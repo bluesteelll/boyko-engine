@@ -222,6 +222,9 @@ impl EnableTagId {
     /// The bounds guard is not decoration: without it an out-of-range id trips
     /// [`storage_kind`](super::storage_kind)'s `debug_assert!` and the
     /// totality claim above would be false in debug.
+    ///
+    /// MOD-SEAM MS-08: a by-id structural op the modding seam consumes (KF-47, KC-21). The
+    /// marker is a doc line only: this item adds no code for modding (05 section 3.2).
     pub fn try_from_component_id(id: ComponentId) -> Option<Self> {
         if id.0 >= MAX_COMPONENTS {
             return None;

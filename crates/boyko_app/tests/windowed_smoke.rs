@@ -34,7 +34,7 @@ fn exit_after_budget(mut budget: ResMut<FrameBudget>, mut exit: ResMut<AppExit>)
 const BUDGET: u32 = 5;
 
 #[test]
-#[ignore = "needs a real windowed GPU device; run with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; run with BOYKO_DISABLE_VALIDATION=1 --test-threads=1"]
 fn windowed_smoke_five_frames_then_clean_teardown() {
     let mut app = App::new();
     app.insert_resource(FrameBudget(BUDGET));

@@ -1087,7 +1087,7 @@ mod gpu {
     /// and writes the BMP. `#[ignore]`d — Vulkan boot can hang a headless run; the
     /// orchestrator runs it on the RTX (see the module header).
     #[test]
-    #[ignore = "boots Vulkan on the GPU; owner-run on the RTX (see module header)"]
+    #[ignore = "gpu: boots Vulkan on the GPU; owner-run on the RTX (see module header)"]
     fn p7b_world_ui_screenshot() {
         let Some(ctx) = boot_or_skip("p7b_world_ui_screenshot") else {
             return;

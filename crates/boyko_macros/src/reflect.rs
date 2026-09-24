@@ -30,7 +30,7 @@
 //! chase is `boyko_reflect::validate`'s two structural checks (CORE D21), which enumerate
 //! no type name at all and therefore cannot drift against this list.
 
-use proc_macro::TokenStream;
+use proc_macro2::TokenStream;
 use proc_macro2::{Literal, Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, quote_spanned};
 use syn::spanned::Spanned;
@@ -264,7 +264,7 @@ pub(crate) fn parse_reflect_no_default(attrs: &[syn::Attribute]) -> Result<bool,
             Err(meta.error("unknown #[reflect(...)] key; valid keys: no_default"))
         });
         if let Err(e) = result {
-            return Err(e.to_compile_error().into());
+            return Err(e.to_compile_error());
         }
     }
     Ok(no_default)

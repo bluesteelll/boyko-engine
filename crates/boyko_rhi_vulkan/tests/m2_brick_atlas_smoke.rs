@@ -51,7 +51,7 @@ fn field_of(edits: &[SdfEdit]) -> SdfEditField {
 /// atlas creates, the CPU bake covers SURFACE cells, and the staged upload runs
 /// validation-clean. Asserts the messenger recorded ZERO messages across the create + upload.
 #[test]
-#[ignore = "GPU on-device smoke — requires a Vulkan device (the owner's RTX); run with --ignored"]
+#[ignore = "gpu: GPU on-device smoke — requires a Vulkan device (the owner's RTX); run with --ignored"]
 fn m2_brick_atlas_creates_and_uploads_on_device() {
     let Some(ctx) = boot_or_skip("m2_brick_atlas_creates_and_uploads_on_device") else {
         return;

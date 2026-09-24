@@ -570,7 +570,7 @@ fn bytemuck_u32s(bytes: &[u8; 48]) -> Vec<u32> {
 /// full sweep, prints per-config `median / p95 / stddev`. The orchestrator reads these numbers to
 /// derive the shipped cadence; nothing here asserts a derived value.
 #[test]
-#[ignore = "cost measurement (RTX + --nocapture --test-threads=1); the orchestrator runs it"]
+#[ignore = "gpu: cost measurement (RTX + --nocapture --test-threads=1); the orchestrator runs it"]
 fn ddgi_probe_gi_cost() {
     let Some(ctx) = boot_or_skip() else {
         return;

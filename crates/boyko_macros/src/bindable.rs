@@ -1,12 +1,12 @@
 //! `#[derive(Bindable)]` implementation.
 
-use proc_macro::TokenStream;
+use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, Ident, parse_macro_input};
+use syn::{Data, DeriveInput, Fields, Ident};
 
 /// Implementation of `#[derive(Bindable)]` (see the public entry in `lib.rs`).
-pub(crate) fn expand(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+pub(crate) fn bindable_macro_impl(input: TokenStream) -> TokenStream {
+    let input = crate::common::parse2_or_compile_error!(input as DeriveInput);
     let name = input.ident.clone();
 
     // Bindable supports NAMED structs only — binding is by field name.
@@ -19,8 +19,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                     "#[derive(Bindable)] requires a struct with named fields \
                      (binding is by field name)",
                 )
-                .to_compile_error()
-                .into();
+                .to_compile_error();
             }
         },
         _ => {
@@ -28,8 +27,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 name.span(),
                 "#[derive(Bindable)] can only be derived for structs with named fields",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
     };
 
@@ -44,8 +42,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             name.span(),
             "#[derive(Bindable)] supports at most 255 fields",
         )
-        .to_compile_error()
-        .into();
+        .to_compile_error();
     }
     let field_count_u8 = field_count as u8;
 
@@ -130,5 +127,5 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         }
     };
 
-    expanded.into()
+    expanded
 }

@@ -458,7 +458,7 @@ invariants: [SYSTEMS.md §3.8](SYSTEMS.md).
 
 | What you want to do | Where | How |
 |---------------------|-------|-----|
-| Define a static enable tag | derive ✅ | `#[component(storage = "bitset")] struct Stunned;` — must be a ZST (a fielded bitset tag is a compile error: no pool to hold data); emits `const STORAGE_IS_BITSET = true` + an `install_storage_kind::<Self>` call; suppresses the single-component Bundle ([boyko_macros/src/component.rs](../crates/boyko_macros/src/component.rs):71~/:84~/:178~/:315~) |
+| Define a static enable tag | derive ✅ | `#[component(storage = "bitset")] struct Stunned;` — must be a ZST (a fielded bitset tag is a compile error: no pool to hold data); emits `const STORAGE_IS_BITSET = true` + an `install_storage_kind::<Self>` call; suppresses the single-component Bundle ([boyko_macros/src/component.rs](../crates/boyko_macros/src/component.rs):71~/:84~/:177~/:314~) |
 | Mint a dynamic enable tag by name | [ecs_master/enable_tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs):61/:73 ✅ | `register_enable_tag(name) -> EnableTagId` (panicking) / `try_register_enable_tag(name) -> Option<EnableTagId>`; NAME-keyed, classifies the id `StorageKind::Bitset`, cold |
 | Toggle (typed) | [enable_tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs):88/:96/:105 ✅ | `enable::<T>(entity)` / `disable::<T>(entity)` / `is_enabled::<T>(entity)` — dead/stale entity = silent no-op |
 | Toggle (dynamic) | [enable_tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs):114/:120/:127 ✅ | `enable_id` / `disable_id` / `is_enabled_id` (take `EnableTagId`) |

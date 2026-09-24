@@ -6,18 +6,18 @@
 //! the relationship-side parsing/types live in [`crate::relationship`]; the shared
 //! [`crate::common::FieldAccess`] selector is reused here.
 
-use proc_macro::TokenStream;
+use proc_macro2::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, quote_spanned};
 use syn::spanned::Spanned;
-use syn::{Data, DeriveInput, Expr, Fields, Ident, Path, Type, parse_macro_input};
+use syn::{Data, DeriveInput, Expr, Fields, Ident, Path, Type};
 
 use crate::common::FieldAccess;
 use crate::relationship::{RelationshipRole, clone_ignore_codegen, parse_relationship_role};
 
 /// Implementation of `#[derive(Component)]` (see the public entry in `lib.rs`).
-pub(crate) fn expand(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+pub(crate) fn component_macro_impl(input: TokenStream) -> TokenStream {
+    let input = crate::common::parse2_or_compile_error!(input as DeriveInput);
 
     // Phase 14a: parse the optional `#[component(...)]` hook attribute
     // (extended in Phase 22 with the bare `no_bundle` flag key, and in EnableTag
@@ -94,8 +94,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
              hooks never fire. Remove the hook(s), or drop `storage = \"bitset\"` to use \
              a normal component.",
         )
-        .to_compile_error()
-        .into();
+        .to_compile_error();
     }
 
     // Feature 3 (D3 gate): scan the struct fields for an `Entity` / `ChildOf` type
@@ -510,7 +509,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         }
     };
 
-    expanded.into()
+    expanded
 }
 
 /// Parsed `#[component(...)]` lifecycle-hook paths (Phase 14a). Each field holds
@@ -732,7 +731,7 @@ impl ComponentHookPaths {
 /// field.
 fn reject_non_zst_bitset_tag(input: &DeriveInput) -> Result<(), TokenStream> {
     let err = |span: Span, msg: &str| -> TokenStream {
-        syn::Error::new(span, msg).to_compile_error().into()
+        syn::Error::new(span, msg).to_compile_error()
     };
 
     match &input.data {
@@ -783,8 +782,7 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
                 attr,
                 "duplicate #[component(...)] attribute; combine all hooks into one",
             )
-            .to_compile_error()
-            .into());
+            .to_compile_error());
         }
         seen_attr = true;
 
@@ -956,7 +954,7 @@ fn parse_component_hooks(attrs: &[syn::Attribute]) -> Result<ComponentHookPaths,
         });
 
         if let Err(e) = result {
-            return Err(e.to_compile_error().into());
+            return Err(e.to_compile_error());
         }
     }
 
@@ -1294,7 +1292,7 @@ fn parse_requires(attrs: &[syn::Attribute]) -> Result<RequiresSpec, TokenStream>
         );
         let list = match parsed {
             Ok(l) => l,
-            Err(e) => return Err(e.to_compile_error().into()),
+            Err(e) => return Err(e.to_compile_error()),
         };
 
         if list.is_empty() {
@@ -1303,8 +1301,7 @@ fn parse_requires(attrs: &[syn::Attribute]) -> Result<RequiresSpec, TokenStream>
                 "empty #[require(...)]: list at least one required component, e.g. \
                  #[require(Velocity, Mass = Mass(1.0))]",
             )
-            .to_compile_error()
-            .into());
+            .to_compile_error());
         }
 
         for expr in list {
@@ -1330,8 +1327,7 @@ fn parse_requires(attrs: &[syn::Attribute]) -> Result<RequiresSpec, TokenStream>
                     "duplicate #[require(...)] for the same component; each required \
                      component may be listed at most once",
                 )
-                .to_compile_error()
-                .into());
+                .to_compile_error());
             }
             spec.entries.push(entry);
         }
@@ -1343,7 +1339,7 @@ fn parse_requires(attrs: &[syn::Attribute]) -> Result<RequiresSpec, TokenStream>
 /// Lowers one `#[require(...)]` list element [`Expr`] into a [`RequireEntry`].
 fn parse_require_entry(expr: Expr) -> Result<RequireEntry, TokenStream> {
     let err = |e: Expr, msg: &str| -> TokenStream {
-        syn::Error::new_spanned(e, msg).to_compile_error().into()
+        syn::Error::new_spanned(e, msg).to_compile_error()
     };
     match expr {
         // `B` — bare path ⇒ `B::default()`.
@@ -2011,8 +2007,7 @@ fn validate_entities_attrs(input: &DeriveInput) -> Result<(), TokenStream> {
                      `#[entities]` on the Entity-bearing field (its remap is wired \
                      in a later serialization phase)",
                 )
-                .to_compile_error()
-                .into());
+                .to_compile_error());
             }
         }
         Ok(())

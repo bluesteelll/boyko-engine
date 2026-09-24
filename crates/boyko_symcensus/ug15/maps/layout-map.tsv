@@ -1,0 +1,19 @@
+# UG-15 sensitivity map (b): leg-(2) bodies that differ between repr(C) and repr(C)+[u8; align] builds of each leg-(3) type (03 §6).
+# type	subject	cand	pin
+ComponentPool	boyko_demo	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows
+ComponentPool	boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+ComponentPool	clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows
+ComponentPool	clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+ComponentPool	swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity
+ComponentPool	swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}
+EcsMaster	boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+EcsMaster	clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run
+EcsMaster	clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+EcsMaster	phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run
+EcsMaster	phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize
+EcsMaster	query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>
+EcsMaster	swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity
+EcsMaster	swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>
+EcsMaster	swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}
+Scope	clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run
+Scope	phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run

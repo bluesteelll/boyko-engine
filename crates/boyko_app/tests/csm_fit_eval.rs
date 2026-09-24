@@ -103,7 +103,7 @@ fn setup(
 /// `#[ignore]`: needs a real windowed GPU device. Run with `BOYKO_DISABLE_VALIDATION=1` and
 /// `--test-threads=1`; see this module's doc for the env knobs and for how to read the result.
 #[test]
-#[ignore = "needs a real windowed GPU device; orchestrator-run CsmFitMode owner-eval dump"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; orchestrator-run CsmFitMode owner-eval dump"]
 fn csm_fit_eval_screenshot_dump() {
     let win: u32 = std::env::var("BOYKO_WIN").ok().and_then(|s| s.parse().ok()).unwrap_or(900);
     // An UNSET `BOYKO_CSM_FIT` renders the engine's own default rather than a hardcoded mode, so

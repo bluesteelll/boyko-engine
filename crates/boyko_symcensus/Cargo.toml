@@ -1,0 +1,37 @@
+[package]
+name = "boyko-symcensus"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "UG-15's instrument: post-LTO object builds with a pairing guard, LLVM tool wrappers that are RED on an absent tool or an empty census, and the `ug15` probe / leg driver (unification plan rung B3)."
+
+# DEV-ONLY, and that is a property this crate's position in the graph must keep. No package may
+# name it under `[dependencies]` or `[build-dependencies]`: it spawns `cargo`, `llvm-*` and
+# `llvm-symbolizer`, reads the file system and parses tool output, none of which belongs in a
+# process that ships. Its one planned in-graph edge is `boyko-macros`' `[dev-dependencies]` (the
+# expanded corpus, M-b, runs this crate's visitor from the proc-macro crate's own tests).
+#
+# The source walker (leg 1, M-a/M-b, leg 5, map c) is `syn` with `visit` on top of the workspace
+# base's `full`, `proc-macro2` and `quote` — the same pinned trio `boyko-macros` already compiles,
+# so no new node enters the graph. NO `span-locations` feature (cut D11): findings are reported
+# as (file, item path), and the feature would unify into every proc-macro build that shares this
+# `proc-macro2`. Cargo's JSON messages are read by the hand-rolled reader in `src/json.rs` for the
+# same reason `tests/reflect_manifest_census.rs` rolls its own: a gate whose subject is the build
+# must not pull a third-party graph into the build it measures.
+[dependencies]
+syn = { workspace = true, features = ["visit"] }
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+
+# Leg (3) reads `size_of`/`align_of` of three kernel types; test-only, so the kernel never
+# becomes a normal dependency of the instrument that measures it.
+[dev-dependencies]
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-threadpool = { path = "../boyko_threadpool" }
+
+[[bin]]
+name = "ug15"
+path = "src/bin/ug15.rs"
+
+[lints]
+workspace = true

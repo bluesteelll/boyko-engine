@@ -52,7 +52,7 @@ more than two of them.
 
 **Why P-D is separate from P-A/P-B/P-C and cannot be folded into any of them.** The reflection opt-in
 is a *token* emitted by `boyko_macros` into whatever crate wrote `#[component(reflect)]`
-(A.5, and `crates/boyko_macros/src/component.rs:454` — the `component_id()` install funnel, whose six
+(A.5, and `crates/boyko_macros/src/component.rs:453` — the `component_id()` install funnel, whose six
 existing slots `#storage_install` … `#serialize_install` are exactly this shape). Tokens are not
 dependency edges: `boyko_macros` does **not** depend on `boyko_ecs` and never will
 (`crates/boyko_macros/Cargo.toml`), and `aether_lang` states the same rule verbatim in its own
@@ -498,7 +498,7 @@ gate whose first run is green, and a first run that is green teaches nothing.
   > `reflect_on` row's "annotated" cell could not be built as written: the `reflect` derive key
   > does not exist until CORE C7 lands it, and the `Component` derive **hard-errors on unknown
   > keys** — *"unknown #[component(...)] key; valid keys: on_add, …"*
-  > (`crates/boyko_macros/src/component.rs:940~`, verified at G0 by writing the annotation and
+  > (`crates/boyko_macros/src/component.rs:938~`, verified at G0 by writing the annotation and
   > watching the derive refuse it). What landed instead: `reflect_on.rs` (and its copy
   > `reflect_off_twin_plus.rs`) carries a **direct `#[cfg(feature = "reflect")]`-gated
   > fn-pointer reference to `boyko_reflect::install_type_info`** (`reflect_linkage()`), which
@@ -1692,7 +1692,7 @@ Verified against the tree at **2026-08-21**, branch `feat/reflection`. This file
 | `tests/trybuild_corpus_compiler_witness.rs` | `BLESSED_RUSTC`, the corpus count, the chocolatey hazard (D13) |
 | `tests/internal_docs_anchors.rs:349` | `GATED_DOCS` — the registration that makes this file's anchors machine-checked |
 | `crates/boyko_ecs/tests/compile_fail_zero_init.rs` | the trybuild harness shape G5 copies |
-| `crates/boyko_macros/src/component.rs:454` | the `component_id()` funnel and its six install slots — the emission site P-D watches |
+| `crates/boyko_macros/src/component.rs:453` | the `component_id()` funnel and its six install slots — the emission site P-D watches |
 | `crates/boyko_macros/Cargo.toml` | tokens-are-not-deps, stated in the manifest |
 | `crates/boyko_ecs/src/ecs/core/component/component_registry/serialize.rs:277` | `BIND_ACCESSORS` — the shipping table D16's Horn 1 would merge into |
 | `crates/boyko_render/Cargo.toml` | `boyko_rhi_vulkan` edge ⇒ `GpuTransform3D` is Miri-unreachable (G4) |

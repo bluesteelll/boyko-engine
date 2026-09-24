@@ -1,0 +1,612 @@
+# UG-15 sensitivity map (a): source files of every frame, inlined frames included, over each pinned body (03 §6; route a1).
+# subject	cand	pin	file
+boyko_demo	D-2	boyko_ecs::ecs::core::iters::query::query_type_registry::register_new	crates/boyko_ecs/src/ecs/core/iters/query/query_type_registry.rs
+boyko_demo	D-2	boyko_ecs::ecs::core::iters::query::query_type_registry::register_new	library/core/src/sync/atomic.rs
+boyko_demo	D-3	boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new	crates/boyko_ecs/src/ecs/core/bundle/bundle_type_registry.rs
+boyko_demo	D-3	boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new	library/core/src/sync/atomic.rs
+boyko_demo	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>	crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs
+boyko_demo	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>	crates/boyko_ecs/src/ecs/core/resources/resource_registry.rs
+boyko_demo	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>	library/core/src/any.rs
+boyko_demo	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>	library/core/src/intrinsics/mod.rs
+boyko_demo	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>	library/core/src/option.rs
+boyko_demo	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>	library/core/src/ptr/non_null.rs
+boyko_demo	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>	library/core/src/slice/iter/macros.rs
+boyko_demo	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>	library/core/src/sync/atomic.rs
+boyko_demo	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>	library/std/src/sync/once.rs
+boyko_demo	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>	library/std/src/sync/once_lock.rs
+boyko_demo	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>	library/std/src/sys/sync/once/futex.rs
+boyko_demo	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	crates/boyko_ecs/src/ecs/constants.rs
+boyko_demo	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	crates/boyko_ecs/src/ecs/memory/component_pool.rs
+boyko_demo	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	library/core/src/alloc/layout.rs
+boyko_demo	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	library/core/src/cmp.rs
+boyko_demo	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	library/core/src/intrinsics/mod.rs
+boyko_demo	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	library/core/src/num/uint_macros.rs
+boyko_demo	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	crates/boyko_ecs/src/ecs/constants.rs
+boyko_demo	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	crates/boyko_ecs/src/ecs/memory/component_pool.rs
+boyko_demo	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	library/core/src/intrinsics/mod.rs
+boyko_demo	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	library/core/src/num/uint_macros.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/archetype/archetype.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/change_detection/check_ticks.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/change_detection/tick.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/component/component_pool_bundle.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/component/dense/dense_registry.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/component/dense/dense_store.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/component/dense/live_bitmap.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/memory/component_pool.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_utils/src/sparse_map/sparse_map.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/alloc/src/alloc.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/alloc/src/raw_vec/mod.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/alloc/src/slice.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/alloc/src/vec/into_iter.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/alloc/src/vec/mod.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/alloc/layout.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/cmp.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/intrinsics/mod.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/iter/range.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/num/uint_macros.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/option.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/ptr/const_ptr.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/ptr/mod.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/ptr/mut_ptr.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/ptr/non_null.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/slice/index.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/slice/mod.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/sync/atomic.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/std/src/alloc.rs
+boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/std/src/sys/alloc/windows.rs
+boyko_demo	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	crates/boyko_threadpool/src/block.rs
+boyko_demo	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/alloc/src/alloc.rs
+boyko_demo	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/core/src/alloc/layout.rs
+boyko_demo	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/core/src/cell.rs
+boyko_demo	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/core/src/mem/alignment.rs
+boyko_demo	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/core/src/mem/mod.rs
+boyko_demo	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/core/src/ptr/mod.rs
+boyko_demo	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/core/src/ptr/mut_ptr.rs
+boyko_demo	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/core/src/result.rs
+boyko_demo	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/std/src/alloc.rs
+boyko_demo	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/std/src/sys/alloc/windows.rs
+clear	D-2	boyko_ecs::ecs::core::iters::query::query_type_registry::register_new	crates/boyko_ecs/src/ecs/core/iters/query/query_type_registry.rs
+clear	D-2	boyko_ecs::ecs::core::iters::query::query_type_registry::register_new	library/core/src/sync/atomic.rs
+clear	D-3	boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new	crates/boyko_ecs/src/ecs/core/bundle/bundle_type_registry.rs
+clear	D-3	boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new	library/core/src/sync/atomic.rs
+clear	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_app::occlusion_force::OcclusionForce>	crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs
+clear	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_app::occlusion_force::OcclusionForce>	crates/boyko_ecs/src/ecs/core/resources/resource_registry.rs
+clear	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_app::occlusion_force::OcclusionForce>	library/core/src/any.rs
+clear	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_app::occlusion_force::OcclusionForce>	library/core/src/intrinsics/mod.rs
+clear	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_app::occlusion_force::OcclusionForce>	library/core/src/option.rs
+clear	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_app::occlusion_force::OcclusionForce>	library/core/src/ptr/non_null.rs
+clear	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_app::occlusion_force::OcclusionForce>	library/core/src/slice/iter/macros.rs
+clear	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_app::occlusion_force::OcclusionForce>	library/core/src/sync/atomic.rs
+clear	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_app::occlusion_force::OcclusionForce>	library/std/src/sync/once.rs
+clear	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_app::occlusion_force::OcclusionForce>	library/std/src/sync/once_lock.rs
+clear	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_app::occlusion_force::OcclusionForce>	library/std/src/sys/sync/once/futex.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_diag/src/clock.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_diag/src/lane.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_diag/src/loss.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_diag/src/profiling_abi.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_diag/src/sample.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/component/hooks/scope.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/ecs_master/system_api.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/profiling/zones.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/schedule/bitset_intersects.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/schedule/executor_scratch.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/schedule/schedule.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/schedule/system_set.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/system/system_kind.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/system/system_meta.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/identifiers/primitives.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/lib.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_threadpool/src/block.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_threadpool/src/scope.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_threadpool/src/task/mod.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_threadpool/src/thread_pool.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_threadpool/src/tls.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_threadpool/src/worker.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/alloc/src/alloc.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/alloc/src/boxed.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/alloc/src/raw_vec/mod.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/alloc/src/sync.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/alloc/src/vec/drain.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/alloc/src/vec/mod.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/bool.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/cell.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/cmp.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/hint.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/internal_macros.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/intrinsics/mod.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/iter/adapters/enumerate.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/iter/adapters/map.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/iter/adapters/zip.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/iter/range.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/iter/traits/accum.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/iter/traits/iterator.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/mem/mod.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/num/int_macros.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/num/uint_macros.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/ops/function.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/option.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/pin.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/ptr/const_ptr.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/ptr/mod.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/ptr/mut_ptr.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/ptr/non_null.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/slice/index.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/slice/iter.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/slice/iter/macros.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/slice/mod.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/sync/atomic.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/alloc.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/sys/alloc/windows.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/sys/pal/windows/futex.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/sys/sync/thread_parking/futex.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/sys/thread/windows.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/sys/thread_local/native/mod.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/thread/current.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/thread/functions.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/thread/local.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/thread/thread.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/stdarch/crates/core_arch/src/x86/avx.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/stdarch/crates/core_arch/src/x86/rdtsc.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/stdarch/crates/core_arch/src/x86/sse2.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	registry/crossbeam-deque-0.8.8/src/deque.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	registry/crossbeam-queue-0.3.14/src/array_queue.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	registry/crossbeam-utils-0.8.23/src/backoff.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	registry/fixedbitset-0.5.7/src/block/avx2.rs
+clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	registry/fixedbitset-0.5.7/src/lib.rs
+clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	crates/boyko_ecs/src/ecs/constants.rs
+clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	crates/boyko_ecs/src/ecs/memory/component_pool.rs
+clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	library/core/src/alloc/layout.rs
+clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	library/core/src/cmp.rs
+clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	library/core/src/intrinsics/mod.rs
+clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	library/core/src/num/uint_macros.rs
+clear	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	crates/boyko_ecs/src/ecs/constants.rs
+clear	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	crates/boyko_ecs/src/ecs/memory/component_pool.rs
+clear	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	library/core/src/intrinsics/mod.rs
+clear	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	library/core/src/num/uint_macros.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/archetype/archetype.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/change_detection/check_ticks.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/change_detection/tick.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/component/component_pool_bundle.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/component/dense/dense_registry.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/component/dense/dense_store.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/component/dense/live_bitmap.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/memory/component_pool.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_utils/src/sparse_map/sparse_map.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/alloc/src/alloc.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/alloc/src/raw_vec/mod.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/alloc/src/slice.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/alloc/src/vec/into_iter.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/alloc/src/vec/mod.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/alloc/layout.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/cmp.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/intrinsics/mod.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/iter/range.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/num/uint_macros.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/option.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/ptr/const_ptr.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/ptr/mod.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/ptr/mut_ptr.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/ptr/non_null.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/slice/index.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/slice/mod.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/core/src/sync/atomic.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/std/src/alloc.rs
+clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	library/std/src/sys/alloc/windows.rs
+clear	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	crates/boyko_threadpool/src/block.rs
+clear	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/alloc/src/alloc.rs
+clear	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/core/src/alloc/layout.rs
+clear	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/core/src/cell.rs
+clear	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/core/src/mem/alignment.rs
+clear	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/core/src/mem/mod.rs
+clear	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/core/src/ptr/mod.rs
+clear	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/core/src/ptr/mut_ptr.rs
+clear	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/core/src/result.rs
+clear	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/std/src/alloc.rs
+clear	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	library/std/src/sys/alloc/windows.rs
+clear	R-1	boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform>	crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs
+clear	R-1	boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform>	library/core/src/any.rs
+clear	R-1	boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform>	library/core/src/intrinsics/mod.rs
+clear	R-1	boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform>	library/core/src/option.rs
+clear	R-1	boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform>	library/core/src/sync/atomic.rs
+clear	R-1	boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform>	library/std/src/sync/once.rs
+clear	R-1	boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform>	library/std/src/sync/once_lock.rs
+clear	R-1	boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform>	library/std/src/sys/sync/once/futex.rs
+clear	R-2	<boyko_scene::transform::Transform as boyko_ecs::ecs::core::component::component::Component>::component_id	crates/boyko_scene/src/transform.rs
+clear	R-2	<boyko_scene::transform::Transform as boyko_ecs::ecs::core::component::component::Component>::component_id	library/core/src/sync/atomic.rs
+clear	R-2	<boyko_scene::transform::Transform as boyko_ecs::ecs::core::component::component::Component>::component_id	library/std/src/sync/once.rs
+clear	R-2	<boyko_scene::transform::Transform as boyko_ecs::ecs::core::component::component::Component>::component_id	library/std/src/sync/once_lock.rs
+clear	R-2	<boyko_scene::transform::Transform as boyko_ecs::ecs::core::component::component::Component>::component_id	library/std/src/sys/sync/once/futex.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_diag/src/lane.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/component/hooks/scope.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/ecs_master/system_api.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/schedule/bitset_intersects.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/schedule/executor_scratch.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/schedule/schedule.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/schedule/system_set.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/system/system_kind.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/core/system/system_meta.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_ecs/src/ecs/identifiers/primitives.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_threadpool/src/block.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_threadpool/src/scope.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_threadpool/src/task/mod.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_threadpool/src/thread_pool.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	crates/boyko_threadpool/src/tls.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/alloc/src/alloc.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/alloc/src/boxed.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/alloc/src/raw_vec/mod.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/alloc/src/sync.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/alloc/src/vec/drain.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/alloc/src/vec/mod.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/bool.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/cell.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/cmp.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/hint.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/internal_macros.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/iter/adapters/enumerate.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/iter/adapters/map.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/iter/adapters/zip.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/iter/range.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/iter/traits/accum.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/iter/traits/iterator.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/mem/mod.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/num/uint_macros.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/ops/function.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/option.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/pin.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/ptr/const_ptr.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/ptr/mod.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/ptr/mut_ptr.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/ptr/non_null.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/slice/index.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/slice/iter.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/slice/iter/macros.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/slice/mod.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/core/src/sync/atomic.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/alloc.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/sys/alloc/windows.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/sys/thread/windows.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/sys/thread_local/native/mod.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/thread/current.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/thread/functions.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/thread/local.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/std/src/thread/thread.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/stdarch/crates/core_arch/src/x86/avx.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	library/stdarch/crates/core_arch/src/x86/sse2.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	registry/crossbeam-queue-0.3.14/src/array_queue.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	registry/crossbeam-utils-0.8.23/src/backoff.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	registry/fixedbitset-0.5.7/src/block/avx2.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	registry/fixedbitset-0.5.7/src/lib.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::apply	library/core/src/error.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::check_change_tick	crates/boyko_ecs/src/ecs/core/change_detection/tick.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::check_change_tick	crates/boyko_ecs/src/ecs/core/system/function_system.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::check_change_tick	library/core/src/num/uint_macros.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::has_deferred	library/std/src/sys/io/error/windows.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::has_deferred	library/std/src/sys/stdio/windows.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize	crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize	crates/boyko_ecs/src/ecs/core/system/filtered_access_set.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize	crates/boyko_ecs/src/ecs/core/system/function_system.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize	library/alloc/src/alloc.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize	library/alloc/src/boxed.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize	library/core/src/num/uint_macros.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize	library/core/src/ptr/mod.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize	library/core/src/sync/atomic.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize	library/std/src/alloc.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize	library/std/src/sys/alloc/windows.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::meta	crates/boyko_ecs/src/ecs/core/system/function_system.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::name	crates/boyko_ecs/src/ecs/core/system/function_system.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher	crates/boyko_ecs/benches/phase9_scheduler.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher	crates/boyko_ecs/src/ecs/core/system/function_system.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher	crates/boyko_ecs/src/ecs/core/system/function_system_impls.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher	crates/boyko_ecs/src/ecs/core/system/system.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher	library/core/src/option.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher	library/core/src/sync/atomic.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe	crates/boyko_ecs/benches/phase9_scheduler.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe	crates/boyko_ecs/src/ecs/core/system/function_system.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe	crates/boyko_ecs/src/ecs/core/system/function_system_impls.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe	library/core/src/option.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe	library/core/src/sync/atomic.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::set_change_ticks	crates/boyko_ecs/src/ecs/core/system/function_system.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::set_zone	crates/boyko_ecs/src/ecs/core/system/function_system.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher	crates/boyko_ecs/benches/phase9_scheduler.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher	crates/boyko_ecs/src/ecs/core/system/function_system.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher	crates/boyko_ecs/src/ecs/core/system/function_system_impls.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher	crates/boyko_ecs/src/ecs/core/system/system.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher	library/core/src/option.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher	library/core/src/sync/atomic.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe	crates/boyko_ecs/benches/phase9_scheduler.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe	crates/boyko_ecs/src/ecs/core/system/function_system.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe	crates/boyko_ecs/src/ecs/core/system/function_system_impls.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe	library/core/src/option.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe	library/core/src/sync/atomic.rs
+phase9_scheduler	H-3	core::ptr::drop_glue::<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()>>	library/alloc/src/alloc.rs
+phase9_scheduler	H-3	core::ptr::drop_glue::<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()>>	library/alloc/src/boxed.rs
+phase9_scheduler	H-3	core::ptr::drop_glue::<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()>>	library/core/src/ptr/mod.rs
+phase9_scheduler	H-3	core::ptr::drop_glue::<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()>>	library/std/src/alloc.rs
+phase9_scheduler	H-3	core::ptr::drop_glue::<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()>>	library/std/src/sys/alloc/windows.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	crates/boyko_ecs/benches/query_dsl.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	crates/boyko_ecs/src/ecs/core/component/component_mask.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	crates/boyko_ecs/src/ecs/core/ecs_master/system_api.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	crates/boyko_ecs/src/ecs/core/iters/query/data/read.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	crates/boyko_ecs/src/ecs/core/iters/query/iter.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	crates/boyko_ecs/src/ecs/core/iters/query/query.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	crates/boyko_ecs/src/ecs/core/iters/query/state.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	crates/boyko_ecs/src/ecs/core/iters/query/term_list.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	crates/boyko_ecs/src/ecs/core/iters/query_state.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	crates/boyko_ecs/src/ecs/core/system/filtered_access_set.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	crates/boyko_ecs/src/ecs/core/system/function_system.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	crates/boyko_ecs/src/ecs/core/system/function_system_impls.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	crates/boyko_ecs/src/ecs/core/system/into_system.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	crates/boyko_ecs/src/ecs/core/system/params/tuple_impl.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	crates/boyko_utils/src/bit_mask/bit_set.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	library/alloc/src/alloc.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	library/alloc/src/boxed.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	library/alloc/src/raw_vec/mod.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	library/alloc/src/vec/mod.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	library/core/src/cmp.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	library/core/src/num/uint_macros.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	library/core/src/ops/function.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	library/core/src/option.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	library/core/src/ptr/mod.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	library/core/src/ptr/mut_ptr.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	library/core/src/result.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	library/core/src/slice/iter.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	library/core/src/slice/mod.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	library/core/src/sync/atomic.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	library/std/src/alloc.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	library/std/src/sys/alloc/windows.rs
+query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	registry/criterion-0.5.1/src/lib.rs
+query_dsl	H-1	<criterion::bencher::Bencher>::iter::<(), query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}>	crates/boyko_ecs/benches/query_dsl.rs
+query_dsl	H-1	<criterion::bencher::Bencher>::iter::<(), query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}>	crates/boyko_ecs/src/ecs/core/ecs_master/system_api.rs
+query_dsl	H-1	<criterion::bencher::Bencher>::iter::<(), query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}>	library/core/src/cmp.rs
+query_dsl	H-1	<criterion::bencher::Bencher>::iter::<(), query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}>	library/core/src/iter/range.rs
+query_dsl	H-1	<criterion::bencher::Bencher>::iter::<(), query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}>	registry/criterion-0.5.1/src/bencher.rs
+query_dsl	H-1	<criterion::bencher::Bencher>::iter::<(), query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}>	registry/criterion-0.5.1/src/measurement.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	crates/boyko_ecs/benches/query_dsl.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	library/alloc/src/alloc.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	library/alloc/src/raw_vec/mod.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	library/alloc/src/vec/mod.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	library/alloc/src/vec/set_len_on_drop.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	library/alloc/src/vec/spec_extend.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	library/alloc/src/vec/spec_from_iter.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	library/alloc/src/vec/spec_from_iter_nested.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	library/core/src/iter/adapters/map.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	library/core/src/iter/traits/iterator.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	library/core/src/num/uint_macros.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	library/core/src/ptr/mod.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	library/core/src/slice/iter/macros.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	library/core/src/time.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	library/std/src/alloc.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	library/std/src/sys/alloc/windows.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	registry/criterion-0.5.1/src/bencher.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	registry/criterion-0.5.1/src/benchmark_group.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	registry/criterion-0.5.1/src/lib.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	registry/criterion-0.5.1/src/measurement.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	registry/criterion-0.5.1/src/routine.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/alloc/src/alloc.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/alloc/src/boxed.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/alloc/src/raw_vec/mod.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/alloc/src/vec/mod.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/alloc/src/vec/set_len_on_drop.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/alloc/src/vec/spec_extend.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/alloc/src/vec/spec_from_iter.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/alloc/src/vec/spec_from_iter_nested.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/cell.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/cmp.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/convert/mod.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/iter/adapters/copied.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/iter/adapters/map.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/iter/traits/accum.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/iter/traits/iterator.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/num/f64.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/num/uint_macros.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/ops/function.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/option.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/ptr/mod.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/ptr/mut_ptr.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/ptr/non_null.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/result.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/slice/iter.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/slice/iter/macros.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/slice/mod.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/sync/atomic.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/core/src/time.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/std/src/alloc.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/std/src/num/f64.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/std/src/sync/poison/mutex.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	library/std/src/sys/alloc/windows.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	registry/criterion-0.5.1/src/lib.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	registry/criterion-0.5.1/src/routine.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	registry/once_cell-1.21.4/src/imp_std.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample	registry/once_cell-1.21.4/src/lib.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up	crates/boyko_ecs/benches/query_dsl.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up	library/core/src/cmp.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up	library/core/src/intrinsics/mod.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up	library/core/src/num/uint_macros.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up	library/core/src/ops/function.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up	library/core/src/option.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up	library/core/src/ptr/mod.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up	library/core/src/time.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up	registry/criterion-0.5.1/src/bencher.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up	registry/criterion-0.5.1/src/benchmark_group.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up	registry/criterion-0.5.1/src/lib.rs
+query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up	registry/criterion-0.5.1/src/routine.rs
+query_dsl	R-4	boyko_ecs::ecs::core::component::component_registry::register_layout::<query_dsl::Tag>	crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs
+query_dsl	R-4	boyko_ecs::ecs::core::component::component_registry::register_layout::<query_dsl::Tag>	library/core/src/any.rs
+query_dsl	R-4	boyko_ecs::ecs::core::component::component_registry::register_layout::<query_dsl::Tag>	library/core/src/cmp.rs
+query_dsl	R-4	boyko_ecs::ecs::core::component::component_registry::register_layout::<query_dsl::Tag>	library/core/src/intrinsics/mod.rs
+query_dsl	R-4	boyko_ecs::ecs::core::component::component_registry::register_layout::<query_dsl::Tag>	library/core/src/option.rs
+query_dsl	R-4	boyko_ecs::ecs::core::component::component_registry::register_layout::<query_dsl::Tag>	library/core/src/sync/atomic.rs
+query_dsl	R-4	boyko_ecs::ecs::core::component::component_registry::register_layout::<query_dsl::Tag>	library/std/src/sync/once.rs
+query_dsl	R-4	boyko_ecs::ecs::core::component::component_registry::register_layout::<query_dsl::Tag>	library/std/src/sync/once_lock.rs
+query_dsl	R-4	boyko_ecs::ecs::core::component::component_registry::register_layout::<query_dsl::Tag>	library/std/src/sys/sync/once/futex.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/core/archetype/archetype.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/core/component/component_pool_bundle.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/core/component/enable/enable_store.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/core/component/hooks/scope.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/core/component/observers/entity_store.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/core/entity/entity_inland.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/core/entity/entity_master.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/core/entity/entity_reservoir.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/core/entity/inland_store.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/identifiers/primitives.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/memory/component_pool.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/memory/vm_column.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_utils/src/sparse_map/sparse_map.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/alloc/src/alloc.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/alloc/src/raw_vec/mod.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/alloc/src/vec/mod.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/alloc/layout.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/cell.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/cmp.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/iter/adapters/map.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/iter/traits/iterator.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/mem/mod.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/num/uint_macros.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/ops/function.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/option.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/ptr/const_ptr.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/ptr/mod.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/ptr/mut_ptr.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/ptr/non_null.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/slice/index.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/slice/iter.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/slice/iter/macros.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/core/src/slice/mod.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/std/src/alloc.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/std/src/sys/alloc/windows.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/std/src/sys/thread_local/native/mod.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/std/src/thread/local.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	crates/boyko_ecs/benches/swap_remove.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/alloc/src/alloc.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/alloc/src/raw_vec/mod.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/alloc/src/vec/into_iter.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/alloc/src/vec/mod.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/alloc/src/vec/set_len_on_drop.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/alloc/src/vec/spec_extend.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/alloc/src/vec/spec_from_iter.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/alloc/src/vec/spec_from_iter_nested.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/alloc/layout.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/cmp.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/hint.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/intrinsics/mod.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/iter/adapters/map.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/iter/range.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/iter/traits/iterator.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/num/uint_macros.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/ops/function.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/option.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/ptr/mod.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/ptr/mut_ptr.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/ptr/non_null.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/slice/iter.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/slice/iter/macros.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/slice/mod.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/core/src/time.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/std/src/alloc.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	library/std/src/sys/alloc/windows.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	registry/criterion-0.5.1/src/bencher.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	registry/criterion-0.5.1/src/lib.rs
+swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	registry/criterion-0.5.1/src/measurement.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	crates/boyko_ecs/benches/swap_remove.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	library/alloc/src/alloc.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	library/alloc/src/raw_vec/mod.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	library/alloc/src/vec/mod.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	library/alloc/src/vec/set_len_on_drop.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	library/alloc/src/vec/spec_extend.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	library/alloc/src/vec/spec_from_iter.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	library/alloc/src/vec/spec_from_iter_nested.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	library/core/src/iter/adapters/map.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	library/core/src/iter/traits/iterator.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	library/core/src/num/uint_macros.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	library/core/src/ptr/mod.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	library/core/src/slice/iter/macros.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	library/core/src/time.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	library/std/src/alloc.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	library/std/src/sys/alloc/windows.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	registry/criterion-0.5.1/src/bencher.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	registry/criterion-0.5.1/src/lib.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	registry/criterion-0.5.1/src/measurement.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	registry/criterion-0.5.1/src/routine.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::warm_up	crates/boyko_ecs/benches/swap_remove.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::warm_up	library/core/src/cmp.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::warm_up	library/core/src/intrinsics/mod.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::warm_up	library/core/src/num/uint_macros.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::warm_up	library/core/src/ops/function.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::warm_up	library/core/src/option.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::warm_up	library/core/src/ptr/mod.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::warm_up	library/core/src/time.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::warm_up	registry/criterion-0.5.1/src/bencher.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::warm_up	registry/criterion-0.5.1/src/lib.rs
+swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::warm_up	registry/criterion-0.5.1/src/routine.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/benches/swap_remove.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/constants.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/archetype/archetype.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/archetype/archetype_registry.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/archetype/archetype_signature.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/archetype/generation.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/component/component_mask.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/component/component_pool_bundle.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/component/component_registry/flags.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/component/hooks/archetype_flags.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/component/hooks/scope.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/component/observers/mod.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/entity/entity_master.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/entity/entity_reservoir.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/entity/inland_store.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/memory/component_pool.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/memory/vm_column.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_utils/src/bit_mask/bit_set.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_utils/src/sparse_map/sparse_map.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/alloc/src/alloc.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/alloc/src/boxed.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/alloc/src/raw_vec/mod.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/alloc/src/slice.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/alloc/src/vec/mod.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/alloc/src/vec/set_len_on_drop.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/alloc/layout.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/array/equality.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/cell.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/cmp.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/intrinsics/mod.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/iter/range.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/macros/mod.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/mem/mod.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/num/uint_macros.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/ops/bit.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/option.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/ptr/const_ptr.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/ptr/mod.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/ptr/mut_ptr.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/ptr/non_null.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/result.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/slice/cmp.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/slice/index.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/slice/iter.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/slice/iter/macros.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/slice/mod.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/core/src/sync/atomic.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/std/src/alloc.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/std/src/sync/once.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/std/src/sync/once_lock.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/std/src/sys/alloc/windows.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/std/src/sys/sync/once/futex.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/std/src/thread/local.rs

@@ -741,7 +741,7 @@ gate that can fail and a gate that cannot.
 - Lazy first-call registration via the existing `component_id()` `OnceLock` —
   avoids the `linkme` dead-strip / init-order hazard class entirely.
   *(Re-confirmed 2026-08-21 and now **more** viable than when written: the funnel at
-  `boyko_macros/src/component.rs:454-479` is intact — `static ID: OnceLock<ComponentId>`
+  `boyko_macros/src/component.rs:453-478` is intact — `static ID: OnceLock<ComponentId>`
   → `ID.get_or_init(|| { let raw = register_new::<Self>(); if Self::HAS_HOOKS { … } … })`
   — and it has grown from one install slot to **six**: `storage_install`,
   `require_install`, `clone_install`, `relationship_install`, `residency_install`,
@@ -935,7 +935,7 @@ zero mechanism risk.
 > ### the tree answered it for the analogous feature, and it chose the FALLBACK.
 >
 > `#[derive(Bindable)]` faced exactly this fork and did **not** hook `component_id()`.
-> It emits a `register_bind_accessor()` associated fn (`boyko_macros/src/bindable.rs:100-127`;
+> It emits a `register_bind_accessor()` associated fn (`boyko_macros/src/bindable.rs:97-124`;
 > trait decl at `boyko_ui/src/binding/bindable.rs:45`) that a human must call at setup.
 > Its own doc-comment spells out the failure mode when you forget: *"the entire
 > `.ui`-dynamic data-bind path for `C` is unreachable"*
@@ -960,7 +960,7 @@ zero mechanism risk.
 >
 > Meanwhile the **lazy funnel this section recommends is healthier than when this was
 > written** — it has grown from one install slot to six
-> (`boyko_macros/src/component.rs:454-479`; §8). So the recommendation is *more*
+> (`boyko_macros/src/component.rs:453-478`; §8). So the recommendation is *more*
 > viable, not less. What changed is the burden of proof: **A.5 must now argue against
 > a shipped in-tree precedent that went the other way**, and say why reflection goes
 > lazy where binding went explicit.
@@ -1560,7 +1560,7 @@ The shipped `Bindable` trampolines **do** form a shared reference off the column
 pointer:
 
 ```rust
-let this: &#name = unsafe { &*(p as *const #name) };   // boyko_macros/src/bindable.rs:113, :119
+let this: &#name = unsafe { &*(p as *const #name) };   // boyko_macros/src/bindable.rs:110, :116
 ```
 
 — a shared retag off arena-rooted `SharedReadWrite` provenance, which has evidently

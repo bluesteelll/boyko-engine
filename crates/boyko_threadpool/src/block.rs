@@ -1176,7 +1176,7 @@ mod tests {
     // The instrument's own positive controls
     // =====================================================================
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn the_recorder_sees_a_known_acquisition_and_its_release() {
         // Without this, every "no allocation happened" assertion below could be
@@ -1205,7 +1205,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn a_region_sees_only_the_events_of_its_own_region() {
         // The second control, and a DIFFERENT property from the first: a
@@ -1280,7 +1280,7 @@ mod tests {
         free(&block);
     }
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn every_emplaced_pointer_lies_inside_a_chunk_the_block_owns() {
         const N: usize = 400;
@@ -1399,7 +1399,7 @@ mod tests {
         free(&block);
     }
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn growth_appends_a_chunk_and_frees_none() {
         const N: usize = 400;
@@ -1438,7 +1438,7 @@ mod tests {
     // R5 — the growth rule
     // =====================================================================
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn the_chunk_count_matches_the_designs_prediction_at_stride_88() {
         assert_eq!(
@@ -1464,7 +1464,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn the_chunk_capacities_match_the_independent_growth_model() {
         // Capacities as a SEQUENCE, not just a count: a doubling curve that
@@ -1503,7 +1503,7 @@ mod tests {
     // R5 — free_all
     // =====================================================================
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn free_all_frees_every_chunk_exactly_once() {
         const N: usize = 400;
@@ -1542,7 +1542,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn free_all_frees_every_chunk_exactly_once_after_an_unwind_mid_wave() {
         const N: usize = 400;
@@ -1626,7 +1626,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn a_second_free_all_frees_nothing() {
         let block = ScopeBlock::new();
@@ -1646,7 +1646,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn a_block_that_emplaced_nothing_never_calls_the_allocator() {
         let log = {
@@ -1663,7 +1663,7 @@ mod tests {
         );
     }
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn emplace_after_free_all_restarts_the_growth_curve_at_chunk_zero() {
         const N: usize = 200;
@@ -1710,7 +1710,7 @@ mod tests {
     // Edge cases the design names
     // =====================================================================
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn a_zero_sized_emplace_allocates_no_chunk() {
         let block = ScopeBlock::new();
@@ -1789,7 +1789,7 @@ mod tests {
         free(&block);
     }
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn an_over_aligned_type_is_placed_aligned_and_inside_its_chunk() {
         // `align_of::<T>() == 128 > CHUNK_ALIGN`. The chunk COUNT is not
@@ -1833,7 +1833,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn a_type_larger_than_chunk0_gets_a_chunk_that_holds_it() {
         // `size_of::<Huge8200>() == 8200 > CHUNK0`, so `min_e` — not the
@@ -1868,7 +1868,7 @@ mod tests {
     // R5 — the receipts' chunk bucket
     // =====================================================================
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn every_chunk_layout_satisfies_the_receipts_chunk_predicate() {
         // Stated over EVERY event the regions produced, not over the ones that
@@ -1897,7 +1897,7 @@ mod tests {
         }
     }
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn the_chunk_bucket_and_the_cell_bucket_cannot_hold_the_same_allocation() {
         // This is what makes a later stage's "zero allocations in the cell size
@@ -1968,7 +1968,7 @@ mod tests {
     /// The child is launched by name, so the name is a constant.
     const EXHAUSTION_TEST_NAME: &str = "block::tests::chunk_table_exhaustion_aborts_the_process";
 
-    #[cfg_attr(miri, ignore = "instrument: re-execs this test binary as a child process, which Miri does not support. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: re-execs this test binary as a child process, which Miri does not support. Runs natively.")]
     #[test]
     fn chunk_table_exhaustion_aborts_the_process() {
         if std::env::var_os(EXHAUSTION_CHILD_ENV).is_some() {
@@ -2075,7 +2075,7 @@ mod tests {
         x
     }
 
-    #[cfg_attr(miri, ignore = "instrument: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
+    #[cfg_attr(miri, ignore = "miri-unsupported: reads the recording allocator's tape, and that allocator is `cfg(not(miri))` (see the `#[global_allocator]` in this module) because delegating to std's Windows `System` reds the crate's own Miri gate from inside `HeapFree`. `Recording::start` panics under Miri rather than returning an empty log, so this attribute cannot silently rot into a vacuous pass. Runs natively.")]
     #[test]
     fn random_mixed_waves_keep_every_claim_in_bounds_aligned_and_pairwise_disjoint() {
         const CASES: usize = 256;

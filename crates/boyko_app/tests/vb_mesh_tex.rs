@@ -242,7 +242,7 @@ fn build_scene(
 /// `#[ignore]`: needs a real windowed GPU device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the VisibilityBuffer TEXTURED screenshot"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the VisibilityBuffer TEXTURED screenshot"]
 fn vb_mesh_tex_screenshot_dump() {
     let mut app = App::new();
     let plugins = EnginePlugins::window("boyko_engine vb mesh textured", 512, 512);
@@ -281,7 +281,7 @@ fn vb_mesh_tex_screenshot_dump() {
 /// so the AA effect reads on high-frequency albedo/normal detail; `BOYKO_HOST_DUMP=<path.bmp>`
 /// arms the capture.
 #[test]
-#[ignore = "needs a real windowed GPU device; orchestrator-run textured AA / render-path eval dump"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; orchestrator-run textured AA / render-path eval dump"]
 fn vb_mesh_tex_aa_screenshot_dump() {
     let win: u32 = std::env::var("BOYKO_WIN").ok().and_then(|s| s.parse().ok()).unwrap_or(640);
     let aa_mode = match std::env::var("BOYKO_AA").ok().as_deref() {

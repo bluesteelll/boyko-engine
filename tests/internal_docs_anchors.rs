@@ -5317,7 +5317,7 @@ fn measured_claims() -> (Vec<MeasuredClaim>, Vec<String>) {
 /// * **A file's LENGTH** — `wc -l`. Inexpressible, and not by oversight: every kind here counts
 ///   lines CONTAINING a token, and the empty token that would count them all cannot be written,
 ///   because the parser splits a marker on whitespace and an empty field simply is not there.
-///   Live in the corpus: **910** and **3283** for the two `seam_by_id` files, **1917** for
+///   Live in the corpus: **919** and **3283** for the two `seam_by_id` files, **1917** for
 ///   `ecs_master.rs`, **4026** for `REFLECTION-PLAN-CORE.md`. Inexpressible as a marker, but no
 ///   longer ungated: all four are re-derived from the tree on every run by
 ///   [`figures_this_file_writes_about_the_tree_are_re_derived`], and the last two are load-bearing

@@ -262,7 +262,7 @@ fn take_sorted(p: &Probe) -> Vec<u32> {
 /// Pre-fix this observes `[3]` — the dense arm's store pointer is NULL, so
 /// `Changed<DCh741>` is false for every row and `p == 1` vanishes.
 #[test]
-#[cfg_attr(miri, ignore = "threadpool busy-wait stalls under Miri; the dense \
+#[cfg_attr(miri, ignore = "miri-slow: threadpool busy-wait stalls under Miri; the dense \
                            membership paths are covered natively")]
 fn or_changed_table_then_dense_sees_the_dense_arm() {
     let pool = ThreadPoolBuilder::new().num_threads(2).build();
@@ -313,7 +313,7 @@ fn or_changed_table_then_dense_sees_the_dense_arm() {
 /// oracle; a fix that forwards plumbing for one arm position only would part
 /// company with the previous test here.
 #[test]
-#[cfg_attr(miri, ignore = "threadpool busy-wait stalls under Miri; the dense \
+#[cfg_attr(miri, ignore = "miri-slow: threadpool busy-wait stalls under Miri; the dense \
                            membership paths are covered natively")]
 fn or_changed_dense_then_table_sees_the_dense_arm() {
     let pool = ThreadPoolBuilder::new().num_threads(2).build();
@@ -361,7 +361,7 @@ fn or_changed_dense_then_table_sees_the_dense_arm() {
 ///
 /// Hand oracle: `[1]`. Pre-fix: `[]`.
 #[test]
-#[cfg_attr(miri, ignore = "threadpool busy-wait stalls under Miri; the dense \
+#[cfg_attr(miri, ignore = "miri-slow: threadpool busy-wait stalls under Miri; the dense \
                            membership paths are covered natively")]
 fn or_changed_dense_alone_sees_the_dense_arm() {
     let pool = ThreadPoolBuilder::new().num_threads(2).build();

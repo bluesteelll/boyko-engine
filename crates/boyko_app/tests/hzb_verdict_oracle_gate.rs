@@ -1506,7 +1506,7 @@ fn spread_boxes(rng: &mut Rng, n: usize, near: f32) -> Vec<TestBounds> {
 /// chain `level >= levels` is unreachable by construction, so `LevelUnavailable` is the truncated
 /// corpus's job, not this one's.
 #[test]
-#[ignore = "live dispatch gate (GPU + --nocapture --test-threads=1); the orchestrator runs it"]
+#[ignore = "gpu: live dispatch gate (GPU + --nocapture --test-threads=1); the orchestrator runs it"]
 fn cull_shader_verdict_eq_oracle_on_the_pinned_extents() {
     let Some(ctx) = boot_or_skip("pinned_extents") else {
         return;
@@ -1587,7 +1587,7 @@ const RANDOM_BOXES: usize = 1024;
 /// gather would not produce. They are here because the SHADER must agree with the ORACLE on them,
 /// not because the engine will meet them.
 #[test]
-#[ignore = "live dispatch gate (GPU + --nocapture --test-threads=1); the orchestrator runs it"]
+#[ignore = "gpu: live dispatch gate (GPU + --nocapture --test-threads=1); the orchestrator runs it"]
 fn cull_shader_verdict_eq_oracle_over_the_random_corpus() {
     let Some(ctx) = boot_or_skip("random_corpus") else {
         return;
@@ -1718,7 +1718,7 @@ fn cull_shader_verdict_eq_oracle_over_the_random_corpus() {
 /// quotient would be asserting that a conforming `OpFDiv` is wrong. What the corpus DECIDES remains
 /// the verdict: the two must partition every probe the same way.
 #[test]
-#[ignore = "live dispatch gate (GPU + --nocapture --test-threads=1); the orchestrator runs it"]
+#[ignore = "gpu: live dispatch gate (GPU + --nocapture --test-threads=1); the orchestrator runs it"]
 fn cull_shader_verdict_eq_oracle_at_the_strict_boundary() {
     let Some(ctx) = boot_or_skip("boundary") else {
         return;
@@ -2078,7 +2078,7 @@ fn next_below(v: f32) -> f32 {
 /// ⚠️ What it CANNOT claim: that the engine's gather produces such a row today. It uploads its own
 /// bounds; the reachability argument above is a claim about the shipped code, gated by nothing.
 #[test]
-#[ignore = "live dispatch gate (GPU + --nocapture --test-threads=1); the orchestrator runs it"]
+#[ignore = "gpu: live dispatch gate (GPU + --nocapture --test-threads=1); the orchestrator runs it"]
 fn the_unknown_bounds_sentinel_is_drawn_early_under_every_affine() {
     let Some(ctx) = boot_or_skip("sentinel") else {
         return;

@@ -179,7 +179,7 @@ fn update_ubo_words() -> [u32; UBO_BYTES / 4] {
 /// SDFDDGI I2 ARM: dispatch the probe-update pass once (GI enabled), read the irradiance atlas back,
 /// and assert it is NON-ZERO (the live compute wrote real probe tiles).
 #[test]
-#[ignore = "live dispatch smoke (RTX + --nocapture --test-threads=1); the orchestrator runs it"]
+#[ignore = "gpu: live dispatch smoke (RTX + --nocapture --test-threads=1); the orchestrator runs it"]
 fn probe_update_dispatch_writes_nonzero_irradiance() {
     let Some(ctx) = boot_or_skip() else {
         return;

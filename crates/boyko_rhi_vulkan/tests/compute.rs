@@ -363,7 +363,7 @@ fn compute_chained_barrier_golden() {
 /// and skips the validation-clean assertion. Run explicitly with
 /// `cargo test ... -- --ignored negative_chained_barrier_hazard` to reproduce.
 #[test]
-#[ignore = "deliberately omits a barrier to document the hazard; run with --ignored"]
+#[ignore = "gpu: deliberately omits a barrier to document the hazard; run with --ignored"]
 fn negative_chained_barrier_hazard() {
     let Some(ctx) = boot_or_skip("negative_chained_barrier_hazard") else {
         return;

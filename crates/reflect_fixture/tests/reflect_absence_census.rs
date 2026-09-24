@@ -980,7 +980,7 @@ fn reflect_absence_census_three_legs_under_fat_lto() {
 /// nowhere. `reflect_absence_census_three_legs_under_fat_lto` now carries `l2_b > 0`
 /// beside `l2_a > 0`; see that clause for why `> 0` and for what it is worth before C8.
 #[test]
-#[ignore = "calibration: builds 3 legs x 3 link configurations and prints the table"]
+#[ignore = "generator: calibration - builds 3 legs x 3 link configurations and prints the table"]
 fn measure_link_configuration_table() {
     println!("| link configuration | L1 A | L2 A | L3 A | L1 B | L2 B | L3 B |");
     println!("|---|---|---|---|---|---|---|");

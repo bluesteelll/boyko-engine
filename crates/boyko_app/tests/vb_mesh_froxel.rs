@@ -304,7 +304,7 @@ fn setup(
 /// orchestrator runs it TWICE on the GPU (once with `BOYKO_VB_FROXEL_FORCE_OFF` unset, once
 /// with it set) to dump both legs and confirm byte equality before blessing.
 #[test]
-#[ignore = "needs a real windowed GPU device; the orchestrator renders both the froxel-ON and \
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator renders both the froxel-ON and \
             clusters-OFF legs to confirm byte equality before blessing"]
 fn vb_mesh_froxel_screenshot_dump() {
     let mut app = App::new();

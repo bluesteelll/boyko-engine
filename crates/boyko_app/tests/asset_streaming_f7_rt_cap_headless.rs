@@ -164,7 +164,7 @@ fn spawn_many(mut commands: Commands, cube: Res<SharedCubeMesh>, mut materials: 
 /// device tier — see this file's module doc for the RT-leg-specific load-bearing
 /// requirement.
 #[test]
-#[ignore = "needs a real windowed GPU device; a load-bearing pass of the RT-leg growth \
+#[ignore = "feature+gpu-windowed+gpu-cap: needs a real windowed GPU device; a load-bearing pass of the RT-leg growth \
             claim requires --features hwrt on hardware that negotiates hardware ray \
             tracing; cargo test --features hwrt; --test-threads=1"]
 fn rt_leg_grows_past_instance_capacity_instead_of_panicking() {

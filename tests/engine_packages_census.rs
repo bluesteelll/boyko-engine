@@ -72,6 +72,11 @@ const USER_PACKAGES: &[&str] = &[
     // EG8 fills it): it consumes engine crates the way a game does, so it is a consumer of the
     // engine, not part of it — the `bench-bevy-vs-boyko` precedent exactly.
     "reflect-dogfood",
+    // Unification rung B3: UG-15's instrument (`crates/boyko_symcensus`). A dev-only build-and-
+    // census tool with one `[[bin]]` (`ug15`) that spawns cargo and the LLVM binutils; it never
+    // runs inside a shipped process, so no runtime zone can exist in it — the `aether-lang`
+    // argument. Recorded as a decision, per this gate's rule.
+    "boyko-symcensus",
 ];
 
 fn repo_root() -> PathBuf {

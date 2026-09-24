@@ -181,7 +181,7 @@ struct ProductRoot {
 /// ⚠️ Derived by reading the tree, not assumed. `CLAUDE.md` calls the root crate "library-shaped";
 /// `src/main.rs` is confirmed to be a `println!` placeholder with an empty `[dependencies]` table,
 /// so it roots nothing, and it is listed only because it is a member that must be classified.
-const PRODUCT_ROOTS: [ProductRoot; 8] = [
+const PRODUCT_ROOTS: [ProductRoot; 9] = [
     ProductRoot {
         package: "boyko-app",
         // The top of the engine stack: the OS loop, device boot, the windowed runner and
@@ -226,6 +226,13 @@ const PRODUCT_ROOTS: [ProductRoot; 8] = [
     ProductRoot {
         package: "profile-fixture-log",
         reason: "G16(a)/(b)'s one-`debug!`-site fixture binary",
+    },
+    ProductRoot {
+        package: "boyko-symcensus",
+        // Unification rung B3. A gate TOOL with a `[[bin]]` (`ug15`), the `prof_decode` /
+        // `profile-fixture` precedent: the UG-15 recipes run it, nothing ships it, and its only
+        // in-graph edge is a dev-dependency.
+        reason: "UG-15's build-and-census instrument (`crates/boyko_symcensus`, one `[[bin]]`)",
     },
 ];
 

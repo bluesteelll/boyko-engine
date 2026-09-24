@@ -753,7 +753,7 @@ PHASE-2 / `fire_enable_column_alloc_bookkeeping` :198 O2), each gated by
   column" ⇒ re-snapshot + re-cull, inside `update` (state.rs:429~).
 
 **Derive (Wave 5)** — `#[component(storage = "bitset")]`
-([boyko_macros/src/component.rs](../crates/boyko_macros/src/component.rs):71~/:84~/:178~/:315~):
+([boyko_macros/src/component.rs](../crates/boyko_macros/src/component.rs):71~/:84~/:177~/:314~):
 must be a ZST (a fielded bitset tag has no pool to hold data — rejected at macro
 time, component.rs:71~); cannot combine with lifecycle hooks (an enable-bit op fires no
 hook — rejected, component.rs:84~); emits `const STORAGE_IS_BITSET = true` + an

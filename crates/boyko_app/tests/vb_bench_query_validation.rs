@@ -313,7 +313,7 @@ fn skip_unless_driven(worker: &str, terminating_knob: &str) -> bool {
 /// driver had moved, and the worker then SKIPPED silently while the driver waited for an artifact
 /// nobody wrote — a green worker and a red gate, which is the shape a skip always takes.
 #[test]
-#[ignore = "needs a real windowed GPU device with the validation layer; the driver spawns it"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device with the validation layer; the driver spawns it"]
 fn vb_bench_query_validation_bench_worker() {
     if skip_unless_driven(WORKER_BENCH, "BOYKO_VB_ZONE") {
         return;
@@ -324,7 +324,7 @@ fn vb_bench_query_validation_bench_worker() {
 
 /// **THE CONTROL WORKER** — the same frame, one variable away. Records not one query command.
 #[test]
-#[ignore = "needs a real windowed GPU device with the validation layer; the driver spawns it"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device with the validation layer; the driver spawns it"]
 fn vb_bench_query_validation_control_worker() {
     if skip_unless_driven(WORKER_CONTROL, "BOYKO_WINDOW_FRAMES") {
         return;
@@ -538,7 +538,7 @@ fn assert_messenger_armed(worker: &str, output: &str) {
 
 /// **THE GATE.**
 #[test]
-#[ignore = "live GPU gate with the validation layer ON (spawns two windowed workers); run with --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU gate with the validation layer ON (spawns two windowed workers); run with --test-threads=1"]
 fn the_bench_armed_query_commands_add_no_validation_message() {
     // Profiling rung 7: the armed leg is the ZONE RECORDER, not the collector rung 7 deletes. The
     // gate's subject is "the profiler's query commands are VUID-clean", and after this rung the

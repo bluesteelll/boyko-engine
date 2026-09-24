@@ -1,0 +1,709 @@
+# ug15 leg2 pins v1
+# == leg (2) pins of boyko_demo under release
+# tree         D:\wt\lighttable (HEAD a6a97c55ccca0a02774b4f6b961a20e4f1dbf9e1, 2 uncommitted path(s))
+# target dir   D:/wt/_targets/vkval-msvc
+# host         x86_64-pc-windows-msvc (msvc)
+# rustc -vV    rustc 1.98.1 (48a229cea 2026-09-01)
+# rustc -vV    binary: rustc
+# rustc -vV    commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
+# rustc -vV    commit-date: 2026-09-01
+# rustc -vV    host: x86_64-pc-windows-msvc
+# rustc -vV    release: 1.98.1
+# rustc -vV    LLVM version: 22.1.8
+# llvm-nm          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-nm.exe
+# llvm-objdump     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-objdump.exe
+# llvm-readobj     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-readobj.exe
+# llvm-size        LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-size.exe
+# llvm-ar          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-ar.exe
+# subject      boyko_demo (boyko_demo --bin boyko_demo)
+# profile      release
+# object       D:/wt/_targets/vkval-msvc\release\deps\boyko_demo.o
+# object sha   3f91d946be687c2583c8b742a6759bd2d2b105ad951865e777f7f7c1e94157bf
+# image        D:/wt/_targets/vkval-msvc\release\deps\boyko_demo.exe
+# image sha    fba05029f1363d080d51bcbe0f73bc0cf1a4cdbc6d8d09ef1bf98944dd205bce
+# pdb          D:/wt/_targets/vkval-msvc\release\deps\boyko_demo.pdb
+# link args    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "D:/wt/_targets/vkval-msvc\\release\\deps\\boyko_demo.boyko_demo.8595b65b38f0f039-cgu.0.rcgu.o" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcD3J3BU\\libgetrandom-5c5bfbeeb531b711.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcD3J3BU\\libwindows_sys-580135e73d930774.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcD3J3BU\\liblibloading-1e4c9da494d1298e.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcD3J3BU\\libwindows-c19e306b3672b7ac.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcD3J3BU\\libwindows_numerics-090b778de29f40e5.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcD3J3BU\\libwindows_core-325392be9da29609.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcD3J3BU\\libwindows_strings-9a201cfed9e48952.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcD3J3BU\\libwindows_result-2af2fbf16144a430.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcD3J3BU\\libparking_lot_core-ae66d183fa563878.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcD3J3BU\\libstd-44a584f44bc3dd65.rlib" "C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib\\libcompiler_builtins-d2ba6b5d33df79c1.rlib" "shlwapi.lib" "kernel32.lib" "user32.lib" "shell32.lib" "gdi32.lib" "advapi32.lib" "C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.53.1\\lib\\windows.0.53.0.lib" "C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "opengl32.lib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/LIBPATH:C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib" "/LIBPATH:C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.53.1\\lib" "/OUT:D:/wt/_targets/vkval-msvc\\release\\deps\\boyko_demo.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libstd.natvis" "/NATVIS:D:/wt/_targets/vkval-msvc\\release\\deps\\rustcD3J3BU\\boyko_demo-0.natvis" "/NATVIS:D:/wt/_targets/vkval-msvc\\release\\deps\\rustcD3J3BU\\boyko_demo-1.natvis" "/NATVIS:D:/wt/_targets/vkval-msvc\\release\\deps\\rustcD3J3BU\\boyko_demo-2.natvis"
+# final rustc  Running `C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name boyko_demo --edition=2024 'crates\boyko_demo\src\main.rs' --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C opt-level=3 -C lto=fat --warn=unexpected_cfgs '--allow=clippy::missing_const_for_thread_local' '--deny=clippy::disallowed_types' --check-cfg 'cfg(loom)' --check-cfg 'cfg(force_alloc_panic)' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=79f2aff1461f0635 --out-dir 'D:/wt/_targets/vkval-msvc\release\deps' -C strip=debuginfo -L 'dependency=D:/wt/_targets/vkval-msvc\release\deps' --extern 'boyko_diag=D:/wt/_targets/vkval-msvc\release\deps\libboyko_diag-b560511677c8eafc.rlib' --extern 'boyko_ecs=D:/wt/_targets/vkval-msvc\release\deps\libboyko_ecs-e93203faf86ba798.rlib' --extern 'boyko_log=D:/wt/_targets/vkval-msvc\release\deps\libboyko_log-d52904bfffa357e2.rlib' --extern 'boyko_macros=D:/wt/_targets/vkval-msvc\release\deps\boyko_macros-f880e435a2f5fc23.dll' --extern 'boyko_threadpool=D:/wt/_targets/vkval-msvc\release\deps\libboyko_threadpool-a64270c06f5de4b0.rlib' --extern 'boyko_demo=D:/wt/_targets/vkval-msvc\release\deps\libboyko_demo-f431c4fa688002a0.rlib' --extern 'bytemuck=D:/wt/_targets/vkval-msvc\release\deps\libbytemuck-8741d75d28ecc71d.rlib' --extern 'eframe=D:/wt/_targets/vkval-msvc\release\deps\libeframe-f1933ccdd279a621.rlib' --extern 'rand=D:/wt/_targets/vkval-msvc\release\deps\librand-987591a5f3bbc988.rlib' --emit=obj --print link-args -C target-cpu=x86-64-v3 -L 'native=C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows_x86_64_msvc-0.52.6\lib' -L 'native=C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows_x86_64_msvc-0.53.1\lib'`
+== boyko_demo | P29-1 | <boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows | size=412 (section RawDataSize) | copies=1 | sha256=6d1f39c203ae3ae9c50521dbd9d5b021aa198254dbe26bd568770f301277d9b5
+<<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows> @+0x0:
+     0: push r15
+     2: push r14
+     4: push r13
+     6: push r12
+     8: push rsi
+     9: push rdi
+     a: push rbp
+     b: push rbx
+     c: sub rsp, 0x58
+    10: mov rsi, qword ptr [rcx + 0x38]
+    14: cmp rdx, rsi
+    17: ja 0x1f
+    19: cmp rdx, qword ptr [rcx + 0x30]
+    1d: ja 0x36
+    1f: cmp rdx, rsi
+    22: setbe al
+    25: add rsp, 0x58
+    29: pop rbx
+    2a: pop rbp
+    2b: pop rdi
+    2c: pop rsi
+    2d: pop r12
+    2f: pop r13
+    31: pop r14
+    33: pop r15
+    35: ret
+    36: mov rbx, qword ptr [rcx + 0x8]
+    3a: test rbx, rbx
+    3d: jne 0x4c
+    3f: mov rdi, rdx
+    42: call 0x47 ; REL32 <boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows_zst
+    47: mov rdx, rdi
+    4a: jmp 0x1f
+    4c: mov r12, rcx
+    4f: mov r9d, dword ptr [rcx + 0x50]
+    53: and r9d, 0x3f
+    57: shl r9d, 0x6
+    5b: lea rcx, [rsp + 0x28]
+    60: mov rdi, rdx
+    63: mov rdx, rsi
+    66: mov r8, rbx
+    69: call 0x6e ; REL32 boyko_ecs::ecs::constants::pool_byte_layout
+    6e: mov rax, rbx
+    71: imul rax, rdi
+    75: cmp rax, -0xffff
+    7b: jae 0x149
+    81: mov r13, rdi
+    84: add rax, 0xffff
+    8a: and rax, -0x10000
+    90: mov r8, qword ptr [r12 + 0x40]
+    95: cmp r8, 0x10001
+    9c: mov edx, 0x10000
+    a1: cmovae rdx, r8
+    a5: cmp rdx, 0x4000000
+    ac: mov r9d, 0x4000000
+    b2: cmovb r9, rdx
+    b6: xor edi, edi
+    b8: sub rax, r8
+    bb: cmovae rdi, rax
+    bf: cmp rdi, r9
+    c2: cmovbe rdi, r9
+    c6: mov r14, qword ptr [r12 + 0x70]
+    cb: add rdi, r8
+    ce: mov rdx, qword ptr [rsp + 0x28]
+    d3: mov rax, qword ptr [rsp + 0x30]
+    d8: cmp rax, rdi
+    db: cmovb rdi, rax
+    df: mov rcx, r14
+    e2: mov r9, rdi
+    e5: call 0xea ; REL32 <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion
+    ea: mov rax, rdi
+    ed: or rax, rbx
+    f0: shr rax, 0x20
+    f4: je 0x100
+    f6: mov rax, rdi
+    f9: xor edx, edx
+    fb: div rbx
+    fe: jmp 0x106
+   100: mov eax, edi
+   102: xor edx, edx
+   104: div ebx
+   106: cmp rsi, rax
+   109: cmovb rax, rsi
+   10d: lea rbx, [4*rax]
+   115: cmp rbx, -0xffff
+   11c: jae 0x149
+   11e: mov rdx, r13
+   121: mov rcx, r12
+   124: add rbx, 0xffff
+   12b: and rbx, -0x10000
+   132: mov r15, qword ptr [r12 + 0x48]
+   137: cmp rbx, r15
+   13a: ja 0x163
+   13c: mov qword ptr [rcx + 0x40], rdi
+   140: mov qword ptr [rcx + 0x30], rax
+   144: jmp 0x1f
+   149: lea rcx, [rip] ; REL32 <anon-data>
+   150: lea r8, [rip] ; REL32 <anon-data>
+   157: mov edx, 0x7f
+   15c: call 0x161 ; REL32 core::panicking::panic_fmt
+   161: ud2
+   163: mov rdx, qword ptr [rsp + 0x40]
+   168: mov rcx, r14
+   16b: mov r8, r15
+   16e: mov r9, rbx
+   171: mov rbp, rax
+   174: call 0x179 ; REL32 <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion
+   179: mov rdx, qword ptr [rsp + 0x48]
+   17e: mov rcx, r14
+   181: mov r8, r15
+   184: mov r9, rbx
+   187: call 0x18c ; REL32 <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion
+   18c: mov rax, rbp
+   18f: mov rcx, r12
+   192: mov rdx, r13
+   195: mov qword ptr [r12 + 0x48], rbx
+   19a: jmp 0x13c
+== boyko_demo | P29-2 | <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion | size=93 (section RawDataSize) | copies=1 | sha256=8365a5d6b84ad3f372cfe674a6005bf82b6d99a42218d1e3a093f53dfff99a18
+<<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion> @+0x0:
+     0: sub rsp, 0x28
+     4: add r9, rdx
+     7: cmp r9, -0xffff
+     e: jae 0x3c
+    10: test rcx, rcx
+    13: je 0x56
+    15: add r9, 0xffff
+    1c: and r9, -0x10000
+    23: add r8, rdx
+    26: and r8, -0x10000
+    2d: mov rdx, r8
+    30: mov r8, r9
+    33: add rsp, 0x28
+    37: jmp 0x3c ; REL32 <boyko_ecs::ecs::memory::vm::VmReservation>::commit
+    3c: lea rcx, [rip] ; REL32 <anon-data>
+    43: lea r8, [rip] ; REL32 <anon-data>
+    4a: mov edx, 0x7f
+    4f: call 0x54 ; REL32 core::panicking::panic_fmt
+    54: ud2
+    56: call 0x5b ; REL32 <boyko_ecs::ecs::memory::component_pool::PoolBacking>::grow_is_host_only
+    5b: ud2
+== boyko_demo | P29-3 | boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan | size=1163 (section RawDataSize) | copies=1 | sha256=270ce025c9d0df16ab7a8e669685751ed5ce544aafb1ebb2703adaafe76bdedb
+<boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan> @+0x0:
+     0: push rbp
+     1: push r15
+     3: push r14
+     5: push r13
+     7: push r12
+     9: push rsi
+     a: push rdi
+     b: push rbx
+     c: sub rsp, 0xf8
+    13: lea rbp, [rsp + 0x80]
+    1b: mov qword ptr [rbp + 0x70], -0x2
+    23: mov r15d, dword ptr [rcx + 0x13b8]
+    2a: mov rdi, qword ptr [rcx + 0x1e8]
+    31: vmovups ymm0, ymmword ptr [rcx + 0x1f0]
+    39: vmovups ymm1, ymmword ptr [rcx + 0x210]
+    41: vmovups ymm2, ymmword ptr [rcx + 0x230]
+    49: vmovups ymm3, ymmword ptr [rcx + 0x248]
+    51: vmovups ymmword ptr [rbp], ymm3
+    56: vmovups ymmword ptr [rbp - 0x18], ymm2
+    5b: vmovups ymmword ptr [rbp - 0x38], ymm1
+    60: vmovups ymmword ptr [rbp - 0x58], ymm0
+    65: mov qword ptr [rbp + 0x40], rcx
+    69: mov rsi, qword ptr [rcx + 0x1e0]
+    70: mov qword ptr [rbp - 0x60], rdi
+    74: mov qword ptr [rbp + 0x20], rsi
+    78: mov qword ptr [rbp + 0x30], rdi
+    7c: lea r12d, [r15 + 0x3dcc5000]
+    83: mov qword ptr [rbp + 0x58], 0x0
+    8b: movabs r8, 0x7ffffffffffffff8
+    95: xor r13d, r13d
+    98: nop dword ptr [rax + rax]
+    a0: test rdi, rdi
+    a3: jne 0xc1
+    a5: inc r13
+    a8: mov qword ptr [rbp + 0x28], r13
+    ac: cmp r13, 0xf
+    b0: ja 0x345
+    b6: mov rdi, qword ptr [rbp + 8*r13 - 0x60]
+    bb: mov qword ptr [rbp + 0x30], rdi
+    bf: jmp 0xa0
+    c1: xor eax, eax
+    c3: tzcnt rax, rdi
+    c8: blsr rdi, rdi
+    cd: mov qword ptr [rbp + 0x30], rdi
+    d1: imul r14, r13, 0x88800
+    d8: add r14, rsi
+    db: mov rdx, rsi
+    de: imul rsi, rax, 0x2220
+    e5: mov eax, dword ptr [rsi + r14 + 0x2200]
+    ed: mov ecx, r15d
+    f0: sub ecx, eax
+    f2: cmp ecx, 0xc233b001
+    f8: cmovae eax, r12d
+    fc: mov dword ptr [rsi + r14 + 0x2200], eax
+   104: mov rbx, qword ptr [rsi + r14 + 0x21b0]
+   10c: lea r9, [8*rbx]
+   114: mov rax, rbx
+   117: shr rax, 0x3d
+   11b: setne al
+   11e: cmp r9, r8
+   121: seta cl
+   124: or cl, al
+   126: jne 0x43e
+   12c: mov qword ptr [rbp + 0x38], rdx
+   130: mov rdx, qword ptr [rsi + r14 + 0x21a8]
+   138: test r9, r9
+   13b: je 0x179
+   13d: mov qword ptr [rbp + 0x48], rdx
+   141: xor ecx, ecx
+   143: mov qword ptr [rbp + 0x50], r9
+   147: mov rdx, r9
+   14a: vzeroupper
+   14d: call 0x152 ; REL32 std::sys::alloc::windows::process_heap_alloc
+   152: mov qword ptr [rbp + 0x68], rax
+   156: test rax, rax
+   159: je 0x42d
+   15f: mov qword ptr [rbp + 0x60], rbx
+   163: lea r9, [8*rbx]
+   16b: mov rdx, qword ptr [rbp + 0x48]
+   16f: test rbx, rbx
+   172: jne 0x193
+   174: jmp 0x305
+   179: mov eax, 0x8
+   17e: mov qword ptr [rbp + 0x68], rax
+   182: mov qword ptr [rbp + 0x60], 0x0
+   18a: test rbx, rbx
+   18d: je 0x305
+   193: add r14, rsi
+   196: mov rsi, qword ptr [rbp + 0x68]
+   19a: mov rcx, rsi
+   19d: mov r8, r9
+   1a0: mov rbx, r9
+   1a3: vzeroupper
+   1a6: call 0x1ab ; REL32 memcpy
+   1ab: mov r10, rbx
+   1ae: add r10, rsi
+   1b1: mov rax, rsi
+   1b4: jmp 0x1cd
+   1b6: nop word ptr cs:[rax + rax]
+   1c0: add rax, 0x8
+   1c4: cmp rax, r10
+   1c7: je 0x305
+   1cd: mov rcx, qword ptr [rax]
+   1d0: cmp rcx, qword ptr [r14 + 0x20e0]
+   1d7: jae 0x1c0
+   1d9: mov rdx, qword ptr [r14 + 0x20d8]
+   1e0: shl rcx, 0x4
+   1e4: cmp dword ptr [rdx + rcx], 0x1
+   1e8: jne 0x1c0
+   1ea: add rdx, rcx
+   1ed: mov rcx, qword ptr [rdx + 0x8]
+   1f1: cmp rcx, qword ptr [r14 + 0x20f8]
+   1f8: jae 0x1c0
+   1fa: mov rdx, qword ptr [r14 + 0x20c8]
+   201: mov r8, qword ptr [r14 + 0x20f0]
+   208: mov rcx, qword ptr [r8 + 8*rcx]
+   20c: cmp rcx, rdx
+   20f: jae 0x41e
+   215: mov rdx, qword ptr [r14 + 0x20c0]
+   21c: shl rcx, 0x7
+   220: mov r8, qword ptr [rdx + rcx + 0x28]
+   225: test r8, r8
+   228: je 0x1c0
+   22a: add rdx, rcx
+   22d: cmp r8, 0x1
+   231: jne 0x23a
+   233: xor ecx, ecx
+   235: jmp 0x2cc
+   23a: mov rsi, r10
+   23d: mov r9, r8
+   240: and r9, -0x2
+   244: xor ecx, ecx
+   246: jmp 0x255
+   248: nop dword ptr [rax + rax]
+   250: cmp r9, rcx
+   253: je 0x2bf
+   255: mov r10, qword ptr [rdx + 0x18]
+   259: mov r11d, r15d
+   25c: sub r11d, dword ptr [r10 + 4*rcx]
+   260: cmp r11d, 0xc233b000
+   267: jbe 0x26d
+   269: mov dword ptr [r10 + 4*rcx], r12d
+   26d: mov r10, qword ptr [rdx + 0x20]
+   271: mov r11d, r15d
+   274: sub r11d, dword ptr [r10 + 4*rcx]
+   278: cmp r11d, 0xc233b001
+   27f: jb 0x285
+   281: mov dword ptr [r10 + 4*rcx], r12d
+   285: mov r10, qword ptr [rdx + 0x18]
+   289: mov r11d, r15d
+   28c: sub r11d, dword ptr [r10 + 4*rcx + 0x4]
+   291: add rcx, 0x2
+   295: cmp r11d, 0xc233b001
+   29c: jb 0x2a3
+   29e: mov dword ptr [r10 + 4*rcx - 0x4], r12d
+   2a3: mov r10, qword ptr [rdx + 0x20]
+   2a7: mov r11d, r15d
+   2aa: sub r11d, dword ptr [r10 + 4*rcx - 0x4]
+   2af: cmp r11d, 0xc233b001
+   2b6: jb 0x250
+   2b8: mov dword ptr [r10 + 4*rcx - 0x4], r12d
+   2bd: jmp 0x250
+   2bf: test r8b, 0x1
+   2c3: mov r10, rsi
+   2c6: je 0x1c0
+   2cc: mov r8, qword ptr [rdx + 0x18]
+   2d0: mov r9d, r15d
+   2d3: sub r9d, dword ptr [r8 + 4*rcx]
+   2d7: cmp r9d, 0xc233b001
+   2de: jb 0x2e4
+   2e0: mov dword ptr [r8 + 4*rcx], r12d
+   2e4: mov rdx, qword ptr [rdx + 0x20]
+   2e8: mov r8d, r15d
+   2eb: sub r8d, dword ptr [rdx + 4*rcx]
+   2ef: cmp r8d, 0xc233b001
+   2f6: jb 0x1c0
+   2fc: mov dword ptr [rdx + 4*rcx], r12d
+   300: jmp 0x1c0
+   305: cmp qword ptr [rbp + 0x60], 0x0
+   30a: mov rsi, qword ptr [rbp + 0x38]
+   30e: movabs r8, 0x7ffffffffffffff8
+   318: je 0xa0
+   31e: vzeroupper
+   321: call qword ptr [rip] ; REL32 __imp_GetProcessHeap
+   327: mov rcx, rax
+   32a: xor edx, edx
+   32c: mov r8, qword ptr [rbp + 0x68]
+   330: call qword ptr [rip] ; REL32 __imp_HeapFree
+   336: movabs r8, 0x7ffffffffffffff8
+   340: jmp 0xa0
+   345: mov r8, qword ptr [rbp + 0x40]
+   349: mov rax, qword ptr [r8 + 0x13a0]
+   350: test rax, rax
+   353: je 0x407
+   359: mov rcx, qword ptr [r8 + 0x13a8]
+   360: test rcx, rcx
+   363: je 0x407
+   369: mov rdx, qword ptr [r8 + 0x1398]
+   370: mov r8, qword ptr [r8 + 0x13b0]
+   377: xor r9d, r9d
+   37a: jmp 0x388
+   37c: nop dword ptr [rax]
+   380: inc r9
+   383: cmp r9, rax
+   386: je 0x407
+   388: mov r10, qword ptr [rdx + 8*r9]
+   38c: cmp r10, r8
+   38f: jae 0x380
+   391: imul r10, r10, 0x1c0
+   398: cmp qword ptr [rcx + r10], 0x0
+   39d: je 0x380
+   39f: add r10, rcx
+   3a2: mov r11, qword ptr [r10 + 0x28]
+   3a6: test r11, r11
+   3a9: je 0x380
+   3ab: xor esi, esi
+   3ad: jmp 0x3b8
+   3af: nop
+   3b0: inc rsi
+   3b3: cmp r11, rsi
+   3b6: je 0x380
+   3b8: mov rdi, rsi
+   3bb: shr rdi, 0x6
+   3bf: cmp rdi, qword ptr [r10 + 0x130]
+   3c6: jae 0x3b0
+   3c8: mov rbx, qword ptr [r10 + 0x128]
+   3cf: mov rdi, qword ptr [rbx + 8*rdi]
+   3d3: bt rdi, rsi
+   3d7: jae 0x3b0
+   3d9: mov rdi, qword ptr [r10 + 0x18]
+   3dd: mov ebx, r15d
+   3e0: sub ebx, dword ptr [rdi + 4*rsi]
+   3e3: cmp ebx, 0xc233b000
+   3e9: jbe 0x3ef
+   3eb: mov dword ptr [rdi + 4*rsi], r12d
+   3ef: mov rdi, qword ptr [r10 + 0x20]
+   3f3: mov ebx, r15d
+   3f6: sub ebx, dword ptr [rdi + 4*rsi]
+   3f9: cmp ebx, 0xc233b001
+   3ff: jb 0x3b0
+   401: mov dword ptr [rdi + 4*rsi], r12d
+   405: jmp 0x3b0
+   407: add rsp, 0xf8
+   40e: pop rbx
+   40f: pop rdi
+   410: pop rsi
+   411: pop r12
+   413: pop r13
+   415: pop r14
+   417: pop r15
+   419: pop rbp
+   41a: vzeroupper
+   41d: ret
+   41e: lea r8, [rip] ; REL32 <anon-data>
+   425: call 0x42a ; REL32 core::panicking::panic_bounds_check
+   42a: nop
+   42b: ud2
+   42d: mov eax, 0x8
+   432: mov qword ptr [rbp + 0x58], rax
+   436: mov rax, qword ptr [rbp + 0x50]
+   43a: mov qword ptr [rbp + 0x68], rax
+   43e: mov rcx, qword ptr [rbp + 0x58]
+   442: mov rdx, qword ptr [rbp + 0x68]
+   446: vzeroupper
+   449: call 0x44e ; REL32 alloc::raw_vec::handle_error
+   44e: ud2
+<?dtor$55@?0?boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan@4HA> @+0x450:
+   450: mov qword ptr [rsp + 0x10], rdx
+   455: push rbp
+   456: push r15
+   458: push r14
+   45a: push r13
+   45c: push r12
+   45e: push rsi
+   45f: push rdi
+   460: push rbx
+   461: sub rsp, 0x28
+   465: lea rbp, [rdx + 0x80]
+   46c: mov rcx, qword ptr [rbp + 0x68]
+   470: mov rdx, qword ptr [rbp + 0x60]
+   474: call 0x479 ; REL32 <alloc::vec::into_iter::IntoIter<boyko_ecs::ecs::identifiers::primitives::ComponentId> as core::ops::drop::Drop>::drop
+   479: nop
+   47a: add rsp, 0x28
+   47e: pop rbx
+   47f: pop rdi
+   480: pop rsi
+   481: pop r12
+   483: pop r13
+   485: pop r14
+   487: pop r15
+   489: pop rbp
+   48a: ret
+== boyko_demo | P29-4 | <boyko_threadpool::block::ScopeBlock>::grow | size=207 (section RawDataSize) | copies=1 | sha256=5d6330778d5586c76a7649bd63ec9bec1ca1e5c2f1f560e6c70928ecfb23b83c
+<<boyko_threadpool::block::ScopeBlock>::grow> @+0x0:
+     0: push rsi
+     1: push rdi
+     2: push rbx
+     3: sub rsp, 0x30
+     7: mov edi, dword ptr [rcx + 0x10]
+     a: cmp rdi, 0x20
+     e: je 0x78
+    10: mov eax, 0x1000
+    15: shlx rbx, rax, rdi
+    1a: movabs rax, 0x7fffffffffffffc1
+    24: cmp rbx, rax
+    27: jae 0x7f
+    29: mov rsi, rcx
+    2c: mov rdx, rbx
+    2f: or rdx, 0x40
+    33: xor ecx, ecx
+    35: call 0x3a ; REL32 std::sys::alloc::windows::process_heap_alloc
+    3a: test rax, rax
+    3d: je 0xaa
+    3f: mov rcx, rax
+    42: and rax, -0x40
+    46: mov qword ptr [rax + 0x38], rcx
+    4a: cmp edi, 0x1f
+    4d: ja 0xb9
+    4f: add rax, 0x40
+    53: mov qword ptr [rsi + 8*rdi + 0x18], rax
+    58: mov byte ptr [rsi + rdi + 0x118], dil
+    60: lea ecx, [rdi + 0x1]
+    63: mov dword ptr [rsi + 0x10], ecx
+    66: mov qword ptr [rsi], rax
+    69: add rax, rbx
+    6c: mov qword ptr [rsi + 0x8], rax
+    70: add rsp, 0x30
+    74: pop rbx
+    75: pop rdi
+    76: pop rsi
+    77: ret
+    78: call 0x7d ; REL32 boyko_threadpool::block::chunk_table_exhausted
+    7d: ud2
+    7f: lea rax, [rip] ; REL32 <anon-data>
+    86: mov qword ptr [rsp + 0x20], rax
+    8b: lea rcx, [rip] ; REL32 <anon-data>
+    92: lea r9, [rip] ; REL32 <anon-data>
+    99: lea r8, [rsp + 0x2f]
+    9e: mov edx, 0x3a
+    a3: call 0xa8 ; REL32 core::result::unwrap_failed
+    a8: ud2
+    aa: mov ecx, 0x40
+    af: mov rdx, rbx
+    b2: call 0xb7 ; REL32 alloc::alloc::handle_alloc_error
+    b7: ud2
+    b9: lea r8, [rip] ; REL32 <anon-data>
+    c0: mov edx, 0x20
+    c5: mov rcx, rdi
+    c8: call 0xcd ; REL32 core::panicking::panic_bounds_check
+    cd: ud2
+== boyko_demo | D-2 | boyko_ecs::ecs::core::iters::query::query_type_registry::register_new | size=143 (section RawDataSize) | copies=1 | sha256=16a34425c52375ec5a34b1499396ee0db5071b8c596e9a9d99b89d042fde0e76
+<boyko_ecs::ecs::core::iters::query::query_type_registry::register_new> @+0x0:
+     0: push rsi
+     1: sub rsp, 0x40
+     5: mov eax, 0x1
+     a: lock
+     b: xadd qword ptr [rip], rax ; REL32 boyko_ecs::ecs::core::iters::query::query_type_registry::QUERY_NEXT_ID
+    13: cmp rax, 0x3ff
+    19: ja 0x29
+    1b: cmp rax, 0x2ff
+    21: je 0x7e
+    23: add rsp, 0x40
+    27: pop rsi
+    28: ret
+    29: mov qword ptr [rip - 0x4], 0x400 ; REL32 boyko_ecs::ecs::core::iters::query::query_type_registry::QUERY_NEXT_ID
+    34: lea rax, [rip] ; REL32 <anon-data>
+    3b: mov qword ptr [rsp + 0x20], rax
+    40: lea rax, [rip] ; REL32 <boyko_log::codes::PanicCode as core::fmt::Display>::fmt
+    47: mov qword ptr [rsp + 0x28], rax
+    4c: lea rax, [rip] ; REL32 <anon-data>
+    53: mov qword ptr [rsp + 0x30], rax
+    58: lea rax, [rip] ; REL32 <u64 as core::fmt::Display>::fmt
+    5f: mov qword ptr [rsp + 0x38], rax
+    64: lea rcx, [rip] ; REL32 <anon-data>
+    6b: lea r8, [rip] ; REL32 <anon-data>
+    72: lea rdx, [rsp + 0x20]
+    77: call 0x7c ; REL32 core::panicking::panic_fmt
+    7c: ud2
+    7e: mov rsi, rax
+    81: call 0x86 ; REL32 boyko_ecs::ecs::core::iters::query::query_type_registry::report_query_table_filling
+    86: mov rax, rsi
+    89: add rsp, 0x40
+    8d: pop rsi
+    8e: ret
+== boyko_demo | D-3 | boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new | size=102 (section RawDataSize) | copies=1 | sha256=3d9d9328638bc8b9a5df0a428343eb6e001f944d18881594319786dd3cc9bf54
+<boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new> @+0x0:
+     0: sub rsp, 0x48
+     4: mov eax, 0x1
+     9: lock
+     a: xadd qword ptr [rip], rax ; REL32 boyko_ecs::ecs::core::bundle::bundle_type_registry::BUNDLE_NEXT_ID
+    12: cmp rax, 0x3ff
+    18: ja 0x1f
+    1a: add rsp, 0x48
+    1e: ret
+    1f: mov qword ptr [rip - 0x4], 0x400 ; REL32 boyko_ecs::ecs::core::bundle::bundle_type_registry::BUNDLE_NEXT_ID
+    2a: lea rax, [rip] ; REL32 <anon-data>
+    31: mov qword ptr [rsp + 0x28], rax
+    36: lea rcx, [rip] ; REL32 <u64 as core::fmt::Display>::fmt
+    3d: mov qword ptr [rsp + 0x30], rcx
+    42: mov qword ptr [rsp + 0x38], rax
+    47: mov qword ptr [rsp + 0x40], rcx
+    4c: lea rcx, [rip] ; REL32 <anon-data>
+    53: lea r8, [rip] ; REL32 <anon-data>
+    5a: lea rdx, [rsp + 0x28]
+    5f: call 0x64 ; REL32 core::panicking::panic_fmt
+    64: ud2
+== boyko_demo | D-4 | boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid> | size=651 (section RawDataSize) | copies=1 | sha256=e2cacac095a7312f1a2597de1eb117bf118715ac5dd7101d8dd9ecbbf75ce049
+<boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>> @+0x0:
+     0: push rsi
+     1: push rdi
+     2: sub rsp, 0x78
+     6: xor eax, eax
+     8: lea rcx, [rip] ; REL32 boyko_ecs::ecs::core::component::component_registry::LAYOUTS
+     f: vmovdqa xmm0, xmmword ptr [rip] ; REL32 __xmm@3b7811ac6d665c7bde21fa4be2001c82
+    17: jmp 0x32
+    19: nop dword ptr [rax]
+    20: add rax, 0x100
+    26: cmp rax, 0x8000
+    2c: je 0xd7
+    32: mov edx, dword ptr [rax + rcx + 0x38]
+    36: test edx, edx
+    38: jne 0x47
+    3a: vpxor xmm1, xmm0, xmmword ptr [rax + rcx + 0x28]
+    40: vptest xmm1, xmm1
+    45: je 0x92
+    47: mov edx, dword ptr [rax + rcx + 0x78]
+    4b: test edx, edx
+    4d: jne 0x5c
+    4f: vpxor xmm1, xmm0, xmmword ptr [rax + rcx + 0x68]
+    55: vptest xmm1, xmm1
+    5a: je 0x92
+    5c: mov edx, dword ptr [rax + rcx + 0xb8]
+    63: test edx, edx
+    65: jne 0x77
+    67: vpxor xmm1, xmm0, xmmword ptr [rax + rcx + 0xa8]
+    70: vptest xmm1, xmm1
+    75: je 0x92
+    77: mov edx, dword ptr [rax + rcx + 0xf8]
+    7e: test edx, edx
+    80: jne 0x20
+    82: vpxor xmm1, xmm0, xmmword ptr [rax + rcx + 0xe8]
+    8b: vptest xmm1, xmm1
+    90: jne 0x20
+    92: lea rax, [rip] ; REL32 <anon-data>
+    99: mov qword ptr [rsp + 0x68], rax
+    9e: mov qword ptr [rsp + 0x70], 0x22
+    a7: lea rax, [rsp + 0x68]
+    ac: mov qword ptr [rsp + 0x30], rax
+    b1: lea rax, [rip] ; REL32 <&str as core::fmt::Display>::fmt
+    b8: mov qword ptr [rsp + 0x38], rax
+    bd: lea rcx, [rip] ; REL32 <anon-data>
+    c4: lea r8, [rip] ; REL32 <anon-data>
+    cb: lea rdx, [rsp + 0x30]
+    d0: call 0xd5 ; REL32 core::panicking::panic_fmt
+    d5: ud2
+    d7: mov ecx, 0x1
+    dc: lock
+    dd: xadd qword ptr [rip], rcx ; REL32 boyko_ecs::ecs::core::resources::resource_registry::NEXT_RESOURCE_ID
+    e5: mov qword ptr [rsp + 0x28], rcx
+    ea: cmp rcx, 0x100
+    f1: jae 0x1a0
+    f7: shl rcx, 0x6
+    fb: lea rsi, [rip] ; REL32 boyko_ecs::ecs::core::resources::resource_registry::RESOURCE_INFO
+   102: mov qword ptr [rsp + 0x30], 0x58
+   10b: mov qword ptr [rsp + 0x38], 0x8
+   114: lea rax, [rip] ; REL32 boyko_ecs::ecs::core::resources::resource_registry::resource_drop_in_place_glue::<boyko_demo::sim::grid::SpatialGrid>
+   11b: mov qword ptr [rsp + 0x40], rax
+   120: lea rdi, [rip] ; REL32 <anon-data>
+   127: mov qword ptr [rsp + 0x48], rdi
+   12c: mov qword ptr [rsp + 0x50], 0x22
+   135: vmovdqu xmm0, xmmword ptr [rip] ; REL32 <anon-data>
+   13d: vmovdqu xmmword ptr [rsp + 0x58], xmm0
+   143: mov eax, dword ptr [rcx + rsi + 0x38]
+   147: test eax, eax
+   149: jne 0x1e1
+   14f: cmp qword ptr [rsp + 0x48], 0x0
+   155: je 0x194
+   157: mov rcx, qword ptr [rsp + 0x28]
+   15c: cmp rcx, 0x100
+   163: jae 0x278
+   169: shl rcx, 0x6
+   16d: mov eax, dword ptr [rcx + rsi + 0x38]
+   171: test eax, eax
+   173: jne 0x1fc
+   179: add rsi, rcx
+   17c: vmovdqu xmm0, xmmword ptr [rsi + 0x28]
+   181: vpxor xmm0, xmm0, xmmword ptr [rip] ; REL32 __xmm@3b7811ac6d665c7bde21fa4be2001c82
+   189: vptest xmm0, xmm0
+   18e: jne 0x216
+   194: mov rax, qword ptr [rsp + 0x28]
+   199: add rsp, 0x78
+   19d: pop rdi
+   19e: pop rsi
+   19f: ret
+   1a0: lea rax, [rsp + 0x28]
+   1a5: mov qword ptr [rsp + 0x30], rax
+   1aa: lea rax, [rip] ; REL32 <u64 as core::fmt::Display>::fmt
+   1b1: mov qword ptr [rsp + 0x38], rax
+   1b6: lea rcx, [rip] ; REL32 <anon-data>
+   1bd: mov qword ptr [rsp + 0x40], rcx
+   1c2: mov qword ptr [rsp + 0x48], rax
+   1c7: lea rcx, [rip] ; REL32 <anon-data>
+   1ce: lea r8, [rip] ; REL32 <anon-data>
+   1d5: lea rdx, [rsp + 0x30]
+   1da: call 0x1df ; REL32 core::panicking::panic_fmt
+   1df: ud2
+   1e1: add rcx, rsi
+   1e4: lea rdx, [rsp + 0x30]
+   1e9: call 0x1ee ; REL32 <std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::resources::resource_registry::ResourceInfo>>::initialize::<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::resources::resource_registry::ResourceInfo>>::get_or_init<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::resources::resource_registry::ResourceInfo>>::try_insert::{closure#0}>::{closure#0}, !>
+   1ee: cmp qword ptr [rsp + 0x48], 0x0
+   1f4: jne 0x157
+   1fa: jmp 0x194
+   1fc: lea rcx, [rip] ; REL32 <anon-data>
+   203: lea r8, [rip] ; REL32 <anon-data>
+   20a: mov edx, 0x39
+   20f: call 0x214 ; REL32 core::option::expect_failed
+   214: ud2
+   216: add rsi, 0x18
+   21a: mov qword ptr [rsp + 0x68], rdi
+   21f: mov qword ptr [rsp + 0x70], 0x22
+   228: lea rax, [rsp + 0x28]
+   22d: mov qword ptr [rsp + 0x30], rax
+   232: lea rax, [rip] ; REL32 <u64 as core::fmt::Display>::fmt
+   239: mov qword ptr [rsp + 0x38], rax
+   23e: mov qword ptr [rsp + 0x40], rsi
+   243: lea rax, [rip] ; REL32 <&str as core::fmt::Display>::fmt
+   24a: mov qword ptr [rsp + 0x48], rax
+   24f: lea rcx, [rsp + 0x68]
+   254: mov qword ptr [rsp + 0x50], rcx
+   259: mov qword ptr [rsp + 0x58], rax
+   25e: lea rcx, [rip] ; REL32 <anon-data>
+   265: lea r8, [rip] ; REL32 <anon-data>
+   26c: lea rdx, [rsp + 0x30]
+   271: call 0x276 ; REL32 core::panicking::panic_fmt
+   276: ud2
+   278: lea r8, [rip] ; REL32 <anon-data>
+   27f: mov edx, 0x100
+   284: call 0x289 ; REL32 core::panicking::panic_bounds_check
+   289: ud2

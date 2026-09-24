@@ -43,7 +43,7 @@ fn setup(
 
 /// **The control.** Every instance is on screen, so nothing may be removed at either rung.
 #[test]
-#[ignore = "needs a real windowed GPU device; the orchestrator runs it as the narrow gate's control"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator runs it as the narrow gate's control"]
 fn vb_inst_cull_wide_keeps_every_instance() {
     let probe = vb_inst_cull_scene::probe_in_process("wide", || {
         let mut app = App::new();

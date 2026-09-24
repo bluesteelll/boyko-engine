@@ -244,7 +244,7 @@ mod tests {
             #[test]
             #[cfg_attr(
                 miri,
-                ignore = "Miri wall-time: 64 cases x up to 39 frames on a fresh world each; \
+                ignore = "miri-slow: Miri wall-time: 64 cases x up to 39 frames on a fresh world each; \
                           the same accumulate/expend math is covered there by \
                           miri_fixed_loop's M-P20-1"
             )]

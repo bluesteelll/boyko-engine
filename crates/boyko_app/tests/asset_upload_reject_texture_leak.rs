@@ -177,7 +177,7 @@ fn spawn_minimal_view(commands: &mut Commands) {
 }
 
 #[test]
-#[ignore = "needs a real windowed GPU device (validation not required); run with --test-threads=1"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device (validation not required); run with --test-threads=1"]
 fn a_fill_rejected_texture_upload_releases_its_bindless_slot() {
     let mut app = App::new();
     app.insert_resource(FrameBudget(BUDGET));

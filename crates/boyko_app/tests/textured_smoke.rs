@@ -213,7 +213,7 @@ fn setup(
 ///
 /// `#[ignore]`: needs a real windowed GPU device; the orchestrator runs it on the GPU.
 #[test]
-#[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the textured-PBR smoke screenshot"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the textured-PBR smoke screenshot"]
 fn textured_smoke_screenshot_dump() {
     let mut app = App::new();
     app.add_plugins(EnginePlugins::window("boyko_engine textured-PBR smoke", 640, 640));

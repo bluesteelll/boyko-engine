@@ -66,3 +66,10 @@ graphify-out/
 # Python bytecode caches from the repository scripts and tools (check_hotpath_exceptions.py self-test imports, tools/)
 __pycache__/
 *.pyc
+
+# The workspace lock IS tracked: an exception to `*.lock` above (line 4, from the 2025-02 layout
+# template, never a decision), which stays for every other lock file. While it was ignored, every
+# worktree and every CI run resolved its own dependency versions, and a TypeId literal follows the
+# resolved graph: UG-15 leg (2) went RED on a tree byte-identical to a green one until the two
+# worktrees' locks were swapped (2026-09-24). CI builds with `--locked`.
+!/Cargo.lock

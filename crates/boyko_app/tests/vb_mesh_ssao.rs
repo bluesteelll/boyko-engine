@@ -177,7 +177,7 @@ fn setup(
 /// `#[ignore]`: needs a real windowed GPU device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the VisibilityBuffer split-SSAO screenshot"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the VisibilityBuffer split-SSAO screenshot"]
 fn vb_mesh_ssao_screenshot_dump() {
     let mut app = App::new();
     let plugins = EnginePlugins::window("boyko_engine vb split ssao", 512, 512);

@@ -209,7 +209,7 @@ fn ubo_u32s(bytes: &[u8; 48]) -> Vec<u32> {
 /// times the DDGI-update pass with GPU timestamps, prints `median / p95 / stddev` (ns) +
 /// ns/ray. The orchestrator reads these to size the HW-RT cadence.
 #[test]
-#[ignore = "GPU-timestamp cost measurement (RTX + --nocapture --test-threads=1); the orchestrator runs it"]
+#[ignore = "gpu: GPU-timestamp cost measurement (RTX + --nocapture --test-threads=1); the orchestrator runs it"]
 fn software_ray_baseline_cost() {
     let Some(ctx) = boot_or_skip() else {
         return;

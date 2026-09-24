@@ -322,7 +322,7 @@ fn run_session(exe: &PathBuf, froxel: bool, tag: &str) -> Option<Artifact> {
 /// SKIPS BY NAME when the sibling bench binary has not been built — a rung that silently measures
 /// nothing is indistinguishable from one that measured a perfect instrument.
 #[test]
-#[ignore = "needs a real windowed GPU device; runs N separate bench processes per configuration"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; runs N separate bench processes per configuration"]
 fn vg_decidability_floor_measure() {
     let Some(exe) = bench_binary() else {
         eprintln!(

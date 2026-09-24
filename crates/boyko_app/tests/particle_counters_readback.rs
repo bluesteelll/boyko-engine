@@ -68,7 +68,7 @@ const DEFAULT_READBACK_FRAME: &str = "30";
 
 /// **The pool-partition readback.** See the module doc for the five properties it asserts.
 #[test]
-#[ignore = "needs a real windowed GPU device; orchestrator-run particles-P0 partition readback (gates #7/#9)"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; orchestrator-run particles-P0 partition readback (gates #7/#9)"]
 fn particle_counters_partition_readback() {
     particle_scene::print_config("particle_counters_readback");
 

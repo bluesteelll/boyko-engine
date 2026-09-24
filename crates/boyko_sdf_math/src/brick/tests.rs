@@ -137,7 +137,7 @@ fn random_scene(rng: &mut XorShift64) -> (SdfEditField, [f32; 3]) {
 /// the in-voxel crossing EXACT (no fragile ε-bound). This assertion is kept VERBATIM
 /// and un-`ignore`d the moment M2's cubic replaces the conservative-step decode.
 #[test]
-#[ignore = "M2: trilinear stepping deferred to the JCGT cubic; M1 is empty-skip-only"]
+#[ignore = "deferred: M2 - trilinear stepping deferred to the JCGT cubic; M1 is empty-skip-only"]
 fn brick_field_is_conservative_lower_bound() {
     const SEEDS: u64 = 1500;
     let voxel = VOXEL_SIZE;
@@ -458,7 +458,7 @@ fn fill_brick_voxel_center_encodes_analytic_minus_bias() {
 /// field is not stepped on in M1 (empty-skip-only); its lower-bound tightness is an
 /// M2/JCGT-cubic concern. Assertion kept verbatim for the M2 re-enable.
 #[test]
-#[ignore = "M2: trilinear stepping deferred to the JCGT cubic; M1 is empty-skip-only"]
+#[ignore = "deferred: M2 - trilinear stepping deferred to the JCGT cubic; M1 is empty-skip-only"]
 fn trilinear_reconstruct_is_a_tight_lower_bound_in_r1() {
     let voxel = VOXEL_SIZE;
     let mut field = SdfEditField::new();

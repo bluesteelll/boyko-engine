@@ -147,7 +147,7 @@ fn setup(
 /// `#[ignore]`: needs a real windowed GPU device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the Forward x Both screenshot"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the Forward x Both screenshot"]
 fn forward_both_screenshot_dump() {
     let mut app = App::new();
     let plugins = EnginePlugins::window("boyko_engine forward both", 512, 512);
