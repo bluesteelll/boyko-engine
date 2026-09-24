@@ -73,6 +73,12 @@ measurement, not for tidiness.**
   cull gained a bound query. Neither was visible until the flag was passed. **"Green" without this
   flag means "green up to the first thing already known to be red".**
 
+**`Cargo.lock` is tracked (2026-09-24), and CI runs every cargo build with `--locked`.** While it was
+git-ignored, each worktree and each CI run resolved its own dependency versions, and a `TypeId`
+literal follows the resolved graph: UG-15 leg (2) went RED on a tree byte-identical to a green one,
+and swapping the two worktrees' locks turned it green. **A worktree created before this commit holds
+an untracked `Cargo.lock`: move it aside before merging a commit that tracks it.**
+
 ### The feature axis — `--all-targets` is not `--all-features`
 
 **None of the four commands above compiles a single `#[cfg(feature = "…")]` item.** `--all-targets`
