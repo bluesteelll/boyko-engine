@@ -802,6 +802,59 @@ impl ComponentPool {
         true
     }
 
+    /// Test-only memory model of this pool (packing plan D7, obligation 10):
+    /// the byte length of the UNION of the three committed intervals, each read
+    /// at its sub-region's absolute page floor (`sub-region offset - stagger`):
+    ///
+    /// * data: `[0, data_committed)`;
+    /// * added: `[data_len, data_len + ticks_committed)`;
+    /// * changed: `[data_len + tick_len, data_len + tick_len + ticks_committed)`.
+    ///
+    /// Both tick intervals are empty on an untracked pool, and the data
+    /// interval is empty on a ZST pool.
+    ///
+    /// The union, not the sum `data_committed + 2 * ticks_committed`: adjacent
+    /// intervals share a page wherever the earlier region's ladder has reached
+    /// its cap, and which boundaries that happens at depends on the geometry.
+    /// The OS-truth tests (`commit_floor_tests`) hold this model to the pages
+    /// the kernel actually reports, so a model that merely restates the
+    /// arithmetic cannot pass them.
+    #[cfg(test)]
+    pub(crate) fn committed_bytes(&self) -> usize {
+        let layout = pool_byte_layout(
+            self.reserve_rows,
+            self.component_layout.size(),
+            pool_base_stagger(self.component_id),
+        );
+        let ticks = if self.is_tracked() { self.ticks_committed } else { 0 };
+        let (dl, tl) = (layout.data_len, layout.tick_len);
+        // Already sorted by start: 0 <= data_len <= data_len + tick_len.
+        let intervals = [
+            (0, self.data_committed),
+            (dl, dl + ticks),
+            (dl + tl, dl + tl + ticks),
+        ];
+        let mut total = 0;
+        let mut open: Option<(usize, usize)> = None;
+        for (start, end) in intervals {
+            if end <= start {
+                continue;
+            }
+            open = match open {
+                Some((s, e)) if start <= e => Some((s, e.max(end))),
+                Some((s, e)) => {
+                    total += e - s;
+                    Some((start, end))
+                }
+                None => Some((start, end)),
+            };
+        }
+        if let Some((s, e)) = open {
+            total += e - s;
+        }
+        total
+    }
+
     /// Byte pointer for row `idx`, computed from the stable reservation base.
     ///
     /// Phase 22 D6: for `stride == 0` (tag pools) every row returns the
@@ -2472,6 +2525,9 @@ mod tests {
     //   Phase X.B dense-equivalence tests below: 224..226
     //   Phase X.I growth tests below:  226, 227
     //   Phase 22 ZST (tag) pool tests below: 228, 229
+    //   packing-plan commit-floor oracle (`commit_floor_tests` below):
+    //     127..=130, 162, 176, 188..=193, 230..=293, 318, 319, 382..=385,
+    //     447..=449 — the census and the reasons are in that module's header
     const POS_ID: ComponentId = ComponentId(220);
     const VEL_ID: ComponentId = ComponentId(221);
     const OTHER_ID: ComponentId = ComponentId(222);
@@ -4114,5 +4170,582 @@ mod tests {
             "only the local probe dropped (==1); the Device pool's CPU drop_fn \
              ran 0 times (CR-C: Host len == 0)"
         );
+    }
+
+    // ====================================================================
+    // Packing plan S0 — the commit-floor oracle
+    // (`docs/ecs/POOL-SUBGRANULAR-PACKING-PLAN.md`, gates G1, G2, G3, G7).
+    //
+    // The `cfg` below is a recorded "not compiled here", never a pass (plan
+    // G2): on the fallback arm (Miri, wasm, 32-bit) `VmReservation::reserve`
+    // is an eager `alloc_zeroed` of the whole `os_len` and `commit` is a
+    // no-op, so no commit floor exists there to measure. The ladder
+    // bookkeeping itself is audited under Miri by `tests/miri_pool_growth.rs`
+    // and `tests/miri_phase22.rs`.
+    // ====================================================================
+    #[cfg(all(not(miri), any(windows, unix), target_pointer_width = "64"))]
+    mod commit_floor_tests {
+        //! Commit-floor oracle for `ComponentPool` (packing plan S0).
+        //!
+        //! * **G1** — the in-process model `ComponentPool::committed_bytes`,
+        //!   pinned by exact equality against the plan's closed form ("The
+        //!   floor, derived"), never by a bound.
+        //! * **G2** — anti-vacuity: one more grow moves the model by exactly one
+        //!   page, and an idempotent grow moves it by exactly zero.
+        //! * **G3** — OS truth: the bytes the kernel reports committed inside
+        //!   one pool's reservation (`VirtualQuery` on Windows,
+        //!   `/proc/self/maps` on Linux) equal the model after every growth
+        //!   event of every geometry in the plan's obligation-10 table, so the
+        //!   model cannot pass by restating the arithmetic it models.
+        //! * **G7** — the grow-event count of a one-row-at-a-time fill to 1 M
+        //!   rows, pinned exactly (an equality also catches a ladder widened
+        //!   to ×4, which a `<=` bound cannot).
+        //!
+        //! # Component ids
+        //!
+        //! One registry per process, one layout per slot: a fixed id that a
+        //! derive mint later lands on panics loudly in `register_new`, and a
+        //! fixed id another test pins to a different type panics in
+        //! `register_layout`. Every id below was checked against the lib test
+        //! binary's census of fixed ids (`register_layout` and `ComponentId(N)`
+        //! in `src/**`, bands 100-109, 150-159, 200-209, 220-229, 300-359,
+        //! 400-511 taken) and sits above the derive-mint range, which
+        //! `ecs_master`'s own fixed ids at 100..=102 already bound from above.
+        //! The stagger `σ = (id % 64) * 64` is what each id is chosen for:
+        //!
+        //! | ids | layout | σ | used by |
+        //! |---|---|---|---|
+        //! | 230..=293 | `Floor40`, 40 B | one id per residue, all 64 | G1 (233..=248, 240 untracked), G2, G3, G7 (256 σ 0, 281 σ 1600, 255 σ 4032) |
+        //! | 128 / 127 | `Floor1`, 1 B | 0 / 4032 | G1 tiny strides |
+        //! | 192 / 191 | `Floor2`, 2 B | 0 / 4032 | G1 tiny strides |
+        //! | 224, 226, 223, 228 | the `tests` fixtures (16 B, 64 B, 4 B, ZST) | 2048, 2176, 1984, 2304 | G3 rows 2-5 and the ZST tick-cap row |
+        //!
+        //! A σ-independent assertion takes its expectation from the plan's
+        //! formula in `COMMIT_PAGE`; the x86_64 literal the plan quotes is
+        //! pinned beside it, so the number the documents cite is the number
+        //! this gate checks.
+
+        #[cfg(windows)]
+        use core::mem::MaybeUninit;
+        use core::ops::RangeInclusive;
+
+        use super::{
+            F32_WRAP_ID, F32Wrap, ZST_TAG_ID, ZstTag, make_stride64_pool, make_u64_pool,
+            make_zst_pool,
+        };
+        use crate::ecs::constants::{
+            COMMIT_PAGE, POOL_MAX_ROWS, pool_base_stagger, pool_reserve_rows,
+        };
+        use crate::ecs::core::component::component_registry;
+        use crate::ecs::identifiers::primitives::EntityId;
+        use crate::ecs::memory::component_pool::{ComponentPool, PoolBacking};
+        use crate::ecs::memory::vm::VmReservation;
+        use crate::ecs::memory::vm_column::VmColumn;
+
+        // Layout-only fixtures: registered for their size and never
+        // constructed, because the oracle grows pools with `grow_rows` and
+        // never writes a row.
+        #[allow(dead_code)]
+        #[repr(C)]
+        struct Floor40([u64; 5]);
+        #[allow(dead_code)]
+        #[repr(C)]
+        struct Floor1(u8);
+        #[allow(dead_code)]
+        #[repr(C)]
+        struct Floor2(u16);
+
+        /// One `Floor40` id per stagger residue.
+        const FLOOR40_BAND: RangeInclusive<usize> = 230..=293;
+        /// G1's sixteen σ != 0 columns (σ = 2624 ..= 3584).
+        const G1_IDS: RangeInclusive<usize> = 233..=248;
+        const SIGMA_0: usize = 256;
+        const SIGMA_1600: usize = 281;
+        const SIGMA_4032: usize = 255;
+        const UNTRACKED_40: usize = 240;
+        const STRIDE1_SIGMA_0: usize = 128;
+        const STRIDE1_SIGMA_4032: usize = 127;
+        const STRIDE2_SIGMA_0: usize = 192;
+        const STRIDE2_SIGMA_4032: usize = 191;
+
+        /// A default-sized pool (`with_default_sizes`: the 16-column fixture
+        /// must be default-sized, plan S0) for `T` registered at `id`.
+        fn default_pool<T: 'static>(id: usize) -> ComponentPool {
+            component_registry::register_layout::<T>(id);
+            ComponentPool::with_default_sizes(id)
+        }
+
+        fn floor40_pool(id: usize) -> ComponentPool {
+            assert!(FLOOR40_BAND.contains(&id), "Floor40 ids live in FLOOR40_BAND (id {id})");
+            default_pool::<Floor40>(id)
+        }
+
+        /// "The floor, derived" (packing plan): `(committed_rows,
+        /// committed bytes)` after the FIRST grow to one row, from `σ`, the
+        /// stride and the tracked flag alone. `stride == 0` is a tracked ZST
+        /// (two tick regions, no data), valid while `σ + 4 <= COMMIT_PAGE`.
+        fn closed_form_floor(sigma: usize, stride: usize, tracked: bool) -> (usize, usize) {
+            let p = COMMIT_PAGE;
+            if stride == 0 {
+                return ((p - sigma) / 4, 2 * p);
+            }
+            let data_pages = (sigma + stride).div_ceil(p);
+            let rows = (data_pages * p - sigma) / stride;
+            if !tracked {
+                return (rows, data_pages * p);
+            }
+            let tick_pages = (sigma + 4 * rows).div_ceil(p);
+            (rows, (data_pages + 2 * tick_pages) * p)
+        }
+
+        /// The SUM of the three frontiers — what the union model is not.
+        /// `sum - committed_bytes()` is the number of shared boundary pages.
+        fn frontier_sum(pool: &ComponentPool) -> usize {
+            let ticks = if pool.is_tracked() { pool.ticks_committed } else { 0 };
+            pool.data_committed + 2 * ticks
+        }
+
+        /// Walks `pool` up its commit ladder exactly as a one-row-at-a-time
+        /// `add` loop does — `add` grows only when `count == committed_rows`,
+        /// and then asks for `committed_rows + 1` — until the frontier covers
+        /// `target`, calling `after_each` after every growth event. Returns the
+        /// number of events.
+        fn climb(
+            pool: &mut ComponentPool,
+            target: usize,
+            mut after_each: impl FnMut(&ComponentPool, usize),
+        ) -> usize {
+            let mut events = 0;
+            while pool.committed_rows() < target {
+                let n = pool.committed_rows() + 1;
+                assert!(pool.grow_rows(n), "grow_rows({n}) below the ceiling must succeed");
+                events += 1;
+                after_each(pool, events);
+            }
+            events
+        }
+
+        fn host_vm(pool: &ComponentPool) -> &VmReservation {
+            match &pool.backing {
+                PoolBacking::Host(vm) => vm,
+                PoolBacking::Device(_) => unreachable!("commit-floor fixtures are host pools"),
+            }
+        }
+
+        /// Bytes the kernel reports committed inside `pool`'s reservation:
+        /// a `VirtualQuery` walk over `[base, base + os_len)` summing the
+        /// `MEM_COMMIT` regions, clipped to the reservation.
+        #[cfg(windows)]
+        fn os_committed_bytes(pool: &ComponentPool) -> usize {
+            use core::ffi::c_void;
+
+            /// `MEMORY_BASIC_INFORMATION` on Win64. Every field is declared so
+            /// the layout is the kernel's; the walk reads three of them.
+            #[allow(dead_code)]
+            #[repr(C)]
+            struct MemoryBasicInformation {
+                base_address: *mut c_void,
+                allocation_base: *mut c_void,
+                allocation_protect: u32,
+                partition_id: u16,
+                region_size: usize,
+                state: u32,
+                protect: u32,
+                kind: u32,
+            }
+            const _: () = assert!(size_of::<MemoryBasicInformation>() == 48);
+            const MEM_COMMIT: u32 = 0x1000;
+
+            // SAFETY: the signature matches kernel32's `VirtualQuery` on Win64
+            // exactly (LPCVOID -> *const c_void, PMEMORY_BASIC_INFORMATION ->
+            // *mut MemoryBasicInformation, SIZE_T -> usize); kernel32 is
+            // linked transitively by std.
+            unsafe extern "system" {
+                fn VirtualQuery(
+                    address: *const c_void,
+                    buffer: *mut MemoryBasicInformation,
+                    length: usize,
+                ) -> usize;
+            }
+
+            let vm = host_vm(pool);
+            let start = vm.base().as_ptr() as usize;
+            let end = start + vm.os_len();
+            let mut at = start;
+            let mut committed = 0;
+            while at < end {
+                let mut info = MaybeUninit::<MemoryBasicInformation>::uninit();
+                // SAFETY: `at` lies inside this pool's live reservation
+                // `[start, end)`; `info` is a writable buffer of exactly the
+                // length passed; the call only writes into that buffer.
+                let written = unsafe {
+                    VirtualQuery(
+                        at as *const c_void,
+                        info.as_mut_ptr(),
+                        size_of::<MemoryBasicInformation>(),
+                    )
+                };
+                assert_eq!(
+                    written,
+                    size_of::<MemoryBasicInformation>(),
+                    "VirtualQuery failed at {at:#x}"
+                );
+                // SAFETY: a return value equal to the buffer length means the
+                // kernel wrote every field of the struct.
+                let info = unsafe { info.assume_init() };
+                let region_end = (info.base_address as usize + info.region_size).min(end);
+                if info.state == MEM_COMMIT {
+                    committed += region_end - at;
+                }
+                at = region_end;
+            }
+            committed
+        }
+
+        /// Bytes mapped read/write inside `pool`'s reservation according to
+        /// `/proc/self/maps`: the `rw` extents clipped to `[base, base +
+        /// os_len)`. A monotone prefix of equal-protection `mprotect`s merges
+        /// into one VMA, and a VMA can merge across the reservation's edge
+        /// with an unrelated mapping, hence the clip.
+        #[cfg(target_os = "linux")]
+        fn os_committed_bytes(pool: &ComponentPool) -> usize {
+            let vm = host_vm(pool);
+            let start = vm.base().as_ptr() as usize;
+            let end = start + vm.os_len();
+            let maps = std::fs::read_to_string("/proc/self/maps")
+                .expect("/proc/self/maps is readable on Linux");
+            let mut committed = 0;
+            for line in maps.lines() {
+                let mut fields = line.split_whitespace();
+                let (Some(range), Some(perms)) = (fields.next(), fields.next()) else {
+                    continue;
+                };
+                let Some((lo, hi)) = range.split_once('-') else {
+                    continue;
+                };
+                let lo = usize::from_str_radix(lo, 16).expect("maps range start is hex");
+                let hi = usize::from_str_radix(hi, 16).expect("maps range end is hex");
+                let (lo, hi) = (lo.max(start), hi.min(end));
+                if lo < hi && perms.starts_with("rw") {
+                    committed += hi - lo;
+                }
+            }
+            committed
+        }
+
+        // The OS-truth arm exists on Windows and Linux only: the syscall arm
+        // of `vm.rs` is `unix`, but `/proc/self/maps` is Linux's, so on every
+        // other unix target the G3 tests below are not compiled — a recorded
+        // absence (this comment), never a vacuous green.
+        #[cfg(any(windows, target_os = "linux"))]
+        fn assert_os_truth(pool: &ComponentPool, what: &str) {
+            assert_eq!(
+                os_committed_bytes(pool),
+                pool.committed_bytes(),
+                "G3 OS truth vs the D7 model ({what}; committed_rows = {}, data_committed = {}, \
+                 ticks_committed = {})",
+                pool.committed_rows(),
+                pool.data_committed,
+                pool.ticks_committed
+            );
+        }
+
+        // ---- G1 -------------------------------------------------------------
+
+        /// G1 — sixteen default-sized 40 B tracked columns with σ != 0, one
+        /// row each: three pages per column (data, added, changed), 196 608 B
+        /// on x86_64. The granule ladder read 3 145 728 B here: 16 × 3 ×
+        /// 64 KiB of sub-region-relative frontiers.
+        #[test]
+        fn floor_of_sixteen_small_tracked_columns() {
+            let mut total = 0;
+            for id in G1_IDS {
+                assert_ne!(pool_base_stagger(id), 0, "G1 needs σ != 0 (id {id})");
+                let mut pool = floor40_pool(id);
+                assert!(pool.grow_rows(1));
+                total += pool.committed_bytes();
+            }
+            assert_eq!(total, 16 * 3 * COMMIT_PAGE, "G1: sixteen σ != 0 columns, one row each");
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(total, 196_608);
+        }
+
+        /// G1 — the floor is the same three pages at σ = 0 and at σ = 4032:
+        /// the page floor absorbs the stagger pad (plan D2, D4). Only the row
+        /// count differs: `(COMMIT_PAGE - σ) / 40`.
+        #[test]
+        fn floor_is_three_pages_at_both_stagger_extremes() {
+            for (id, sigma) in [(SIGMA_0, 0), (SIGMA_4032, 4032)] {
+                assert_eq!(pool_base_stagger(id), sigma);
+                let mut pool = floor40_pool(id);
+                assert!(pool.grow_rows(1));
+                assert_eq!(
+                    (pool.committed_rows(), pool.committed_bytes()),
+                    closed_form_floor(sigma, 40, true),
+                    "G1: σ = {sigma}"
+                );
+                assert_eq!(pool.committed_bytes(), 3 * COMMIT_PAGE, "G1: σ = {sigma}");
+            }
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(
+                [closed_form_floor(0, 40, true), closed_form_floor(4032, 40, true)],
+                [(102, 12_288), (1, 12_288)]
+            );
+        }
+
+        /// G1 — an untracked column (`ScratchColumn`'s backing) costs its data
+        /// page alone.
+        #[test]
+        fn floor_of_an_untracked_column_is_its_data_page() {
+            component_registry::register_layout::<Floor40>(UNTRACKED_40);
+            let mut pool = ComponentPool::new_untracked(UNTRACKED_40, pool_reserve_rows(40));
+            assert!(pool.grow_rows(1));
+            assert_eq!(
+                (pool.committed_rows(), pool.committed_bytes()),
+                closed_form_floor(pool_base_stagger(UNTRACKED_40), 40, false)
+            );
+            assert_eq!(pool.committed_bytes(), COMMIT_PAGE);
+        }
+
+        /// G1 — a tracked ZST (tag) column costs its two tick pages.
+        #[test]
+        fn floor_of_a_tracked_zst_column_is_two_tick_pages() {
+            let mut pool = default_pool::<ZstTag>(ZST_TAG_ID.0);
+            assert!(pool.grow_rows(1));
+            let sigma = pool_base_stagger(ZST_TAG_ID.0);
+            assert_eq!(
+                (pool.committed_rows(), pool.committed_bytes()),
+                closed_form_floor(sigma, 0, true)
+            );
+            assert_eq!(pool.committed_bytes(), 2 * COMMIT_PAGE);
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(pool.committed_rows(), 448, "(4096 - 2304) / 4");
+        }
+
+        /// G1 — a four-column 40 B table plus its `VmColumn<EntityId>`
+        /// (OPEN-QUESTIONS F2's unit): 4 × 3 pages + 1 page.
+        #[test]
+        fn floor_of_a_four_column_table_and_its_entity_column() {
+            let mut total = 0;
+            for id in G1_IDS.take(4) {
+                let mut pool = floor40_pool(id);
+                assert!(pool.grow_rows(1));
+                total += pool.committed_bytes();
+            }
+            let mut entity_ids: VmColumn<EntityId> =
+                VmColumn::new("commit_floor_tests.entity_ids", POOL_MAX_ROWS);
+            entity_ids.push(EntityId(0));
+            total += entity_ids.committed_elems() * size_of::<EntityId>();
+            assert_eq!(total, 13 * COMMIT_PAGE, "G1: 4 × 3 pages + one entity-id page");
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(total, 53_248);
+        }
+
+        /// G1 — 1 B and 2 B columns: the tick pages drive the floor (plan
+        /// D6), phase-dependent on σ, so the closed form pins them.
+        #[test]
+        fn tiny_stride_floors_are_driven_by_the_tick_pages() {
+            let cases = [
+                (STRIDE1_SIGMA_0, 1),
+                (STRIDE1_SIGMA_4032, 1),
+                (STRIDE2_SIGMA_0, 2),
+                (STRIDE2_SIGMA_4032, 2),
+            ];
+            let mut floors = [0usize; 4];
+            for (k, (id, stride)) in cases.into_iter().enumerate() {
+                let mut pool = if stride == 1 {
+                    default_pool::<Floor1>(id)
+                } else {
+                    default_pool::<Floor2>(id)
+                };
+                assert!(pool.grow_rows(1));
+                let expected = closed_form_floor(pool_base_stagger(id), stride, true);
+                assert_eq!(
+                    (pool.committed_rows(), pool.committed_bytes()),
+                    expected,
+                    "G1: stride {stride}, id {id}"
+                );
+                floors[k] = expected.1;
+            }
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(floors, [36_864, 20_480, 20_480, 20_480]);
+        }
+
+        // ---- G2 -------------------------------------------------------------
+
+        /// G2 (a) — a model stuck at a constant is red: the second rung of a
+        /// σ = 0 column moves the model by exactly one page (the data page
+        /// doubles; the tick pages already cover the new rows).
+        #[test]
+        fn one_more_grow_moves_the_model_by_exactly_one_page() {
+            let mut pool = floor40_pool(SIGMA_0);
+            assert!(pool.grow_rows(1));
+            let (rows, bytes) = (pool.committed_rows(), pool.committed_bytes());
+            assert!(pool.grow_rows(rows + 1));
+            assert_eq!(pool.committed_bytes() - bytes, COMMIT_PAGE, "G2(a): one more rung");
+            assert_eq!(pool.committed_rows(), 2 * COMMIT_PAGE / 40, "G2(a): σ = 0 rows");
+        }
+
+        /// G2 (b) — a model that double-counts is red: an idempotent grow at
+        /// or below the frontier moves nothing.
+        #[test]
+        fn idempotent_grow_below_the_frontier_moves_the_model_by_zero() {
+            let mut pool = floor40_pool(SIGMA_1600);
+            assert!(pool.grow_rows(1));
+            let state = |p: &ComponentPool| {
+                (p.committed_rows(), p.committed_bytes(), p.data_committed, p.ticks_committed)
+            };
+            let before = state(&pool);
+            for n in [0, 1, before.0] {
+                assert!(pool.grow_rows(n));
+                assert_eq!(state(&pool), before, "G2(b): grow_rows({n}) is a no-op");
+            }
+        }
+
+        // ---- G3 -------------------------------------------------------------
+
+        /// G3 — the floor of a σ != 0 column, as the kernel sees it. The
+        /// granule ladder's `align_down`/`align_up` pair committed two granules
+        /// per sub-region here (393 216 B against a 196 608 B model); only
+        /// this arm can see that overshoot.
+        #[cfg(any(windows, target_os = "linux"))]
+        #[test]
+        fn os_truth_equals_the_model_at_the_floor_with_nonzero_stagger() {
+            let mut pool = floor40_pool(SIGMA_1600);
+            assert!(pool.grow_rows(1));
+            assert_os_truth(&pool, "floor, σ = 1600");
+            assert_eq!(pool.committed_bytes(), 3 * COMMIT_PAGE);
+        }
+
+        /// G3 — the σ = 0 twin: page floors coincide with the sub-region
+        /// offsets, so no overshoot existed here even on the granule ladder.
+        #[cfg(any(windows, target_os = "linux"))]
+        #[test]
+        fn os_truth_equals_the_model_at_the_floor_with_zero_stagger() {
+            let mut pool = floor40_pool(SIGMA_0);
+            assert!(pool.grow_rows(1));
+            assert_os_truth(&pool, "floor, σ = 0");
+        }
+
+        /// G3 obligation-10 row 2 — `make_stride64_pool(4096)` (σ = 2176) to
+        /// full capacity: the data ladder reaches its cap `data_len + P` by
+        /// request, so the data interval shares the `added` floor page.
+        #[cfg(any(windows, target_os = "linux"))]
+        #[test]
+        fn os_truth_row2_stride64_to_full_capacity() {
+            let mut pool = make_stride64_pool(4096);
+            climb(&mut pool, 4096, |p, k| assert_os_truth(p, &format!("row 2, event {k}")));
+            assert_eq!(pool.committed_rows(), 4096);
+            assert_eq!(frontier_sum(&pool) - pool.committed_bytes(), COMMIT_PAGE, "row 2");
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!((pool.committed_bytes(), frontier_sum(&pool)), (303_104, 307_200));
+        }
+
+        /// G3 obligation-10 row 3 — `make_u64_pool(256)` (σ = 2048) to full
+        /// capacity: neither cap is reached, so the union is the sum.
+        #[cfg(any(windows, target_os = "linux"))]
+        #[test]
+        fn os_truth_row3_u64_to_full_capacity() {
+            let mut pool = make_u64_pool(256);
+            climb(&mut pool, 256, |p, k| assert_os_truth(p, &format!("row 3, event {k}")));
+            assert_eq!(pool.committed_rows(), 256);
+            assert_eq!(frontier_sum(&pool), pool.committed_bytes(), "row 3");
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(pool.committed_bytes(), 16_384);
+        }
+
+        /// G3 obligation-10 row 4 — `pool_byte_layout(3072, 64, 2176)` climbed
+        /// one rung at a time to `n = 2015`: the doubling from `2G` overshoots
+        /// onto the data cap `3G + P` BEFORE full capacity (route (ii)). The
+        /// climb is load-bearing: one `grow_rows(2015)` from empty lands at
+        /// 135 168 B, where union == sum, and would pass for the wrong reason.
+        #[cfg(any(windows, target_os = "linux"))]
+        #[test]
+        fn os_truth_row4_doubling_overshoots_onto_the_data_cap() {
+            let mut pool = make_stride64_pool(3072);
+            climb(&mut pool, 2015, |p, k| assert_os_truth(p, &format!("row 4, event {k}")));
+            assert_eq!(pool.committed_rows(), 3072, "row 4: the overshoot reaches the ceiling");
+            assert_eq!(
+                frontier_sum(&pool) - pool.committed_bytes(),
+                COMMIT_PAGE,
+                "row 4: the data/added boundary page must be shared (anti-vacuity)"
+            );
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!((pool.committed_bytes(), frontier_sum(&pool)), (229_376, 233_472));
+        }
+
+        /// G3 obligation-10 row 5 — `pool_byte_layout(16384, 4, 1984)` to full
+        /// capacity: both caps reached, two shared pages — the cheap twin of
+        /// row 1's both-caps case.
+        #[cfg(any(windows, target_os = "linux"))]
+        #[test]
+        fn os_truth_row5_both_caps_to_full_capacity() {
+            component_registry::register_layout::<F32Wrap>(F32_WRAP_ID.0);
+            let mut pool = ComponentPool::new(F32_WRAP_ID.0, 16_384);
+            climb(&mut pool, 16_384, |p, k| assert_os_truth(p, &format!("row 5, event {k}")));
+            assert_eq!(pool.committed_rows(), 16_384);
+            assert_eq!(frontier_sum(&pool) - pool.committed_bytes(), 2 * COMMIT_PAGE, "row 5");
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!((pool.committed_bytes(), frontier_sum(&pool)), (200_704, 208_896));
+        }
+
+        /// G3 — a tracked ZST pool (σ = 2304) driven to its tick cap
+        /// `align_up_page(σ + tick_len)`, the ZST form of obligation 3's error
+        /// class: the `added` interval shares the `changed` floor page.
+        #[cfg(any(windows, target_os = "linux"))]
+        #[test]
+        fn os_truth_zst_to_the_tick_cap() {
+            let mut pool = make_zst_pool(16_384);
+            climb(&mut pool, 16_384, |p, k| assert_os_truth(p, &format!("ZST, event {k}")));
+            assert_eq!(pool.committed_rows(), 16_384);
+            assert_eq!(frontier_sum(&pool) - pool.committed_bytes(), COMMIT_PAGE, "ZST tick cap");
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(pool.committed_bytes(), 135_168);
+        }
+
+        /// G3 obligation-10 row 1 — the default 40 B pool (σ = 1600) at its full
+        /// 2^24-row capacity in one request: both caps reached, two shared
+        /// pages. Ignored for its commit charge, not its time: ≈ 768 MiB of
+        /// process-wide Windows commit in a binary that runs other tests in
+        /// parallel. Row 5 gates the same both-caps shape on every run.
+        #[cfg(any(windows, target_os = "linux"))]
+        #[test]
+        #[ignore = "solo: commits ~768 MiB (a default 40 B pool at its full 2^24-row capacity), process-wide commit charge; run alone: `cargo test -p boyko-ecs --lib ecs::memory::component_pool::tests::commit_floor_tests::os_truth_row1_default_pool_at_full_capacity -- --ignored --exact --test-threads=1`"]
+        fn os_truth_row1_default_pool_at_full_capacity() {
+            let mut pool = floor40_pool(SIGMA_1600);
+            assert!(pool.grow_rows(POOL_MAX_ROWS));
+            assert_eq!(pool.committed_rows(), POOL_MAX_ROWS);
+            assert_os_truth(&pool, "row 1, full capacity");
+            assert_eq!(frontier_sum(&pool) - pool.committed_bytes(), 2 * COMMIT_PAGE, "row 1");
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(pool.committed_bytes(), 805_310_464);
+        }
+
+        // ---- G7 -------------------------------------------------------------
+
+        /// G7 — a one-row-at-a-time fill of a 40 B column to 1 M rows takes
+        /// exactly 15 growth events on the page ladder (11 on the granule
+        /// ladder), for σ = 0, 1600 and 4032 alike: `4e7 + σ < 2^26`. The
+        /// plan's bound is `<= log2(1M·40 / COMMIT_PAGE) + 2 == 16`; the pin is
+        /// the equality.
+        #[test]
+        fn grow_event_count_to_a_million_rows() {
+            for id in [SIGMA_0, SIGMA_1600, SIGMA_4032] {
+                let mut pool = floor40_pool(id);
+                let events = climb(&mut pool, 1_000_000, |_, _| {});
+                #[cfg(target_arch = "x86_64")]
+                assert_eq!(events, 15, "G7: σ = {}", pool_base_stagger(id));
+                assert!(events <= 16, "G7: the plan's bound (σ = {})", pool_base_stagger(id));
+            }
+        }
+
+        /// G7 — a batch request is ONE event whatever the quantum:
+        /// `pool_commit_step` is request-dominant.
+        #[test]
+        fn a_batch_request_is_one_event() {
+            let mut pool = floor40_pool(SIGMA_1600);
+            assert!(pool.grow_rows(1_000_000));
+            assert!(pool.committed_rows() >= 1_000_000, "G7: one request covers the batch");
+        }
     }
 }

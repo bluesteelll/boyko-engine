@@ -6,6 +6,29 @@
 /// frontier commit can never overrun the kernel's page-rounded mapping.
 pub const COMMIT_GRANULE: usize = 64 * 1024;
 
+/// OS commit page (packing plan D1,
+/// `docs/ecs/POOL-SUBGRANULAR-PACKING-PLAN.md`): `MEM_COMMIT` inside an
+/// existing reservation and `mprotect` are page-granular; only `MEM_RESERVE`
+/// is bound by the 64 KiB allocation granularity ([`COMMIT_GRANULE`]).
+///
+/// 4 KiB on `x86_64`, the stated target platform on both OSes.
+///
+/// Defined one step ahead of its consumers: the commit-floor oracle
+/// (`component_pool.rs`, `commit_floor_tests`) is written against it in its
+/// final form, while the pool and `VmColumn` commit ladders still step by
+/// [`COMMIT_GRANULE`] until the ladder step of the plan retargets them.
+#[cfg(target_arch = "x86_64")]
+pub const COMMIT_PAGE: usize = 4096;
+/// Every other architecture keeps the granule as its commit page, so a
+/// 16 KiB- or 64 KiB-page kernel is never handed a page-misaligned `mprotect`
+/// base (packing plan D1).
+#[cfg(not(target_arch = "x86_64"))]
+pub const COMMIT_PAGE: usize = COMMIT_GRANULE;
+
+// A granule is a whole number of commit pages on every arm, so every
+// granule-rounded reservation length ends on a page boundary.
+const _: () = assert!(COMMIT_GRANULE.is_multiple_of(COMMIT_PAGE));
+
 /// Typical CPU cache line size in bytes
 /// Used for memory alignment to optimize cache usage
 pub const CACHE_LINE_SIZE: usize = 64;
