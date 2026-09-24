@@ -23,15 +23,16 @@
 //! Under Stacked Borrows a raw pointer to a local carries its own tag, and a
 //! direct write to the local pops it (`wip/stacked-borrows.md`, "Accessing
 //! memory", write rule), so the guard's read was UB on every walk that
-//! applied at least one command. Tree Borrows accepts the same code, because
+//! reached at least one command. Tree Borrows accepts the same code, because
 //! a raw pointer taken directly to a local inherits the local's tag
 //! (R. Jung, "From Stacked Borrows to Tree Borrows", 2023-06-02: the
 //! `let ptr = addr_of_mut!(x); x = 1; ptr.read();` example). The project
 //! requires both legs green (UG-08), so this target runs under both, and
 //! each test below drives the guard through one of its three exits with the
-//! local cursor written at least twice before the guard reads it.
+//! local cursor written at least twice before the guard reads it. The guard
+//! now reaches the local only through a `&mut` borrow it holds.
 //!
-//! The four suites that surfaced the defect (`miri_pool_growth`'s churn test
+//! The four tests that surfaced the defect (`miri_pool_growth`'s churn test
 //! and three `miri_phase22` tests) reach the guard only through a full
 //! `EcsMaster` system run; this target reaches it with a bare queue and
 //! no-op commands, so a regression is caught in one small binary.
