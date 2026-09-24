@@ -135,7 +135,7 @@ parent's W=8 cell sat +11.5 % above window 4b's on unchanged solver code). By th
 query's excess over the design (334 ns per row against 100–150: 0.225–0.287 ms at W=8) is larger than the whole
 +0.147 ms W=8 gap to Jolt. **C4 (the default flip) stays DEFERRED:** no Tree row in window 5 was armed, so neither the
 G4 `J snapshot` cell nor the G5 Tree span was re-taken, the query-cost investigation of window 4's `analysis.md` §8 has
-not run, and the stop rules of 2026-09-22 stand.
+not run, and the stop rules of 2026-09-22 stand. ⚠ *2026-09-24, ruling after window 6 (orchestrator): **the runner gains `--bp-kernel` before F3's window.** Window 6 timed C3b's query kernels across two binaries, its parent and its tip, because the runner has no kernel switch (`c3b/design.md:253`, `:387`), and the tip's armed W=1 t_q read 0.2102 ms in one block and 0.2354 ms in a later block of the same window, with the cause unknown (window 6 `analysis.md` §3.2, §7 item 3; FOLLOW-UP item 8, which leaves the flag to the orchestrator). So `benches/jolt_parity_pyramid.rs` gains `--bp-kernel`, which selects the query kernel inside one binary, before the quiet window of F3 (the reserve kd median-split leaf order), so that F3's armed A/B is timed same-binary. The flag changes no default and no pose.*
 
 **L10 rev 2** (`L10-sleeping/04-DESIGN-REV2.md`, review `05-REVIEW-OF-REV2.md`):
 - **W1:** the Tree's hint is PRE_HELD minus the prologue restore list (or `release` runs for every restore on
@@ -198,6 +198,23 @@ predicted setup 0.425 → 0.10–0.21 µs per manifold. Rulings:
 - **L7 RETIRED (2026-09-23, after C3), closing the design's instruction** (`L11-solve-setup/02-DESIGN-REV1.md` D7, "Recommend retiring L7 after C3", and its interaction list, "L7: retire it after C3 (D7)"). L7 — `warm_start_apply` per wide colour, in parallel (`01-PLAN-REV1.md`, row L7) — is not built and leaves the lever set. D7 prices its dispatch at 4 × 9.11 waves × ω(8) 6.54 µs ≈ 0.24 ms, and C3 has now measured the whole warm apply it would split at 0.296 ms (W=1) / 0.304 ms (W=8) (window 5, armed, reading B). The plan's size rule (t_warm(8) ≥ 3 % of T(8)) is met at 6.7 % (0.304 of 4.510 ms), but the plan's own formula t_warm(1)·(1 − 1/(E·W)) − 4·waves·ω nets it to at most 0.296 × 7/8 − 0.24 ≈ 0.02 ms at W=8 even at E = 1 — arithmetic, not measured. Its prerequisite L6 was never built (`docs/physics/perf-campaign/00-RULINGS.md`, "Rulings after P0", 2026-09-19: "L6 is not built (8.2 % < 10 %); L7 stays gated behind L6"). No L7 code, lever directory or gate exists, so nothing is removed; a per-colour parallel warm pass comes back only as a new design with its own measurement.
 - **L12 is commissioned** (the effective-mass cache per inertia epoch: 5 of 12 sweeps compute, 7 load;
   bit-identical) as its own design after L11.
+- **G9 on C3 CLOSED by ruling (orchestrator, 2026-09-24, after window 6).** Window 6 ran the rest of G9 on window 5's two
+  binaries and found no row claimed slower and the canary seen (window 6 `analysis.md` §4; queue section 14.4). It left
+  two items open (FOLLOW-UP items 12 and 13). The rulings:
+  - **K.** G9 closes under the window protocol the timing windows were ruled on: K = 6 processes per cell, and a claim
+    only above twice the combined spread under both min-max and SE (the window-3 protocol block of 2026-09-19, as
+    window 6 states it in queue section 14). That protocol supersedes the letter "K=12 interleaved" of
+    `L11-solve-setup/02-DESIGN-REV1.md:360`. A cell is read at K = 5 when one of its slots is dropped because the
+    original and its one re-run both had an after-receipt over 5 %. That is the protocol's re-run-once rule working as
+    written, and the claim rule applies to the five processes unchanged. So window 6's five such G9 cells stand: R@1,
+    R-S@8, S16@1 and J-As@2 on the parent, J-As@16 on the tip (window 6 `analysis.md:26-27` and its §4 table).
+  - **J-A at W 2/4/16.** The three G9 cells no window has run yet go to the next quiet window: `J-A` at W = 2, 4 and 16,
+    g9p against g9t, K = 6, about six minutes. They are a record against the same "not claimed slower" gate, and C3
+    moves no pin, so no code waits on them.
+  - **Reconcile with `u/win6`** (added 2026-09-24 by the Phase B document step's revision). `u/win6` adds window 6's
+    own line, "G9's remainder on C3", above this bullet, and it says "G9 is not formally closed … whether K=12 is
+    required is an open ruling". This bullet is that ruling. When both branches have merged, that sentence is struck to a pointer here (the reconcile list in
+    `docs/unification/UNIFIED-SYSTEM-PLAN-02-ORDER-OF-WORK.md` §2, after the Phase B table).
 
 **Lane order (ruled, replaces the order above):** L5 (in flight) → then, in parallel because their files are
 disjoint, the tree broadphase and L11 → L9 (after L5, which owns the narrowphase system) → L10 (rev 2.2: it
