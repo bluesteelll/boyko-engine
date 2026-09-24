@@ -661,7 +661,7 @@ pub fn check(ctx: &Ctx, llvm: &Llvm, rename: &RenameList, named: &[(String, Stri
     let mut out = crate::probes::header(ctx, llvm, "leg (2) check");
     let lock = ctx.root.join("Cargo.lock");
     let before = lock_sha(&lock)?;
-    let _ = writeln!(out, "Cargo.lock   sha256 {} ({})", before.as_deref().unwrap_or("absent"), lock.display());
+    let _ = writeln!(out, "Cargo.lock   sha256 {} over LF text ({})", before.as_deref().unwrap_or("absent"), lock.display());
     let verdict = check_with(&ctx.root, &BuiltObjects { ctx, llvm }, rename, named, subjects, out);
     let after = lock_sha(&lock)?;
     if after == before {
@@ -677,9 +677,17 @@ pub fn check(ctx: &Ctx, llvm: &Llvm, rename: &RenameList, named: &[(String, Stri
     }
 }
 
-/// The sha256 of the lock file at `p`, `None` when there is none.
+/// The sha256 of the lock file at `p` over its LF text, `None` when there is none.
+///
+/// LF, because the lock is tracked and `core.autocrlf = true` checks the one LF blob out as CRLF
+/// on a Windows worktree: a digest of the raw bytes would name the checkout, not the lock, and two
+/// worktrees built under the same lock would print two shas.
 fn lock_sha(p: &Path) -> Result<Option<String>> {
-    if p.is_file() { sha256::file_hex(p).map(Some) } else { Ok(None) }
+    match std::fs::read(p) {
+        Ok(bytes) => Ok(Some(sha256::bytes_hex(String::from_utf8_lossy(&bytes).replace("\r\n", "\n").as_bytes()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Red::io(p, &e)),
+    }
 }
 
 /// `true` when two differing sets of bodies of one name stop differing once every content-named
