@@ -20,7 +20,7 @@
 //!   exactly that slot — the anti-vacuity that ties the scan to the counter the mint writes.
 //! * **Pinned slots** — occupied slots above the first gap: `register_layout` pins, which only
 //!   `boyko_physics` makes in production (its scratch band grows down from 511 to the private
-//!   `SCRATCH_REGION_MIN_ID` = 384, which this file STATES as [`RESERVED_FLOOR_STATED`] rather than
+//!   `SCRATCH_REGION_MIN_ID` = 352, which this file STATES as [`RESERVED_FLOOR_STATED`] rather than
 //!   reads). Both the lowest OCCUPIED pinned slot and the stated reserved floor are printed.
 //! * **`NEXT_RESOURCE_ID`** — the resource registry module is `pub(crate)`, so its slots cannot be
 //!   scanned; each reading point mints one [`ResourceProbe`] through the public
@@ -52,9 +52,10 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 use boyko_macros::Resource;
 
-/// `boyko_physics::scratch_ids::SCRATCH_REGION_MIN_ID` (`MAX_COMPONENTS - 128`), which is private
-/// there: STATED here, not read. Printed beside the measured lowest pinned slot.
-pub const RESERVED_FLOOR_STATED: usize = MAX_COMPONENTS - 128;
+/// `boyko_physics::scratch_ids::SCRATCH_REGION_MIN_ID` (`MAX_COMPONENTS - 160` since L10 C3b,
+/// `- 128` before it), which is private there: STATED here, not read. Printed beside the
+/// measured lowest pinned slot.
+pub const RESERVED_FLOOR_STATED: usize = MAX_COMPONENTS - 160;
 
 /// The one component-id probe [`id_cross_check`] mints.
 struct IdCensusProbe;

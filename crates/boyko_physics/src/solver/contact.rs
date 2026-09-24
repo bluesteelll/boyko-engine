@@ -51,8 +51,8 @@ pub(crate) fn is_dynamic_row(inv_mass: f32) -> bool {
 /// held row is immovable to the colouring AND to every write: a manifold naming it could
 /// differ in value, never race.
 ///
-/// `held` is `false` for every row until L10 C3b holds islands (C2a: plumbing under `Off`),
-/// so this returns `inv_mass` exactly and both sites are unchanged.
+/// `held` is the row's `HELD` flag of the step (`RowCls::is_held`), `false` on every step the
+/// sleep-skip did not classify, where this returns `inv_mass` exactly.
 #[inline]
 pub(crate) fn effective_inv_mass(inv_mass: f32, held: bool) -> f32 {
     if held { 0.0 } else { inv_mass }

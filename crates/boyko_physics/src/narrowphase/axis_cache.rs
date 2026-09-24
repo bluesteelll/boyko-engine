@@ -546,6 +546,15 @@ impl BoxAxisCache {
         KeyChange { prefetched, cleared, grown }
     }
 
+    /// Whether [`begin_frame`](Self::begin_frame) for `pairs` pairs would grow or clear the
+    /// table: its two conditions, read-only (L10's D3 test, made in the broadphase before the
+    /// frame; design 04 A2.1).
+    #[inline]
+    pub(crate) fn would_clear(&self, pairs: usize) -> bool {
+        let len = next_pow2(2 * pairs.max(1));
+        len > self.slots.len() || self.occupied > self.slots.len() / 2
+    }
+
     /// Whether this frame's key set changed — the table grew or cleared, or the rows moved or
     /// the carry was Reset — so an entry a pair does not `set` this frame is lost or stale under
     /// its current key. A contact-reuse hit writes its record's axis on such a frame, and only on
@@ -1098,6 +1107,38 @@ mod tests {
                  consecutive gathers without a miss drops the carried hint",
                 step.what
             );
+        }
+    }
+
+    proptest::proptest! {
+        // `failure_persistence: None`: no regression file is read or written, so the test runs
+        // under Miri's default isolation (the crate's convention, `broadphase_tree/tests.rs`).
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 128 },
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        /// L10 (design 04 A2.1, "Unit and property tests"): `would_clear(p)` is exactly the grow or
+        /// clear decision the next `begin_frame(p)` takes, over random frame sizes and insertions
+        /// (the D3 rule reads it in the broadphase, before the narrowphase's frame).
+        #[test]
+        fn would_clear_is_begin_frames_decision(
+            frames in proptest::collection::vec((0usize..300, 0usize..400), 1..12),
+        ) {
+            let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), 8);
+            let mut key = 0u32;
+            for (pairs, inserts) in frames {
+                let predicted = c.would_clear(pairs);
+                let (grown, cleared) = c.begin_frame_keyed(pairs);
+                proptest::prop_assert_eq!(predicted, grown || cleared, "would_clear({})", pairs);
+                // At most a quarter of the table per frame: `begin_frame` leaves it at most half
+                // full, so the probes always find a slot.
+                for _ in 0..inserts.min(pairs.max(1) / 2) {
+                    key += 1;
+                    c.set(BodyIndex(key), BodyIndex(key + 1), (key % 15) as usize);
+                }
+            }
         }
     }
 }

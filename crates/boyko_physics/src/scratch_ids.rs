@@ -46,12 +46,13 @@ use boyko_utils::bit_mask::bit_set_256::BitSet256;
 
 use crate::broadphase_tree::RowRec;
 use crate::broadphase_tree::bvh::{Item, Node8};
+use crate::held_store::{HeldIsland, KeptManifold, KeptPair, RestoreSort};
 use crate::manifold::{BodyIndex, Manifold};
 use crate::math::Vec3;
 use crate::narrowphase::axis_cache::AxisEntry;
 use crate::narrowphase::carry::PairTag;
 use crate::narrowphase::reuse::{ReuseRecord, RowFrame};
-use crate::resources::{BodyState, IslandScratch};
+use crate::resources::{BodyState, IslandInfo, IslandScratch};
 use crate::row_identity::{RowKey, SleepLatch};
 use crate::sleep_sets::RowCls;
 use crate::solver::contact::BodyEffective;
@@ -1016,10 +1017,264 @@ pub(crate) fn sleep_row_cls_id() -> ComponentId {
     ComponentId::new(SCRATCH_ID_SLEEP_ROW_CLS)
 }
 
+// ── L10 C3b's cohort: the held store, the sleep-skip's columns, the graph's island info ──
+//
+// Below `row_cls`, the region's floor at C2a, so the floor moves (design 04 "Scratch ids":
+// `MAX − 160`, after the census its docs require; see `SCRATCH_REGION_MIN_ID`).
+//
+// Four HOT columns, touched on every step the sleep-skip runs, each computed clear of what it is
+// swept beside:
+//
+// * `HeldStore::of_row` (row → record) and `SleepSets::cand` (per previous island: its admissible
+//   members) are read and written by the per-row classification (A1.3), which reads the gather
+//   snapshot, the baseline, `row_cls`, `prev_row`, the latch, the awake mask, the previous graph's
+//   `island_of` and island scratch and the jumper bitset at the same row;
+// * `SleepSets::inv` (previous row → current row) is built from `prev_row` and read beside the
+//   record row tables, `of_row` and the previous graph (A1.2, A2.4);
+// * `ConstraintGraph::island_info` (per island: root, members, held record, held length) is
+//   written by `flatten_islands` beside the graph cohort and read by the sleep step beside the
+//   latch and the island scratch.
+//
+// Then the COLD run, contiguous below them, touched only on steps whose held set changes (a
+// move-in, a restore, a compaction): consecutive ids have distinct stagger slots, which is what
+// the columns swept together there (the store's runs, `kept_rec`, the restore sources and the
+// sort buffer) need.
+
+/// Every run the per-row classification sweeps beside `of_row` and `cand`.
+const SLEEP_ROW_FAMILIES: [(usize, usize); 10] = [
+    (SCRATCH_ID_BODY_STATE, SCRATCH_ID_BODY_STATE),
+    (SCRATCH_ID_BODIES_PREV, SCRATCH_ID_BODIES_PREV),
+    (SCRATCH_ID_SLEEP_ROW_CLS, SCRATCH_ID_SLEEP_ROW_CLS),
+    (SCRATCH_ID_ROW_PREV, SCRATCH_ID_ROW_IDENTITY_BOTTOM),
+    (SCRATCH_ID_SLEEP_LATCH, SCRATCH_ID_SLEEP_LATCH),
+    (SCRATCH_ID_TOUCHED_AWAKE, SCRATCH_ID_TOUCHED_AWAKE),
+    (SCRATCH_ID_GRAPH_TOP, SCRATCH_ID_GRAPH_BOTTOM),
+    (SCRATCH_ID_SLEEP_ISLAND_SCRATCH, SCRATCH_ID_SLEEP_ISLAND_SCRATCH),
+    (SCRATCH_ID_NARROWPHASE_TOP, SCRATCH_ID_NARROWPHASE_BOTTOM),
+    (SCRATCH_ID_TREE_TOP, SCRATCH_ID_TREE_BOTTOM),
+];
+
+/// Synthetic id for `HeldStore::of_row` (L10 C3b, design 04 D5).
+pub(crate) const SCRATCH_ID_HELD_OF_ROW: usize =
+    highest_id_clear_of_all(SCRATCH_ID_SLEEP_ROW_CLS - 1, &SLEEP_ROW_FAMILIES);
+
+/// The per-row families plus `of_row`.
+const SLEEP_CAND_FAMILIES: [(usize, usize); 11] = [
+    SLEEP_ROW_FAMILIES[0],
+    SLEEP_ROW_FAMILIES[1],
+    SLEEP_ROW_FAMILIES[2],
+    SLEEP_ROW_FAMILIES[3],
+    SLEEP_ROW_FAMILIES[4],
+    SLEEP_ROW_FAMILIES[5],
+    SLEEP_ROW_FAMILIES[6],
+    SLEEP_ROW_FAMILIES[7],
+    SLEEP_ROW_FAMILIES[8],
+    SLEEP_ROW_FAMILIES[9],
+    (SCRATCH_ID_HELD_OF_ROW, SCRATCH_ID_HELD_OF_ROW),
+];
+
+/// Synthetic id for `SleepSets::cand` (L10 C3b, design 04 A1.3).
+pub(crate) const SCRATCH_ID_SLEEP_CAND: usize =
+    highest_id_clear_of_all(SCRATCH_ID_HELD_OF_ROW - 1, &SLEEP_CAND_FAMILIES);
+
+/// What `inv` is swept beside: `prev_row`, `of_row`, `cand`, the previous graph and the gather
+/// snapshot.
+const SLEEP_INV_FAMILIES: [(usize, usize); 5] = [
+    (SCRATCH_ID_ROW_PREV, SCRATCH_ID_ROW_IDENTITY_BOTTOM),
+    (SCRATCH_ID_HELD_OF_ROW, SCRATCH_ID_HELD_OF_ROW),
+    (SCRATCH_ID_SLEEP_CAND, SCRATCH_ID_SLEEP_CAND),
+    (SCRATCH_ID_GRAPH_TOP, SCRATCH_ID_GRAPH_BOTTOM),
+    (SCRATCH_ID_BODY_STATE, SCRATCH_ID_BODY_STATE),
+];
+
+/// Synthetic id for `SleepSets::inv` (L10 C3b, design 04 A1.2).
+pub(crate) const SCRATCH_ID_SLEEP_INV: usize =
+    highest_id_clear_of_all(SCRATCH_ID_SLEEP_CAND - 1, &SLEEP_INV_FAMILIES);
+
+/// What `island_info` is swept beside: the graph cohort, the latch and the island scratch.
+const ISLAND_INFO_FAMILIES: [(usize, usize); 3] = [
+    (SCRATCH_ID_GRAPH_TOP, SCRATCH_ID_GRAPH_BOTTOM),
+    (SCRATCH_ID_SLEEP_LATCH, SCRATCH_ID_SLEEP_LATCH),
+    (SCRATCH_ID_SLEEP_ISLAND_SCRATCH, SCRATCH_ID_SLEEP_ISLAND_SCRATCH),
+];
+
+/// Synthetic id for `ConstraintGraph::island_info` (L10 C3b, design 04 A5).
+pub(crate) const SCRATCH_ID_GRAPH_ISLAND_INFO: usize =
+    highest_id_clear_of_all(SCRATCH_ID_SLEEP_INV - 1, &ISLAND_INFO_FAMILIES);
+
+/// The cold run's column count.
+pub(crate) const SLEEP_COLD_COLUMN_COUNT: usize = 15;
+
+/// Top of the cold run: below the lowest hot id.
+const SCRATCH_ID_SLEEP_COLD_TOP: usize = min_id(
+    min_id(SCRATCH_ID_HELD_OF_ROW, SCRATCH_ID_SLEEP_CAND),
+    min_id(SCRATCH_ID_SLEEP_INV, SCRATCH_ID_GRAPH_ISLAND_INFO),
+) - 1;
+
+/// Bottom of the cold run (inclusive).
+pub(crate) const SCRATCH_ID_SLEEP_COLD_BOTTOM: usize =
+    SCRATCH_ID_SLEEP_COLD_TOP - (SLEEP_COLD_COLUMN_COUNT - 1);
+
+/// The smaller of two ids.
+const fn min_id(a: usize, b: usize) -> usize {
+    if a < b { a } else { b }
+}
+
+/// Cold column `k`: 0 `HeldStore::records`, 1 `rows`, 2 `kept`, 3 and 4 the two `order` sides,
+/// 5 `kept_pair`, 6 `kept_reuse`, 7 `SleepSets::kept_rec`, 8 and 9 `restore_rec`'s keys and
+/// records, 10–12 the restore pair source (keys, tags, reuse records), 13 `restore_sort`,
+/// 14 `scratch`.
+const fn sleep_cold_id(k: usize) -> usize {
+    SCRATCH_ID_SLEEP_COLD_TOP - k
+}
+
+const _: () = assert!(
+    SCRATCH_ID_HELD_OF_ROW != SCRATCH_ID_SLEEP_CAND
+        && SCRATCH_ID_SLEEP_CAND != SCRATCH_ID_SLEEP_INV
+        && SCRATCH_ID_SLEEP_INV != SCRATCH_ID_GRAPH_ISLAND_INFO
+        && SCRATCH_ID_HELD_OF_ROW < SCRATCH_ID_SLEEP_ROW_CLS
+        && SCRATCH_ID_SLEEP_CAND < SCRATCH_ID_HELD_OF_ROW
+        && SCRATCH_ID_SLEEP_INV < SCRATCH_ID_SLEEP_CAND
+        && SCRATCH_ID_GRAPH_ISLAND_INFO < SCRATCH_ID_SLEEP_INV,
+    "the L10 C3b hot ids descend below row_cls, each distinct"
+);
+
+const _: () = assert!(
+    !shares_stagger_slot_with_any(SCRATCH_ID_HELD_OF_ROW, &SLEEP_ROW_FAMILIES)
+        && !shares_stagger_slot_with_any(SCRATCH_ID_SLEEP_CAND, &SLEEP_CAND_FAMILIES)
+        && !shares_stagger_slot_with_any(SCRATCH_ID_SLEEP_INV, &SLEEP_INV_FAMILIES)
+        && !shares_stagger_slot_with_any(SCRATCH_ID_GRAPH_ISLAND_INFO, &ISLAND_INFO_FAMILIES),
+    "an L10 C3b hot column shares a stagger slot with a column it is swept beside"
+);
+
+const _: () = assert!(
+    SLEEP_COLD_COLUMN_COUNT <= POOL_STAGGER_LINES,
+    "the cold run's ids must have distinct stagger slots"
+);
+
+/// The [`ComponentId`] of `HeldStore::records`.
+#[inline]
+pub(crate) fn held_records_id() -> ComponentId {
+    ComponentId::new(sleep_cold_id(0))
+}
+
+/// The [`ComponentId`] of `HeldStore::rows`.
+#[inline]
+pub(crate) fn held_rows_id() -> ComponentId {
+    ComponentId::new(sleep_cold_id(1))
+}
+
+/// The [`ComponentId`] of `HeldStore::kept`.
+#[inline]
+pub(crate) fn held_kept_id() -> ComponentId {
+    ComponentId::new(sleep_cold_id(2))
+}
+
+/// The [`ComponentId`] of `HeldStore::order` side `side` (`0` or `1`).
+#[inline]
+pub(crate) fn held_order_id(side: usize) -> ComponentId {
+    debug_assert!(side < 2, "order has two sides");
+    ComponentId::new(sleep_cold_id(3 + side))
+}
+
+/// The [`ComponentId`] of `HeldStore::kept_pair`.
+#[inline]
+pub(crate) fn held_kept_pair_id() -> ComponentId {
+    ComponentId::new(sleep_cold_id(5))
+}
+
+/// The [`ComponentId`] of `HeldStore::kept_reuse`.
+#[inline]
+pub(crate) fn held_kept_reuse_id() -> ComponentId {
+    ComponentId::new(sleep_cold_id(6))
+}
+
+/// The [`ComponentId`] of `HeldStore::of_row`.
+#[inline]
+pub(crate) fn held_of_row_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_HELD_OF_ROW)
+}
+
+/// The [`ComponentId`] of `SleepSets::kept_rec`.
+#[inline]
+pub(crate) fn sleep_kept_rec_id() -> ComponentId {
+    ComponentId::new(sleep_cold_id(7))
+}
+
+/// The [`ComponentId`]s of `SleepSets::restore_rec`'s keys and records.
+#[inline]
+pub(crate) fn sleep_restore_rec_ids() -> (ComponentId, ComponentId) {
+    (ComponentId::new(sleep_cold_id(8)), ComponentId::new(sleep_cold_id(9)))
+}
+
+/// The [`ComponentId`]s of the restore pair source: keys, tags, reuse records.
+#[inline]
+pub(crate) fn sleep_restore_pair_ids() -> (ComponentId, ComponentId, ComponentId) {
+    (
+        ComponentId::new(sleep_cold_id(10)),
+        ComponentId::new(sleep_cold_id(11)),
+        ComponentId::new(sleep_cold_id(12)),
+    )
+}
+
+/// The [`ComponentId`] of `SleepSets::restore_sort`.
+#[inline]
+pub(crate) fn sleep_restore_sort_id() -> ComponentId {
+    ComponentId::new(sleep_cold_id(13))
+}
+
+/// The [`ComponentId`] of `SleepSets::scratch`.
+#[inline]
+pub(crate) fn sleep_scratch_id() -> ComponentId {
+    ComponentId::new(sleep_cold_id(14))
+}
+
+/// The [`ComponentId`] of `SleepSets::inv`.
+#[inline]
+pub(crate) fn sleep_inv_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_SLEEP_INV)
+}
+
+/// The [`ComponentId`] of `SleepSets::cand`.
+#[inline]
+pub(crate) fn sleep_cand_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_SLEEP_CAND)
+}
+
+/// The [`ComponentId`] of `ConstraintGraph::island_info`.
+#[inline]
+pub(crate) fn graph_island_info_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_GRAPH_ISLAND_INFO)
+}
+
 /// Registers the element layout of every [`SleepSets`](crate::sleep_sets::SleepSets) column,
-/// idempotently: the per-row `RowCls`.
+/// idempotently: the per-row `RowCls`, the index and candidate columns, the kept warm records,
+/// the restore sources, the sort buffer and the scratch.
 pub(crate) fn register_sleep_sets_layouts() {
     register_layout::<RowCls>(SCRATCH_ID_SLEEP_ROW_CLS);
+    register_layout::<u32>(SCRATCH_ID_SLEEP_INV);
+    register_layout::<u32>(SCRATCH_ID_SLEEP_CAND);
+    register_layout::<WarmRecord>(sleep_cold_id(7));
+    register_layout::<u64>(sleep_cold_id(8));
+    register_layout::<WarmRecord>(sleep_cold_id(9));
+    register_layout::<(BodyIndex, BodyIndex)>(sleep_cold_id(10));
+    register_layout::<PairTag>(sleep_cold_id(11));
+    register_layout::<ReuseRecord>(sleep_cold_id(12));
+    register_layout::<RestoreSort>(sleep_cold_id(13));
+    register_layout::<u64>(sleep_cold_id(14));
+}
+
+/// Registers the element layout of every [`HeldStore`](crate::held_store::HeldStore) column,
+/// idempotently.
+pub(crate) fn register_held_store_layouts() {
+    register_layout::<HeldIsland>(sleep_cold_id(0));
+    register_layout::<u32>(sleep_cold_id(1));
+    register_layout::<KeptManifold>(sleep_cold_id(2));
+    register_layout::<u32>(sleep_cold_id(3));
+    register_layout::<u32>(sleep_cold_id(4));
+    register_layout::<KeptPair>(sleep_cold_id(5));
+    register_layout::<ReuseRecord>(sleep_cold_id(6));
+    register_layout::<u32>(SCRATCH_ID_HELD_OF_ROW);
 }
 
 /// The lowest id the physics scratch region may occupy.
@@ -1031,29 +1286,35 @@ pub(crate) fn register_sleep_sets_layouts() {
 /// production type lands on a reserved slot. What the margin buys is that the
 /// panic stays unreachable in practice.
 ///
-/// # Why 128 ids, measured 2026-09-09
+/// # Why 160 ids, re-measured 2026-09-24 (L10 C3b)
 ///
-/// The previous value was 64, written when the region was 34 ids wide, and the
+/// L10 C3b's cohort needs 19 ids below `row_cls`, which sat on the old floor
+/// (`MAX − 128 = 384`), so the floor moves to `MAX − 160 = 352` as L10's design
+/// (`04-DESIGN-REV2.md`, "Scratch ids") prescribed, after re-running the census below.
+/// Counting `#[derive(..Component..)]` attributes under `src/` (a multi-line match)
+/// across the largest binary's dependency closure (`boyko_demo`: ecs 45 + ui 42 +
+/// render 23 + physics 17 + scene 14 + demo 8 + input 1) gives **150** — an
+/// OVER-count, because it includes `#[cfg(test)]` types no shipping process ever
+/// mints. The production side gets 352 ids against it: a 2.3x margin (2.7x at the
+/// 2026-09-09 reading, 142 against 384).
+///
+/// # The previous value, 128, measured 2026-09-09
+///
+/// The value before that was 64, written when the region was 34 ids wide, and the
 /// only number behind it was a guess in prose: "500+ distinct component types,
-/// far beyond any realistic world". Counting `#[derive(Component)]` sites under
-/// `src/` across the largest binary's dependency closure (`boyko_demo`: ecs 45 +
-/// ui 36 + render 21 + physics 17 + scene 14 + demo 8 + input 1) gives **142** —
-/// and that is an OVER-count, because it includes `#[cfg(test)]` types no
-/// shipping process ever mints.
-///
-/// Finishing Stage 4 needs roughly 90 scratch ids, which does not fit under 64.
-/// At 128 the scratch side keeps ~38 ids of headroom and the production side gets
-/// 384 against a measured ~142 — a 2.7x margin on the side that actually grows,
-/// and the census above is the thing to re-run before moving this number again.
-const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 128;
+/// far beyond any realistic world". The 2026-09-09 census counted **142** (ecs 45 +
+/// ui 36 + render 21 + physics 17 + scene 14 + demo 8 + input 1). Finishing Stage 4
+/// needed roughly 90 scratch ids, which did not fit under 64; the census above is the
+/// thing to re-run before moving this number again.
+const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 160;
 
-// `SleepSets::row_cls`, the lower of L10's two per-row columns below the island scratch, is the
-// region's lowest edge today (L10 C2a; it sits ON the floor, so the next id below it needs the
-// floor moved). The floor is asserted against the LOWEST id rather than against whichever
-// cohort happened to be last when this was written — add a cohort below and move this assert
-// with it.
+// The cold run's bottom is the region's lowest edge today (L10 C3b). The floor is asserted
+// against the LOWEST id rather than against whichever cohort happened to be last when this was
+// written — add a cohort below and move this assert with it.
 const _: () = assert!(
-    SCRATCH_ID_SLEEP_ROW_CLS >= SCRATCH_REGION_MIN_ID
+    SCRATCH_ID_SLEEP_COLD_BOTTOM >= SCRATCH_REGION_MIN_ID
+        && SCRATCH_ID_SLEEP_COLD_BOTTOM < SCRATCH_ID_GRAPH_ISLAND_INFO
+        && SCRATCH_ID_SLEEP_ROW_CLS > SCRATCH_ID_HELD_OF_ROW
         && SCRATCH_ID_SLEEP_ISLAND_SCRATCH < SCRATCH_ID_TREE_BOTTOM,
     "the physics scratch region has grown below SCRATCH_REGION_MIN_ID; production \
      ids climb from 0 and the reserved region is no longer comfortably out of \
@@ -1102,14 +1363,15 @@ pub(crate) fn contact_pairs_prev_id() -> ComponentId {
 
 /// Registers the element layout of every [`ConstraintGraph`] column, idempotently.
 ///
-/// Seven `u32` columns and one `u64` (`color_occ`'s bitset words). Same-type
-/// re-registration is a silent no-op, so calling this from the constructor costs
-/// one branch per id after the first.
+/// Seven `u32` columns and one `u64` (`color_occ`'s bitset words), and L10 C3b's per-island
+/// `IslandInfo` below the cohort. Same-type re-registration is a silent no-op, so calling this
+/// from the constructor costs one branch per id after the first.
 pub(crate) fn register_graph_column_layouts() {
     for k in 0..GRAPH_COLUMN_COUNT - 1 {
         register_layout::<u32>(graph_column_id(k).get());
     }
     register_layout::<u64>(graph_column_id(GRAPH_COLUMN_COUNT - 1).get());
+    register_layout::<IslandInfo>(SCRATCH_ID_GRAPH_ISLAND_INFO);
 }
 
 /// Registers the [`Layout`](std::alloc::Layout) of every scratch element type

@@ -58,7 +58,8 @@ use crate::soft::{
 use crate::solver::colored::ColoredSoftStepSolver;
 use crate::solver::{DefaultRigidSolver, RigidSolver};
 use crate::systems::{
-    physics_apply, physics_broadphase, physics_broadphase_colored, physics_build_graph,
+    physics_apply, physics_broadphase, physics_broadphase_colored,
+    physics_broadphase_colored_sdf, physics_build_graph,
     physics_gather, physics_integrate, physics_narrowphase, physics_narrowphase_colored,
     physics_narrowphase_sdf, physics_solve_colored, physics_solve_step,
 };
@@ -786,8 +787,11 @@ fn register_physics_pipeline<S: RigidSolver + Default>(
     let select = joined(builder.add_system(select_broadphase), set).after(gather).key();
     // L10 (design 04 D15): the colored pipeline — the one that inserts `IslandSleep` and
     // `SleepSets` — runs the colored broadphase and narrowphase, which carry the sleep-skip;
-    // every other pipeline keeps the reference stages.
-    let broadphase = if colored {
+    // every other pipeline keeps the reference stages. With the SDF stage the broadphase's sleep
+    // epoch also covers the field (design 04 D10).
+    let broadphase = if colored && with_sdf {
+        joined(builder.add_system(physics_broadphase_colored_sdf), set).after(select).key()
+    } else if colored {
         joined(builder.add_system(physics_broadphase_colored), set).after(select).key()
     } else {
         joined(builder.add_system(physics_broadphase), set).after(select).key()

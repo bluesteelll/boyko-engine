@@ -111,8 +111,9 @@ use crate::narrowphase::axis_cache::{AXIS_NONE, AxisHints, SAT_AXIS_COUNT};
 use crate::narrowphase::carry::{CarryIn, PairJoin, PairTag};
 use crate::narrowphase::reuse::{ReuseRecord, RowFrame, fill_row_frames};
 use crate::profiling::{PHYS_NP_AXIS_COMMIT, PHYS_NP_COMPACT, PHYS_NP_DISPATCH};
+use crate::components::ColliderShape;
 use crate::resources::{BodyState, Manifolds};
-use crate::sleep_sets::{Route, RowCls, np_route};
+use crate::sleep_sets::{NpCounts, NpSets, Route, RowCls, np_route, sensor_pair};
 use crate::systems::{PairOut, collide_pair};
 
 /// Chunks per pool lane: the solver's measured work-stealing oversubscription
@@ -204,14 +205,33 @@ pub(crate) struct NpChunkCtx<'a> {
     /// L10: one held-skip count per chunk (design 06 D-D D3), stored once by its chunk; empty
     /// on the `Off` arm, which skips nothing.
     skips: &'a [AtomicU32],
+    /// L10: the restore pair source's join (design 06 B4, ruling W2) — L9's join over the kept
+    /// pairs of the records restored this step, read-only; the carry's own join on the `Off`
+    /// arm, which routes no pair to it.
+    restore: PairJoin<'a>,
+    /// L10: one `(restored pairs << 32) | restore hits` word per chunk, stored once by its chunk;
+    /// empty on the `Off` arm.
+    restores: &'a [AtomicU64],
 }
 
 impl<'a> NpChunkCtx<'a> {
-    /// This context with L10's `Sets`-arm inputs: the step's per-row classification and one
-    /// held-skip count per chunk.
+    /// This context with L10's `Sets`-arm inputs: the step's per-row classification, one
+    /// held-skip count per chunk, the restore join and one restore count word per chunk.
     #[inline]
-    pub(crate) fn with_sleep(self, cls: &'a [RowCls], skips: &'a [AtomicU32]) -> Self {
-        Self { cls, skips, ..self }
+    pub(crate) fn with_sleep(
+        self,
+        cls: &'a [RowCls],
+        skips: &'a [AtomicU32],
+        restore: PairJoin<'a>,
+        restores: &'a [AtomicU64],
+    ) -> Self {
+        Self { cls, skips, restore, restores, ..self }
+    }
+
+    /// The step's pair carry join, which the restore join is built from.
+    #[inline]
+    pub(crate) fn join(&self) -> PairJoin<'a> {
+        self.join
     }
 }
 
@@ -223,7 +243,8 @@ impl<'a> NpChunkCtx<'a> {
 /// The columns' lengths only grow, and their fill runs only on growth, so a warm step writes
 /// only the frames here (and the jumper bitset when the rows moved). The views are taken after
 /// the growth: a view caches its column's length. `carry` is what `PairCarry::source` returned
-/// for this step; the caller has checked that the pairs fit the tag columns' reserve.
+/// for this step; the caller has checked that the pairs fit the tag columns' reserve. `cls` is
+/// L10's per-row classification on its `Sets` arm (the frame fill's D-F mask), empty otherwise.
 pub(crate) fn prepare<'a>(
     manifolds: &'a mut Manifolds,
     bodies: &'a [BodyState],
@@ -231,13 +252,14 @@ pub(crate) fn prepare<'a>(
     prefetched: bool,
     carry: CarryIn<'a>,
     meta: &'a [AtomicU64],
+    cls: &'a [RowCls],
 ) -> NpChunkCtx<'a> {
     let n = pairs.len();
     let Manifolds { np_stage, box_axis_cache, row_frames, pair_carry, .. } = manifolds;
     if np_stage.len() < n {
         grow_stage(np_stage, n);
     }
-    let frames = fill_row_frames(row_frames, bodies, n, carry.reuse().on);
+    let frames = fill_row_frames(row_frames, bodies, n, carry.reuse().on, cls);
     let (join, tag_column, record_column) = pair_carry.open(carry, n);
     let tag_column: &'a ScratchColumn<PairTag> = tag_column;
     let record_column: &'a ScratchColumn<ReuseRecord> = record_column;
@@ -267,6 +289,8 @@ pub(crate) fn prepare<'a>(
         meta,
         cls: &[],
         skips: &[],
+        restore: join,
+        restores: &[],
     }
 }
 
@@ -308,11 +332,15 @@ pub(crate) unsafe fn np_chunk<const SETS: bool>(
     );
     let prefetched = ctx.hints.prefetched();
     let reuse = ctx.join.reuse();
-    // L9 D9: this chunk's own join cursor; it finds its start by one binary search.
+    // L9 D9: this chunk's own join cursor; it finds its start by one binary search. L10's
+    // restore cursor (design 06 B4, ruling W2) is the same join over the restore source, with a
+    // cursor of its own that positions itself at the chunk's first restored key.
     let mut join = ctx.join.cursor();
+    let mut restore = ctx.restore.cursor();
     let mut wo = lo;
     let mut ws = hi;
     let mut held_skips = 0u32;
+    let (mut restored, mut restore_hits) = (0u32, 0u32);
     for k in lo..hi {
         let (a, b) = ctx.pairs[k];
         let ba = &ctx.bodies[a.0 as usize];
@@ -325,8 +353,13 @@ pub(crate) unsafe fn np_chunk<const SETS: bool>(
                 held_skips += 1;
                 (PairOut::held_skip(), AXIS_NONE)
             }
-            Route::Stream => {
+            route @ (Route::Stream | Route::Restore) => {
+                if SETS {
+                    debug_assert_computed(ctx.cls, ctx.frames.is_some(), a, b, ba, bb);
+                }
+                let from_restore = route == Route::Restore;
                 let mut hint = None;
+                let mut hit = false;
                 let out = collide_pair(
                     a,
                     b,
@@ -334,12 +367,22 @@ pub(crate) unsafe fn np_chunk<const SETS: bool>(
                     bb,
                     ctx.frames,
                     reuse,
-                    || join.prev(a, b),
+                    || {
+                        if from_restore {
+                            let prev = restore.prev(a, b);
+                            hit = prev.tag != PairTag::NONE;
+                            prev
+                        } else {
+                            join.prev(a, b)
+                        }
+                    },
                     || {
                         hint = ctx.hints.read(k, a, b);
                         hint
                     },
                 );
+                restored += u32::from(from_restore);
+                restore_hits += u32::from(hit);
                 // The skip rule (D3): without a pre-read, a pair whose hint already names the
                 // axis it chose would `set` the value its slot holds — an identity (Lemma 2).
                 let commit = match out.axis {
@@ -353,9 +396,6 @@ pub(crate) unsafe fn np_chunk<const SETS: bool>(
                     _ => AXIS_NONE,
                 };
                 (out, commit)
-            }
-            Route::Restore => {
-                unreachable!("invariant: no pair routes to the kept source before L10 C3b builds it")
             }
         };
         // SAFETY: `lo <= k < hi <= commit.len()` (the caller's contract and `prepare`'s
@@ -418,7 +458,37 @@ pub(crate) unsafe fn np_chunk<const SETS: bool>(
     if SETS {
         // Relaxed, as `meta`: the scope's join orders it before the caller's load.
         ctx.skips[chunk].store(held_skips, Ordering::Relaxed);
+        // Relaxed, as `meta`.
+        ctx.restores[chunk]
+            .store((u64::from(restored) << 32) | u64::from(restore_hits), Ordering::Relaxed);
+    } else {
+        debug_assert!(restored == 0, "invariant: the Off arm routes no pair to the kept source");
     }
+}
+
+/// The two debug checks of a computed pair on L10's `Sets` arm: D-F (design 08) — a box pair
+/// reading the step's frames reads two rows the fill wrote (`RowCls::fills`) — and the D-G tie of
+/// the `SENSOR` flag to the bodies' own sensor bit (O-3, through `sensor_pair`).
+#[inline]
+pub(crate) fn debug_assert_computed(
+    cls: &[RowCls],
+    frames: bool,
+    a: BodyIndex,
+    b: BodyIndex,
+    ba: &BodyState,
+    bb: &BodyState,
+) {
+    let (ca, cb) = (cls[a.0 as usize], cls[b.0 as usize]);
+    debug_assert!(
+        sensor_pair(ca.flags, 0) == ba.is_sensor && sensor_pair(0, cb.flags) == bb.is_sensor,
+        "invariant: the SENSOR flag is the body's sensor bit (design 08 D-G)"
+    );
+    let boxes = matches!(ba.shape, ColliderShape::Box { .. }) && matches!(bb.shape, ColliderShape::Box { .. });
+    debug_assert!(
+        !frames || !boxes || (ca.fills() && cb.fills()),
+        "invariant: a computed box pair reads frames the fill wrote (design 08 D-F): {ca:?} {cb:?}"
+    );
+    let _ = (ca, cb, boxes, frames);
 }
 
 /// Joins the chunks' runs into the two streams, in ascending chunk order: each solver run
@@ -470,48 +540,51 @@ pub(crate) fn try_parallel(
     prefetched: bool,
     carry: CarryIn<'_>,
 ) -> usize {
-    try_parallel_sets::<false>(manifolds, bodies, pairs, prefetched, carry, &[]).0
+    try_parallel_sets::<false>(manifolds, bodies, pairs, prefetched, carry, NpSets::OFF).0
 }
 
 /// The parallel narrowphase for one step. Returns the number of chunks it ran — `0` when it ran
 /// none: no pool, fewer than two lanes, fewer than two chunks, or more pairs than the stage can
-/// hold, and the caller must run the serial loop — and the number of pairs it skipped for a held
-/// endpoint (L10; always `0` on the `Off` arm).
+/// hold, and the caller must run the serial loop — and what L10's `Sets` arm counted (all zero
+/// on the `Off` arm).
 ///
 /// `pairs` is the stream, so the chunk count is the stream's (design 06 D-D D2). `prefetched`
 /// is what `BoxAxisCache::begin_frame_synced` returned for this frame; it must have run first.
-/// `carry` is what `PairCarry::source` returned for it (L9 D9). `SETS` is L10's arm, and `cls`
-/// the step's per-row classification, read on the `Sets` arm only.
+/// `carry` is what `PairCarry::source` returned for it (L9 D9). `SETS` is L10's arm, and `np`
+/// its inputs — the step's per-row classification and the restore pair source — read on the
+/// `Sets` arm only.
 pub(crate) fn try_parallel_sets<const SETS: bool>(
     manifolds: &mut Manifolds,
     bodies: &[BodyState],
     pairs: &[(BodyIndex, BodyIndex)],
     prefetched: bool,
     carry: CarryIn<'_>,
-    cls: &[RowCls],
-) -> (usize, u32) {
+    np: NpSets<'_>,
+) -> (usize, NpCounts) {
     let n = pairs.len();
     try_with_active_pool(|pool| {
         let chunks = chunk_count(n, pool.num_threads());
         if chunks == 0 {
-            return (0, 0);
+            return (0, NpCounts::default());
         }
         if n > manifolds.np_stage.capacity()
             || n > manifolds.box_axis_cache.commit_capacity()
             || n > manifolds.pair_carry.capacity()
         {
-            return (beyond_stage_ceiling(), 0);
+            return (beyond_stage_ceiling(), NpCounts::default());
         }
         debug_assert!(chunks <= NP_MAX_CHUNKS, "invariant: chunk_count clamps to NP_MAX_CHUNKS");
         let meta: [AtomicU64; NP_MAX_CHUNKS] = [const { AtomicU64::new(0) }; NP_MAX_CHUNKS];
-        // L10 (design 06 D-D D3): the `Sets` arm's per-chunk skip counts, a function-local array
-        // like `meta`, summed after the join. The `Off` arm skips nothing and keeps none.
+        // L10 (design 06 D-D D3): the `Sets` arm's per-chunk skip and restore counts,
+        // function-local arrays like `meta`, summed after the join. The `Off` arm keeps none.
         let skip_counts: [AtomicU32; NP_MAX_CHUNKS];
-        let skips: &[AtomicU32] = if SETS {
+        let restore_counts: [AtomicU64; NP_MAX_CHUNKS];
+        let (skips, restores): (&[AtomicU32], &[AtomicU64]) = if SETS {
             skip_counts = [const { AtomicU32::new(0) }; NP_MAX_CHUNKS];
-            &skip_counts[..chunks]
+            restore_counts = [const { AtomicU64::new(0) }; NP_MAX_CHUNKS];
+            (&skip_counts[..chunks], &restore_counts[..chunks])
         } else {
-            &[]
+            (&[], &[])
         };
         {
             let _zone = zone!(PHYS_NP_DISPATCH);
@@ -522,8 +595,10 @@ pub(crate) fn try_parallel_sets<const SETS: bool>(
             // chunks of a lane-bound W = 16 step. Capturing the 128-byte context by value
             // with the cuts would have been 168 bytes a cell: 24 a block, so W = 8 (48
             // chunks) took two blocks and W = 16 three. C4's census pins the block count.
-            let ctx = prepare(manifolds, bodies, pairs, prefetched, carry, &meta[..chunks])
-                .with_sleep(cls, skips);
+            let ctx = prepare(manifolds, bodies, pairs, prefetched, carry, &meta[..chunks], np.cls);
+            // L10 (ruling W2): the restore route is L9's join over the restore pair source.
+            let restore = ctx.join().restored(np.keys, np.tags, np.reuse);
+            let ctx = ctx.with_sleep(np.cls, skips, restore, restores);
             let ctx = &ctx;
             pool.scope(|scope| {
                 for chunk in 0..chunks {
@@ -542,7 +617,8 @@ pub(crate) fn try_parallel_sets<const SETS: bool>(
                         //   commit row, a tag row, a record row or a `meta` slot; nothing takes
                         //   a slice over the stage, the commit, the tags or the records until
                         //   `pool.scope` has joined every task. On the `Sets` arm `ctx.skips`
-                        //   holds one slot per chunk, and a chunk stores only its own.
+                        //   and `ctx.restores` hold one slot per chunk, and a chunk stores only
+                        //   its own; the restore join is shared read-only, like the carry's.
                         unsafe { np_chunk::<SETS>(*ctx, chunk, lo, hi) }
                     });
                 }
@@ -558,10 +634,18 @@ pub(crate) fn try_parallel_sets<const SETS: bool>(
         }
         manifolds.note_np_dispatch();
         // Relaxed: the scope's join orders every chunk's store before these loads.
-        let held_skips = skips.iter().map(|s| s.load(Ordering::Relaxed)).sum();
-        (chunks, held_skips)
+        let mut counts = NpCounts {
+            skips: skips.iter().map(|s| s.load(Ordering::Relaxed)).sum(),
+            ..NpCounts::default()
+        };
+        for word in restores {
+            let w = word.load(Ordering::Relaxed);
+            counts.restored += (w >> 32) as u32;
+            counts.restore_hits += w as u32;
+        }
+        (chunks, counts)
     })
-    .unwrap_or((0, 0))
+    .unwrap_or((0, NpCounts::default()))
 }
 
 /// The step has more candidate pairs than the staging column (7.06M rows natively), the
@@ -601,7 +685,7 @@ mod tests {
     use crate::row_identity::RowRemap;
     #[cfg(not(miri))]
     use crate::row_identity::NO_ROW;
-    use crate::systems::narrowphase_serial_with;
+    use crate::systems::{narrowphase_serial_sets, narrowphase_serial_with};
 
     /// D4 and ruling W1: the lanes term, the work term, the cap and the "two chunks or none"
     /// floor, on the P0 pyramid's pair count.
@@ -861,7 +945,7 @@ mod tests {
     ) {
         let chunks = cuts.len() - 1;
         let meta: Vec<AtomicU64> = (0..chunks).map(|_| AtomicU64::new(0)).collect();
-        let ctx = prepare(m, &scene.bodies, &scene.pairs, prefetched, carry, &meta);
+        let ctx = prepare(m, &scene.bodies, &scene.pairs, prefetched, carry, &meta, &[]);
         for &chunk in order {
             // SAFETY: `ctx` came from `prepare` for these pairs; `cuts` is ascending from 0 to
             //   n, so the chunks' ranges are disjoint, and they run one after another on this
@@ -1253,7 +1337,7 @@ mod tests {
             let chunks = 3;
             let meta: Vec<AtomicU64> = (0..chunks).map(|_| AtomicU64::new(0)).collect();
             let ctx =
-                prepare(&mut parallel, &scene.bodies, &scene.pairs, frame.prefetched, carry, &meta);
+                prepare(&mut parallel, &scene.bodies, &scene.pairs, frame.prefetched, carry, &meta, &[]);
             std::thread::scope(|s| {
                 for chunk in 0..chunks {
                     let (lo, hi) = chunk_bounds(chunk, chunks, n);
@@ -1285,5 +1369,294 @@ mod tests {
             second_frame_reuse_hits > 0,
             "construction: the second frame must hold a pair that reuses its record"
         );
+    }
+
+    // ── L10 C3b: the `Sets` arm (design 06 D-D, 08 D1′; ruling W2) ──────────────────────────
+
+    /// The `Sets` arm's inputs for a frame: a classification — `SENSOR` from the bodies, a
+    /// random quarter of the other rows `HELD`, another quarter `RESTORED`, and `SENSOR_NBR` on a
+    /// held row with a sensor pair (D-F) — and a restore source: a random subset of the previous
+    /// frame's slots, keyed by their previous rows, with the previous frame's tags and records.
+    struct SetsInput {
+        cls: Vec<RowCls>,
+        keys: Vec<(BodyIndex, BodyIndex)>,
+        tags: Vec<PairTag>,
+        reuse: Vec<ReuseRecord>,
+    }
+
+    impl SetsInput {
+        fn random(rng: &mut Rng, scene: &Scene, prev: &Manifolds, pairs_prev: &[(BodyIndex, BodyIndex)]) -> Self {
+            let mut cls: Vec<RowCls> = scene
+                .bodies
+                .iter()
+                .map(|b| {
+                    let flags = if b.is_sensor {
+                        RowCls::SENSOR
+                    } else {
+                        match rng.below(4) {
+                            0 => RowCls::HELD,
+                            1 => RowCls::RESTORED,
+                            _ => 0,
+                        }
+                    };
+                    RowCls { island: RowCls::NO_ISLAND, flags }
+                })
+                .collect();
+            for &(a, b) in &scene.pairs {
+                if sensor_pair(cls[a.0 as usize].flags, cls[b.0 as usize].flags) {
+                    for r in [a, b] {
+                        if cls[r.0 as usize].flags & RowCls::HELD != 0 {
+                            cls[r.0 as usize].flags |= RowCls::SENSOR_NBR;
+                        }
+                    }
+                }
+            }
+            let (tags_prev, records_prev) = (prev.pair_carry.tags(), prev.pair_carry.records());
+            let mut input = Self { cls, keys: Vec::new(), tags: Vec::new(), reuse: Vec::new() };
+            for (j, &key) in pairs_prev.iter().enumerate() {
+                if rng.below(2) == 0 {
+                    let tag = tags_prev[j];
+                    input.keys.push(key);
+                    input.tags.push(tag);
+                    input.reuse.push(if tag.has(PairTag::REC) { records_prev[j] } else { ReuseRecord::UNWRITTEN });
+                }
+            }
+            input
+        }
+
+        /// A fixed input: rows 0 and 1 `HELD`, rows 2 and 3 `RESTORED` (sensors keep only
+        /// `SENSOR`), `SENSOR_NBR` as the D-F rule sets it, and every previous slot restorable.
+        fn fixed(scene: &Scene, prev: &Manifolds, pairs_prev: &[(BodyIndex, BodyIndex)]) -> Self {
+            let mut cls: Vec<RowCls> = scene
+                .bodies
+                .iter()
+                .enumerate()
+                .map(|(r, b)| {
+                    let flags = match r {
+                        _ if b.is_sensor => RowCls::SENSOR,
+                        0 | 1 => RowCls::HELD,
+                        2 | 3 => RowCls::RESTORED,
+                        _ => 0,
+                    };
+                    RowCls { island: RowCls::NO_ISLAND, flags }
+                })
+                .collect();
+            for &(a, b) in &scene.pairs {
+                if sensor_pair(cls[a.0 as usize].flags, cls[b.0 as usize].flags) {
+                    for r in [a, b] {
+                        if cls[r.0 as usize].flags & RowCls::HELD != 0 {
+                            cls[r.0 as usize].flags |= RowCls::SENSOR_NBR;
+                        }
+                    }
+                }
+            }
+            let (tags_prev, records_prev) = (prev.pair_carry.tags(), prev.pair_carry.records());
+            let reuse = pairs_prev
+                .iter()
+                .enumerate()
+                .map(|(j, _)| if tags_prev[j].has(PairTag::REC) { records_prev[j] } else { ReuseRecord::UNWRITTEN })
+                .collect();
+            Self { cls, keys: pairs_prev.to_vec(), tags: tags_prev[..pairs_prev.len()].to_vec(), reuse }
+        }
+
+        fn np(&self) -> NpSets<'_> {
+            NpSets { cls: &self.cls, keys: &self.keys, tags: &self.tags, reuse: &self.reuse }
+        }
+    }
+
+    /// The `Sets` arm over an explicit partition, its chunks run on this thread in `order`.
+    /// Returns what the arm counted: `(skips, restored, restore hits)`.
+    #[cfg(not(miri))]
+    fn run_partition_sets(
+        m: &mut Manifolds,
+        scene: &Scene,
+        prefetched: bool,
+        carry: CarryIn<'_>,
+        input: &SetsInput,
+        cuts: &[usize],
+        order: &[usize],
+    ) -> (u32, u32, u32) {
+        let chunks = cuts.len() - 1;
+        let meta: Vec<AtomicU64> = (0..chunks).map(|_| AtomicU64::new(0)).collect();
+        let skips: Vec<AtomicU32> = (0..chunks).map(|_| AtomicU32::new(0)).collect();
+        let restores: Vec<AtomicU64> = (0..chunks).map(|_| AtomicU64::new(0)).collect();
+        let ctx = prepare(m, &scene.bodies, &scene.pairs, prefetched, carry, &meta, &input.cls);
+        let restore = ctx.join().restored(&input.keys, &input.tags, &input.reuse);
+        let ctx = ctx.with_sleep(&input.cls, &skips, restore, &restores);
+        for &chunk in order {
+            // SAFETY: `ctx` came from `prepare` for these pairs; `cuts` is ascending from 0 to
+            //   n, so the chunks' ranges are disjoint, and they run one after another on this
+            //   thread; each writes only its own `meta`, `skips` and `restores` slot, and no
+            //   slice over the stage, the commit, the tags or the records is taken until
+            //   `compact`.
+            unsafe { np_chunk::<true>(ctx, chunk, cuts[chunk], cuts[chunk + 1]) };
+        }
+        compact(m, chunks, |c| (cuts[c], cuts[c + 1]), &meta);
+        m.box_axis_cache.commit_axes(&scene.pairs);
+        let skipped = skips.iter().map(|s| s.load(Ordering::Relaxed)).sum();
+        let (mut restored, mut hits) = (0, 0);
+        for w in &restores {
+            let w = w.load(Ordering::Relaxed);
+            restored += (w >> 32) as u32;
+            hits += w as u32;
+        }
+        (skipped, restored, hits)
+    }
+
+    /// L10's partition gate (design 06 §7: G-C-2 extended to restored runs; N12, N14, W2-M,
+    /// N27): on the `Sets` arm, a random partition of a random frame's pairs into chunks, run in
+    /// a random order, then the compaction and the axis commit, equals the serial loop — the
+    /// streams, the table, the tags and the records — and counts the same skips, restored pairs
+    /// and restore hits. The frame's pairs join the previous frame's tags (Identity, Rows with
+    /// jumpers, or Reset), and its restored pairs join a random subset of the previous frame's
+    /// slots through the same join (ruling W2). Mutations that go red here: a held skip only on
+    /// the serial path (N12), the restore cursor started at the chunk's first index instead of
+    /// its lower bound (N14), a jumper pair merged on the restore cursor (W2-M), and a held
+    /// skip that leaves its commit unwritten (N27).
+    #[test]
+    #[cfg(not(miri))]
+    fn sets_chunks_equal_the_serial_loop_with_held_and_restored_rows() {
+        #[derive(Clone, Copy, Default, Debug)]
+        struct SetsCoverage {
+            skips: u64,
+            restored: u64,
+            restore_hits: u64,
+            /// Restore hits whose source slot lies below the chunk's first pair index.
+            hits_behind_chunk_start: u64,
+            /// Restore hits on a pair with a jumper endpoint (a Rows frame).
+            jumper_hits: u64,
+            multi_chunk: u64,
+        }
+        let totals = Cell::new(SetsCoverage::default());
+        let config = ProptestConfig { cases: 256, failure_persistence: None, ..ProptestConfig::default() };
+        proptest!(config, |(seed in any::<u64>())| {
+            let mut rng = Rng::new(seed);
+            let n_bodies = 4 + rng.below(12) as usize;
+            let first = Scene::random(&mut rng, n_bodies);
+            let second_kind = CarryKind::random(&mut rng, n_bodies, n_bodies);
+            let mut second = Scene::random(&mut rng, n_bodies);
+            if rng.below(2) == 0 {
+                second.bodies.clone_from(&first.bodies);
+                if let CarryKind::Rows { prev_row, .. } = &second_kind {
+                    for (r, &p) in prev_row.iter().enumerate() {
+                        if p != NO_ROW {
+                            second.bodies[r] = first.bodies[p as usize];
+                        }
+                    }
+                }
+            }
+            let reuse_on = rng.below(4) != 0;
+            let capacity = first.pairs.len().max(second.pairs.len());
+            let mut serial = Manifolds::with_capacity(capacity);
+            let mut parallel = Manifolds::with_capacity(capacity);
+            // Frame one: the Off arm on both, to leave tags and records behind.
+            let n = first.pairs.len();
+            let max_fill = begin_frames(&mut serial, &mut parallel, n);
+            let frame = Frame::random(&mut rng, &first, max_fill);
+            frame.apply(&mut serial);
+            frame.apply(&mut parallel);
+            let carry = CarryIn::NONE.with_reuse(reuse_step(reuse_on, &serial));
+            narrowphase_serial_with(&mut serial, &first.bodies, &first.pairs, frame.prefetched, carry);
+            let cuts = random_cuts(&mut rng, n);
+            let order = random_order(&mut rng, cuts.len() - 1);
+            run_partition(&mut parallel, &first, frame.prefetched, carry, &cuts, &order);
+            prop_assert_eq!(outcome(&parallel), outcome(&serial), "seed {:#x}: frame one", seed);
+            // Frame two: the Sets arm.
+            let input = SetsInput::random(&mut rng, &second, &serial, &first.pairs);
+            let n = second.pairs.len();
+            let max_fill = begin_frames(&mut serial, &mut parallel, n);
+            let frame = Frame::random(&mut rng, &second, max_fill);
+            frame.apply(&mut serial);
+            frame.apply(&mut parallel);
+            let carry = second_kind.carry(&first.pairs).with_reuse(reuse_step(reuse_on, &serial));
+            let counts = narrowphase_serial_sets::<true>(&mut serial, &second.bodies, &second.pairs, frame.prefetched, carry, input.np());
+            let cuts = random_cuts(&mut rng, n);
+            let order = random_order(&mut rng, cuts.len() - 1);
+            let got = run_partition_sets(&mut parallel, &second, frame.prefetched, carry, &input, &cuts, &order);
+            prop_assert_eq!(got, (counts.skips, counts.restored, counts.restore_hits), "seed {:#x}: counts", seed);
+            prop_assert_eq!(outcome(&parallel), outcome(&serial), "seed {:#x}, cuts {:?}, order {:?}", seed, cuts, order);
+            // Coverage, from the definition of the restore join (lemma L9-J over the source).
+            let mut cov = totals.get();
+            cov.skips += u64::from(counts.skips);
+            cov.restored += u64::from(counts.restored);
+            cov.restore_hits += u64::from(counts.restore_hits);
+            cov.multi_chunk += u64::from(cuts.windows(2).filter(|w| w[1] > w[0]).count() >= 2);
+            for c in 0..cuts.len() - 1 {
+                for k in cuts[c]..cuts[c + 1] {
+                    let (a, b) = second.pairs[k];
+                    if np_route::<true>(&input.cls, a, b) != Route::Restore {
+                        continue;
+                    }
+                    let Some((j, _)) = second_kind.expected_join(&input.keys, a, b) else { continue };
+                    cov.hits_behind_chunk_start += u64::from(cuts[c] > 0 && j < cuts[c]);
+                    cov.jumper_hits += u64::from(second_kind.is_jumper_pair(a, b));
+                }
+            }
+            totals.set(cov);
+        });
+        let cov = totals.get();
+        println!("L10 Sets partition coverage: {cov:?}");
+        assert!(cov.skips > 0, "no pair was skipped for a held endpoint: {cov:?}");
+        assert!(cov.restored > 0 && cov.restore_hits > 0, "no restored pair found its source: {cov:?}");
+        assert!(cov.hits_behind_chunk_start > 0, "no restore hit behind a chunk's first pair (the N14 witness): {cov:?}");
+        assert!(cov.jumper_hits > 0, "no restore hit on a jumper pair (the W2-M witness): {cov:?}");
+        assert!(cov.multi_chunk > 0, "no case ran two non-empty chunks: {cov:?}");
+    }
+
+    /// L10 C3b under Miri (Tree Borrows): the `Sets` arm's chunks — held skips writing the
+    /// held-skip tag and an `AXIS_NONE` commit, restored pairs joining the restore source —
+    /// run on three `std::thread::scope` threads equal the serial loop, on a second frame whose
+    /// pairs join the first frame's tags. The provenance check on the chunks' `Sets` writes.
+    #[test]
+    fn sets_chunks_on_threads_equal_the_serial_loop() {
+        let mut rng = Rng::new(0x10_C3B);
+        let scene = Scene::random(&mut rng, 9);
+        let n = scene.pairs.len();
+        let mut serial = Manifolds::with_capacity(n);
+        let mut parallel = Manifolds::with_capacity(n);
+        // Frame one: the serial loop on both.
+        for m in [&mut serial, &mut parallel] {
+            m.box_axis_cache.begin_frame(n);
+            let carry = CarryIn::NONE.with_reuse(ReuseStep::new(true, TAU, DT, m.box_axis_cache.keys_changed()));
+            narrowphase_serial_with(m, &scene.bodies, &scene.pairs, false, carry);
+        }
+        let input = SetsInput::fixed(&scene, &serial, &scene.pairs);
+        let max_fill = begin_frames(&mut serial, &mut parallel, n);
+        let frame = Frame::random(&mut rng, &scene, max_fill);
+        frame.apply(&mut serial);
+        frame.apply(&mut parallel);
+        let carry = CarryIn::new(RowRemap::Identity, &scene.pairs, &[]).with_reuse(reuse_step(true, &serial));
+        let counts = narrowphase_serial_sets::<true>(&mut serial, &scene.bodies, &scene.pairs, frame.prefetched, carry, input.np());
+
+        let chunks = 3;
+        let meta: Vec<AtomicU64> = (0..chunks).map(|_| AtomicU64::new(0)).collect();
+        let skips: Vec<AtomicU32> = (0..chunks).map(|_| AtomicU32::new(0)).collect();
+        let restores: Vec<AtomicU64> = (0..chunks).map(|_| AtomicU64::new(0)).collect();
+        let ctx = prepare(&mut parallel, &scene.bodies, &scene.pairs, frame.prefetched, carry, &meta, &input.cls);
+        let restore = ctx.join().restored(&input.keys, &input.tags, &input.reuse);
+        let ctx = ctx.with_sleep(&input.cls, &skips, restore, &restores);
+        std::thread::scope(|s| {
+            for chunk in 0..chunks {
+                let (lo, hi) = chunk_bounds(chunk, chunks, n);
+                s.spawn(move || {
+                    // SAFETY: `ctx` came from `prepare` for these pairs; the closed-form cuts
+                    //   partition `[0, n)`, so the three threads write disjoint rows and
+                    //   distinct `meta`, `skips` and `restores` slots; nothing reads the stage,
+                    //   the commit, the tags or the records until `std::thread::scope` has joined
+                    //   all three.
+                    unsafe { np_chunk::<true>(ctx, chunk, lo, hi) }
+                });
+            }
+        });
+        compact(&mut parallel, chunks, |c| chunk_bounds(c, chunks, n), &meta);
+        parallel.box_axis_cache.commit_axes(&scene.pairs);
+        let skipped: u32 = skips.iter().map(|s| s.load(Ordering::Relaxed)).sum();
+        let restored: u32 = restores.iter().map(|w| (w.load(Ordering::Relaxed) >> 32) as u32).sum();
+        assert_eq!((skipped, restored), (counts.skips, counts.restored), "the chunks count the serial loop's");
+        assert!(
+            counts.skips > 0 && counts.restored > 0 && counts.restore_hits > 0,
+            "construction: the frame skips pairs and restores pairs that find their source: {counts:?}"
+        );
+        assert_eq!(outcome(&parallel), outcome(&serial), "three threaded Sets chunks must reproduce the serial loop");
     }
 }

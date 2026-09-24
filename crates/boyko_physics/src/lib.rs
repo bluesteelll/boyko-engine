@@ -152,3 +152,8 @@ pub mod sleep_sets;
 // every engine crate writes. `declare_zone!` reads `crate::__BOYKO_ZONE_PARTITION` from the
 // DECLARING crate's root. Placed at the end of the file so no line the internal docs cite moves.
 boyko_diag::profiling_partition!(Engine);
+
+/// L10 C3b: the held store — a held island's row table, kept manifolds and kept pairs — owned by
+/// [`Manifolds`](resources::Manifolds). Internal; declared last so no line the internal docs cite
+/// moves.
+pub(crate) mod held_store;

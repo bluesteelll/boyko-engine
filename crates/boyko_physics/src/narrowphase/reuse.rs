@@ -76,6 +76,7 @@ use crate::narrowphase::box_box::{
 };
 use crate::narrowphase::carry::PairTag;
 use crate::resources::BodyState;
+use crate::sleep_sets::RowCls;
 
 /// The fraction of the smaller bounding radius, and of the thinnest half-extent, that bounds τ_eff
 /// (D4, ruling O1): 5 %, so the deepest-point bound `2·τ_eff` stays a tenth of the thinnest box's
@@ -125,11 +126,18 @@ impl RowFrame {
 ///
 /// Serial, on the calling thread, before any pair of the step is collided; the returned slice is
 /// read-only while the pairs run, on any thread.
+///
+/// `cls` is L10's per-row classification on its `Sets` arm (design 08 D-F), empty on the `Off`
+/// arm: when present, a box row's frame is written iff [`RowCls::fills`] — the row is not held,
+/// or it is a held row with a sensor pair — which is the predicate ANDed with the box mask. Every
+/// row a computed pair reads satisfies it (a computed pair with a held endpoint is a sensor pair,
+/// and that endpoint carries `SENSOR_NBR`), so a held row's stale slot is never read.
 pub(crate) fn fill_row_frames<'a>(
     frames: &'a mut ScratchColumn<RowFrame>,
     bodies: &[BodyState],
     n_pairs: usize,
     radius: bool,
+    cls: &[RowCls],
 ) -> Option<&'a [RowFrame]> {
     let rows = bodies.len();
     if n_pairs.saturating_mul(2) < rows || rows > frames.capacity() {
@@ -139,11 +147,23 @@ pub(crate) fn fill_row_frames<'a>(
         // The view publishes its length on drop, before the read slice below is taken.
         let mut view = frames.build_view();
         view.resize(rows, RowFrame::UNWRITTEN);
-        for (frame, body) in view.as_mut_slice().iter_mut().zip(bodies) {
+        let write = |frame: &mut RowFrame, body: &BodyState| {
             if let ColliderShape::Box { half_extents } = body.shape {
                 frame.axes = RowFrame::axes_of(body.rotation);
                 if radius {
                     frame.radius = half_extents.length();
+                }
+            }
+        };
+        if cls.is_empty() {
+            for (frame, body) in view.as_mut_slice().iter_mut().zip(bodies) {
+                write(frame, body);
+            }
+        } else {
+            debug_assert!(cls.len() >= rows, "invariant: the classification covers every row");
+            for ((frame, body), c) in view.as_mut_slice().iter_mut().zip(bodies).zip(cls) {
+                if c.fills() {
+                    write(frame, body);
                 }
             }
         }

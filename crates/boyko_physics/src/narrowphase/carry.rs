@@ -94,7 +94,7 @@ const UNSET: usize = usize::MAX;
 /// | 0–3 | the SAT axis the pair chose this step (`15` = none) |
 /// | 4 | `BOX`: both shapes are boxes |
 /// | 5 | `PUSHED`: the pair emitted a manifold (into either stream) |
-/// | 6, 7 | `SET`, `SETTLED`: reserved for L10 (never written here) |
+/// | 6, 7 | `SET`, `SETTLED`: L10's settle bits (design 08 B1′), written by [`PairTag::settled`] |
 /// | 8 | `REC`: the pair's reuse record at this slot was written this step (L9b) |
 /// | 9 | `SEP`: the pair is separated, on the axis in bits 12–15 |
 /// | 10 | `HIT`: the pair's output came from its record, not the SAT (L9b) |
@@ -107,8 +107,9 @@ const UNSET: usize = usize::MAX;
 /// closure of the narrowphase's per-step counters.
 ///
 /// One layout shared with L10 (ruling O7): L10 rev 2.2 adopts this `u16` in place of rev 2's
-/// `u8` (its Δ3), with its `SET` and `SETTLED` at bits 6 and 7. Every pair kind writes its tag
-/// every step (ruling O5), so no stale bit survives the double buffer.
+/// `u8` (its Δ3), with its `SET` and `SETTLED` at bits 6 and 7, which L10 C3b writes on every
+/// path (design 08 B1′). Every pair kind writes its tag every step (ruling O5), so no stale bit
+/// survives the double buffer.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PairTag(u16);
@@ -124,6 +125,13 @@ impl PairTag {
     pub(crate) const BOX: u16 = 1 << 4;
     /// Bit 5: the pair emitted a manifold.
     pub(crate) const PUSHED: u16 = 1 << 5;
+    /// Bit 6 (L10, design 08 B1′): the box pair made a contact this step — a full collision's
+    /// contact, or a record hit's.
+    pub(crate) const SET: u16 = 1 << 6;
+    /// Bit 7 (L10, design 08 B1′): the pair's output is settled — a record hit, or a full
+    /// contact on the axis its hint named (`hint == Some(chosen)`), so the next step's inputs
+    /// choose the same axis again.
+    pub(crate) const SETTLED: u16 = 1 << 7;
     /// Bit 8: the pair's reuse record at this slot was written this step.
     pub(crate) const REC: u16 = 1 << 8;
     /// Bit 9: the pair is separated on the axis in bits 12–15.
@@ -253,10 +261,48 @@ impl PairTag {
     /// `BOX` test a non-box pair, and [`rekeys`](Self::rekeys) must never see it.
     pub(crate) const HELD_SKIP: Self = Self(Self::HIT | Self::SEPHIT);
 
+    /// The tag with raw bits `bits` (L10's exhaustive gates over every `u16`).
+    #[cfg(test)]
+    pub(crate) const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
     /// Whether this is [`HELD_SKIP`](Self::HELD_SKIP): the whole tag, not a bit of it.
     #[inline]
     pub(crate) const fn is_held_skip(self) -> bool {
         self.0 == Self::HELD_SKIP.0
+    }
+
+    /// The bits a reader of a KEPT tag may consume (design 08 B1′): every bit but `HIT` and
+    /// `SEPHIT`. L9's join reads `REC`, `SEP` and the separating axis, L10's mirror reads
+    /// [`rekeys`](Self::rekeys) and the axis nibble, and the admission test decides a `REC` pair
+    /// by `HIT | SETTLED`, where a hit is always settled. So a pair captured on a settled miss and
+    /// the same pair's later hit under `Off` agree on every bit of this mask.
+    pub(crate) const HIT_INVARIANT: u16 = !(Self::HIT | Self::SEPHIT);
+
+    /// This tag with L10's settle bits (`SET`, `SETTLED`, design 08 B1′) written as the path that
+    /// produced it defines them, for a box pair whose full collision read the hysteresis hint
+    /// `hint` (`None` when it read none, or the hint named no axis):
+    ///
+    /// | path | settle bits |
+    /// |---|---|
+    /// | a record hit (`REC \| HIT` with an axis) | `SET \| SETTLED` |
+    /// | a full collision's contact (an axis, no hit) | `SET`, and `SETTLED` iff `hint` is the axis |
+    /// | separated, a carried-axis hit, no contact | neither |
+    ///
+    /// Every other bit is the path's own. A pure function of the tag and the hint, so both
+    /// narrowphase paths write the same bits.
+    #[inline]
+    pub(crate) fn settled(self, hint: Option<usize>) -> Self {
+        let bits = self.0 & !(Self::SET | Self::SETTLED);
+        match self.axis() {
+            Some(_) if self.has(Self::REC | Self::HIT) => Self(bits | Self::SET | Self::SETTLED),
+            Some(axis) => {
+                let settled = hint == Some(usize::from(axis));
+                Self(bits | Self::SET | if settled { Self::SETTLED } else { 0 })
+            }
+            None => Self(bits),
+        }
     }
 
     /// This tag as seen by the pair with bodies A and B exchanged (a join whose two rows swapped
@@ -390,6 +436,10 @@ pub(crate) struct PairJoin<'a> {
     records: &'a [ReuseRecord],
     /// This step's contact reuse and parity, as [`PairCarry::open`] settled them.
     reuse: ReuseStep,
+    /// Whether a record's parity is NOT the previous step's by construction: set on L10's
+    /// restore source ([`restored`](Self::restored)), whose records were copied from the stream
+    /// at a move-in any number of steps ago (design 06 B4's parity waiver).
+    waive_parity: bool,
 }
 
 impl<'a> PairJoin<'a> {
@@ -397,6 +447,37 @@ impl<'a> PairJoin<'a> {
     #[inline]
     pub(crate) fn reuse(&self) -> ReuseStep {
         self.reuse
+    }
+
+    /// The same join — this step's row map, jumper bitset and settled reuse — over L10's restore
+    /// source instead of the previous pair list (design 06 B4, ruling W2): `keys` are the kept
+    /// pairs of the records restored this step in the rows of the previous gather, `(min, max)`
+    /// and strictly increasing; `tags` and `records` are slot-parallel to them, a record valid
+    /// where its tag carries `REC`. The pairs L10 routes to the kept source find their previous
+    /// state through the very key function L9's join uses — the monotone cursor, the jumper
+    /// binary search and the order flip — so a restored pair reads what `Off`'s join reads.
+    ///
+    /// Its records' parity is waived: a kept record was written at its island's move-in, not in
+    /// the previous step.
+    #[inline]
+    pub(crate) fn restored(
+        self,
+        keys: &'a [(BodyIndex, BodyIndex)],
+        tags: &'a [PairTag],
+        records: &'a [ReuseRecord],
+    ) -> Self {
+        debug_assert!(
+            keys.windows(2).all(|w| w[0] < w[1]) && tags.len() >= keys.len(),
+            "invariant: the restore source is strictly sorted and tags every key"
+        );
+        let records = if self.reuse.on { records } else { &[] };
+        Self {
+            pairs_prev: if matches!(self.remap, RowRemap::Reset) { &[] } else { keys },
+            tag_prev: tags,
+            records,
+            waive_parity: true,
+            ..self
+        }
     }
 
     /// A cursor for one run of consecutive pairs (the serial loop's `[0, n)`, a chunk's
@@ -482,8 +563,11 @@ impl<'a> JoinCursor<'a> {
         let record = if self.join.reuse.on && stored.has(PairTag::REC) {
             let record = self.join.records.get(hit.j as usize);
             debug_assert!(
-                record.is_some_and(|r| r.parity() != self.join.reuse.parity),
-                "invariant: a REC tag's record was written at its slot in the previous step"
+                record.is_some_and(|r| {
+                    self.join.waive_parity || r.parity() != self.join.reuse.parity
+                }),
+                "invariant: a REC tag's record was written at its slot in the previous step \
+                 (or kept by L10's held store)"
             );
             record
         } else {
@@ -686,6 +770,7 @@ impl PairCarry {
             jumpers: carry.jumpers,
             records: if reuse.on { rec_prev.as_read_slice() } else { &[] },
             reuse,
+            waive_parity: false,
         };
         (join, tag, rec)
     }
@@ -733,6 +818,28 @@ impl PairCarry {
     #[inline]
     pub(crate) fn jumper_builds(&self) -> u64 {
         self.jumper_builds
+    }
+
+    /// How this step's narrowphase will classify the carry against `rows`, without counting a
+    /// Reset (L10 A1.1, design 06 B1: the broadphase prologue reads it before the narrowphase
+    /// runs).
+    #[inline]
+    pub(crate) fn peek<'a>(&self, rows: &'a RowIdentity) -> RowRemap<'a> {
+        self.cursor.peek(rows)
+    }
+
+    /// The tags and the records the last narrowphase wrote — one per slot of `pairs.pairs_prev()`,
+    /// a record valid where its tag carries `REC` — when they index that list: read in the
+    /// broadphase, after the rotation and before this step's narrowphase swaps the columns (L10
+    /// A2.4, design 06 B2). `None` when the stamp does not tie them to `pairs_prev` (the step the
+    /// narrowphase will run as a Reset).
+    #[inline]
+    pub(crate) fn written(&self, pairs: &ContactPairs) -> Option<(&[PairTag], &[ReuseRecord])> {
+        (self.seq != NO_SEQ
+            && pairs.seq_prev() == self.seq
+            && pairs.rotations() == self.list.wrapping_add(1)
+            && self.len == pairs.pairs_prev().len())
+        .then(|| (self.tags(), self.rec.as_read_slice()))
     }
 }
 

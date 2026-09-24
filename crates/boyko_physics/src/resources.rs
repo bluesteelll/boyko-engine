@@ -20,9 +20,11 @@ use crate::math::{Mat3, Quat, Vec3};
 use crate::narrowphase::axis_cache::BoxAxisCache;
 use crate::narrowphase::carry::{NO_SEQ, PairCarry, PairTag, build_jumpers};
 use crate::narrowphase::reuse::RowFrame;
+use crate::held_store::{HeldStore, HeldView};
 use crate::row_identity::{NO_ISLAND_KEY, NO_ROW, RemapCursor, RowIdentity, RowRemap, SleepLatch};
+use crate::solver::warm_records::ord;
 use crate::scratch_ids::{
-    bodies_prev_id, body_state_id, broadphase_column_id, graph_column_id,
+    bodies_prev_id, body_state_id, broadphase_column_id, graph_column_id, graph_island_info_id,
     register_broadphase_column_layouts,
     box_axis_cache_id, contact_pairs_id, contact_pairs_prev_id, jumper_bits_id, manifolds_id,
     np_stage_id, row_frames_id,
@@ -156,8 +158,10 @@ pub enum SleepSkip {
     /// skipped (the O8 path). The oracle.
     Off,
     /// A frozen, clean island is HELD: its pairs skip the narrowphase, the SDF stage, the
-    /// colouring and the solve, and its contacts are kept for the views (DEFAULT). Until L10
-    /// C3b builds the held store nothing is held, so this runs exactly as [`Off`](Self::Off).
+    /// colouring and the solve, and its contacts are kept for the views (DEFAULT). A held
+    /// island is restored — collided again from what it kept — the step its inputs change
+    /// (`sleep_sets.rs`), and a change of `contact_reuse`, `contact_reuse_distance`, `dt`, the
+    /// warm start, the SDF field or its kernel restores every held island.
     #[default]
     Sets,
 }
@@ -443,8 +447,9 @@ pub struct PhysicsConfig {
     /// path, where the broadphase records it for the step.
     ///
     /// Every value gives the same observables bit for bit ([`SleepSkip::Off`] is the oracle),
-    /// so it changes cost, never a result. Until L10 C3b builds the held store, `Sets` holds
-    /// nothing and runs exactly as `Off`.
+    /// so it changes cost, never a result: the per-slot narrowphase tags of held pairs, and the
+    /// warm store's and the hysteresis table's bytes, are what differ, never a lookup or a
+    /// view.
     pub sleep_skip: SleepSkip,
     /// Per-island SPEED² threshold below which an island is a sleep CANDIDATE (default
     /// [`DEFAULT_SLEEP_THRESHOLD`]); only meaningful when [`sleeping`](Self::sleeping)
@@ -2577,6 +2582,10 @@ pub struct Manifolds {
     /// only by the calling thread after the join. A structural witness, read through
     /// [`narrowphase_dispatches`](Self::narrowphase_dispatches).
     np_dispatches: u64,
+    /// L10's held store (C3b, `held_store.rs`): what a held island keeps — its row table, its
+    /// kept manifolds and pairs — so the logical views below still report it. Written by the
+    /// colored broadphase only; empty while sleeping is off.
+    pub(crate) held: HeldStore,
 }
 
 impl Default for Manifolds {
@@ -2614,6 +2623,7 @@ impl Manifolds {
             ),
             pair_carry: PairCarry::with_capacity(capacity),
             np_dispatches: 0,
+            held: HeldStore::with_capacity(0),
         }
     }
 
@@ -2664,6 +2674,29 @@ impl Manifolds {
             }
         }
         c
+    }
+
+    /// Diagnostic (L10's bit-identity gate, design 06 §7 and 08 §7): calls `f` with every
+    /// candidate pair the last narrowphase ran over — `pairs`' stream, in order — and the probe
+    /// of its tag. A pair the sleep-skip skipped carries the held-skip tag in its slot, and its
+    /// probe the copy the held store keeps of it, which is what the pair's state is claimed on;
+    /// a collided pair's probe is its own tag. O(pairs), plus two binary searches per skipped
+    /// pair.
+    pub fn for_each_pair_tag(&self, pairs: &ContactPairs, mut f: impl FnMut(PairTagProbe)) {
+        let held = self.held.view();
+        for (&(a, b), &tag) in pairs.pairs_stream().iter().zip(self.pair_carry.tags()) {
+            let kept = if tag.is_held_skip() { held.kept_tag_of(a.0, b.0) } else { Some(tag) };
+            f(PairTagProbe {
+                a: a.0,
+                b: b.0,
+                slot: tag.bits(),
+                held: tag.is_held_skip(),
+                invariant: kept.map(|t| t.bits() & PairTag::HIT_INVARIANT),
+                kept_class: kept.is_some_and(|t| {
+                    !t.is_held_skip() && t.bits() & (PairTag::REC | PairTag::SEP | PairTag::PUSHED) != 0
+                }),
+            });
+        }
     }
 
     /// Diagnostic: an FNV-1a 64 hash of the reuse records the last narrowphase wrote (L9b) —
@@ -2728,10 +2761,10 @@ impl Manifolds {
     /// solver's indices would read the wrong one. [`solver_manifolds`](Self::solver_manifolds)
     /// is the stream the graph and the solve index.
     ///
-    /// Nothing is kept before L10 C3b, so today the view is the stream element for element.
+    /// With no island held the view is the stream element for element.
     #[inline]
     pub fn manifolds(&self) -> ManifoldsView<'_> {
-        ManifoldsView::new(self.manifolds.as_read_slice())
+        ManifoldsView::new(self.manifolds.as_read_slice(), self.held.view())
     }
 
     /// The contiguous read slice over this step's STREAM solver manifolds, in the deterministic
@@ -2751,18 +2784,28 @@ impl Manifolds {
         if handle < HELD_BASE {
             self.solver_manifolds().get(handle as usize).copied()
         } else {
-            // No manifold is kept before L10 C3b.
-            None
+            let held = self.held.view();
+            held.slot_of_handle(handle).map(|slot| held.manifold(slot))
         }
     }
 
     /// The position handle `handle` holds in [`manifolds`](Self::manifolds), the order the
     /// sleep-skip off would emit (L10 design 04 D6), or `None` for a handle that names nothing.
-    /// With nothing kept, a stream index is its own position.
+    /// O(log n): a stream manifold's position is its index plus the kept manifolds ranked below
+    /// it, a kept one's its rank in the kept order plus the stream manifolds ranked below it.
     #[inline]
     pub fn position_of(&self, handle: u32) -> Option<usize> {
-        let i = handle as usize;
-        (handle < HELD_BASE && i < self.solver_manifolds().len()).then_some(i)
+        let stream = self.solver_manifolds();
+        let held = self.held.view();
+        if handle < HELD_BASE {
+            let m = stream.get(handle as usize)?;
+            Some(handle as usize + held.rank_below(ord(m.body_a.0, m.body_b.0)))
+        } else {
+            let slot = held.slot_of_handle(handle)?;
+            let key = held.ordinal(slot);
+            let below = stream.partition_point(|m| ord(m.body_a.0, m.body_b.0) < key);
+            Some(held.rank_below(key) + below)
+        }
     }
 
     /// The contiguous read slice over this step's sensor / trigger overlaps.
@@ -2792,7 +2835,7 @@ pub struct PairClasses {
     /// Candidate pairs the narrowphase tagged.
     pub pairs: u64,
     /// Pairs L10's sleep-skip did not collide because an endpoint is held (their tag is the
-    /// held-skip tag, classed before any other test). `0` until L10 C3b holds islands.
+    /// held-skip tag, classed before any other test).
     pub held_skipped: u64,
     /// Sphere-sphere and sphere-box pairs.
     pub non_box: u64,
@@ -2807,6 +2850,28 @@ pub struct PairClasses {
     pub full_contacts: u64,
     /// Of `full_contacts`, the slow pairs that built a reuse record from it (L9b misses).
     pub records_built: u64,
+}
+
+/// One candidate pair's narrowphase tag as L10's bit-identity gate compares it
+/// ([`Manifolds::for_each_pair_tag`]; design 06 §7, 08 §7): a collided pair's slot tag is
+/// claimed bit for bit; a held pair's slot holds the held-skip tag, and its state is claimed on
+/// the kept copy without the bits no reader of a kept tag consumes (`HIT` and `SEPHIT`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PairTagProbe {
+    /// The pair's lower row.
+    pub a: u32,
+    /// The pair's higher row.
+    pub b: u32,
+    /// The slot's tag bits.
+    pub slot: u16,
+    /// Whether the narrowphase skipped the pair for a held endpoint.
+    pub held: bool,
+    /// The tag's claimed bits — every bit but `HIT` and `SEPHIT` — of the slot's tag, or of the
+    /// held store's copy for a held pair; `None` for a held pair the store keeps no copy of.
+    pub invariant: Option<u16>,
+    /// Whether that tag carries state a held island keeps: a reuse record, a separating axis or
+    /// a manifold (design 06 B2).
+    pub kept_class: bool,
 }
 
 /// Bit width of one `color_occ` word (a `u64` per-color body bitset cell).
@@ -2952,8 +3017,39 @@ pub struct ConstraintGraph {
     /// (see [`max_island_constraints`](Self::max_island_constraints)). Folded into
     /// [`flatten_islands`](Self::flatten_islands) at zero extra pass (the per-island
     /// counts already exist as the CSR deltas).
+    ///
+    /// With L10 holding islands it is the maximum over [`island_len`](Self::island_len), the
+    /// logical count (design 04 A5).
     max_island_constraints: u32,
+    /// Per island of the last build (L10 C3b, design 04 A5): its union-find root, its member
+    /// count, and — for a held island — its kept manifolds' first slot and count, which
+    /// [`island_len`](Self::island_len) and [`island`](Self::island) add to the stream's. The
+    /// next step's broadphase reads it for its move-in candidates.
+    island_info: ScratchColumn<IslandInfo>,
 }
+
+/// One island of a [`ConstraintGraph`] build (L10 C3b, design 04 A5), 16 B.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct IslandInfo {
+    /// The island's union-find root (a member row).
+    pub(crate) root: u32,
+    /// Its member rows.
+    pub(crate) members: u32,
+    /// The first kept manifold slot of the held record the island is, or
+    /// [`NO_HELD`](Self::NO_HELD) (design 04's `held` names the record; the slot is what
+    /// [`ConstraintGraph::island`]'s handles need, and the record is `kept[slot].record`).
+    pub(crate) held_start: u32,
+    /// The held record's kept manifolds (`0` for an island that is not held).
+    pub(crate) held_len: u32,
+}
+
+impl IslandInfo {
+    /// An island that is not held.
+    pub(crate) const NO_HELD: u32 = u32::MAX;
+}
+
+const _: () = assert!(size_of::<IslandInfo>() == 16, "IslandInfo is 16 B (design 04 A5)");
 
 impl Default for ConstraintGraph {
     /// An empty graph at the kernel's standard column budget.
@@ -2999,6 +3095,10 @@ impl ConstraintGraph {
             n_colors: 0,
             n_islands: 0,
             max_island_constraints: 0,
+            island_info: ScratchColumn::new(
+                graph_island_info_id(),
+                scratch_reserve_rows(size_of::<IslandInfo>()),
+            ),
         }
     }
 
@@ -3055,18 +3155,27 @@ impl ConstraintGraph {
     /// [`Manifolds::position_of`] maps it to its position in [`Manifolds::manifolds`]. Empty for
     /// `island >= n_islands`.
     ///
-    /// Nothing is kept before L10 C3b, so today every handle is a stream index, in ascending
-    /// order.
+    /// The stream handles come first, ascending, then a held island's kept handles, ascending by
+    /// slot; as a set they are the island's manifolds under the sleep-skip off, and through
+    /// [`Manifolds::position_of`] they are `Off`'s index list.
     #[inline]
     pub fn island(&self, island: u32) -> IslandManifolds<'_> {
         let i = island as usize;
         let starts = self.island_manifold_start.as_read_slice();
         if i + 1 >= starts.len() {
-            return IslandManifolds::new(&[]);
+            return IslandManifolds::new(&[], 0, 0);
         }
         let start = starts[i] as usize;
         let end = starts[i + 1] as usize;
-        IslandManifolds::new(&self.island_manifolds.as_read_slice()[start..end])
+        let (held_start, held_len) = match self.island_info.as_read_slice().get(i) {
+            Some(info) if info.held_start != IslandInfo::NO_HELD => (info.held_start, info.held_len),
+            _ => (0, 0),
+        };
+        IslandManifolds::new(
+            &self.island_manifolds.as_read_slice()[start..end],
+            held_start,
+            held_len,
+        )
     }
 
     /// The number of manifolds of island `island` (L10 design 04 D7): its stream manifolds plus
@@ -3079,7 +3188,14 @@ impl ConstraintGraph {
         if i + 1 >= starts.len() {
             return 0;
         }
-        starts[i + 1] - starts[i]
+        let held = self.island_info.as_read_slice().get(i).map_or(0, |info| info.held_len);
+        starts[i + 1] - starts[i] + held
+    }
+
+    /// The per-island info of the last build (L10 C3b): root, members, held run.
+    #[inline]
+    pub(crate) fn island_info(&self) -> &[IslandInfo] {
+        self.island_info.as_read_slice()
     }
 
     /// Compacted island id of dynamic body `row`, or [`NO_ISLAND`](Self::NO_ISLAND)
@@ -3133,10 +3249,109 @@ impl ConstraintGraph {
         n_dynamic: usize,
         is_dynamic: impl Fn(u32) -> bool,
     ) {
+        self.build_with_held(manifolds, n_dynamic, &is_dynamic, &is_dynamic, HeldView::EMPTY, false);
+    }
+
+    /// [`build`](Self::build) with L10's held islands (design 04 A5, D7, D8): the partition of
+    /// the stream `manifolds`, plus one island per held record, each with the id, the members and
+    /// the manifold count the sleep-skip off gives it.
+    ///
+    /// * `is_member(row)` is the membership predicate the island ids are assigned over — the
+    ///   dynamic rows, held ones included;
+    /// * `movable(row)` is the predicate the unions, the filing and the colouring use — the
+    ///   dynamic rows that are not held (`is_dynamic_row(effective_inv_mass(..))`, the solve's
+    ///   write guard's own value, ruling W1);
+    /// * `held` is the store: every live record's members are pre-rooted under the record's
+    ///   root before any union — no stream manifold names a held row, so no union touches them —
+    ///   and the flatten assigns ids in ascending root order over the members, so a held island's
+    ///   id is `Off`'s (its root is `Off`'s: a monotone renaming of an unchanged union sequence).
+    ///   [`island_len`](Self::island_len) adds the record's kept manifolds, and
+    ///   [`max_island_constraints`](Self::max_island_constraints) is the maximum of that;
+    /// * `with_info` records every island's root and member count for the next step's move-in
+    ///   candidates (a step the sleep-skip runs); off, the info is left empty.
+    pub(crate) fn build_with_held(
+        &mut self,
+        manifolds: &[Manifold],
+        n_dynamic: usize,
+        is_member: &impl Fn(u32) -> bool,
+        movable: &impl Fn(u32) -> bool,
+        held: HeldView<'_>,
+        with_info: bool,
+    ) {
         self.reset_islands(n_dynamic);
-        self.build_islands(manifolds, &is_dynamic);
-        self.flatten_islands(manifolds, n_dynamic, &is_dynamic);
-        self.color_manifolds(manifolds, n_dynamic, &is_dynamic);
+        self.pre_root(n_dynamic, held);
+        self.build_islands(manifolds, movable);
+        self.flatten_islands(manifolds, n_dynamic, is_member, movable, held, with_info);
+        self.color_manifolds(manifolds, n_dynamic, movable);
+    }
+
+    /// L10 (design 04 A5): every island's root (the row that claimed its id), member count and —
+    /// for a held record's island — its kept run, when `with_info`; otherwise the info is empty.
+    fn fill_island_info(
+        &mut self,
+        n_dynamic: usize,
+        is_member: &impl Fn(u32) -> bool,
+        held: HeldView<'_>,
+        with_info: bool,
+    ) {
+        let mut info_view = self.island_info.build_view();
+        info_view.clear();
+        if !with_info {
+            return;
+        }
+        info_view.resize(
+            self.n_islands as usize,
+            IslandInfo { root: Self::NO_ISLAND, members: 0, held_start: IslandInfo::NO_HELD, held_len: 0 },
+        );
+        let info = info_view.as_mut_slice();
+        let island_of = self.island_of.as_read_slice();
+        let parent = self.uf_parent.as_read_slice();
+        for row in 0..n_dynamic as u32 {
+            if !is_member(row) {
+                continue;
+            }
+            let i = &mut info[island_of[row as usize] as usize];
+            i.members += 1;
+            if parent[row as usize] == row {
+                i.root = row;
+            }
+        }
+        for rec in held.records() {
+            if !rec.live() {
+                continue;
+            }
+            let i = &mut info[island_of[rec.root as usize] as usize];
+            debug_assert!(
+                i.root == rec.root && i.members == rec.n_members,
+                "invariant: a held record is one island of the build, rooted where Off roots it"
+            );
+            i.held_start = rec.kept_start;
+            i.held_len = rec.kept_len;
+        }
+    }
+
+    /// Pre-roots every live held record's members under its root (design 04 D7).
+    #[inline]
+    fn pre_root(&mut self, n_dynamic: usize, held: HeldView<'_>) {
+        if held.is_empty() {
+            return;
+        }
+        let mut parent = self.uf_parent.build_view();
+        let mut size = self.uf_size.build_view();
+        let parent = parent.as_mut_slice();
+        let size = size.as_mut_slice();
+        for rec in held.records() {
+            if !rec.live() {
+                continue;
+            }
+            let root = rec.root as usize;
+            debug_assert!(root < n_dynamic, "invariant: a held root is a current row");
+            for &m in held.rows(rec.members_range()) {
+                debug_assert!((m as usize) < n_dynamic, "invariant: a held member is a current row");
+                parent[m as usize] = rec.root;
+            }
+            size[root] = rec.n_members;
+        }
     }
 
     /// Resets the union-find forest to `n_dynamic` singleton sets and clears
@@ -3222,18 +3437,27 @@ impl ConstraintGraph {
     /// manifold with at least one dynamic body is filed under that body's island;
     /// a manifold with NO dynamic body (both static — degenerate) is filed under no
     /// island (skipped).
+    ///
+    /// L10 (design 04 A5): ids are assigned over `is_member` (held rows included), manifolds are
+    /// filed over `is_dynamic` (the movable rows: no stream manifold names a held row), and
+    /// `island_info` records every island's root, member count and held run when `with_info`
+    /// (a step the sleep-skip runs); otherwise it is left empty, and `island_len` reads the CSR
+    /// alone.
     fn flatten_islands(
         &mut self,
         manifolds: &[Manifold],
         n_dynamic: usize,
+        is_member: &impl Fn(u32) -> bool,
         is_dynamic: &impl Fn(u32) -> bool,
+        held: HeldView<'_>,
+        with_info: bool,
     ) {
         // Assign dense island ids to roots in ascending root order (deterministic).
         // `island_of` doubles as the root→dense-id map: a root maps itself, a child
         // is resolved through its compacted root.
         let mut next_id = 0u32;
         for row in 0..n_dynamic as u32 {
-            if !is_dynamic(row) {
+            if !is_member(row) {
                 continue;
             }
             let root = self.uf_find(row);
@@ -3245,7 +3469,7 @@ impl ConstraintGraph {
         }
         // Resolve every dynamic child to its root's dense id.
         for row in 0..n_dynamic as u32 {
-            if !is_dynamic(row) {
+            if !is_member(row) {
                 continue;
             }
             let root = self.uf_find(row);
@@ -3254,6 +3478,7 @@ impl ConstraintGraph {
             island_of[row as usize] = island_of[root as usize];
         }
         self.n_islands = next_id;
+        self.fill_island_info(n_dynamic, is_member, held, with_info);
 
         // CSR group manifolds by island via a counting sort (deterministic, stable
         // by manifold index). counts → exclusive prefix sum → scatter.
@@ -3294,10 +3519,13 @@ impl ConstraintGraph {
         // free. `0` for an island-less partition (the loop body never runs).
         let mut max_island = 0u32;
         let total = {
+            let info = self.island_info.as_read_slice();
             let mut starts_view = self.island_manifold_start.build_view();
             let starts = starts_view.as_mut_slice();
             for i in 0..n_islands {
-                max_island = max_island.max(starts[i + 1]);
+                // L10: the logical count adds a held island's kept manifolds (design 04 A5).
+                let held = info.get(i).map_or(0, |x| x.held_len);
+                max_island = max_island.max(starts[i + 1] + held);
                 starts[i + 1] += starts[i];
             }
             starts[n_islands] as usize
@@ -3630,6 +3858,11 @@ pub struct IslandSleep {
     contact_wakes: u64,
     /// The latch's place in the gather sequence (defect A, interim; U6 deletes it).
     cursor: RemapCursor,
+    /// The awake mask's place in the gather sequence (L10 C3b, design 04 D9): stamped by the solve
+    /// right after every [`begin_step`](Self::begin_step) ([`stamp_mask`](Self::stamp_mask)), so
+    /// the next broadphase knows the mask it reads (its resting test R2) was built on the
+    /// previous gather — a solve that took the no-dynamic-body early return leaves it stale.
+    mask_cursor: RemapCursor,
 }
 
 /// One island's per-step sleep scratch (L10 C0, design D14): the frozen decision and the
@@ -3690,7 +3923,41 @@ impl IslandSleep {
             latch_prev: ScratchColumn::new(sleep_latch_prev_id(), latch_reserve),
             contact_wakes: 0,
             cursor: RemapCursor::default(),
+            mask_cursor: RemapCursor::default(),
         }
+    }
+
+    /// Records that the awake mask was just built on `rows`' gather (L10 C3b): called by the
+    /// solve right after [`begin_step`](Self::begin_step).
+    #[inline]
+    pub(crate) fn stamp_mask(&mut self, rows: &RowIdentity) {
+        self.mask_cursor.stamp(rows);
+    }
+
+    /// How the next reader classifies the awake mask against `rows` (L10 A1.1): `Identity` or
+    /// `Rows` when it was built on the previous gather, else `Reset`.
+    #[inline]
+    pub(crate) fn mask_peek<'a>(&self, rows: &'a RowIdentity) -> RowRemap<'a> {
+        self.mask_cursor.peek(rows)
+    }
+
+    /// How the next reader classifies the latch against `rows` (L10 A1.1).
+    #[inline]
+    pub(crate) fn latch_peek<'a>(&self, rows: &'a RowIdentity) -> RowRemap<'a> {
+        self.cursor.peek(rows)
+    }
+
+    /// The per-row latch, in the rows its cursor was last stamped with (L10 A1.3 reads a
+    /// previous row's latch in the broadphase, before the solve re-keys it).
+    #[inline]
+    pub(crate) fn latches(&self) -> &[SleepLatch] {
+        self.latch.as_read_slice()
+    }
+
+    /// Whether a global wake is pending (L10 D6 flushes every held island on it).
+    #[inline]
+    pub(crate) fn wake_all_pending(&self) -> bool {
+        self.wake_all
     }
 
     /// Diagnostic: rows unlatched by wake-on-contact-change (see `begin_step`) since
@@ -3699,6 +3966,21 @@ impl IslandSleep {
     #[inline]
     pub fn contact_wakes(&self) -> u64 {
         self.contact_wakes
+    }
+
+    /// Diagnostic (L10's bit-identity gate, design 04 "What is compared"): an FNV-1a 64 hash
+    /// of every row's sleep latch — whether it is latched asleep, its debounce count and its
+    /// island contact key — in row order. O(rows).
+    pub fn latch_fingerprint(&self) -> u64 {
+        let fnv = |h: u64, w: u32| {
+            w.to_le_bytes()
+                .iter()
+                .fold(h, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3))
+        };
+        self.latch.as_read_slice().iter().fold(0xcbf2_9ce4_8422_2325, |h, l| {
+            let h = fnv(h, u32::from(l.asleep) | (u32::from(l.below_count) << 8));
+            fnv(h, l.island_key)
+        })
     }
 
     /// Requests that EVERY row wake on the next solve (the explicit-wake /
@@ -3998,6 +4280,8 @@ impl IslandSleep {
         // bound-checks the row on every call, once per row of the sweep below
         // (MEASUREMENT-QUEUE.md §8 R2).
         let ids = graph.island_ids();
+        // L10: the per-island held runs (empty unless the sleep-skip holds islands).
+        let held_info = graph.island_info();
         debug_assert!(
             n_islands == 0 || starts.len() == n_islands + 1,
             "invariant: the island CSR holds n_islands + 1 offsets"
@@ -4021,7 +4305,9 @@ impl IslandSleep {
             // `i + 1` first: its bound check implies the one on `i`.
             let hi = starts[i + 1];
             let lo = starts[i];
-            let key = hi - lo;
+            // L10 (design 04 D7, 06 B6): the logical count, a held island's kept manifolds
+            // included (`ConstraintGraph::island_len`), so the key is `Off`'s.
+            let key = hi - lo + held_info.get(i).map_or(0, |info| info.held_len);
             debug_assert!(
                 key != NO_ISLAND_KEY,
                 "invariant: a live island contact key is below the sentinel"
@@ -4533,7 +4819,6 @@ impl SolverScratch {
     /// The resting baseline — the previous step's post-solve snapshot, by previous row — when
     /// the current gather kept one ([`keep_baseline`](Self::keep_baseline)), else `None`.
     #[inline]
-    #[expect(dead_code, reason = "L10 C3b's broadphase prologue (A1.3, the R3 test) is the first reader")]
     pub(crate) fn baseline(&self) -> Option<&[BodyState]> {
         (self.baseline_seq == self.rows.gather_seq()).then(|| self.bodies_prev.as_read_slice())
     }

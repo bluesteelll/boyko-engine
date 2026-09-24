@@ -1598,6 +1598,8 @@ fn run(args: &Args) -> ExitCode {
     // L10 C3a: armed steps whose recomputed structure is the no-awake fast path.
     let mut fast_steps_derived = 0u64;
     let mut first_frozen_step: Option<usize> = None;
+    // L10 C3b: the held set's witness (untimed): steps with a held row, and the most rows held.
+    let (mut held_steps, mut held_rows_max) = (0u64, 0u32);
     // L9: the pair classes, per step. Read on every row whose EFFECTIVE config has reuse on, since
     // the void probe after the run reads them there whether or not the row named the flag, and on
     // every row that names `--contact-reuse` (the summary's `pair_classes`). A reuse-off row that
@@ -1646,6 +1648,11 @@ fn run(args: &Args) -> ExitCode {
             });
         }
         rows.push(StepRow { wall_ns: wall.as_nanos() as u64, manifolds, pairs, top_y, awake });
+        if let Some(sets) = rig.world.try_resource::<SleepSets>() {
+            let held = sets.stats().held_rows;
+            held_steps += u64::from(held > 0);
+            held_rows_max = held_rows_max.max(held);
+        }
         if read_classes {
             classes.push(rig.world.resource::<Manifolds>().pair_classes());
         }
@@ -1891,6 +1898,15 @@ fn run(args: &Args) -> ExitCode {
         println!(
             "no-awake fast path (L10 C3a): {engine} steps{}",
             if armed { format!(", {fast_steps_derived} derived from the structure") } else { String::new() }
+        );
+    }
+    if let Some(sets) = rig.world.try_resource::<SleepSets>() {
+        println!(
+            "sleep-skip (L10 C3b): mode {:?}, {held_steps} steps with a held row, at most \
+             {held_rows_max} rows held, last step {:?}, rules {:?}",
+            sets.step_mode(),
+            sets.stats(),
+            sets.rule_counts()
         );
     }
     if let Some(why) = &first_void {

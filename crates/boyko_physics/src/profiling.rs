@@ -88,7 +88,7 @@
 //! | [`PHYS_NP_REUSED`] | box pairs whose output came from their contact-reuse record (L9b) |
 //! | [`PHYS_NP_SEP_HITS`] | box pairs their carried separating axis rejected, the SAT not run (L9a) |
 //! | [`PHYS_NP_FULL`] | box pairs whose full collision ran (neither of the two above) |
-//! | [`PHYS_SLEEP_HELD`] | rows L10's sleep-skip holds after the broadphase (`0` until L10 C3b) |
+//! | [`PHYS_SLEEP_HELD`] | rows L10's sleep-skip holds after the broadphase |
 //!
 //! The three narrowphase class counters are computed after the pair loop from the pairs' tags,
 //! and close: `PHYS_NP_FULL + PHYS_NP_REUSED + PHYS_NP_SEP_HITS` plus the non-box pairs and the

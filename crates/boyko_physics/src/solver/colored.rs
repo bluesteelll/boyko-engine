@@ -100,7 +100,7 @@ use super::simd;
 // no value/layout change to `soft_step.rs`).
 use super::soft_step::{IMMOVABLE_AT_REST, MAX_BIAS_VELOCITY, RESTITUTION_THRESHOLD, SoftCoefficients};
 use super::warm_records::{
-    self, WarmIndex, WarmLookup, WarmRecord, WarmRecords, WarmRun, point_fid,
+    self, WarmIndex, WarmLookup, WarmRecord, WarmRecords, WarmRun, ord, point_fid,
 };
 use super::RigidSolver;
 use crate::manifold::{Manifold, SDF_SENTINEL};
@@ -112,13 +112,14 @@ use crate::profiling::{
     PHYS_WRITE_BACK, counter,
 };
 use crate::resources::{
-    BodyState, ConstraintGraph, IslandSleep, PhysicsConfig, SolverScratch,
+    BodyState, ConstraintGraph, IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
 };
 use crate::row_identity::{RemapCursor, RowIdentity, RowRemap, WarmSeedStats};
 use crate::scratch_ids::{
     body_eff_colored_id, colored_frozen_rows_id, contact_column_id, register_scratch_layouts,
     scratch_reserve_rows, warm_table_id,
 };
+use crate::sleep_sets::{HeldSolve, RowCls, SleepSets};
 
 /// Loads one SoA `[f32; 8]` column into a `__m256` (the O7 cohort kernel's scalar
 /// vector load helper). Unaligned — any alignment.
@@ -566,13 +567,17 @@ impl RankBlock {
 pub(crate) struct ManifoldTag {
     /// Live points, `0..=MAX_CONTACT_POINTS`.
     count: u8,
-    /// [`Self::FROZEN`] or zero.
+    /// [`Self::FROZEN`] and [`Self::SRC_RESTORE`], or zero.
     flags: u8,
 }
 
 impl ManifoldTag {
     /// The manifold's island is frozen this step: not solved, its record carried.
     const FROZEN: u8 = 1;
+    /// L10 (design 08 A3′, the plan's E1): the manifold's warm run names positions of the
+    /// restore source — the kept records of the islands restored this step — not of the read
+    /// side. Set by P-a's search; the P-c seed and the D3 carry pick their source by it.
+    const SRC_RESTORE: u8 = 1 << 1;
 
     /// Whether the manifold is frozen this step.
     #[inline]
@@ -580,10 +585,44 @@ impl ManifoldTag {
         self.flags & Self::FROZEN != 0
     }
 
+    /// Whether the manifold's warm run lies in L10's restore source.
+    #[inline]
+    fn src_restore(self) -> bool {
+        self.flags & Self::SRC_RESTORE != 0
+    }
+
     /// Whether the manifold was laid out into a cohort and solved.
     #[inline]
     fn solved(self) -> bool {
         !self.frozen() && self.count != 0
+    }
+}
+
+/// A step's warm sources as the P-c seed and the D3 carry read them: every manifold's run
+/// (`plan`), and the lookup its tag names — the read side, or L10's restore source for a
+/// manifold P-a marked [`SRC_RESTORE`](ManifoldTag::SRC_RESTORE) (design 08 A3′, the plan's
+/// E1). One branch per manifold, none per point.
+#[derive(Clone, Copy)]
+struct WarmSources<'a> {
+    /// The read side's lookup.
+    lookup: WarmLookup<'a>,
+    /// The restore source's lookup, on a step that has one.
+    restore: Option<WarmLookup<'a>>,
+    /// Every manifold's run.
+    plan: &'a [WarmRun],
+    /// Every manifold's tag.
+    tags: &'a [ManifoldTag],
+}
+
+impl<'a> WarmSources<'a> {
+    /// Manifold `mi`'s lookup and run.
+    #[inline]
+    fn of(self, mi: usize) -> (WarmLookup<'a>, WarmRun) {
+        let lookup = match self.restore {
+            Some(restore) if self.tags[mi].src_restore() => restore,
+            _ => self.lookup,
+        };
+        (lookup, self.plan[mi])
     }
 }
 
@@ -1580,6 +1619,129 @@ impl ColoredSoftStepSolver {
         self.fast_path_steps
     }
 
+    /// Diagnostic (L10's bit-identity gate, design 04 "What is compared", 06 §7): calls
+    /// `f(key, fid, seed)` for every point of every logical manifold of `manifolds` — the
+    /// stream's, whose records the last store wrote, and the held store's, whose records
+    /// `sets` keeps — with the seed the next step's lookup of that manifold finds for the
+    /// point's feature id: the last stored point with that id (Lemma W), `None` on a miss and
+    /// with warm start off. `key` is the manifold's ordinal in the rows of the last step. Stream
+    /// manifolds first, in stream order, then the kept ones by ordinal. O(points · log
+    /// manifolds) on a strict store.
+    pub fn for_each_warm_seed(
+        &self,
+        manifolds: &Manifolds,
+        sets: &SleepSets,
+        mut f: impl FnMut(u64, u16, Option<[f32; 3]>),
+    ) {
+        let read = &self.warm[usize::from(self.warm_cur)];
+        let (keys, recs) = (read.keys(), read.recs());
+        let lookup = |key: u64, fid: u16| -> Option<[f32; 3]> {
+            if !self.warm_start_enabled {
+                return None;
+            }
+            if read.strict() {
+                let i = keys.partition_point(|&k| k < key);
+                (keys.get(i) == Some(&key)).then(|| recs[i].seed_of(fid)).flatten()
+            } else {
+                (0..keys.len()).rev().filter(|&i| keys[i] == key).find_map(|i| recs[i].seed_of(fid))
+            }
+        };
+        for m in manifolds.solver_manifolds() {
+            let key = ord(m.body_a.0, m.body_b.0);
+            for p in 0..usize::from(m.count) {
+                let fid = point_fid(m, p);
+                f(key, fid, lookup(key, fid));
+            }
+        }
+        let held = manifolds.held.view();
+        let kept_rec = sets.kept_records();
+        for &slot in held.order() {
+            let m = held.manifold(slot);
+            let key = ord(m.body_a.0, m.body_b.0);
+            for p in 0..usize::from(m.count) {
+                let fid = point_fid(&m, p);
+                let seed = if self.warm_start_enabled {
+                    kept_rec.get(slot as usize).and_then(|r| r.seed_of(fid))
+                } else {
+                    None
+                };
+                f(key, fid, seed);
+            }
+        }
+    }
+
+    /// Whether warm-starting is active: L10's sleep epoch reads it in the broadphase (design
+    /// 04 D5), since a toggle changes what a held island's records would be under `Off`.
+    #[inline]
+    pub(crate) fn warm_start_enabled(&self) -> bool {
+        self.warm_start_enabled
+    }
+
+    /// L10's D-H drain (ruling on rev 2.3, open question 2): the warm records of the islands a
+    /// flush restored on a step whose mode is `Off` join the read side before the solve, which
+    /// searches the read side alone on that path, so every lookup of the step finds what
+    /// `Off`'s store holds. Merged into the idle write side, which then becomes the read side;
+    /// the warm cursor's stamp is unchanged, since the drained keys are in the rows the read
+    /// side is keyed in. Called by the colored broadphase, never by the solve. A disabled
+    /// solver reads no record, and takes none.
+    pub(crate) fn drain_restore(&mut self, restore: &WarmRecords) {
+        if !self.warm_start_enabled || restore.keys().is_empty() {
+            return;
+        }
+        let (read, write) = Self::warm_sides(&mut self.warm, self.warm_cur);
+        write.merge_of(read, restore);
+        self.warm_cur ^= 1;
+    }
+
+    /// L10 A1′ (design 06 A1, 08 A1′): every kept manifold the broadphase moved in this step
+    /// takes the record `Off`'s store writes for it at this step — its points carried from the
+    /// read side through the run of its previous-step pair, by the D2 search and the D3 carry a
+    /// frozen stream manifold takes — and its hits join the held total. Runs before the swap,
+    /// while the read side still holds the previous step's records, on the full path and the
+    /// fast path alike (O10). With warm start off or a Reset, every run misses: an empty record
+    /// with no hit, as `Off`'s carry would drop every point. `remap` is how the warm store's
+    /// cursor classifies this gather (the build's classification, not yet stamped).
+    fn capture_moved_in(&self, remap: RowRemap<'_>, held: &mut HeldSolve<'_>) {
+        let range = held.capture.clone();
+        if range.is_empty() {
+            return;
+        }
+        let mut kept_rec = held.kept_rec.build_view();
+        let recs = kept_rec.as_mut_slice();
+        if !self.warm_start_enabled {
+            recs[range].fill(WarmRecord::EMPTY);
+            return;
+        }
+        let read = &self.warm[usize::from(self.warm_cur)];
+        let lookup = WarmLookup { read, index: &self.warm_index };
+        let mut cursor = 0usize;
+        for (i, slot) in range.enumerate() {
+            let m = held.held.manifold(slot as u32);
+            let run = match remap.manifold_pair(&m) {
+                Some((la, lb)) if read.strict() => read.find(&mut cursor, ord(la, lb)).run,
+                Some((la, lb)) => self.warm_index.run(ord(la, lb)),
+                None => WarmRun::MISS,
+            };
+            // Design 08 OQ3: the run is the previous-stream index the move-in copied the
+            // manifold from (debug builds hand the list over; a strict side's run is the index).
+            if let Some(&entry) = held.sources.get(i) {
+                debug_assert_eq!(entry >> 32, slot as u64, "invariant: the list is in capture order");
+                debug_assert!(
+                    run == WarmRun::MISS || !read.strict() || u64::from(run.lo) == entry & 0xFFFF_FFFF,
+                    "invariant: a moved-in manifold's run is the stream index it was copied from"
+                );
+            }
+            let (rec, hits) = lookup.carry(run, &m, usize::from(m.count));
+            debug_assert_eq!(
+                u32::from(rec.count()),
+                hits,
+                "invariant: the carry compacts its hits, so a record's count is its hit count"
+            );
+            recs[slot] = rec;
+            *held.held_warm += hits;
+        }
+    }
+
     /// The G1 anti-vacuity counters, cumulative since construction (L11 C0).
     #[cfg(test)]
     #[inline]
@@ -1597,10 +1759,21 @@ impl ColoredSoftStepSolver {
 
     /// Rebuilds the per-body solver views from the gather snapshot (mirrors the
     /// reference `build_bodies`).
-    fn build_bodies(&mut self, bodies: &[BodyState]) {
+    ///
+    /// `cls` is L10's classification of the step (empty when the sleep-skip did not classify
+    /// it): a row it marks `HELD` gets the effective inverse mass `0` (design 04 D8, ruling
+    /// W1), read from the same function over the same flag as the graph's colouring predicate,
+    /// so the write guards, gravity, the integrate, the refresh and the write-back leave a held
+    /// row as the colouring does.
+    fn build_bodies(&mut self, bodies: &[BodyState], cls: &[RowCls]) {
+        debug_assert!(
+            cls.is_empty() || cls.len() >= bodies.len(),
+            "invariant: a classification covers every row"
+        );
         let mut view = self.bodies.build_view();
         view.clear();
-        for b in bodies {
+        for (row, b) in bodies.iter().enumerate() {
+            let held = cls.get(row).is_some_and(|c| c.is_held());
             // The `*_movable` guard's ANGULAR no-op (`ω + inv_inertia·(r×p) == ω`
             // for a guarded static row) keys only on `inv_mass == 0`, so it relies
             // on a static row ALSO carrying `inv_inertia == Mat3::ZERO`. Production
@@ -1613,10 +1786,9 @@ impl ColoredSoftStepSolver {
                 "static row (inv_mass == 0) must have inv_inertia == Mat3::ZERO for the *_movable angular no-op"
             );
             // L10 D8 (ruling W1): the graph's colouring predicate reads the same function
-            // over the same flag, so the write guards and the colouring cannot disagree. No row
-            // is held before C3b.
+            // over the same flag, so the write guards and the colouring cannot disagree.
             view.push(BodyEffective {
-                inv_mass: effective_inv_mass(b.inv_mass, false),
+                inv_mass: effective_inv_mass(b.inv_mass, held),
                 inv_inertia: b.inv_inertia,
                 linear_velocity: b.linear_velocity,
                 angular_velocity: b.angular_velocity,
@@ -1642,6 +1814,9 @@ impl ColoredSoftStepSolver {
     /// seeded accumulated impulses (zero on a miss / when disabled).
     ///
     /// No per-step heap allocation: all scratch is capacity-reused.
+    ///
+    /// `restore` is L10's restore warm source for the step (design 06 A3), searched after a
+    /// miss of the read side. Returns its searches and hits.
     fn build_columns(
         &mut self,
         manifolds: &[Manifold],
@@ -1649,7 +1824,8 @@ impl ColoredSoftStepSolver {
         bodies: &[BodyState],
         sleep: Option<&IslandSleep>,
         remap: RowRemap<'_>,
-    ) {
+        restore: Option<&WarmRecords>,
+    ) -> (u32, u32) {
         if let RowRemap::Rows(prev_row) = remap {
             debug_assert_eq!(
                 prev_row.len(),
@@ -1684,17 +1860,6 @@ impl ColoredSoftStepSolver {
         if *warm_start_enabled {
             write.resize(n);
         }
-        let plan_counts = warm_records::plan_sources(
-            manifolds,
-            remap,
-            *warm_start_enabled,
-            read,
-            write,
-            warm_index,
-            cols.plan.build_view().as_mut_slice(),
-        );
-        counters.plan(plan_counts);
-        let lookup = WarmLookup { read, index: warm_index };
 
         // P-a, the tags: the live point count and the freeze decision, made here once
         // per manifold. A manifold whose island is FROZEN this step is not laid out —
@@ -1702,7 +1867,8 @@ impl ColoredSoftStepSolver {
         // (gather stays full; only the solve is elided); the store carries its record
         // instead (B1). `sleep == None` (sleeping off) takes the byte-identical O6/O7
         // path. The island is the manifold's dynamic side (the same resolution the
-        // graph build uses).
+        // graph build uses). The tags are written before the source search below, which
+        // adds L10's `SRC_RESTORE` to the manifolds whose run it finds in `restore`.
         //
         // Warm-seed diagnostic (defect A): the carried count is taken only on a step
         // whose rows changed; the unchanged step does no per-manifold work for it.
@@ -1731,6 +1897,28 @@ impl ColoredSoftStepSolver {
                 }
             }
         }
+        // P-a, the sources: this step's ordinals to the write side, every manifold's warm run
+        // to `plan` — from the read side, or (L10, design 06 A3) from the restore source
+        // when the read side misses, which marks the tag `SRC_RESTORE`.
+        let plan_counts = {
+            let mut tags = cols.tags.build_view();
+            let tags = tags.as_mut_slice();
+            warm_records::plan_sources_restored(
+                manifolds,
+                remap,
+                *warm_start_enabled,
+                read,
+                write,
+                warm_index,
+                cols.plan.build_view().as_mut_slice(),
+                restore,
+                |mi| tags[mi].flags |= ManifoldTag::SRC_RESTORE,
+            )
+        };
+        counters.plan(plan_counts);
+        let index: &WarmIndex = warm_index;
+        let lookup = WarmLookup { read, index };
+        let restore_lookup = restore.map(|read| WarmLookup { read, index });
 
         // P-b (D4): the layout, in color order.
         let seeded = cols.layout(graph);
@@ -1745,7 +1933,12 @@ impl ColoredSoftStepSolver {
         let mut point_hits = 0u32;
         // The build views commit their lengths on drop, so the fill's borrows end here.
         {
-            let plan = cols.plan.as_read_slice();
+            let sources = WarmSources {
+                lookup,
+                restore: restore_lookup,
+                plan: cols.plan.as_read_slice(),
+                tags: cols.tags.as_read_slice(),
+            };
             let mut recs_view = write.recs_mut();
             let mut recs_w = if *warm_start_enabled { Some(recs_view.as_mut_slice()) } else { None };
             let mut heads = cols.heads.build_view();
@@ -1765,8 +1958,7 @@ impl ColoredSoftStepSolver {
                     manifolds,
                     bodies,
                     bodies_eff,
-                    lookup,
-                    plan,
+                    sources,
                     recs_w.as_deref_mut(),
                     counters,
                 );
@@ -1802,6 +1994,7 @@ impl ColoredSoftStepSolver {
             *cols.color_cohort_start().last().unwrap_or(&0),
             "invariant: the per-color cohort CSR must tile every cohort exactly once"
         );
+        (plan_counts.restore_searches, plan_counts.restore_hits)
     }
 
     /// The read side and the write side of the warm store: `warm[cur]` is read this
@@ -1827,8 +2020,10 @@ impl ColoredSoftStepSolver {
     /// lane and every rank past a lane's width is written as zero.
     ///
     /// `blocks` / `vn0` are the cohort's own `depth` rows. `recs_w` is `None` with
-    /// warm start disabled (no record is written). Returns the lanes' point hits.
-    // The eleven parameters are the per-cohort slice of every table the fill reads
+    /// warm start disabled (no record is written). `sources` holds every manifold's run and
+    /// the lookup its tag names (the read side, or L10's restore source). Returns the lanes'
+    /// point hits.
+    // The ten parameters are the per-cohort slice of every table the fill reads
     // or writes, split so the C4 parallel fill can hand each worker its own cohort
     // rows without a shared `&mut CohortColumns`; a parameter struct would be built
     // once per cohort per step for no reader.
@@ -1841,8 +2036,7 @@ impl ColoredSoftStepSolver {
         manifolds: &[Manifold],
         bodies: &[BodyState],
         bodies_eff: &[BodyEffective],
-        lookup: WarmLookup<'_>,
-        plan: &[WarmRun],
+        sources: WarmSources<'_>,
         mut recs_w: Option<&mut [WarmRecord]>,
         counters: &mut SetupCounters,
     ) -> u32 {
@@ -1916,7 +2110,7 @@ impl ColoredSoftStepSolver {
             let ba = &bodies_eff[ia];
             let bb = if b_is_sentinel { &IMMOVABLE_AT_REST } else { &bodies_eff[ib] };
 
-            let run = plan[mi];
+            let (lookup, run) = sources.of(mi);
             if let Some(recs) = recs_w.as_deref_mut() {
                 recs[mi].set_shape(m);
             }
@@ -3652,16 +3846,30 @@ impl ColoredSoftStepSolver {
     /// gather's rows, and this is its only writer (defect A, interim). A disabled
     /// solver neither stores nor stamps.
     ///
+    /// `restore` is L10's restore warm source (design 06 A3): a frozen manifold that P-a
+    /// marked `SRC_RESTORE` carries from it (design 08 A3′, mutation N28).
+    ///
     /// [O6]: https://github.com/bluesteelll/boyko-engine
-    fn store_and_swap(&mut self, rows: &RowIdentity, manifolds: &[Manifold]) {
+    fn store_and_swap(
+        &mut self,
+        rows: &RowIdentity,
+        manifolds: &[Manifold],
+        restore: Option<&WarmRecords>,
+    ) {
         if !self.warm_start_enabled {
             return;
         }
         let cols = &self.columns;
         let (read, write) = Self::warm_sides(&mut self.warm, self.warm_cur);
-        let lookup = WarmLookup { read, index: &self.warm_index };
+        let index = &self.warm_index;
         let tags = cols.tags();
         let plan = cols.plan();
+        let sources = WarmSources {
+            lookup: WarmLookup { read, index },
+            restore: restore.map(|read| WarmLookup { read, index }),
+            plan,
+            tags,
+        };
         debug_assert!(
             tags.len() == manifolds.len() && plan.len() == manifolds.len(),
             "invariant: tags and plan hold one row per manifold of this step"
@@ -3696,7 +3904,8 @@ impl ColoredSoftStepSolver {
                         m.count,
                         "invariant: a frozen tag holds its manifold's live-point count"
                     );
-                    let (rec, hits) = lookup.carry(plan[mi], m, usize::from(tag.count));
+                    let (lookup, run) = sources.of(mi);
+                    let (rec, hits) = lookup.carry(run, m, usize::from(tag.count));
                     carry_hits += hits;
                     rec
                 } else {
@@ -3781,7 +3990,7 @@ impl ColoredSoftStepSolver {
         scratch: &mut SolverScratch,
     ) {
         // Sleeping OFF (or no resource): the byte-identical O6/O7 colored path.
-        self.solve_colored_inner(config, manifolds, graph, scratch, None);
+        self.solve_colored_inner(config, manifolds, graph, scratch, None, None);
     }
 
     /// The colored solve with O8 sleeping (plan O8 / Decision 5) — the entry the
@@ -3807,12 +4016,31 @@ impl ColoredSoftStepSolver {
         scratch: &mut SolverScratch,
         sleep: &mut IslandSleep,
     ) {
-        self.solve_colored_inner(config, manifolds, graph, scratch, Some(sleep));
+        self.solve_colored_inner(config, manifolds, graph, scratch, Some(sleep), None);
+    }
+
+    /// [`solve_colored_sleeping`](Self::solve_colored_sleeping) with L10's sleep-skip (design
+    /// 04 A6, 06 A1–A3, 08 A1′): the rows the broadphase holds get the effective inverse mass
+    /// `0` (D8), P-a searches the restore source after the read side (A3), and the kept
+    /// manifolds moved in this step take their warm records before the swap (A1′); the logical
+    /// [`WarmSeedStats`] add the held store's points and hits (E6′). The
+    /// [`physics_solve_colored`](crate::systems::physics_solve_colored) stage's sleeping arm.
+    pub(crate) fn solve_colored_held(
+        &mut self,
+        config: &PhysicsConfig,
+        manifolds: &[Manifold],
+        graph: &ConstraintGraph,
+        scratch: &mut SolverScratch,
+        sleep: &mut IslandSleep,
+        held: HeldSolve<'_>,
+    ) {
+        self.solve_colored_inner(config, manifolds, graph, scratch, Some(sleep), Some(held));
     }
 
     /// Shared body of the colored solve — `sleep == None` is the byte-identical
     /// O6/O7 path (the 0%-gate), `sleep == Some(_)` adds the O8 solve+integrate skip
-    /// for slept islands (gather stays full — IM-1).
+    /// for slept islands (gather stays full — IM-1), and `held == Some(_)` L10's
+    /// sleep-skip on top of it.
     fn solve_colored_inner(
         &mut self,
         config: &PhysicsConfig,
@@ -3820,6 +4048,7 @@ impl ColoredSoftStepSolver {
         graph: &ConstraintGraph,
         scratch: &mut SolverScratch,
         mut sleep: Option<&mut IslandSleep>,
+        mut held: Option<HeldSolve<'_>>,
     ) {
         let substeps = config.substeps.max(1);
         let h = config.dt / substeps as f32;
@@ -3856,6 +4085,9 @@ impl ColoredSoftStepSolver {
         if let Some(sleep) = sleep.as_mut() {
             let _z = zone!(PHYS_SLEEP_BEGIN);
             sleep.begin_step(graph, n_rows);
+            // L10 A1.1 (design 04 D9): the awake mask is now this gather's; the next
+            // broadphase's resting test trusts it only with this stamp.
+            sleep.stamp_mask(&scratch.rows);
         }
         // An immutable view used by `build_columns` (SOLVE skip) + the integrate
         // freeze; `None` when sleeping is off so the path is byte-identical.
@@ -3863,7 +4095,14 @@ impl ColoredSoftStepSolver {
 
         {
             let _z = zone!(PHYS_SOLVE_BUILD);
-            self.build_bodies(scratch.bodies());
+            let cls: &[RowCls] = held.as_ref().map_or(&[], |h| h.cls);
+            self.build_bodies(scratch.bodies(), cls);
+            // Ruling W1: the write guards read the effective inverse mass of the flag the
+            // colouring read, so a held row is immovable to both.
+            debug_assert!(
+                cls.iter().zip(self.bodies.as_read_slice()).all(|(c, e)| !c.is_held() || e.inv_mass == 0.0),
+                "invariant: a held row's effective inverse mass is 0 (design 04 D8, ruling W1)"
+            );
             // Warm start is classified only while it is enabled: a disabled solver never
             // reads or stores the records, so `Identity` is a placeholder that takes no
             // per-manifold branch, and its cursor never counts a phantom `Reset`.
@@ -3872,7 +4111,13 @@ impl ColoredSoftStepSolver {
             } else {
                 RowRemap::Identity
             };
-            self.build_columns(manifolds, graph, scratch.bodies(), sleep_view, warm_remap);
+            let restore = held.as_ref().and_then(|h| h.restore);
+            let (searches, hits) =
+                self.build_columns(manifolds, graph, scratch.bodies(), sleep_view, warm_remap, restore);
+            if let Some(h) = held.as_mut() {
+                h.rules.restore_rec_searches += u64::from(searches);
+                h.rules.restore_rec_hits += u64::from(hits);
+            }
         }
         // L11 C0: the setup digest is taken here, over the seeds the sweeps have not
         // yet touched; the step's warm stats are folded in after the store.
@@ -3900,6 +4145,11 @@ impl ColoredSoftStepSolver {
         let fast = self.columns.len() == 0
             && sleep_view.is_some_and(|sleep| Self::no_awake_dynamic_row(sleep, scratch.bodies()));
         self.fast_path_steps += u64::from(fast);
+        if let Some(h) = held.as_mut()
+            && !h.cls.is_empty()
+        {
+            h.stats.fast_path = u32::from(fast);
+        }
 
         // O8 integrate-freeze (INTEGRATE half): capture the pre-solve hot state of
         // every slept-island body so the per-substep integrate (which streams the
@@ -3912,10 +4162,12 @@ impl ColoredSoftStepSolver {
             frozen.clear();
             if let Some(sleep) = sleep_view {
                 let _z = zone!(PHYS_SLEEP_FREEZE);
+                let eff = self.bodies.as_read_slice();
                 for (row, b) in scratch.bodies().iter().enumerate() {
-                    if b.inv_mass == 0.0 {
+                    if eff[row].inv_mass == 0.0 {
                         // Static rows are no-ops to the integrate kernels (the
-                        // `inv_mass != 0` guard) — no need to snapshot them.
+                        // `inv_mass != 0` guard) — no need to snapshot them. So are the rows
+                        // L10 holds (design 04 D8: their effective inverse mass is `0`).
                         continue;
                     }
                     if !sleep.is_row_awake(row) {
@@ -4072,7 +4324,21 @@ impl ColoredSoftStepSolver {
         // points (B1), then swap the sides.
         {
             let _z = zone!(PHYS_STORE);
-            self.store_and_swap(&scratch.rows, manifolds);
+            // L10 A1′ (design 08 O10): the move-in capture, before the swap, on both paths.
+            if let Some(h) = held.as_mut() {
+                let remap = self.warm_cursor.peek(&scratch.rows);
+                self.capture_moved_in(remap, h);
+            }
+            let restore = held.as_ref().and_then(|h| h.restore);
+            self.store_and_swap(&scratch.rows, manifolds, restore);
+            // L10 E6′ (design 06): the logical carry adds the held store's points and hits —
+            // `Off` carries the same frozen manifolds' records every step with the same hits.
+            if let Some(h) = held.as_ref()
+                && self.warm_start_enabled
+            {
+                self.warm_stats.carry_points += h.held.live_points();
+                self.warm_stats.carry_hits += *h.held_warm;
+            }
         }
         #[cfg(test)]
         {

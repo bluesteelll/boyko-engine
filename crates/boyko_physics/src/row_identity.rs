@@ -304,7 +304,6 @@ impl RemapCursor {
     /// classify this step, before that consumer runs (L10 A1.1 reads `IslandSleep`'s latch
     /// cursor and the pair carry's cursor this way, design 04 D9 / 06 B1).
     #[inline]
-    #[expect(dead_code, reason = "L10 C3b's broadphase prologue (A1.1) is the first reader")]
     pub(crate) fn peek<'a>(&self, rows: &'a RowIdentity) -> RowRemap<'a> {
         rows.classify(self.synced_seq)
     }
@@ -530,6 +529,19 @@ impl RowIdentity {
     #[inline]
     pub(crate) fn rows_len(&self) -> usize {
         self.cur.len()
+    }
+
+    /// The current gather's previous-row map when the rows changed since the previous gather,
+    /// else `None` (L10's mirror tells a moved pair from an unmoved one by it).
+    #[inline]
+    pub(crate) fn prev_row_map(&self) -> Option<&[u32]> {
+        (!self.stable).then(|| self.prev_row.as_read_slice())
+    }
+
+    /// The number of rows in the previous gather (the range of `prev_row`'s values).
+    #[inline]
+    pub(crate) fn prev_rows_len(&self) -> usize {
+        self.prev.len()
     }
 
     /// The current gather's sequence number: the stamp a consumer compares with a stamp it

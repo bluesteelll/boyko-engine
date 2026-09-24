@@ -286,8 +286,8 @@
         let graph = build_graph(&bodies, &manifolds);
 
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&bodies);
-        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
+        solver.build_bodies(&bodies, &[]);
+        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
         let cols = &solver.columns;
 
         // The total live point count = 1 + 1 + 4 = 6.
@@ -449,8 +449,8 @@
         proptest!(ProptestConfig::with_cases(400), |(seed in any::<u64>())| {
             let (bodies, manifolds, graph) = random_scene(seed);
             let mut solver = ColoredSoftStepSolver::default();
-            solver.build_bodies(&bodies);
-            solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
+            solver.build_bodies(&bodies, &[]);
+            solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
             let cols = &solver.columns;
 
             let n_colors = cols.color_offsets().len().saturating_sub(1);
@@ -1149,8 +1149,8 @@
         let manifolds = dense_collision_manifolds(&bodies);
         let graph = build_graph(&bodies, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&bodies);
-        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
+        solver.build_bodies(&bodies, &[]);
+        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
         let cols = &solver.columns;
         let n_colors = cols.color_offsets().len().saturating_sub(1);
         (0..n_colors)
@@ -1566,8 +1566,8 @@
 
             // ── Scalar arm ──────────────────────────────────────────────────
             let mut solver_scalar = ColoredSoftStepSolver::default();
-            solver_scalar.build_bodies(&bodies);
-            solver_scalar.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
+            solver_scalar.build_bodies(&bodies, &[]);
+            solver_scalar.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
             let cols_scalar = &solver_scalar.columns;
             let n_colors = cols_scalar.color_offsets().len() - 1;
             let bodies_scalar = body_scratch_from(&pristine_bodies);
@@ -1593,8 +1593,8 @@
 
             // ── SIMD arm ─────────────────────────────────────────────────────
             let mut solver_simd = ColoredSoftStepSolver::default();
-            solver_simd.build_bodies(&bodies);
-            solver_simd.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
+            solver_simd.build_bodies(&bodies, &[]);
+            solver_simd.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
             let cols_simd = &solver_simd.columns;
             let bodies_simd = body_scratch_from(&pristine_bodies);
             {
@@ -1842,8 +1842,8 @@
         }
         let graph = build_graph(&states, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&states);
-        solver.build_columns(&manifolds, &graph, &states, None, RowRemap::Identity);
+        solver.build_bodies(&states, &[]);
+        solver.build_columns(&manifolds, &graph, &states, None, RowRemap::Identity, None);
         assert_eq!(solver.columns.color_offsets().len(), 2, "body-disjoint specs form one color");
         assert_eq!(solver.columns.group_start().len(), groups.len() + 1, "one group per spec");
         // The seeds are the specs' (the fresh warm store seeded zero).
@@ -2451,8 +2451,8 @@
         let (bodies, manifolds) = ragged_colored_scene(11);
         let graph = build_graph(&bodies, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&bodies);
-        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
+        solver.build_bodies(&bodies, &[]);
+        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
         let mut rng = SplitMix64(0x11C3_5EED_A1B2_C3D4);
         seed_live_lanes(&mut solver, &mut rng);
 
@@ -5330,4 +5330,58 @@
                 );
             }
         }
+    }
+
+    /// L10 A1′ (design 06 A1, mutation N2): a kept manifold moved in this step takes the record
+    /// the carry routine builds from the read side — each point the LAST stored point carrying
+    /// its feature id (Lemma W), the hits compacted — not the previous record copied verbatim.
+    /// The two differ exactly when a manifold repeats a feature id, which this one does.
+    #[test]
+    fn a_moved_in_manifold_takes_the_carry_not_a_copy() {
+        use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
+
+        use crate::held_store::HeldStore;
+        use crate::held_store::tests::{ModelRecord, manifold as kept_manifold, move_in};
+        use crate::scratch_ids::{register_sleep_sets_layouts, sleep_kept_rec_id, sleep_scratch_id};
+        use crate::sleep_sets::{HeldSolve, SleepRuleCounts, SleepSkipStats};
+
+        register_sleep_sets_layouts();
+        // The manifold: rows 0 and 1, two points sharing feature id 7.
+        let mut m = kept_manifold(0, 1, 2, 1);
+        m.points[0].feature_id = 7;
+        m.points[1].feature_id = 7;
+        // The read side: the manifold's record, the two points' impulses distinct.
+        let mut solver = ColoredSoftStepSolver::with_capacity(2, 8);
+        {
+            let read = &mut solver.warm[usize::from(solver.warm_cur)];
+            read.resize(1);
+            read.keys_mut().as_mut_slice()[0] = ord(0, 1);
+            let (n, t1, t2) = ([1.0f32, 2.0], [3.0f32, 4.0], [5.0f32, 6.0]);
+            read.recs_mut().as_mut_slice()[0] = WarmRecord::solved(&m, 0, 2, [&n, &t1, &t2]);
+            read.set_strict(true);
+        }
+        // The held store: one record, moved in this step, keeping the manifold.
+        let mut store = HeldStore::with_capacity(0);
+        let mut ids: ScratchColumn<u64> = ScratchColumn::new(sleep_scratch_id(), 64);
+        let record = ModelRecord { members: vec![0, 1], kept: vec![(m, 1)], pairs: Vec::new(), live: true };
+        move_in(&mut store, &mut ids, &record, 2);
+        let mut kept_rec: ScratchColumn<WarmRecord> = ScratchColumn::new(sleep_kept_rec_id(), 64);
+        kept_rec.build_view().resize(1, WarmRecord::EMPTY);
+        let (mut held_warm, mut stats, mut rules) = (0u32, SleepSkipStats::default(), SleepRuleCounts::default());
+        let mut held = HeldSolve {
+            cls: &[],
+            restore: None,
+            held: store.view(),
+            capture: 0..1,
+            kept_rec: &mut kept_rec,
+            held_warm: &mut held_warm,
+            sources: &[],
+            stats: &mut stats,
+            rules: &mut rules,
+        };
+        solver.capture_moved_in(RowRemap::Identity, &mut held);
+        // Lemma W: both points take the last stored point with id 7 — the second one's impulses.
+        let want = WarmRecord::solved(&m, 0, 2, [&[2.0, 2.0], &[4.0, 4.0], &[6.0, 6.0]]);
+        assert_eq!(kept_rec.as_read_slice()[0].words(), want.words(), "the capture is the carry, not the stored record");
+        assert_eq!(held_warm, 2, "both points hit");
     }

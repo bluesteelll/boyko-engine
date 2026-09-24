@@ -408,7 +408,8 @@ fn physics_zones_count_exactly() {
             (&PHYS_NP_REUSED, 1, classes.reused),
             (&PHYS_NP_SEP_HITS, 1, classes.sep_hits),
             (&PHYS_NP_FULL, 1, classes.full),
-            // L10: once per sleeping step (the classification's), nothing held before C3b.
+            // L10: once per sleeping step (the classification's); no island of this scene is
+            // held within its steps.
             (&PHYS_SLEEP_HELD, sl, 0),
         ];
         for (k, &(handle, samples, value)) in expected_counters.iter().enumerate() {
