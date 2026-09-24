@@ -32,18 +32,23 @@
 //!
 //! # Supported element domain (review #4)
 //!
-//! `size_of::<T>()` must be non-zero AND divide [`COMMIT_GRANULE`] — both
+//! `size_of::<T>()` must be non-zero AND divide [`COMMIT_PAGE`] — both
 //! asserted in [`VmColumn::new`]. The divisibility pin is what keeps every
-//! commit frontier granule-aligned: `committed_elems * SIZE` is then exact
-//! (granule-aligned, no flooring slack), so the NEXT `grow_to`'s
+//! commit frontier page-aligned: `committed_elems * SIZE` is then exact
+//! (page-aligned, no flooring slack), so the NEXT `grow_to`'s
 //! `commit(old, new)` never hands the OS an unaligned range — without the pin,
-//! a `T` whose size does not divide the granule (e.g. 12 or 24 bytes) would
+//! a `T` whose size does not divide the page (e.g. 12 or 24 bytes) would
 //! floor `committed_elems` below the byte frontier and the unix arm's
 //! `mprotect` would reject the recommit of a LEGAL growth with a release
-//! assert-panic. All current consumers store the 8-byte `EntityId`; 8 divides
-//! the 64 KiB granule. (Same pin as `InlandStore`'s
-//! `COMMIT_GRANULE.is_multiple_of(SLOT_SIZE)` const assert, made a constructor
-//! assert here because `T` is generic.)
+//! assert-panic. All current consumers store the 8-byte `EntityId` or the
+//! 16-byte `Entity`, and the log ring a 16-byte line and bytes; each divides
+//! the 4 KiB page. The divisor is the commit quantum, which the packing plan
+//! (D1) lowered from the 64 KiB granule to the page, so the domain tightened
+//! from "divides 65 536" to "divides 4 096": the only sizes it newly refuses
+//! are 8, 16, 32 and 64 KiB. (Same pin as
+//! `InlandStore`'s `COMMIT_GRANULE.is_multiple_of(SLOT_SIZE)` const assert,
+//! whose slabs are still granule-stepped, made a constructor assert here
+//! because `T` is generic.)
 //!
 //! # Zero-fill contract
 //!
@@ -59,7 +64,7 @@
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-use crate::ecs::constants::{COMMIT_GRANULE, POOL_MAX_SLAB, POOL_MIN_SLAB};
+use crate::ecs::constants::{COMMIT_PAGE, POOL_MAX_SLAB, POOL_MIN_SLAB};
 use crate::ecs::memory::vm::VmReservation;
 
 /// Typed, address-stable, growable column of `T` on one [`VmReservation`].
@@ -132,21 +137,22 @@ impl<T: Copy> VmColumn<T> {
     ///
     /// # Panics
     /// * `size_of::<T>() == 0` — a ZST column has no element-count math.
-    /// * `COMMIT_GRANULE % size_of::<T>() != 0` — the supported-domain pin
+    /// * `COMMIT_PAGE % size_of::<T>() != 0` — the supported-domain pin
     ///   (review #4, module doc): a non-dividing size would misalign the
     ///   commit frontier and panic a later LEGAL growth on the unix arm.
     /// * `reserve_elems == 0` — the ceiling must be non-zero.
     /// * `reserve_elems * size_of::<T>()` overflows `usize`.
     pub(crate) fn new(label: &'static str, reserve_elems: usize) -> Self {
         assert!(Self::SIZE > 0, "VmColumn[{label}]: element type must not be a ZST");
-        // Review #4 — the granule-divisibility domain pin (see the module doc's
+        // Review #4 — the page-divisibility domain pin (see the module doc's
         // "Supported element domain"): keeps `committed_elems * SIZE` exact, so
-        // every `commit(old, new)` range stays granule-aligned.
+        // every `commit(old, new)` range stays page-aligned. The condition is
+        // a per-`T` constant, so it folds away for every supported `T`.
         assert!(
-            COMMIT_GRANULE.is_multiple_of(Self::SIZE),
-            "VmColumn[{label}]: size_of::<T>() = {} must divide COMMIT_GRANULE ({})",
+            COMMIT_PAGE.is_multiple_of(Self::SIZE),
+            "VmColumn[{label}]: size_of::<T>() = {} must divide COMMIT_PAGE ({})",
             Self::SIZE,
-            COMMIT_GRANULE
+            COMMIT_PAGE
         );
         assert!(reserve_elems > 0, "VmColumn[{label}]: reserve_elems must be non-zero");
         let bytes = reserve_elems
@@ -493,9 +499,9 @@ impl<T: Copy> VmColumn<T> {
             self.reserve_elems
         );
 
-        // Granule chain (review #4, module doc): `old_bytes = committed_elems ×
-        // SIZE` is granule-aligned — either `committed_elems` came from an
-        // unclamped `new_bytes / SIZE` (exact because SIZE | granule | new_bytes)
+        // Page chain (review #4, module doc): `old_bytes = committed_elems ×
+        // SIZE` is page-aligned — either `committed_elems` came from an
+        // unclamped `new_bytes / SIZE` (exact because SIZE | page | new_bytes)
         // or the `min(reserve_elems)` clamp bound, in which case `committed_elems
         // == reserve_elems` and THIS call cannot exist (the exhaustion assert
         // above fires first: `n > committed_elems == reserve_elems`). The mul
@@ -505,20 +511,21 @@ impl<T: Copy> VmColumn<T> {
         let needed = checked_slab_round(n * Self::SIZE);
         // Geometric doubling clamped to [MIN, MAX], request-dominant (a single
         // huge request is a single event), never past the reservation ceiling.
-        // Every term is a granule multiple (old_bytes above; the slab constants;
-        // `needed - old_bytes` as a difference of granule multiples), so
-        // `new_bytes` stays granule-aligned and `vm.commit` receives an aligned
-        // range on every arm (the unix `mprotect` alignment requirement).
+        // Every term is a page multiple (old_bytes above; the slab constants;
+        // `needed - old_bytes` as a difference of page multiples; `os_len`, a
+        // granule multiple), so `new_bytes` stays page-aligned and `vm.commit`
+        // receives an aligned range on every arm (the unix `mprotect`
+        // alignment requirement).
         let step = old_bytes.clamp(POOL_MIN_SLAB, POOL_MAX_SLAB).max(needed - old_bytes);
         let new_bytes = (old_bytes + step).min(vm.os_len());
         debug_assert!(new_bytes >= needed, "VmColumn::grow_to post-condition (proof) violated");
 
         vm.commit(old_bytes, new_bytes);
-        // Exact division (review #4): `SIZE | COMMIT_GRANULE | new_bytes`, so no
+        // Exact division (review #4): `SIZE | COMMIT_PAGE | new_bytes`, so no
         // flooring slack exists. The `min(reserve_elems)` clamp guards the case
-        // where granule padding rounds the byte frontier above the element
-        // ceiling the reservation was sized for — a TERMINAL state (see the
-        // granule-chain note above: no further grow can reach the commit path).
+        // where page or granule padding rounds the byte frontier above the
+        // element ceiling the reservation was sized for — a TERMINAL state (see
+        // the page-chain note above: no further grow can reach the commit path).
         self.committed_elems = (new_bytes / Self::SIZE).min(self.reserve_elems);
         debug_assert!(
             self.committed_elems >= n,
@@ -527,19 +534,20 @@ impl<T: Copy> VmColumn<T> {
     }
 }
 
-/// Cold-path granule rounding with overflow check. Private twin of
-/// `vm::checked_align_up` specialized to the commit granule (mirrors
-/// `inland_store::checked_slab_round`).
+/// Cold-path page rounding with overflow check. Private twin of
+/// `vm::checked_align_up` specialized to the commit page (packing plan D1;
+/// `inland_store::checked_slab_round` is the granule-stepped sibling).
 fn checked_slab_round(bytes: usize) -> usize {
     bytes
-        .checked_add(COMMIT_GRANULE - 1)
+        .checked_add(COMMIT_PAGE - 1)
         .expect("VmColumn: slab rounding overflow")
-        & !(COMMIT_GRANULE - 1)
+        & !(COMMIT_PAGE - 1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ecs::constants::COMMIT_GRANULE;
     use crate::ecs::identifiers::primitives::EntityId;
 
     const G: usize = COMMIT_GRANULE;

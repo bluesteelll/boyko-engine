@@ -13,10 +13,13 @@ pub const COMMIT_GRANULE: usize = 64 * 1024;
 ///
 /// 4 KiB on `x86_64`, the stated target platform on both OSes.
 ///
-/// Defined one step ahead of its consumers: the commit-floor oracle
-/// (`component_pool.rs`, `commit_floor_tests`) is written against it in its
-/// final form, while the pool and `VmColumn` commit ladders still step by
-/// [`COMMIT_GRANULE`] until the ladder step of the plan retargets them.
+/// It is the commit quantum: `ComponentPool`'s page-floor ladder,
+/// `VmColumn::grow_to` and [`POOL_MIN_SLAB`] step by it, while every
+/// reservation (`os_len`, `pool_byte_layout`, `VmReservation::reserve`) stays
+/// granule-rounded. A constant rather than a runtime query because
+/// `pool_byte_layout`, `pool_commit_step` and the `const _` proofs are
+/// `const fn`; a debug-only belt in `VmReservation::reserve` checks the OS page
+/// divides it.
 #[cfg(target_arch = "x86_64")]
 pub const COMMIT_PAGE: usize = 4096;
 /// Every other architecture keeps the granule as its commit page, so a
@@ -119,11 +122,17 @@ const _: () = assert!(POOL_MAX_ROWS < u32::MAX as usize);
 // representable on every arm.
 const _: () = assert!(POOL_MIN_ROWS <= POOL_MAX_ROWS && POOL_MIN_ROWS > 0);
 
-/// Minimum pool data-commit slab (Phase X.I D4): 64 KiB = one commit
-/// granule — the floor that keeps sparse archetypes cheap (a 1-row
-/// archetype commits 3 × 64 KiB per pool, not megabytes). Doubling from
-/// here reaches any real population in ≤ a dozen µs-scale events.
-pub const POOL_MIN_SLAB: usize = 64 * 1024;
+/// Minimum pool commit step (Phase X.I D4, retargeted by packing plan D2):
+/// one [`COMMIT_PAGE`], the first rung of the `ComponentPool` and `VmColumn`
+/// commit ladders — the floor that keeps sparse archetypes cheap. The ladder
+/// doubles from here (×2, not ×4, plan D3), so on `x86_64` a one-row-at-a-time
+/// fill of a 40 B column to 1 M rows is 15 growth events; a batch request is
+/// one.
+pub const POOL_MIN_SLAB: usize = COMMIT_PAGE;
+
+// One knob, not two (packing plan D2): the first ladder rung IS the commit
+// page. Removing this assert is half of the recorded G2(c) mutation.
+const _: () = assert!(POOL_MIN_SLAB == COMMIT_PAGE);
 
 /// Maximum pool data-commit step (Phase X.I D4): 64 MiB — bounds
 /// commit-charge overshoot by one slab (the X.F overshoot-honesty bound);
@@ -144,6 +153,16 @@ pub(crate) const fn pool_align_up_granule(value: usize) -> usize {
     match value.checked_add(COMMIT_GRANULE - 1) {
         Some(v) => v & !(COMMIT_GRANULE - 1),
         None => panic!("pool_align_up_granule: overflow (value too close to usize::MAX)"),
+    }
+}
+
+/// Checked page round-up — the twin of [`pool_align_up_granule`] for the
+/// commit ladders (packing plan D2): reservations round to the granule,
+/// commit frontiers to the page. Overflow panics loudly, like its twin.
+pub(crate) const fn pool_align_up_page(value: usize) -> usize {
+    match value.checked_add(COMMIT_PAGE - 1) {
+        Some(v) => v & !(COMMIT_PAGE - 1),
+        None => panic!("pool_align_up_page: overflow (value too close to usize::MAX)"),
     }
 }
 
@@ -187,6 +206,19 @@ pub const fn pool_reserve_rows(stride: usize) -> usize {
 /// rows in 64 *different* L1 sets (and, since the stride is a cache line,
 /// 64 different L2 sets too).
 pub const POOL_STAGGER_LINES: usize = 64;
+
+/// The span the per-pool stagger cycles through: 64 lines × 64 B = 4 KiB,
+/// the L1 set-index span (packing plan D4). A cache property, NOT the commit
+/// quantum — `pool_byte_layout` bounds the stagger by this, never by
+/// [`COMMIT_PAGE`], which only coincides with it on `x86_64`.
+pub const POOL_STAGGER_SPAN: usize = POOL_STAGGER_LINES * CACHE_LINE_SIZE;
+
+// Packing plan D4: the page-floor ladder (D2) takes each sub-region's floor
+// as `offset - stagger`, which is a page multiple only while the stagger stays
+// below one commit page. The quantum must be AT LEAST the cache-set span; it
+// must never define it. Raising `POOL_STAGGER_LINES` past 64 is therefore a
+// compile error on `x86_64` and still a valid layout on a granule-page arm.
+const _: () = assert!(POOL_STAGGER_SPAN <= COMMIT_PAGE);
 
 // The stagger granule must preserve the SIMD data-base alignment guarantee:
 // each step is a whole `CACHE_LINE_SIZE` (64 B) and the data sub-region starts
@@ -307,8 +339,12 @@ pub(crate) const fn pool_byte_layout(
     // P2-CACHE-FIX: the stagger is a SIMD-aligned leading pad strictly below
     // one page; a value above it would defeat the per-page cost bound and
     // signal a caller computing it outside `pool_base_stagger`.
+    // The bound is the cache-set span (`POOL_STAGGER_SPAN`, 4096), named
+    // rather than literal. The message text is unchanged on purpose: an
+    // inlined panic passes its length as an immediate, which the UG-15
+    // codegen pins of the bodies this layout math inlines into would see.
     assert!(
-        stagger < 4096 && stagger.is_multiple_of(SIMD_BUFFER_ALIGN),
+        stagger < POOL_STAGGER_SPAN && stagger.is_multiple_of(SIMD_BUFFER_ALIGN),
         "pool_byte_layout: stagger must be SIMD-aligned and < one page"
     );
 

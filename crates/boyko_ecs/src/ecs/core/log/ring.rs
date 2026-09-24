@@ -2,14 +2,18 @@
 
 use std::sync::OnceLock;
 
-use crate::ecs::constants::COMMIT_GRANULE;
+use crate::ecs::constants::COMMIT_PAGE;
 use crate::ecs::core::resources::register_new;
 use crate::ecs::core::resources::resource::Resource;
 use crate::ecs::identifiers::primitives::ResourceId;
 use crate::ecs::memory::vm_column::VmColumn;
 
-/// Lines the ring retains. `4096 * 16 B` is exactly one [`COMMIT_GRANULE`], so the line column's
-/// reservation is a single commit step and its ceiling divides the granule with nothing left over.
+/// Lines the ring retains. `4096 * 16 B` is exactly one
+/// [`COMMIT_GRANULE`](crate::ecs::constants::COMMIT_GRANULE), so the line column's
+/// reservation holds its ceiling with nothing left over. Its commit is a single step because
+/// [`LogRing`] materializes the whole ceiling with ONE bulk request and `VmColumn`'s growth is
+/// request-dominant — not because of the quantum, which is the 4 KiB [`COMMIT_PAGE`] (packing plan
+/// D1); lines arriving one at a time would take five growth events (4 → 8 → 16 → 32 → 64 KiB).
 pub const LINE_CAP: u32 = 4096;
 
 /// Bytes of formatted text the ring retains.
@@ -67,19 +71,19 @@ impl LogLine {
 }
 
 // The size is not a cosmetic pin. `VmColumn::<T>::new` PANICS unless
-// `COMMIT_GRANULE % size_of::<T>() == 0`, so a layout of, say, 12 bytes (10 payload + align-4
-// tail; `65536 % 12 == 4`) would make `LogPlugin::build` panic at construction in every process
-// that added the plugin. `repr(C, packed)` does not save that layout either — `65536 % 10 == 6`.
-// The fix is a size that divides the granule, and this turns "someone adds a field" from a
+// `COMMIT_PAGE % size_of::<T>() == 0`, so a layout of, say, 12 bytes (10 payload + align-4
+// tail; `4096 % 12 == 4`) would make `LogPlugin::build` panic at construction in every process
+// that added the plugin. `repr(C, packed)` does not save that layout either — `4096 % 10 == 6`.
+// The fix is a size that divides the commit page, and this turns "someone adds a field" from a
 // plugin-build panic into a compile error here.
 const _: () = assert!(size_of::<LogLine>() == 16);
 const _: () = assert!(
-    COMMIT_GRANULE.is_multiple_of(size_of::<LogLine>()),
-    "LogLine must divide COMMIT_GRANULE or VmColumn::new panics"
+    COMMIT_PAGE.is_multiple_of(size_of::<LogLine>()),
+    "LogLine must divide COMMIT_PAGE or VmColumn::new panics"
 );
-// `VmColumn<u8>` for the arena is trivially fine: 65536 % 1 == 0. Asserted anyway, because the
+// `VmColumn<u8>` for the arena is trivially fine: 4096 % 1 == 0. Asserted anyway, because the
 // reason it is fine is the same rule, and a reader should not have to know which types are exempt.
-const _: () = assert!(COMMIT_GRANULE.is_multiple_of(size_of::<u8>()));
+const _: () = assert!(COMMIT_PAGE.is_multiple_of(size_of::<u8>()));
 
 /// The durable, displayable log.
 ///
