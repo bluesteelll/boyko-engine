@@ -75,11 +75,11 @@ finds one false stops and escalates rather than working around it.
 | F4 | `STORAGE_KIND` / `RESIDENCY_CLASS` are `[AtomicU8; MAX_COMPONENTS]` with `Relaxed`, deliberately, because *"the kind is a registration-time, write-once datum with **no payload published through it**"* | `component_registry/mod.rs:375`, `:503` |
 | F5 | In-tree installer/getter convention is `(component_id: usize, …)`, because the derive calls them as `…::component_id().0` | `component_registry/serialize.rs:287`, `:308` |
 | F6 | `install_bind_accessor` is **`pub`** specifically *"so the `#[derive(Bindable)]` expansion (which lives in downstream crates where `pub(crate)` is unreachable) can call it"*; write-once, *"a same-id re-install is a silent no-op (first writer wins)"* | `component_registry/serialize.rs:299~-318` |
-| F7 | The `component_id()` funnel is `static ID: OnceLock<ComponentId>` → `get_or_init` → `register_new::<Self>()` → **six** install slots (`storage`, `require`, `clone`, `relationship`, `residency`, `serialize`) + the const-gated `if Self::HAS_HOOKS` | `boyko_macros/src/component.rs:452-479`, **re-derived 2026-08-26 after C9 landed.** The content of this fact is unchanged and still **six** slots — `#reflect_install` is the seventh and is cited separately wherever it matters. **The anchors have now moved three times for the same reason** (C7 inserted the descriptor emission into the same `quote!`; C8 inserted the D29 condition block, the `reflect_install` binding and the slot; C9 replaced that condition block with the refusal argument and the `reflect_refused` gate), which is why the former numbers are recorded here as *"it moved"* and no longer as digits: a struck anchor rots exactly like a live one and reds nothing extra. **Live, in the tree C9 leaves behind:** `fn component_id()` `:454`, `get_or_init` `:457~`, `register_new::<Self>()` `:458~`, the const-gated `install_hooks` `:467~-469`, the six slots `:450~-455`, the seventh `#reflect_install` `:456~`, `ComponentId(raw)` `:457~`. **Since HEAD `eeb567be` all five reflection documents ARE in `internal_docs_anchors.rs`'s `GATED_DOCS`, so this row now reds when it rots** — which is how C9's own landing found it |
-| F8 | Install slots come in two flavours: **const-gated** (`if Self::HAS_HOOKS`, for the derive-XOR-runtime-builder contract) and **ungated + self-gating** (`install_residency_class::<Self>` short-circuits on the default const) | `boyko_macros/src/component.rs:341~-364` |
-| F9 | `#[component(...)]` already parses a bare flag key (`no_bundle`) and a `storage = "bitset"|"dense"` key, with duplicate detection and a *"valid keys: …"* diagnostic | `boyko_macros/src/component.rs:742~-873` |
+| F7 | The `component_id()` funnel is `static ID: OnceLock<ComponentId>` → `get_or_init` → `register_new::<Self>()` → **six** install slots (`storage`, `require`, `clone`, `relationship`, `residency`, `serialize`) + the const-gated `if Self::HAS_HOOKS` | `boyko_macros/src/component.rs:451-478`, **re-derived 2026-08-26 after C9 landed.** The content of this fact is unchanged and still **six** slots — `#reflect_install` is the seventh and is cited separately wherever it matters. **The anchors have now moved three times for the same reason** (C7 inserted the descriptor emission into the same `quote!`; C8 inserted the D29 condition block, the `reflect_install` binding and the slot; C9 replaced that condition block with the refusal argument and the `reflect_refused` gate), which is why the former numbers are recorded here as *"it moved"* and no longer as digits: a struck anchor rots exactly like a live one and reds nothing extra. **Live, in the tree C9 leaves behind:** `fn component_id()` `:453`, `get_or_init` `:456~`, `register_new::<Self>()` `:457~`, the const-gated `install_hooks` `:466~-468`, the six slots `:449~-454`, the seventh `#reflect_install` `:455~`, `ComponentId(raw)` `:456~`. **Since HEAD `eeb567be` all five reflection documents ARE in `internal_docs_anchors.rs`'s `GATED_DOCS`, so this row now reds when it rots** — which is how C9's own landing found it |
+| F8 | Install slots come in two flavours: **const-gated** (`if Self::HAS_HOOKS`, for the derive-XOR-runtime-builder contract) and **ungated + self-gating** (`install_residency_class::<Self>` short-circuits on the default const) | `boyko_macros/src/component.rs:340~-363` |
+| F9 | `#[component(...)]` already parses a bare flag key (`no_bundle`) and a `storage = "bitset"|"dense"` key, with duplicate detection and a *"valid keys: …"* diagnostic | `boyko_macros/src/component.rs:741~-871` |
 | F10 | `StorageKind` is 3-way (`Table=0`, `Bitset=1`, `Dense=2`); `Bitset` has **no `ComponentPool`**, `Dense` has a global `DenseStore` and is **always `ResidencyKind::Cpu`** | `component_registry/mod.rs:325-341` |
-| F11 | The `Bindable` derive's trampoline takes `let this: &T = unsafe { &*(p as *const T) }` off arena-rooted provenance, and it has passed Miri | `boyko_macros/src/bindable.rs:113`, `:119` |
+| F11 | The `Bindable` derive's trampoline takes `let this: &T = unsafe { &*(p as *const T) }` off arena-rooted provenance, and it has passed Miri | `boyko_macros/src/bindable.rs:110`, `:116` |
 | F12 | `core::mem::offset_of!` is load-bearing engine-wide on this toolchain, including as `const _: () = assert!(offset_of!(…) == N)` layout pins | `boyko_render/src/gpu_transform3d.rs:108-115` (317 sites tree-wide) |
 | F13 | `boyko_serialize`'s manifest and lib header assert the directional rule at the source: *"never `boyko_reflect` (the codegen-not-reflection invariant)"* | `crates/boyko_serialize/Cargo.toml:6~-10`, `boyko_serialize/src/lib.rs:6~` |
 | F14 | Package names are dashed, directories underscored (`boyko-serialize` in `crates/boyko_serialize`), and every member carries `[lints] workspace = true` | `crates/boyko_serialize/Cargo.toml` |
@@ -740,14 +740,14 @@ printed `bitset+reflect ACCEPTED: name=…::AuditBitsetTag size=0 align=1 fields
 Nothing rejects the pair: `reject_non_zst_bitset_tag` (`boyko_macros/src/component.rs:72~-76`) only requires
 fieldlessness and `AuditBitsetTag` is fieldless; the `hooks.any()` rejection (`:84~-94`) covers only
 lifecycle hooks; `Fields::Unit` maps to a zero-field `Struct` (`boyko_macros/src/reflect.rs:704~`). **And the
-suppression does not exist either:** `boyko_macros/src/component.rs:185~` gates the reflect emission on
+suppression does not exist either:** `boyko_macros/src/component.rs:184~` gates the reflect emission on
 `hooks.reflect` alone, the one slot in its neighbourhood carrying no `storage_bitset` term — its six
-neighbours all do (`:128~`, `:148~`, `:281~`, `:305~`, `:357~`, `:413~`).
+neighbours all do (`:127~`, `:147~`, `:280~`, `:304~`, `:356~`, `:412~`).
 
 > **The anchors in the paragraph above are the PRE-C8 tree's** (HEAD `bf7803d6`) and are left as
 > measured, because the paragraph is a dated record of what the audit found. **Post-landing they are
-> `:182~` for the condition — which now reads `hooks.reflect && !hooks.storage_bitset` — and `:127~`,
-> `:148~`, `:272~`, `:296~`, `:348~`, `:404~` for the six neighbours** (`entities_items`,
+> `:181~` for the condition — which now reads `hooks.reflect && !hooks.storage_bitset` — and `:126~`,
+> `:147~`, `:271~`, `:295~`, `:347~`, `:403~` for the six neighbours** (`entities_items`,
 > `serialize_items`, `clone_install`, `relationship_install`, `serialize_install`, `bundle_items`,
 > in that order; only the first two did not move). Re-derived by reading the file, 2026-08-21, after
 > the landing. Cite the neighbours **by binding name** in new text: names survive an insertion and
@@ -788,7 +788,7 @@ Three things are wrong with the gate as written, and the third is the one the au
    file holding both strings is `boyko_macros/src/lib.rs`, where they are two unrelated rustdoc
    examples (`boyko_macros/src/lib.rs:583~` and the reflect key's own docs).
 2. **No listed package can host one.** The derive emits `impl ::boyko_ui::binding::Bindable`
-   (`boyko_macros/src/bindable.rs:70`), so the subject needs a `boyko-ui` edge; D2 makes `#[cfg(feature = "reflect")]`
+   (`boyko_macros/src/bindable.rs:67`), so the subject needs a `boyko-ui` edge; D2 makes `#[cfg(feature = "reflect")]`
    evaluate in the **annotating** crate, so it also needs a feature literally named `reflect`.
    `reflect_fixture` forbids a third production dep — *"Deps are `boyko-ecs`, `boyko-macros`,
    `boyko-reflect` — and nothing else, ever"* (`reflect_fixture/Cargo.toml:23~-24`) — `reflect_dogfood` has no
@@ -796,7 +796,7 @@ Three things are wrong with the gate as written, and the third is the one the au
    (and is what D16 names as **Horn 1's** cost).
 3. **The stated red is not expressible, and never becomes expressible.** *"Rename a field on one
    side only"* has no "one side": a single struct definition feeds both derives, both read the same
-   `syn::Field::ident` (`boyko_macros/src/bindable.rs:36~-40,:54~`; `boyko_macros/src/reflect.rs:459~-462`), and neither admits a rename
+   `syn::Field::ident` (`boyko_macros/src/bindable.rs:34~-38,:51~`; `boyko_macros/src/reflect.rs:459~-462`), and neither admits a rename
    — `attributes(bind)` is declared at `boyko_macros/src/lib.rs:588~` and **never parsed** (`bindable.rs` never touches
    `f.attrs`). The audit's expectation that C9's `#[reflect(skip)]` would supply the divergence is
    **wrong, and D14 is why**: *"`#[reflect(skip)]` emits a `FieldInfo` with `kind: Opaque` … **it
@@ -816,7 +816,7 @@ plan delivers at C8"* — but it is respecified as what it can see, and given a 
   (`boyko_ui/src/binding/bindable.rs:25-46`) — and the `FIELD_COUNT` clause is the half that catches
   a name reflect stopped emitting, which the name-driven loop cannot see.
 * **What its RED is** — and this is the change: a mutation of one **generator**, not of a subject.
-  Reverse `boyko_macros/src/bindable.rs:53~`'s `ids` (`(0..n).rev()`), or suffix `boyko_macros/src/reflect.rs:501~`'s baked `name:`.
+  Reverse `boyko_macros/src/bindable.rs:50~`'s `ids` (`(0..n).rev()`), or suffix `boyko_macros/src/reflect.rs:501~`'s baked `name:`.
   Either reds; a source rename does not and cannot.
 * **Where the subject lives:** `reflect_dogfood`, which already has a `reflect` feature, a library
   target, an existing CI leg (`reflect-dogfood`, `cargo test -p reflect-dogfood --all-targets
@@ -880,8 +880,8 @@ minus the `reflect` key) must emit the same symbol multiset and the same `.text`
 carry the funnel touch so the comparison is exactly *"does the seventh slot's existence perturb the
 other six"*. **C8 does not need it:** for an un-annotated type the slot is `TokenStream2::new()`
 interpolated into a `quote!`, which emits nothing as a language guarantee — the same guarantee the
-six existing slots at ~~`boyko_macros/src/component.rs:389~-394`~~ → ~~`:441~-446`~~ → **`boyko_macros/src/component.rs:470~-475`** (re-derived again after C9 landed; the
-seventh, `#reflect_install`, is `boyko_macros/src/component.rs:476~`) already rely on. This edge is recorded in §7 so it
+six existing slots at ~~`boyko_macros/src/component.rs:389~-394`~~ → ~~`:441~-446`~~ → **`boyko_macros/src/component.rs:469~-474`** (re-derived again after C9 landed; the
+seventh, `#reflect_install`, is `boyko_macros/src/component.rs:475~`) already rely on. This edge is recorded in §7 so it
 cannot expire, which is how the last two rungs lost obligations.
 
 ### D32 — C9's trybuild corpus is **GATES G5's**, and two rungs were about to build one corpus because neither document could see the other.
@@ -1033,7 +1033,7 @@ except as the PBR material key `reflectance`. The remaining user is hand-written
 `reflect`; ECS's *"type name"* is superseded, and GATES' `aether_tests` twin for this combination is
 a fixture for an input Aether cannot emit (§7.3d).
 
-**The replacement.** D29 landed a *silent* suppression at C8 — the `!hooks.storage_bitset` term in `codegen`'s condition (`crates/boyko_macros/src/component.rs:185~`’s binding today) —
+**The replacement.** D29 landed a *silent* suppression at C8 — the `!hooks.storage_bitset` term in `codegen`'s condition (`crates/boyko_macros/src/component.rs:184~`’s binding today) —
 `let reflect_enabled = hooks.reflect && !hooks.storage_bitset;` — and handed the message here. With
 the refusal in place the term is unreachable in its suppressing branch, and its only witness
 (`reflect_fixture`’s `c8_bitset_suppression.rs`, deleted by C9) no longer compiles: a dead datum whose gate
@@ -2085,7 +2085,7 @@ the user's own token instead of at registration.
 > **Evidence, measured on this worktree at `793d8d3a` + C5:**
 > * `grep -rn "REFUSALS" crates/ docs/ tests/` → **7 hits, every one inside C9's own prose in this
 >   file** (lines 318–319, 1369, 1380, 1382, 1384, 1392). **Zero occurrences in any source file.**
-> * `grep -rn "reflect" crates/boyko_macros/src/` → 2 hits, both unrelated prose (`boyko_macros/src/bundle.rs:274~`
+> * `grep -rn "reflect" crates/boyko_macros/src/` → 2 hits, both unrelated prose (`boyko_macros/src/bundle.rs:269~`
 >   *"the registry layout reflects `size_of`"*, `boyko_macros/src/lib.rs:563~` *"reflection-free"*). The derive key
 >   `#[component(reflect)]` does not exist and does not land until **C7**, as the binding context
 >   for this session states.
@@ -2361,11 +2361,11 @@ verified against the tree rather than argued.
 
 * the `reflect` **flag key** on `#[component(…)]` — F9's mechanism is accurately described
   (bare flag, duplicate detection, a "valid keys" diagnostic; `no_bundle` is the precedent at
-  `boyko_macros/src/component.rs:793~-801`) but ~~one match arm~~ → **four sites, and there is no match**: the
+  `boyko_macros/src/component.rs:791~-799`) but ~~one match arm~~ → **four sites, and there is no match**: the
   parser is a linear `if meta.path.is_ident(..)` chain inside one `parse_nested_meta` closure
-  (`boyko_macros/src/component.rs:791~-956`), so the key needs a field on `ComponentHookPaths`, its own `if` block
+  (`boyko_macros/src/component.rs:789~-954`), so the key needs a field on `ComponentHookPaths`, its own `if` block
   with its own duplicate-detection error, and **both** copies of the "valid keys: …" literal —
-  `boyko_macros/src/component.rs:742~` (the `on_despawn` arm) and `:894~` (the unknown-key arm), two independent
+  `boyko_macros/src/component.rs:741~` (the `on_despawn` arm) and `:892~` (the unknown-key arm), two independent
   strings. Updating one and not the other ships a diagnostic that lies about which keys are valid;
 * the **registration of `reflect` as a derive helper attribute.**
   `#[proc_macro_derive(Component, attributes(component, require, entities, relationship,
@@ -3142,8 +3142,8 @@ regression list carried it.
    "bitset")]`, **no install is emitted** and `type_info_of(T::component_id().0)` is `None`. Not a
    derive error at C8 — C9 owns the message and, with it, ECS D5's release `assert!`. The subject is
    one unit struct this rung creates. *(Measured at the audit: the combination compiles today and
-   bakes `size=0 align=1 fields=0 kind=Struct`, and `boyko_macros/src/component.rs:168~` — the pre-landing anchor;
-   **`:182~` after C8, where the term now is** — is the one slot in its neighbourhood with no
+   bakes `size=0 align=1 fields=0 kind=Struct`, and `boyko_macros/src/component.rs:167~` — the pre-landing anchor;
+   **`:181~` after C8, where the term now is** — is the one slot in its neighbourhood with no
    `storage_bitset` term.)*
 5. ~~**Horn-2 drift test (D16):** for every type carrying both `#[derive(Bindable)]` and
    `#[component(reflect)]`, `<T as Bindable>::field_id(name)` and the reflect field index
@@ -3203,7 +3203,7 @@ struct definition feeds both derives, both read the same `syn::Field::ident`, ne
 (`attributes(bind)` is declared and never read), and D14 fixes `#[reflect(skip)]` to *emit* an
 `Opaque` field rather than omit it — *precisely* so the by-index vocabulary cannot drift. The two
 indices agree by construction, permanently. **The red that fires is a generator mutation:** reverse
-`boyko_macros/src/bindable.rs:53~`'s `ids`, or suffix `boyko_macros/src/reflect.rs:501~`'s baked `name:`. That is the drift Horn 2 buys
+`boyko_macros/src/bindable.rs:50~`'s `ids`, or suffix `boyko_macros/src/reflect.rs:501~`'s baked `name:`. That is the drift Horn 2 buys
 and the reason the test is the price of taking it.
 
 *Fourth red (gate 4 — D29):* drop the `!hooks.storage_bitset` term from the emission's condition.
@@ -3527,7 +3527,7 @@ without it.
 generic `#[derive(Component)]` struct fails with **15 errors** (`E0107` *missing generics for
 struct* plus `E0425` *cannot find type `T` in this scope*), because the derive emits `impl #name`
 and `impl … Component for #name` from the bare ident and threads no generics —
-`crates/boyko_macros/src/component.rs:436` and `crates/boyko_macros/src/component.rs:452`. With
+`crates/boyko_macros/src/component.rs:435` and `crates/boyko_macros/src/component.rs:451`. With
 `#[component(reflect)]` added it is
 **20**. The row's stated hazard — a per-impl `static TYPE_INFO` collapsing across monomorphizations
 — is therefore **not reachable**: the reflect seam is never entered. The only thing the row could

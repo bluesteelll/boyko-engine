@@ -1284,7 +1284,7 @@ branch, not on this one.**
   edge in the file. **So a reloaded scene's children never compose their parent's pose.** Under the
   2026-09-03 editor ruling that is the editor's very first useful frame.
 - ⚠ **A code comment asserts the mechanism that does not exist.**
-  [`component.rs:137-142`](../crates/boyko_macros/src/component.rs) states that a relationship
+  [`component.rs:136-141`](../crates/boyko_macros/src/component.rs) states that a relationship
   TARGET's reverse index *"is rebuilt from the sources' `Relationship` on load, exactly as it is
   rebuilt on clone"*. The clone half is true; the load half is the measurement above. The comment is
   identical on both branches and is **deliberately not edited here** — the honest place for it is
@@ -4700,7 +4700,7 @@ subset off the table path (`commands/insert_command.rs:128-137`) — the same pa
 D2) the require pass never learned. Note the trap: the BARE type does not work —
 `insert(UiSpriteCursor::default())` is `error[E0277]: UiSpriteCursor: Bundle is not satisfied`,
 because dense storage suppresses the single-component `Bundle` impl
-(`boyko_macros/src/component.rs:413`). This does not close the defect — `#[require]` still panics,
+(`boyko_macros/src/component.rs:412`). This does not close the defect — `#[require]` still panics,
 and the hook is more code and DEFERRED rather than synchronous — but it means **no rung has to wait
 for this entry to resolve**, and "the capability is missing" is now only true of the attribute.
 
@@ -11301,8 +11301,8 @@ move with them.
 
 | helper | def | callers outside `migration_helpers.rs` | disposition |
 |---|---|---|---|
-| `migrate_entity_attach_ids_with_bytes` | `migration_helpers.rs:2419` | **one module** — `ecs_master/seam_by_id.rs:320` and `:462` | **REPAIRED here.** It is this rung's own `pub(crate)` D9 sibling with no other consumer, so the change alters no pre-existing behaviour: `world.migrate_entity_observer_bit(entity)` at `migration_helpers.rs:2696` (site 1, one line), the `HAS_ENTITY_OBSERVER` block at `migration_helpers.rs:2748-2755` (site 2, eight lines; the two fires are `migration_helpers.rs:2750` and `migration_helpers.rs:2753`), `added` iterated unfiltered for both kinds. |
-| `migrate_entity_detach_ids` | `migration_helpers.rs:2022` | **two** — `ecs_master/tag_api.rs:234` (`remove_tag`) and `seam_by_id.rs:591` | **DEFERRED.** Repairing it changes `remove_tag` too. Measured: `grep -c` for `fire_entity_observers` and `migrate_entity_observer_bit` over its body returns **0** for both. |
+| `migrate_entity_attach_ids_with_bytes` | `migration_helpers.rs:2419` | **one module** — `ecs_master/seam_by_id.rs:323` and `:465` | **REPAIRED here.** It is this rung's own `pub(crate)` D9 sibling with no other consumer, so the change alters no pre-existing behaviour: `world.migrate_entity_observer_bit(entity)` at `migration_helpers.rs:2696` (site 1, one line), the `HAS_ENTITY_OBSERVER` block at `migration_helpers.rs:2748-2755` (site 2, eight lines; the two fires are `migration_helpers.rs:2750` and `migration_helpers.rs:2753`), `added` iterated unfiltered for both kinds. |
+| `migrate_entity_detach_ids` | `migration_helpers.rs:2022` | **two** — `ecs_master/tag_api.rs:234` (`remove_tag`) and `seam_by_id.rs:597` | **DEFERRED.** Repairing it changes `remove_tag` too. Measured: `grep -c` for `fire_entity_observers` and `migrate_entity_observer_bit` over its body returns **0** for both. |
 | `migrate_entity_attach_ids` | `migration_helpers.rs:1724` | **one** — `tag_api.rs:170` (`add_tag`) | **DEFERRED, and it is the SAME change.** Same zero count over its body. |
 
 So **`add_tag` and `remove_tag` have never fired entity-targeted observers either.** That is the real

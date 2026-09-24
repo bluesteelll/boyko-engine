@@ -148,12 +148,12 @@ precedent.**
   (`no_bundle`, `:273~-278`) **and a lookahead list** at `:256~-263` that decides whether an
   identifier after a comma continues a `requires` path or opens a new item. **That
   lookahead is the easily-missed third touch point** — see rung B6.
-* `boyko_macros::component::parse_component_hooks` (`boyko_macros/src/component.rs:773+`) already accepts
+* `boyko_macros::component::parse_component_hooks` (`boyko_macros/src/component.rs:772+`) already accepts
   bare flag keys (`no_bundle`, `no_clone`, `no_serialize`) and NameValue keys
   (`clone = <fn>`, `storage = "bitset"|"dense"`, `stable_name = ".."`,
   `format_version = N`). A `reflect` bare flag is **not a new shape**, it is the sixth
   instance of an existing one.
-* The `component_id()` funnel (`boyko_macros/src/component.rs:454-479`) already carries **six** install
+* The `component_id()` funnel (`boyko_macros/src/component.rs:453-478`) already carries **six** install
   slots (`storage_install`, `require_install`, `clone_install`, `relationship_install`,
   `residency_install`, `serialize_install`), each an independently-emitted
   `TokenStream2`. Appending a seventh is a well-trodden pattern here.
@@ -706,7 +706,7 @@ error: duplicate #[component(...)] attribute; combine all hooks into one
   --> #[component(stable_name = "reflect::fixture::Pod3")]
 ```
 
-The derive parses one `#[component(…)]` list (`crates/boyko_macros/src/component.rs:744~` names the
+The derive parses one `#[component(…)]` list (`crates/boyko_macros/src/component.rs:743~` names the
 accepted key set); the form is `#[component(reflect, stable_name = "…")]`.
 
 ### D22 — B0's gate was one-sided, read an artefact five rungs downstream, and had no place to put it
@@ -1425,7 +1425,7 @@ transposed while gates 1–3 stay green.
    byte-identical tokens to today.
 4. **`crates/boyko_macros/src/component.rs`** — `parse_component_hooks` gains the `reflect` bare
    flag (the sixth instance of that shape); a `reflect_install` `TokenStream2` appended as
-   the **seventh** install slot in the `component_id()` funnel (`:454-479`), and the
+   the **seventh** install slot in the `component_id()` funnel (`:453-478`), and the
    `#[cfg(feature = "reflect")]`-wrapped `Reflect` impl + `TYPE_INFO` static. The refusal
    for `storage = "bitset"` + `reflect` is spanned at the offending key.
 
