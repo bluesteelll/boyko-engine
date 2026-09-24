@@ -1195,13 +1195,29 @@ columns ⇒ **256 KiB per table regardless of row count**; so twenty 50-row tabl
 resident for 40 KB of payload**, and the rejected resource region *"wins by two orders of magnitude
 at 50 rows"*.
 
+⚠ *2026-09-24, rung D-M0 (KC-02, [packing plan](ecs/POOL-SUBGRANULAR-PACKING-PLAN.md) S4): both
+sides of that arithmetic are re-stated, because it was wrong in both directions.* The quoted
+sentence described a `VmColumn`, not a `ComponentPool` column. A tracked 40 B column committed
+**384 KiB** on the granule ladder — three sub-regions, each overshooting to a second 64 KiB granule
+at 63 of 64 staggers — so the true pre-D-M0 figure was **1.6 MiB per table** (4 × 384 KiB + 64 KiB
+of entity ids) and **31.25 MiB for twenty (≈ 800× the 40 KB payload)**: the correction understated
+its own decisive number by 6.25×. D-M0 made the commit quantum the 4 KiB `COMMIT_PAGE` on absolute
+page floors: **52 KiB per table** (4 × 12 KiB + 4 KiB) and **1.02 MiB for twenty (≈ 26×)**. The
+ruling below is unaffected; the margins in point 1 are re-derived on both sides.
+
 **The ruling stands. That ground does not, and is marked SUPERSEDED.** Three reads on THIS branch:
 
-1. **The floor is symmetric across the fork.** `COMMIT_GRANULE = 64 * 1024`
-   ([`constants.rs:7`](../crates/boyko_ecs/src/ecs/constants.rs)) is the commit unit on **both**
-   sides — a resource region commits in the same granule. At the correction's own worst case the
-   margin is therefore **≤ 4× and ≤ 3.75 MiB**, not two orders of magnitude. One 1024² RGBA8 texture
-   is 4 MiB.
+1. **The floor is symmetric across the fork.** The commit unit is the same on **both** sides — a
+   resource region commits in the same quantum as a column: `COMMIT_PAGE`, 4 KiB
+   ([`constants.rs:24`](../crates/boyko_ecs/src/ecs/constants.rs)), since rung D-M0, and
+   `COMMIT_GRANULE = 64 * 1024` ([`constants.rs:7`](../crates/boyko_ecs/src/ecs/constants.rs))
+   before it. At the correction's own worst case the table form now costs **1.02 MiB** against
+   **80 KiB** of twenty one-page regions — **≈ 13× and < 1 MiB**, not two orders of magnitude. This
+   point used to read *"≤ 4× and ≤ 3.75 MiB"*, taking the correction's 256 KiB per table; on the
+   granule ladder the true margin was 31.25 MiB against 1.25 MiB of one-granule regions, **25× and
+   30 MiB**. The ratio grew because a tracked column's floor is three pages against a region's one;
+   the absolute gap, which is what the ruling weighs, fell thirty-fold. One 1024² RGBA8 texture is
+   4 MiB.
 2. **The floor keys on SCHEMA count, not FILE count.** `create_archetype` **dedups** by id set and
    `load_archetype` **appends** at the archetype's current row head — the loader says so itself at
    [`load_writer.rs:325-335`](../crates/boyko_ecs/src/ecs/core/serialize/load_writer.rs). N one-row
@@ -1209,8 +1225,9 @@ at 50 rows"*.
    one-schema-both-shapes form is exactly the mitigation. The correction's "twenty tables" counts
    files.
 3. **Option (b) cannot be built with the engine's own primitive.** `VmColumn::new` asserts
-   `COMMIT_GRANULE.is_multiple_of(size_of::<T>())`
-   ([`vm_column.rs:144-149`](../crates/boyko_ecs/src/ecs/memory/vm_column.rs)) and 40 ∤ 65536, so
+   `COMMIT_PAGE.is_multiple_of(size_of::<T>())` (`COMMIT_GRANULE` before D-M0)
+   ([`vm_column.rs:151-156`](../crates/boyko_ecs/src/ecs/memory/vm_column.rs)) and 40 ∤ 4096 (nor
+   65536), so
    the correction's "flat column" of a 40 B row type collapses into a pool-reusing variant that
    saves 25 % while paying 100 %. And `grep -rniw "resource" crates/boyko_serialize/src/` returns
    **0** on this branch — (b) writes an entire per-`ResourceId` serialize seam from scratch rather
@@ -1574,7 +1591,13 @@ within-a-system kind does not.
 table archetype has four non-empty columns ⇒ **256 KiB per table, independent of row count.** F3
 (owner-ruled) admits N table files through one schema, so twenty small tables of 50 rows × 40 B cost
 **~5 MiB resident for 40 KB of payload (~128× overhead)** plus twenty extra archetype mask tests on
-every query, every frame. The rejected resource region loses by ~25 % at 4000 rows and **wins by two
+every query, every frame.
+
+⚠ *2026-09-24, rung D-M0 (packing plan S4): this arithmetic is superseded on both sides — see the
+F2 supersession above.* The quoted sentence described a `VmColumn`; a tracked `ComponentPool`
+column committed 384 KiB at 63 of 64 staggers, so the figure at the time was **1.6 MiB per table,
+31.25 MiB for twenty (≈ 800×)** — this paragraph understated its own decisive number by 6.25× — and
+since D-M0 it is **52 KiB per table, 1.02 MiB for twenty (≈ 26×)**. The rejected resource region loses by ~25 % at 4000 rows and **wins by two
 orders of magnitude at 50**. The ruling never says the choice is size-dependent, and the mechanical
 rule it gives keys on a different property. Marginal cost also mixes units: honest figure is
 **511–704 KiB**, not a flat 511 KiB.
@@ -2329,7 +2352,7 @@ red tests land regardless of its disposition). Everything above them waits on a 
 
   > *Body kept by the merge `merge/ke16-into-render`, 2026-09-10, from `feat/threadpool-ke16` — the record as it stood when the ruling was taken. Where it says a ballot is STILL OPEN, the disposition line above it is the later state.*
   >
-  > ⚠ **HEADER NOTE, 2026-09-10 (`merge/ke16-into-render`) — nothing in this block is a live status.** Every sentence in it that calls the ballot open is struck in place and dated. GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:1032` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:2343`).
+  > ⚠ **HEADER NOTE, 2026-09-10 (`merge/ke16-into-render`) — nothing in this block is a live status.** Every sentence in it that calls the ballot open is struck in place and dated. GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:1032` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:2366`).
   >
   > ⚠ ~~STILL OPEN — 2026-08-30. The owner asked for the ANALYSIS, not a ruling.~~ Below is what was
   > measured; nothing in it is a decision.
@@ -2352,7 +2375,7 @@ red tests land regardless of its disposition). Everything above them waits on a 
   > G6; §Identity + the GN1 lint). *A question still open cannot have had four consequences filed
   > against it.*
   >
-  > ⚠ *De-bolded 2026-09-10 by the merge `merge/ke16-into-render`: the sentence is the 2026-08-30 analysis's own argument, kept verbatim, and is no longer set in the bold disposition voice a reader — or the `gaia_ruled_vs_open_census` gate — reads a live status out of.* GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:1032` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:2359`).
+  > ⚠ *De-bolded 2026-09-10 by the merge `merge/ke16-into-render`: the sentence is the 2026-08-30 analysis's own argument, kept verbatim, and is no longer set in the bold disposition voice a reader — or the `gaia_ruled_vs_open_census` gate — reads a live status out of.* GB-6 was DISPOSED BY THE OWNER on 2026-09-03, both halves; ground at the who-table row `docs/OPEN-QUESTIONS.md:1032` and §*2026-09-03* (`docs/OPEN-QUESTIONS.md:2382`).
   >
   > ⚠ **The one thing missing is the price of the rejected alternative.** Measured:
   > `grep -rn "SceneModel" docs/ crates/` returns **exactly one line in the whole repository** — the
@@ -2825,7 +2848,7 @@ red tests land regardless of its disposition). Everything above them waits on a 
 - **AB-7** — R-DENSE: unconditional with a driver-independent ground that must be ESTABLISHED rather
   than asserted, or lifted by `publish tracked`. ⚠ **re-grounds a ratified refusal**. Blocks **R5**.
   ~~STILL OPEN — STILL THE OWNER'S.~~ **Struck 2026-09-10 by the merge `merge/ke16-into-render`:
-  the owner LIFTED it — see the ruling table above, `docs/OPEN-QUESTIONS.md:1641`, "R-DENSE LIFTED,
+  the owner LIFTED it — see the ruling table above, `docs/OPEN-QUESTIONS.md:1664`, "R-DENSE LIFTED,
   and the ballot's framing rejected", with his own words. This paragraph is the record of the state
   BEFORE that ruling, not a live status.** ⚠ When it was struck, the ruled-vs-open census could not
   see this one: the table at `docs/OPEN-QUESTIONS.md:1637` is headed `| ballot | ruling | where the ground lives |` with no
@@ -10973,7 +10996,8 @@ wrong by the time they were re-measured here.** (i) The site count was **327**, 
 `g12c` ignore this rung just wrote is itself the 327th, so the figure moved *because of* the change
 it was describing, and it moved again for the same reason: EG2-R round 3's `g17` takes it to
 **328** (`grep -rn '#\[ignore' --include=*.rs crates/ | wc -l` → 328, re-measured at that round).
-It is **404** on the tree today too (401 at `2431c570`; the A7 merge adds three) <!-- measure: tree-lines crates rs #[ignore = 404 -->, and that
+It is **405** on the tree today too (401 at `2431c570`; the A7 merge adds three; rung D-M0's
+`solo:` OS-truth test adds one) <!-- measure: tree-lines crates rs #[ignore = 405 -->, and that
 half is no longer prose: the round stamp keeps the historical sentence true, and the marker keeps
 the live one checkable — a paragraph whose whole subject is that a count rots should not carry one
 that nothing re-takes.

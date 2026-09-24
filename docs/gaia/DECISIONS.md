@@ -1224,8 +1224,10 @@ separately, and then there would be less reserved empty space."*
 **Correct instinct, but the benefit is not primarily the one stated, and saying so is the point of
 recording it.**
 
-* **Resident memory — conditional.** `POOL_MIN_SLAB`'s 64 KiB floor is paid per non-empty column of
-  an **archetype**, not per file. Splitting the file does not reduce the archetype count once
+* **Resident memory — conditional.** The resident floor is paid per non-empty column of an
+  **archetype**, not per file — one commit page per sub-region since rung D-M0 (12 KiB for a
+  tracked column; it was 384 KiB at 63 of 64 staggers under the 64 KiB `POOL_MIN_SLAB` this
+  sentence used to name, see D-3). Splitting the file does not reduce the archetype count once
   everything is loaded, so the floor is unchanged. The saving is real only if chunks are
   **unloaded** — i.e. it is the streaming half, which the owner already ruled in (F5, everything
   from the start).
@@ -1248,6 +1250,26 @@ currently pays the same floor. The F2 finding (twenty small tables ⇒ ~5 MiB re
 payload) is one symptom of an engine-wide property, not a data-language problem.
 
 Owner: *"if it can somehow be fixed, it should be fixed."*
+
+⚠ **Answered 2026-09-24 by rung D-M0** (KC-02, [packing plan](../ecs/POOL-SUBGRANULAR-PACKING-PLAN.md)
+S0–S4), and the answer corrects the premise above rather than taking the direction it names:
+
+* **The premise was false.** 64 KiB is the Windows *reservation* granularity
+  (`dwAllocationGranularity`), which binds `MEM_RESERVE` only; `MEM_COMMIT` inside a reservation
+  and Linux `mprotect` are page-granular. The floor could be lowered, and D-M0 lowered it: the
+  commit quantum is now `COMMIT_PAGE` (4 KiB on x86_64) on absolute page floors, and
+  `POOL_MIN_SLAB == COMMIT_PAGE` (plan D1–D2). Reservations stay granule-rounded.
+* **The fix is a smaller quantum, not shared slabs.** Several columns sharing one slab was rejected
+  (plan D5): it defeats the per-pool cache stagger, turns concurrently scheduled writers into false
+  sharing, and — for the per-archetype-arena form — reintroduces the relocation whose absence fixed
+  the SP4 colored-solve race.
+* **Measured on the oracle, not asserted.** A tracked column's floor fell from 384 KiB (63 of 64
+  staggers; 192 KiB at stagger 0 — the "3 × 64 KiB" above was the stagger-0 case) to 12 KiB, an
+  untracked one from 128 KiB to 4 KiB; the commit-floor tests hold the model to the kernel's own
+  `VirtualQuery` / `/proc/self/maps` count. F2's twenty small tables go from 31.25 MiB to 1.02 MiB.
+* **It does pay beyond Gaia, as this entry said:** 1000 sparse archetypes × 4 tracked columns go
+  from 1 536 000 KiB (≈ 1.5 GiB) of commit charge to 48 000 KiB (≈ 47 MiB; the plan's "Target
+  metrics" table rounds it to 48 MiB).
 
 ### D-4 — the priority that governs all of the above
 
