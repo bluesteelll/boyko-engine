@@ -1,0 +1,637 @@
+2026-09-24T09:09:49.799+03:00 WINDOW START cutoff 2026-09-24T12:45:00 blocks ['P1-L10', 'P2a-L9classes', 'P2b-L9reuse', 'P3-C3b', 'P4-G9', 'P5a-bridge2', 'P5b-L10spans', 'P5g-C3bG5', 'P5d-L9reuseJD', 'P5e-L9reuseR', 'P5f-L9reuseJAmid', 'P5c-C3bG4'] test False resume False
+2026-09-24T09:09:49.961+03:00 P1-L10-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T09:12:00.463+03:00 P1-L10-p0: idle reached; {'time': '2026-09-24T09:12:00.463+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T09:12:10.509+03:00 P1-L10-p0: opening receipt 1.2% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T09:12:23.981+03:00   P1-L10-p0 warm-up L10-Son#b4db W=1 (untimed): stat 4.6748 ms pose 0xcc2a5400c66eecce expect match rb 1.2% ra 1.67% others 0.16% cpu_s 8.375 wall 8.38s waited 0.0s
+2026-09-24T09:12:34.281+03:00   P1-L10-p0 r0 [  1] L10-Offp#b4db W=1: stat 1.4826 ms pose 0x3db47fae414b655c expect match rb 1.67% ra 3.48% others 4.28% cpu_s 5.281 wall 5.209s waited 0.0s
+2026-09-24T09:12:47.777+03:00   P1-L10-p0 r0 [  2] L10-Son#b4db W=1: stat 4.7029 ms pose 0xcc2a5400c66eecce expect match rb 3.48% ra 0.55% others 0.59% cpu_s 8.406 wall 8.406s waited 0.0s
+2026-09-24T09:12:58.033+03:00   P1-L10-p0 r1 [  3] L10-Offp#b4db W=1: stat 1.4701 ms pose 0x3db47fae414b655c expect match rb 0.55% ra 0.62% others 0.21% cpu_s 5.156 wall 5.167s waited 0.0s
+2026-09-24T09:13:11.475+03:00   P1-L10-p0 r1 [  4] L10-Son#b4db W=1: stat 4.6759 ms pose 0xcc2a5400c66eecce expect match rb 0.62% ra 4.69% others 0.69% cpu_s 8.391 wall 8.354s waited 0.0s
+2026-09-24T09:13:21.722+03:00   P1-L10-p0 r2 [  5] L10-Offp#b4db W=1: stat 1.4566 ms pose 0x3db47fae414b655c expect match rb 4.69% ra 2.73% others 3.39% cpu_s 5.219 wall 5.159s waited 0.0s
+2026-09-24T09:13:35.172+03:00   P1-L10-p0 r2 [  6] L10-Son#b4db W=1: stat 4.6808 ms pose 0xcc2a5400c66eecce expect match rb 2.73% ra 0.41% others 0.28% cpu_s 8.359 wall 8.362s waited 0.0s
+2026-09-24T09:13:35.172+03:00 P1-L10-p0: done
+2026-09-24T09:13:35.174+03:00 P1-L10-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T09:15:45.742+03:00 P1-L10-p1: idle reached; {'time': '2026-09-24T09:15:45.742+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T09:15:55.787+03:00 P1-L10-p1: opening receipt 1.2% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T09:16:09.294+03:00   P1-L10-p1 warm-up L10-Son#b4db W=1 (untimed): stat 4.6861 ms pose 0xcc2a5400c66eecce expect match rb 1.2% ra 3.62% others 4.74% cpu_s 8.484 wall 8.421s waited 0.0s
+2026-09-24T09:16:22.803+03:00   P1-L10-p1 r0 [  1] L10-Son#b4db W=1: stat 4.7127 ms pose 0xcc2a5400c66eecce expect match rb 3.62% ra 0.51% others 0.55% cpu_s 8.406 wall 8.424s waited 0.0s
+2026-09-24T09:16:33.106+03:00   P1-L10-p1 r0 [  2] L10-Offp#b4db W=1: stat 1.4738 ms pose 0x3db47fae414b655c expect match rb 0.51% ra 0.2% others 0.28% cpu_s 5.219 wall 5.216s waited 0.0s
+2026-09-24T09:16:46.577+03:00   P1-L10-p1 r1 [  3] L10-Son#b4db W=1: stat 4.6862 ms pose 0xcc2a5400c66eecce expect match rb 0.2% ra 5.22% others 0.94% cpu_s 8.359 wall 8.383s waited 0.0s CONTAMINATED-after(5.22%)
+2026-09-24T09:17:21.863+03:00   P1-L10-p1 r1 [  4] L10-Offp#b4db W=1: stat 1.4587 ms pose 0x3db47fae414b655c expect match rb 0.23% ra 0.16% others 0.15% cpu_s 5.156 wall 5.172s waited 25.0s
+2026-09-24T09:17:35.336+03:00   P1-L10-p1 r2 [  5] L10-Son#b4db W=1: stat 4.6956 ms pose 0xcc2a5400c66eecce expect match rb 0.16% ra 3.03% others 3.77% cpu_s 8.391 wall 8.385s waited 0.0s
+2026-09-24T09:17:45.599+03:00   P1-L10-p1 r2 [  6] L10-Offp#b4db W=1: stat 1.4639 ms pose 0x3db47fae414b655c expect match rb 3.03% ra 1.4% others 0.64% cpu_s 5.156 wall 5.173s waited 0.0s
+2026-09-24T09:17:45.599+03:00 P1-L10-p1: re-running 1 process(es) at the end of the pass: [(3, 1, 'L10-Son', 'b4db', 1, 'contaminated')]
+2026-09-24T09:17:59.079+03:00   P1-L10-p1 r1 [  3] L10-Son#b4db W=1 RERUN (contaminated): stat 4.6990 ms pose 0xcc2a5400c66eecce expect match rb 1.4% ra 0.66% others 0.12% cpu_s 8.406 wall 8.393s waited 0.0s
+2026-09-24T09:17:59.079+03:00 P1-L10-p1: done
+2026-09-24T09:17:59.081+03:00 P2a-L9classes-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T09:20:09.592+03:00 P2a-L9classes-p0: idle reached; {'time': '2026-09-24T09:20:09.592+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T09:20:19.637+03:00 P2a-L9classes-p0: opening receipt 2.71% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T09:20:31.211+03:00   P2a-L9classes-p0 warm-up L9-classes#c4db W=1 (untimed): stat 1.3795 ms rb 2.71% ra 2.67% others 2.89% cpu_s 6.484 wall 6.526s waited 0.0s
+2026-09-24T09:20:42.781+03:00   P2a-L9classes-p0 r0 [  1] L9-classes#c4db W=1: stat 1.3705 ms rb 2.67% ra 0.67% others 0.15% cpu_s 6.234 wall 6.526s waited 0.0s
+2026-09-24T09:20:54.158+03:00   P2a-L9classes-p0 r1 [  2] L9-classes#c4db W=1: stat 1.3725 ms rb 0.67% ra 0.25% others 0.17% cpu_s 6.375 wall 6.33s waited 0.0s
+2026-09-24T09:21:05.762+03:00   P2a-L9classes-p0 r2 [  3] L9-classes#c4db W=1: stat 1.3670 ms rb 0.25% ra 4.84% others 2.44% cpu_s 6.562 wall 6.558s waited 0.0s
+2026-09-24T09:21:05.763+03:00 P2a-L9classes-p0: done
+2026-09-24T09:21:05.764+03:00 P2a-L9classes-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T09:23:16.268+03:00 P2a-L9classes-p1: idle reached; {'time': '2026-09-24T09:23:16.268+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T09:23:26.318+03:00 P2a-L9classes-p1: opening receipt 2.62% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T09:23:37.903+03:00   P2a-L9classes-p1 warm-up L9-classes#c4db W=1 (untimed): stat 1.4215 ms rb 2.62% ra 0.27% others 0.19% cpu_s 6.484 wall 6.539s waited 0.0s
+2026-09-24T09:23:49.494+03:00   P2a-L9classes-p1 r0 [  1] L9-classes#c4db W=1: stat 1.3695 ms rb 0.27% ra 1.18% others 0.21% cpu_s 6.594 wall 6.543s waited 0.0s
+2026-09-24T09:24:00.911+03:00   P2a-L9classes-p1 r1 [  2] L9-classes#c4db W=1: stat 1.4090 ms rb 1.18% ra 3.77% others 4.54% cpu_s 6.438 wall 6.37s waited 0.0s
+2026-09-24T09:24:12.343+03:00   P2a-L9classes-p1 r2 [  3] L9-classes#c4db W=1: stat 1.3785 ms rb 3.77% ra 0.72% others 0.83% cpu_s 6.406 wall 6.387s waited 0.0s
+2026-09-24T09:24:12.344+03:00 P2a-L9classes-p1: done
+2026-09-24T09:24:12.345+03:00 P2b-L9reuse-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T09:26:22.834+03:00 P2b-L9reuse-p0: idle reached; {'time': '2026-09-24T09:26:22.834+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T09:26:32.880+03:00 P2b-L9reuse-p0: opening receipt 0.38% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T09:26:40.969+03:00   P2b-L9reuse-p0 warm-up L9-JA-off#b4db W=8 (untimed): stat 6.0415 ms pose 0x32d5e235342b4143 expect match rb 0.38% ra 1.27% others 0.29% cpu_s 12.062 wall 3.036s waited 0.0s
+2026-09-24T09:26:55.094+03:00   P2b-L9reuse-p0 r0 [  1] L9-JA-off#b4db W=1: stat 18.1204 ms pose 0x32d5e235342b4143 expect match rb 1.27% ra 3.4% others 3.83% cpu_s 9.156 wall 9.075s waited 0.0s
+2026-09-24T09:27:08.436+03:00   P2b-L9reuse-p0 r0 [  2] L9-JA-on#b4db W=1: stat 16.5556 ms pose 0x30c5438bc6ad9ffa expect match rb 3.4% ra 1.28% others 0.34% cpu_s 8.328 wall 8.293s waited 0.0s
+2026-09-24T09:27:22.653+03:00   P2b-L9reuse-p0 r0 [  3] L9-JA-a-off#b4db W=1: stat 18.1602 ms pose 0x32d5e235342b4143 expect match rb 1.28% ra 0.55% others 0.18% cpu_s 9.094 wall 9.149s waited 0.0s
+2026-09-24T09:27:36.063+03:00   P2b-L9reuse-p0 r0 [  4] L9-JA-a-on#b4db W=1: stat 16.5367 ms pose 0x30c5438bc6ad9ffa expect match rb 0.55% ra 3.64% others 4.11% cpu_s 8.406 wall 8.338s waited 0.0s
+2026-09-24T09:27:44.168+03:00   P2b-L9reuse-p0 r0 [  5] L9-JA-off#b4db W=8: stat 6.0794 ms pose 0x32d5e235342b4143 expect match rb 3.64% ra 0.78% others 0.87% cpu_s 13.031 wall 3.054s waited 0.0s
+2026-09-24T09:27:52.184+03:00   P2b-L9reuse-p0 r0 [  6] L9-JA-on#b4db W=8: stat 5.9001 ms pose 0x30c5438bc6ad9ffa expect match rb 0.78% ra 0.43% others 0.33% cpu_s 11.188 wall 2.965s waited 0.0s
+2026-09-24T09:28:06.383+03:00   P2b-L9reuse-p0 r1 [  7] L9-JA-off#b4db W=1: stat 18.2676 ms pose 0x32d5e235342b4143 expect match rb 0.43% ra 2.16% others 0.29% cpu_s 9.109 wall 9.149s waited 0.0s
+2026-09-24T09:28:19.694+03:00   P2b-L9reuse-p0 r1 [  8] L9-JA-on#b4db W=1: stat 16.4892 ms pose 0x30c5438bc6ad9ffa expect match rb 2.16% ra 3.05% others 3.94% cpu_s 8.266 wall 8.26s waited 0.0s
+2026-09-24T09:28:33.901+03:00   P2b-L9reuse-p0 r1 [  9] L9-JA-a-off#b4db W=1: stat 18.1349 ms pose 0x32d5e235342b4143 expect match rb 3.05% ra 0.31% others 0.27% cpu_s 9.109 wall 9.14s waited 0.0s
+2026-09-24T09:28:47.325+03:00   P2b-L9reuse-p0 r1 [ 10] L9-JA-a-on#b4db W=1: stat 16.5663 ms pose 0x30c5438bc6ad9ffa expect match rb 0.31% ra 0.14% others 0.16% cpu_s 8.359 wall 8.352s waited 0.0s
+2026-09-24T09:28:55.408+03:00   P2b-L9reuse-p0 r1 [ 11] L9-JA-off#b4db W=8: stat 6.0338 ms pose 0x32d5e235342b4143 expect match rb 0.14% ra 4.88% others 2.32% cpu_s 11.531 wall 3.032s waited 0.0s
+2026-09-24T09:29:03.424+03:00   P2b-L9reuse-p0 r1 [ 12] L9-JA-on#b4db W=8: stat 5.8994 ms pose 0x30c5438bc6ad9ffa expect match rb 4.88% ra 3.85% others 3.46% cpu_s 12.109 wall 2.965s waited 0.0s
+2026-09-24T09:29:17.582+03:00   P2b-L9reuse-p0 r2 [ 13] L9-JA-off#b4db W=1: stat 18.1843 ms pose 0x32d5e235342b4143 expect match rb 3.85% ra 0.23% others 0.25% cpu_s 9.109 wall 9.107s waited 0.0s
+2026-09-24T09:29:30.871+03:00   P2b-L9reuse-p0 r2 [ 14] L9-JA-on#b4db W=1: stat 16.4506 ms pose 0x30c5438bc6ad9ffa expect match rb 0.23% ra 0.41% others 0.2% cpu_s 8.312 wall 8.24s waited 0.0s
+2026-09-24T09:29:45.110+03:00   P2b-L9reuse-p0 r2 [ 15] L9-JA-a-off#b4db W=1: stat 18.1943 ms pose 0x32d5e235342b4143 expect match rb 0.41% ra 3.5% others 3.76% cpu_s 9.156 wall 9.167s waited 0.0s
+2026-09-24T09:29:58.506+03:00   P2b-L9reuse-p0 r2 [ 16] L9-JA-a-on#b4db W=1: stat 16.5099 ms pose 0x30c5438bc6ad9ffa expect match rb 3.5% ra 2.45% others 0.38% cpu_s 8.328 wall 8.324s waited 0.0s
+2026-09-24T09:30:06.658+03:00   P2b-L9reuse-p0 r2 [ 17] L9-JA-off#b4db W=8: stat 6.1725 ms pose 0x32d5e235342b4143 expect match rb 2.45% ra 0.37% others 0.44% cpu_s 12.812 wall 3.102s waited 0.0s
+2026-09-24T09:30:14.724+03:00   P2b-L9reuse-p0 r2 [ 18] L9-JA-on#b4db W=8: stat 6.0012 ms pose 0x30c5438bc6ad9ffa expect match rb 0.37% ra 1.1% others 1.62% cpu_s 11.328 wall 3.016s waited 0.0s
+2026-09-24T09:30:14.725+03:00 P2b-L9reuse-p0: done
+2026-09-24T09:30:14.726+03:00 P2b-L9reuse-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T09:32:25.191+03:00 P2b-L9reuse-p1: idle reached; {'time': '2026-09-24T09:32:25.190+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T09:32:35.236+03:00 P2b-L9reuse-p1: opening receipt 4.44% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T09:32:43.353+03:00   P2b-L9reuse-p1 warm-up L9-JA-off#b4db W=8 (untimed): stat 6.1047 ms pose 0x32d5e235342b4143 expect match rb 4.44% ra 1.1% others 1.18% cpu_s 12.656 wall 3.067s waited 0.0s
+2026-09-24T09:32:51.377+03:00   P2b-L9reuse-p1 r0 [  1] L9-JA-on#b4db W=8: stat 5.9160 ms pose 0x30c5438bc6ad9ffa expect match rb 1.1% ra 1.42% others 0.13% cpu_s 11.078 wall 2.974s waited 0.0s
+2026-09-24T09:32:59.463+03:00   P2b-L9reuse-p1 r0 [  2] L9-JA-off#b4db W=8: stat 6.0385 ms pose 0x32d5e235342b4143 expect match rb 1.42% ra 0.98% others 0.32% cpu_s 12.047 wall 3.034s waited 0.0s
+2026-09-24T09:33:12.848+03:00   P2b-L9reuse-p1 r0 [  3] L9-JA-a-on#b4db W=1: stat 16.4933 ms pose 0x30c5438bc6ad9ffa expect match rb 0.98% ra 5.94% others 1.13% cpu_s 8.344 wall 8.316s waited 0.0s CONTAMINATED-after(5.94%)
+2026-09-24T09:33:52.105+03:00   P2b-L9reuse-p1 r0 [  4] L9-JA-a-off#b4db W=1: stat 18.1831 ms pose 0x32d5e235342b4143 expect match rb 0.86% ra 3.32% others 0.19% cpu_s 9.094 wall 9.162s waited 25.0s
+2026-09-24T09:34:05.431+03:00   P2b-L9reuse-p1 r0 [  5] L9-JA-on#b4db W=1: stat 16.5243 ms pose 0x30c5438bc6ad9ffa expect match rb 3.32% ra 2.15% others 3.73% cpu_s 8.297 wall 8.277s waited 0.0s
+2026-09-24T09:34:19.563+03:00   P2b-L9reuse-p1 r0 [  6] L9-JA-off#b4db W=1: stat 18.1389 ms pose 0x32d5e235342b4143 expect match rb 2.15% ra 0.19% others 0.17% cpu_s 9.094 wall 9.085s waited 0.0s
+2026-09-24T09:34:27.560+03:00   P2b-L9reuse-p1 r1 [  7] L9-JA-on#b4db W=8: stat 5.8593 ms pose 0x30c5438bc6ad9ffa expect match rb 0.19% ra 0.2% others 0.13% cpu_s 11.391 wall 2.945s waited 0.0s
+2026-09-24T09:34:35.650+03:00   P2b-L9reuse-p1 r1 [  8] L9-JA-off#b4db W=8: stat 6.0454 ms pose 0x32d5e235342b4143 expect match rb 0.2% ra 3.98% others 0.1% cpu_s 9.953 wall 3.038s waited 0.0s
+2026-09-24T09:34:49.042+03:00   P2b-L9reuse-p1 r1 [  9] L9-JA-a-on#b4db W=1: stat 16.5029 ms pose 0x30c5438bc6ad9ffa expect match rb 3.98% ra 2.0% others 2.92% cpu_s 8.344 wall 8.321s waited 0.0s
+2026-09-24T09:35:03.256+03:00   P2b-L9reuse-p1 r1 [ 10] L9-JA-a-off#b4db W=1: stat 18.1427 ms pose 0x32d5e235342b4143 expect match rb 2.0% ra 0.33% others 0.24% cpu_s 9.141 wall 9.141s waited 0.0s
+2026-09-24T09:35:16.563+03:00   P2b-L9reuse-p1 r1 [ 11] L9-JA-on#b4db W=1: stat 16.4836 ms pose 0x30c5438bc6ad9ffa expect match rb 0.33% ra 2.34% others 0.2% cpu_s 8.266 wall 8.257s waited 0.0s
+2026-09-24T09:35:30.688+03:00   P2b-L9reuse-p1 r1 [ 12] L9-JA-off#b4db W=1: stat 18.1236 ms pose 0x32d5e235342b4143 expect match rb 2.34% ra 2.52% others 3.68% cpu_s 9.109 wall 9.076s waited 0.0s
+2026-09-24T09:35:38.700+03:00   P2b-L9reuse-p1 r2 [ 13] L9-JA-on#b4db W=8: stat 5.8938 ms pose 0x30c5438bc6ad9ffa expect match rb 2.52% ra 1.57% others 0.6% cpu_s 10.953 wall 2.962s waited 0.0s
+2026-09-24T09:35:46.783+03:00   P2b-L9reuse-p1 r2 [ 14] L9-JA-off#b4db W=8: stat 6.0350 ms pose 0x32d5e235342b4143 expect match rb 1.57% ra 0.43% others 0.19% cpu_s 11.281 wall 3.032s waited 0.0s
+2026-09-24T09:36:00.204+03:00   P2b-L9reuse-p1 r2 [ 15] L9-JA-a-on#b4db W=1: stat 16.5662 ms pose 0x30c5438bc6ad9ffa expect match rb 0.43% ra 3.16% others 0.25% cpu_s 8.344 wall 8.353s waited 0.0s
+2026-09-24T09:36:14.416+03:00   P2b-L9reuse-p1 r2 [ 16] L9-JA-a-off#b4db W=1: stat 18.1435 ms pose 0x32d5e235342b4143 expect match rb 3.16% ra 1.82% others 3.79% cpu_s 9.172 wall 9.14s waited 0.0s
+2026-09-24T09:36:27.746+03:00   P2b-L9reuse-p1 r2 [ 17] L9-JA-on#b4db W=1: stat 16.5304 ms pose 0x30c5438bc6ad9ffa expect match rb 1.82% ra 0.45% others 0.34% cpu_s 8.312 wall 8.281s waited 0.0s
+2026-09-24T09:36:41.858+03:00   P2b-L9reuse-p1 r2 [ 18] L9-JA-off#b4db W=1: stat 18.0970 ms pose 0x32d5e235342b4143 expect match rb 0.45% ra 1.85% others 0.25% cpu_s 9.078 wall 9.063s waited 0.0s
+2026-09-24T09:36:41.858+03:00 P2b-L9reuse-p1: re-running 1 process(es) at the end of the pass: [(3, 0, 'L9-JA-a-on', 'b4db', 1, 'contaminated')]
+2026-09-24T09:36:55.261+03:00   P2b-L9reuse-p1 r0 [  3] L9-JA-a-on#b4db W=1 RERUN (contaminated): stat 16.5271 ms pose 0x30c5438bc6ad9ffa expect match rb 1.85% ra 3.02% others 3.76% cpu_s 8.281 wall 8.333s waited 0.0s
+2026-09-24T09:36:55.262+03:00 P2b-L9reuse-p1: done
+2026-09-24T09:36:55.263+03:00 P3-C3b-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T09:39:05.717+03:00 P3-C3b-p0: idle reached; {'time': '2026-09-24T09:39:05.717+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T09:39:15.765+03:00 P3-C3b-p0: opening receipt 0.73% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T09:39:22.011+03:00   P3-C3b-p0 warm-up C3b-TD-tree#tip W=8 (untimed): stat 2.3690 ms pose 0x32d5e235342b4143 expect match rb 0.73% ra 1.21% others 0.16% cpu_s 4.797 wall 1.195s waited 0.0s
+2026-09-24T09:39:35.870+03:00   P3-C3b-p0 r0 [  1] C3b-TA-armed#par W=1: stat 17.4695 ms pose 0x32d5e235342b4143 expect match rb 1.21% ra 12.14% others 0.29% cpu_s 8.812 wall 8.787s waited 0.0s CONTAMINATED-after(12.14%)
+2026-09-24T09:40:14.657+03:00   P3-C3b-p0 r0 [  2] C3b-TA-armed#tip W=1: stat 17.2732 ms pose 0x32d5e235342b4143 expect match rb 0.25% ra 1.38% others 0.14% cpu_s 8.656 wall 8.689s waited 25.0s
+2026-09-24T09:40:23.188+03:00   P3-C3b-p0 r0 [  3] C3b-TD-tree#par W=1: stat 6.9416 ms pose 0x32d5e235342b4143 expect match rb 1.38% ra 5.69% others 3.98% cpu_s 3.578 wall 3.482s waited 0.0s CONTAMINATED-after(5.69%)
+2026-09-24T09:40:56.661+03:00   P3-C3b-p0 r0 [  4] C3b-TD-tree#tip W=1: stat 6.7745 ms pose 0x32d5e235342b4143 expect match rb 0.31% ra 0.74% others 0.26% cpu_s 3.422 wall 3.396s waited 25.0s
+2026-09-24T09:41:04.019+03:00   P3-C3b-p0 r0 [  5] C3b-TA-armed#par W=8: stat 4.4812 ms pose 0x32d5e235342b4143 expect match rb 0.74% ra 5.39% others 3.03% cpu_s 11.438 wall 2.288s waited 0.0s CONTAMINATED-after(5.39%)
+2026-09-24T09:41:36.328+03:00   P3-C3b-p0 r0 [  6] C3b-TA-armed#tip W=8: stat 4.3270 ms pose 0x32d5e235342b4143 expect match rb 0.45% ra 0.54% others 0.13% cpu_s 11.062 wall 2.212s waited 25.0s
+2026-09-24T09:41:42.688+03:00   P3-C3b-p0 r0 [  7] C3b-TD-tree#par W=8: stat 2.6018 ms pose 0x32d5e235342b4143 expect match rb 0.54% ra 2.58% others 0.15% cpu_s 5.203 wall 1.311s waited 0.0s
+2026-09-24T09:41:48.923+03:00   P3-C3b-p0 r0 [  8] C3b-TD-tree#tip W=8: stat 2.3523 ms pose 0x32d5e235342b4143 expect match rb 2.58% ra 5.19% others 4.62% cpu_s 4.5 wall 1.186s waited 0.0s CONTAMINATED-after(5.19%)
+2026-09-24T09:42:27.768+03:00   P3-C3b-p0 r1 [  9] C3b-TA-armed#par W=1: stat 17.3984 ms pose 0x32d5e235342b4143 expect match rb 1.23% ra 4.71% others 0.16% cpu_s 8.75 wall 8.751s waited 25.0s
+2026-09-24T09:42:41.517+03:00   P3-C3b-p0 r1 [ 10] C3b-TA-armed#tip W=1: stat 17.2599 ms pose 0x32d5e235342b4143 expect match rb 4.71% ra 1.42% others 2.63% cpu_s 8.656 wall 8.681s waited 0.0s
+2026-09-24T09:42:50.103+03:00   P3-C3b-p0 r1 [ 11] C3b-TD-tree#par W=1: stat 7.0538 ms pose 0x32d5e235342b4143 expect match rb 1.42% ra 0.47% others 0.08% cpu_s 3.547 wall 3.536s waited 0.0s
+2026-09-24T09:42:58.542+03:00   P3-C3b-p0 r1 [ 12] C3b-TD-tree#tip W=1: stat 6.7608 ms pose 0x32d5e235342b4143 expect match rb 0.47% ra 0.66% others 0.18% cpu_s 3.406 wall 3.39s waited 0.0s
+2026-09-24T09:43:05.915+03:00   P3-C3b-p0 r1 [ 13] C3b-TA-armed#par W=8: stat 4.5115 ms pose 0x32d5e235342b4143 expect match rb 0.66% ra 1.16% others 0.46% cpu_s 11.391 wall 2.304s waited 0.0s
+2026-09-24T09:43:13.153+03:00   P3-C3b-p0 r1 [ 14] C3b-TA-armed#tip W=8: stat 4.2440 ms pose 0x32d5e235342b4143 expect match rb 1.16% ra 6.18% others 3.55% cpu_s 11.078 wall 2.171s waited 0.0s CONTAMINATED-after(6.18%)
+2026-09-24T09:43:44.553+03:00   P3-C3b-p0 r1 [ 15] C3b-TD-tree#par W=8: stat 2.6256 ms pose 0x32d5e235342b4143 expect match rb 0.24% ra 0.14% others 0.15% cpu_s 4.875 wall 1.322s waited 25.0s
+2026-09-24T09:43:50.841+03:00   P3-C3b-p0 r1 [ 16] C3b-TD-tree#tip W=8: stat 2.4582 ms pose 0x32d5e235342b4143 expect match rb 0.14% ra 2.29% others 0.39% cpu_s 5.031 wall 1.239s waited 0.0s
+2026-09-24T09:44:04.641+03:00   P3-C3b-p0 r2 [ 17] C3b-TA-armed#par W=1: stat 17.3599 ms pose 0x32d5e235342b4143 expect match rb 2.29% ra 3.88% others 3.83% cpu_s 8.719 wall 8.731s waited 0.0s
+2026-09-24T09:44:18.416+03:00   P3-C3b-p0 r2 [ 18] C3b-TA-armed#tip W=1: stat 17.3052 ms pose 0x32d5e235342b4143 expect match rb 3.88% ra 1.22% others 0.29% cpu_s 8.703 wall 8.705s waited 0.0s
+2026-09-24T09:44:26.947+03:00   P3-C3b-p0 r2 [ 19] C3b-TD-tree#par W=1: stat 6.9417 ms pose 0x32d5e235342b4143 expect match rb 1.22% ra 0.43% others 0.31% cpu_s 3.5 wall 3.48s waited 0.0s
+2026-09-24T09:44:35.413+03:00   P3-C3b-p0 r2 [ 20] C3b-TD-tree#tip W=1: stat 6.8135 ms pose 0x32d5e235342b4143 expect match rb 0.43% ra 4.5% others 0.26% cpu_s 3.422 wall 3.416s waited 0.0s
+2026-09-24T09:44:42.774+03:00   P3-C3b-p0 r2 [ 21] C3b-TA-armed#par W=8: stat 4.4832 ms pose 0x32d5e235342b4143 expect match rb 4.5% ra 5.42% others 4.74% cpu_s 11.578 wall 2.29s waited 0.0s CONTAMINATED-after(5.42%)
+2026-09-24T09:45:15.063+03:00   P3-C3b-p0 r2 [ 22] C3b-TA-armed#tip W=8: stat 4.2905 ms pose 0x32d5e235342b4143 expect match rb 0.69% ra 1.05% others 0.22% cpu_s 11.328 wall 2.194s waited 25.0s
+2026-09-24T09:45:21.418+03:00   P3-C3b-p0 r2 [ 23] C3b-TD-tree#par W=8: stat 2.5889 ms pose 0x32d5e235342b4143 expect match rb 1.05% ra 5.68% others 3.6% cpu_s 4.969 wall 1.303s waited 0.0s CONTAMINATED-after(5.68%)
+2026-09-24T09:45:52.734+03:00   P3-C3b-p0 r2 [ 24] C3b-TD-tree#tip W=8: stat 2.4546 ms pose 0x32d5e235342b4143 expect match rb 0.77% ra 0.68% others 0.0% cpu_s 5.406 wall 1.237s waited 25.0s
+2026-09-24T09:45:52.734+03:00 P3-C3b-p0: re-running 7 process(es) at the end of the pass: [(1, 0, 'C3b-TA-armed', 'par', 1, 'contaminated'), (3, 0, 'C3b-TD-tree', 'par', 1, 'contaminated'), (5, 0, 'C3b-TA-armed', 'par', 8, 'contaminated'), (8, 0, 'C3b-TD-tree', 'tip', 8, 'contaminated'), (14, 1, 'C3b-TA-armed', 'tip', 8, 'contaminated'), (21, 2, 'C3b-TA-armed', 'par', 8, 'contaminated'), (23, 2, 'C3b-TD-tree', 'par', 8, 'contaminated')]
+2026-09-24T09:46:06.636+03:00   P3-C3b-p0 r0 [  1] C3b-TA-armed#par W=1 RERUN (contaminated): stat 17.5626 ms pose 0x32d5e235342b4143 expect match rb 0.68% ra 4.68% others 2.11% cpu_s 8.812 wall 8.833s waited 0.0s
+2026-09-24T09:46:15.163+03:00   P3-C3b-p0 r0 [  3] C3b-TD-tree#par W=1 RERUN (contaminated): stat 6.9397 ms pose 0x32d5e235342b4143 expect match rb 4.68% ra 2.09% others 2.11% cpu_s 3.531 wall 3.479s waited 0.0s
+2026-09-24T09:46:22.529+03:00   P3-C3b-p0 r0 [  5] C3b-TA-armed#par W=8 RERUN (contaminated): stat 4.4957 ms pose 0x32d5e235342b4143 expect match rb 2.09% ra 0.66% others 0.38% cpu_s 11.25 wall 2.296s waited 0.0s
+2026-09-24T09:46:28.776+03:00   P3-C3b-p0 r0 [  8] C3b-TD-tree#tip W=8 RERUN (contaminated): stat 2.3764 ms pose 0x32d5e235342b4143 expect match rb 0.66% ra 0.39% others 0.0% cpu_s 5.875 wall 1.197s waited 0.0s
+2026-09-24T09:46:36.044+03:00   P3-C3b-p0 r1 [ 14] C3b-TA-armed#tip W=8 RERUN (contaminated): stat 4.3000 ms pose 0x32d5e235342b4143 expect match rb 0.39% ra 0.34% others 0.36% cpu_s 11.188 wall 2.198s waited 0.0s
+2026-09-24T09:46:43.412+03:00   P3-C3b-p0 r2 [ 21] C3b-TA-armed#par W=8 RERUN (contaminated): stat 4.5002 ms pose 0x32d5e235342b4143 expect match rb 0.34% ra 2.98% others 0.3% cpu_s 11.25 wall 2.298s waited 0.0s
+2026-09-24T09:46:49.775+03:00   P3-C3b-p0 r2 [ 23] C3b-TD-tree#par W=8 RERUN (contaminated): stat 2.6059 ms pose 0x32d5e235342b4143 expect match rb 2.98% ra 5.0% others 4.98% cpu_s 5.5 wall 1.312s waited 0.0s
+2026-09-24T09:46:49.775+03:00 P3-C3b-p0: done
+2026-09-24T09:46:49.776+03:00 P3-C3b-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T09:49:00.243+03:00 P3-C3b-p1: idle reached; {'time': '2026-09-24T09:49:00.243+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T09:49:10.288+03:00 P3-C3b-p1: opening receipt 1.49% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T09:49:16.542+03:00   P3-C3b-p1 warm-up C3b-TD-tree#tip W=8 (untimed): stat 2.3884 ms pose 0x32d5e235342b4143 expect match rb 1.49% ra 0.39% others 0.24% cpu_s 4.969 wall 1.204s waited 0.0s
+2026-09-24T09:49:22.807+03:00   P3-C3b-p1 r0 [  1] C3b-TD-tree#tip W=8: stat 2.4084 ms pose 0x32d5e235342b4143 expect match rb 0.39% ra 0.43% others 0.16% cpu_s 4.719 wall 1.214s waited 0.0s
+2026-09-24T09:49:29.228+03:00   P3-C3b-p1 r0 [  2] C3b-TD-tree#par W=8: stat 2.7156 ms pose 0x32d5e235342b4143 expect match rb 0.43% ra 0.39% others 0.15% cpu_s 4.406 wall 1.367s waited 0.0s
+2026-09-24T09:49:36.506+03:00   P3-C3b-p1 r0 [  3] C3b-TA-armed#tip W=8: stat 4.3252 ms pose 0x32d5e235342b4143 expect match rb 0.39% ra 5.13% others 0.36% cpu_s 10.906 wall 2.21s waited 0.0s CONTAMINATED-after(5.13%)
+2026-09-24T09:50:08.941+03:00   P3-C3b-p1 r0 [  4] C3b-TA-armed#par W=8: stat 4.5709 ms pose 0x32d5e235342b4143 expect match rb 0.49% ra 0.61% others 0.25% cpu_s 11.141 wall 2.334s waited 25.0s
+2026-09-24T09:50:17.439+03:00   P3-C3b-p1 r0 [  5] C3b-TD-tree#tip W=1: stat 6.8767 ms pose 0x32d5e235342b4143 expect match rb 0.61% ra 4.34% others 0.17% cpu_s 3.5 wall 3.447s waited 0.0s
+2026-09-24T09:50:25.980+03:00   P3-C3b-p1 r0 [  6] C3b-TD-tree#par W=1: stat 6.9651 ms pose 0x32d5e235342b4143 expect match rb 4.34% ra 3.55% others 4.84% cpu_s 3.484 wall 3.492s waited 0.0s
+2026-09-24T09:50:39.686+03:00   P3-C3b-p1 r0 [  7] C3b-TA-armed#tip W=1: stat 17.1724 ms pose 0x32d5e235342b4143 expect match rb 3.55% ra 1.49% others 0.68% cpu_s 8.609 wall 8.638s waited 0.0s
+2026-09-24T09:50:53.548+03:00   P3-C3b-p1 r0 [  8] C3b-TA-armed#par W=1: stat 17.4843 ms pose 0x32d5e235342b4143 expect match rb 1.49% ra 0.43% others 0.15% cpu_s 8.75 wall 8.794s waited 0.0s
+2026-09-24T09:50:59.827+03:00   P3-C3b-p1 r1 [  9] C3b-TD-tree#tip W=8: stat 2.4362 ms pose 0x32d5e235342b4143 expect match rb 0.43% ra 2.61% others 0.24% cpu_s 5.078 wall 1.228s waited 0.0s
+2026-09-24T09:51:06.283+03:00   P3-C3b-p1 r1 [ 10] C3b-TD-tree#par W=8: stat 2.7921 ms pose 0x32d5e235342b4143 expect match rb 2.61% ra 5.17% others 5.97% cpu_s 5.672 wall 1.406s waited 0.0s CONTAMINATED-after(5.17%)
+2026-09-24T09:51:38.576+03:00   P3-C3b-p1 r1 [ 11] C3b-TA-armed#tip W=8: stat 4.2866 ms pose 0x32d5e235342b4143 expect match rb 0.94% ra 1.13% others 0.18% cpu_s 11.516 wall 2.192s waited 25.0s
+2026-09-24T09:51:45.969+03:00   P3-C3b-p1 r1 [ 12] C3b-TA-armed#par W=8: stat 4.5464 ms pose 0x32d5e235342b4143 expect match rb 1.13% ra 4.52% others 1.85% cpu_s 11.047 wall 2.321s waited 0.0s
+2026-09-24T09:51:54.453+03:00   P3-C3b-p1 r1 [ 13] C3b-TD-tree#tip W=1: stat 6.8439 ms pose 0x32d5e235342b4143 expect match rb 4.52% ra 3.22% others 4.07% cpu_s 3.438 wall 3.431s waited 0.0s
+2026-09-24T09:52:02.990+03:00   P3-C3b-p1 r1 [ 14] C3b-TD-tree#par W=1: stat 6.9498 ms pose 0x32d5e235342b4143 expect match rb 3.22% ra 0.82% others 0.84% cpu_s 3.516 wall 3.484s waited 0.0s
+2026-09-24T09:52:16.705+03:00   P3-C3b-p1 r1 [ 15] C3b-TA-armed#tip W=1: stat 17.1856 ms pose 0x32d5e235342b4143 expect match rb 0.82% ra 0.27% others 0.23% cpu_s 8.641 wall 8.644s waited 0.0s
+2026-09-24T09:52:30.512+03:00   P3-C3b-p1 r1 [ 16] C3b-TA-armed#par W=1: stat 17.3739 ms pose 0x32d5e235342b4143 expect match rb 0.27% ra 6.03% others 1.14% cpu_s 8.719 wall 8.738s waited 0.0s CONTAMINATED-after(6.03%)
+2026-09-24T09:53:01.809+03:00   P3-C3b-p1 r2 [ 17] C3b-TD-tree#tip W=8: stat 2.4252 ms pose 0x32d5e235342b4143 expect match rb 0.46% ra 0.91% others 0.4% cpu_s 5.859 wall 1.222s waited 25.0s
+2026-09-24T09:53:08.188+03:00   P3-C3b-p1 r2 [ 18] C3b-TD-tree#par W=8: stat 2.6382 ms pose 0x32d5e235342b4143 expect match rb 0.91% ra 2.97% others 0.44% cpu_s 5.281 wall 1.328s waited 0.0s
+2026-09-24T09:53:15.492+03:00   P3-C3b-p1 r2 [ 19] C3b-TA-armed#tip W=8: stat 4.3696 ms pose 0x32d5e235342b4143 expect match rb 2.97% ra 5.71% others 5.6% cpu_s 11.328 wall 2.234s waited 0.0s CONTAMINATED-after(5.71%)
+2026-09-24T09:53:48.004+03:00   P3-C3b-p1 r2 [ 20] C3b-TA-armed#par W=8: stat 4.7239 ms pose 0x32d5e235342b4143 expect match rb 2.74% ra 0.51% others 0.44% cpu_s 11.406 wall 2.411s waited 25.0s
+2026-09-24T09:53:56.600+03:00   P3-C3b-p1 r2 [ 21] C3b-TD-tree#tip W=1: stat 7.0579 ms pose 0x32d5e235342b4143 expect match rb 0.51% ra 8.41% others 3.17% cpu_s 3.547 wall 3.539s waited 0.0s CONTAMINATED-after(8.41%)
+2026-09-24T09:54:30.157+03:00   P3-C3b-p1 r2 [ 22] C3b-TD-tree#par W=1: stat 6.9364 ms pose 0x32d5e235342b4143 expect match rb 1.25% ra 0.66% others 0.17% cpu_s 3.484 wall 3.478s waited 25.0s
+2026-09-24T09:54:43.867+03:00   P3-C3b-p1 r2 [ 23] C3b-TA-armed#tip W=1: stat 17.1786 ms pose 0x32d5e235342b4143 expect match rb 0.66% ra 3.4% others 3.38% cpu_s 8.609 wall 8.64s waited 0.0s
+2026-09-24T09:54:57.669+03:00   P3-C3b-p1 r2 [ 24] C3b-TA-armed#par W=1: stat 17.3620 ms pose 0x32d5e235342b4143 expect match rb 3.4% ra 0.64% others 0.47% cpu_s 8.719 wall 8.733s waited 0.0s
+2026-09-24T09:54:57.669+03:00 P3-C3b-p1: re-running 5 process(es) at the end of the pass: [(3, 0, 'C3b-TA-armed', 'tip', 8, 'contaminated'), (10, 1, 'C3b-TD-tree', 'par', 8, 'contaminated'), (16, 1, 'C3b-TA-armed', 'par', 1, 'contaminated'), (19, 2, 'C3b-TA-armed', 'tip', 8, 'contaminated'), (21, 2, 'C3b-TD-tree', 'tip', 1, 'contaminated')]
+2026-09-24T09:55:04.939+03:00   P3-C3b-p1 r0 [  3] C3b-TA-armed#tip W=8 RERUN (contaminated): stat 4.3046 ms pose 0x32d5e235342b4143 expect match rb 0.64% ra 0.76% others 0.27% cpu_s 11.344 wall 2.2s waited 0.0s
+2026-09-24T09:55:11.306+03:00   P3-C3b-p1 r1 [ 10] C3b-TD-tree#par W=8 RERUN (contaminated): stat 2.6107 ms pose 0x32d5e235342b4143 expect match rb 0.76% ra 0.37% others 0.96% cpu_s 5.031 wall 1.315s waited 0.0s
+2026-09-24T09:55:25.113+03:00   P3-C3b-p1 r1 [ 16] C3b-TA-armed#par W=1 RERUN (contaminated): stat 17.3744 ms pose 0x32d5e235342b4143 expect match rb 0.37% ra 5.01% others 2.87% cpu_s 8.688 wall 8.739s waited 0.0s CONTAMINATED-after(5.01%)
+2026-09-24T09:55:57.433+03:00   P3-C3b-p1 r2 [ 19] C3b-TA-armed#tip W=8 RERUN (contaminated): stat 4.3483 ms pose 0x32d5e235342b4143 expect match rb 0.67% ra 1.15% others 0.22% cpu_s 11.391 wall 2.222s waited 25.0s
+2026-09-24T09:56:05.921+03:00   P3-C3b-p1 r2 [ 21] C3b-TD-tree#tip W=1 RERUN (contaminated): stat 6.8573 ms pose 0x32d5e235342b4143 expect match rb 1.15% ra 5.17% others 3.44% cpu_s 3.484 wall 3.438s waited 0.0s CONTAMINATED-after(5.17%)
+2026-09-24T09:56:05.921+03:00 P3-C3b-p1: done
+2026-09-24T09:56:05.922+03:00 P4-G9-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T10:01:16.439+03:00 P4-G9-p0: idle reached; {'time': '2026-09-24T10:01:16.439+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T10:01:26.485+03:00 P4-G9-p0: opening receipt 0.59% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T10:01:34.612+03:00   P4-G9-p0 warm-up G9-JA#g9t W=8 (untimed): stat 6.1305 ms pose 0x32d5e235342b4143 expect match rb 0.59% ra 0.96% others 0.54% cpu_s 12.203 wall 3.077s waited 0.0s
+2026-09-24T10:01:49.122+03:00   P4-G9-p0 r0 [  1] G9-JA#g9p W=1: stat 18.9017 ms pose 0x32d5e235342b4143 expect match rb 0.96% ra 5.92% others 1.62% cpu_s 9.5 wall 9.462s waited 0.0s CONTAMINATED-after(5.92%)
+2026-09-24T10:02:28.648+03:00   P4-G9-p0 r0 [  2] G9-JA#g9t W=1: stat 18.8837 ms pose 0x32d5e235342b4143 expect match rb 0.68% ra 4.8% others 0.49% cpu_s 9.5 wall 9.451s waited 25.0s
+2026-09-24T10:02:46.243+03:00   P4-G9-p0 r0 [  3] G9-R#g9p W=1: stat 11.3311 ms pose 0x87e561d20589d4a5 expect match rb 4.8% ra 1.31% others 2.15% cpu_s 12.531 wall 12.521s waited 0.0s
+2026-09-24T10:03:03.419+03:00   P4-G9-p0 r0 [  4] G9-R#g9t W=1: stat 10.9524 ms pose 0x87e561d20589d4a5 expect match rb 1.31% ra 0.47% others 0.27% cpu_s 12.172 wall 12.098s waited 0.0s
+2026-09-24T10:03:14.701+03:00   P4-G9-p0 r0 [  5] G9-RS#g9p W=1: stat 6.0558 ms pose 0x2a2b7926a48aab00 expect match rb 0.47% ra 5.39% others 2.28% cpu_s 6.234 wall 6.203s waited 0.0s CONTAMINATED-after(5.39%)
+2026-09-24T10:03:50.889+03:00   P4-G9-p0 r0 [  6] G9-RS#g9t W=1: stat 6.0381 ms pose 0x2a2b7926a48aab00 expect match rb 0.59% ra 3.16% others 0.37% cpu_s 6.062 wall 6.086s waited 25.0s
+2026-09-24T10:03:56.011+03:00   P4-G9-p0 r0 [  7] G9-S16#g9p W=1: stat 0.0833 ms pose 0x8877dbb1192e9b92 expect match rb 3.16% ra 5.11% others 3.12% cpu_s 0.031 wall 0.064s waited 0.0s CONTAMINATED-after(5.11%)
+2026-09-24T10:04:26.160+03:00   P4-G9-p0 r0 [  8] G9-S16#g9t W=1: stat 0.0835 ms pose 0x8877dbb1192e9b92 expect match rb 0.75% ra 0.78% others 0.0% cpu_s 0.047 wall 0.063s waited 25.0s
+2026-09-24T10:04:35.707+03:00   P4-G9-p0 r0 [  9] G9-JAs-a#g9p W=1: stat 8.8642 ms pose 0x32d5e235342b4143 expect match rb 0.78% ra 4.3% others 0.22% cpu_s 4.484 wall 4.482s waited 0.0s
+2026-09-24T10:04:45.071+03:00   P4-G9-p0 r0 [ 10] G9-JAs-a#g9t W=1: stat 8.4923 ms pose 0x32d5e235342b4143 expect match rb 4.3% ra 4.35% others 4.32% cpu_s 4.266 wall 4.296s waited 0.0s
+2026-09-24T10:04:54.793+03:00   P4-G9-p0 r0 [ 11] G9-JC#g9p W=1: stat 9.2151 ms pose 0x32d5e235342b4143 expect match rb 4.35% ra 0.91% others 0.54% cpu_s 4.594 wall 4.657s waited 0.0s
+2026-09-24T10:05:04.410+03:00   P4-G9-p0 r0 [ 12] G9-JC#g9t W=1: stat 9.0056 ms pose 0x32d5e235342b4143 expect match rb 0.91% ra 1.72% others 0.49% cpu_s 4.578 wall 4.552s waited 0.0s
+2026-09-24T10:05:12.736+03:00   P4-G9-p0 r0 [ 13] G9-JAs-mid#g9p W=2: stat 6.5329 ms pose 0x32d5e235342b4143 expect match rb 1.72% ra 0.41% others 0.72% cpu_s 4.891 wall 3.275s waited 0.0s
+2026-09-24T10:05:20.920+03:00   P4-G9-p0 r0 [ 14] G9-JAs-mid#g9t W=2: stat 6.2553 ms pose 0x32d5e235342b4143 expect match rb 0.41% ra 4.77% others 1.68% cpu_s 4.703 wall 3.137s waited 0.0s
+2026-09-24T10:05:28.614+03:00   P4-G9-p0 r0 [ 15] G9-JAs-mid#g9p W=4: stat 5.2699 ms pose 0x32d5e235342b4143 expect match rb 4.77% ra 2.8% others 4.43% cpu_s 6.062 wall 2.644s waited 0.0s
+2026-09-24T10:05:36.158+03:00   P4-G9-p0 r0 [ 16] G9-JAs-mid#g9t W=4: stat 4.9708 ms pose 0x32d5e235342b4143 expect match rb 2.8% ra 1.01% others 0.55% cpu_s 5.016 wall 2.495s waited 0.0s
+2026-09-24T10:05:44.317+03:00   P4-G9-p0 r0 [ 17] G9-JA#g9p W=8: stat 6.2047 ms pose 0x32d5e235342b4143 expect match rb 1.01% ra 1.23% others 0.41% cpu_s 12.016 wall 3.111s waited 0.0s
+2026-09-24T10:05:52.492+03:00   P4-G9-p0 r0 [ 18] G9-JA#g9t W=8: stat 6.2297 ms pose 0x32d5e235342b4143 expect match rb 1.23% ra 0.45% others 0.62% cpu_s 13.0 wall 3.124s waited 0.0s
+2026-09-24T10:06:03.896+03:00   P4-G9-p0 r0 [ 19] G9-R#g9p W=8: stat 5.6595 ms pose 0x87e561d20589d4a5 expect match rb 0.45% ra 5.24% others 1.08% cpu_s 19.453 wall 6.325s waited 0.0s CONTAMINATED-after(5.24%)
+2026-09-24T10:06:39.995+03:00   P4-G9-p0 r0 [ 20] G9-R#g9t W=8: stat 5.3654 ms pose 0x87e561d20589d4a5 expect match rb 0.53% ra 1.37% others 0.31% cpu_s 17.859 wall 5.991s waited 25.0s
+2026-09-24T10:06:48.376+03:00   P4-G9-p0 r0 [ 21] G9-RS#g9p W=8: stat 3.2998 ms pose 0x2a2b7926a48aab00 expect match rb 1.37% ra 5.87% others 3.75% cpu_s 7.984 wall 3.304s waited 0.0s CONTAMINATED-after(5.87%)
+2026-09-24T10:07:21.742+03:00   P4-G9-p0 r0 [ 22] G9-RS#g9t W=8: stat 3.2549 ms pose 0x2a2b7926a48aab00 expect match rb 0.73% ra 0.56% others 0.36% cpu_s 9.016 wall 3.263s waited 25.0s
+2026-09-24T10:07:29.234+03:00   P4-G9-p0 r0 [ 23] G9-JAs-mid#g9p W=16: stat 4.8641 ms pose 0x32d5e235342b4143 expect match rb 0.56% ra 5.5% others 1.56% cpu_s 11.219 wall 2.441s waited 0.0s CONTAMINATED-after(5.5%)
+2026-09-24T10:08:01.633+03:00   P4-G9-p0 r0 [ 24] G9-JAs-mid#g9t W=16: stat 4.6231 ms pose 0x32d5e235342b4143 expect match rb 0.7% ra 1.83% others 0.51% cpu_s 10.75 wall 2.322s waited 25.0s
+2026-09-24T10:08:16.180+03:00   P4-G9-p0 r1 [ 25] G9-JA#g9p W=1: stat 18.9776 ms pose 0x32d5e235342b4143 expect match rb 1.83% ra 4.81% others 2.38% cpu_s 9.578 wall 9.498s waited 0.0s
+2026-09-24T10:08:30.705+03:00   P4-G9-p0 r1 [ 26] G9-JA#g9t W=1: stat 18.9355 ms pose 0x32d5e235342b4143 expect match rb 4.81% ra 1.29% others 0.68% cpu_s 9.484 wall 9.477s waited 0.0s
+2026-09-24T10:08:48.399+03:00   P4-G9-p0 r1 [ 27] G9-R#g9p W=1: stat 11.3805 ms pose 0x87e561d20589d4a5 expect match rb 1.29% ra 0.47% others 0.37% cpu_s 12.609 wall 12.61s waited 0.0s
+2026-09-24T10:09:05.410+03:00   P4-G9-p0 r1 [ 28] G9-R#g9t W=1: stat 10.7821 ms pose 0x87e561d20589d4a5 expect match rb 0.47% ra 2.83% others 3.63% cpu_s 12.016 wall 11.93s waited 0.0s
+2026-09-24T10:09:16.875+03:00   P4-G9-p0 r1 [ 29] G9-RS#g9p W=1: stat 6.0453 ms pose 0x2a2b7926a48aab00 expect match rb 2.83% ra 0.69% others 0.32% cpu_s 6.375 wall 6.386s waited 0.0s
+2026-09-24T10:09:28.032+03:00   P4-G9-p0 r1 [ 30] G9-RS#g9t W=1: stat 6.0494 ms pose 0x2a2b7926a48aab00 expect match rb 0.69% ra 1.45% others 0.29% cpu_s 6.094 wall 6.074s waited 0.0s
+2026-09-24T10:09:33.153+03:00   P4-G9-p0 r1 [ 31] G9-S16#g9p W=1: stat 0.0827 ms pose 0x8877dbb1192e9b92 expect match rb 1.45% ra 1.95% others 3.08% cpu_s 0.047 wall 0.063s waited 0.0s
+2026-09-24T10:09:38.272+03:00   P4-G9-p0 r1 [ 32] G9-S16#g9t W=1: stat 0.0812 ms pose 0x8877dbb1192e9b92 expect match rb 1.95% ra 4.62% others 3.23% cpu_s 0.031 wall 0.062s waited 0.0s
+2026-09-24T10:09:47.913+03:00   P4-G9-p0 r1 [ 33] G9-JAs-a#g9p W=1: stat 9.0541 ms pose 0x32d5e235342b4143 expect match rb 4.62% ra 2.48% others 3.03% cpu_s 4.531 wall 4.577s waited 0.0s
+2026-09-24T10:09:57.314+03:00   P4-G9-p0 r1 [ 34] G9-JAs-a#g9t W=1: stat 8.5761 ms pose 0x32d5e235342b4143 expect match rb 2.48% ra 0.98% others 0.27% cpu_s 4.359 wall 4.338s waited 0.0s
+2026-09-24T10:10:07.005+03:00   P4-G9-p0 r1 [ 35] G9-JC#g9p W=1: stat 9.1553 ms pose 0x32d5e235342b4143 expect match rb 0.98% ra 0.86% others 0.25% cpu_s 4.609 wall 4.626s waited 0.0s
+2026-09-24T10:10:16.668+03:00   P4-G9-p0 r1 [ 36] G9-JC#g9t W=1: stat 9.0971 ms pose 0x32d5e235342b4143 expect match rb 0.86% ra 3.14% others 0.28% cpu_s 4.625 wall 4.597s waited 0.0s
+2026-09-24T10:10:24.977+03:00   P4-G9-p0 r1 [ 37] G9-JAs-mid#g9p W=2: stat 6.4998 ms pose 0x32d5e235342b4143 expect match rb 3.14% ra 5.88% others 3.9% cpu_s 4.797 wall 3.26s waited 0.0s CONTAMINATED-after(5.88%)
+2026-09-24T10:10:58.208+03:00   P4-G9-p0 r1 [ 38] G9-JAs-mid#g9t W=2: stat 6.2934 ms pose 0x32d5e235342b4143 expect match rb 0.34% ra 1.97% others 0.34% cpu_s 4.688 wall 3.156s waited 25.0s
+2026-09-24T10:11:05.928+03:00   P4-G9-p0 r1 [ 39] G9-JAs-mid#g9p W=4: stat 5.3240 ms pose 0x32d5e235342b4143 expect match rb 1.97% ra 5.48% others 3.69% cpu_s 6.312 wall 2.672s waited 0.0s CONTAMINATED-after(5.48%)
+2026-09-24T10:11:38.508+03:00   P4-G9-p0 r1 [ 40] G9-JAs-mid#g9t W=4: stat 4.9912 ms pose 0x32d5e235342b4143 expect match rb 0.61% ra 0.55% others 0.39% cpu_s 5.0 wall 2.505s waited 25.0s
+2026-09-24T10:11:46.632+03:00   P4-G9-p0 r1 [ 41] G9-JA#g9p W=8: stat 6.1285 ms pose 0x32d5e235342b4143 expect match rb 0.55% ra 4.92% others 1.72% cpu_s 12.203 wall 3.073s waited 0.0s
+2026-09-24T10:11:54.758+03:00   P4-G9-p0 r1 [ 42] G9-JA#g9t W=8: stat 6.1339 ms pose 0x32d5e235342b4143 expect match rb 4.92% ra 3.18% others 3.87% cpu_s 12.516 wall 3.076s waited 0.0s
+2026-09-24T10:12:06.372+03:00   P4-G9-p0 r1 [ 43] G9-R#g9p W=8: stat 5.8870 ms pose 0x87e561d20589d4a5 expect match rb 3.18% ra 0.57% others 0.73% cpu_s 18.484 wall 6.536s waited 0.0s
+2026-09-24T10:12:17.527+03:00   P4-G9-p0 r1 [ 44] G9-R#g9t W=8: stat 5.4809 ms pose 0x87e561d20589d4a5 expect match rb 0.57% ra 1.29% others 0.4% cpu_s 17.0 wall 6.075s waited 0.0s
+2026-09-24T10:12:25.916+03:00   P4-G9-p0 r1 [ 45] G9-RS#g9p W=8: stat 3.3061 ms pose 0x2a2b7926a48aab00 expect match rb 1.29% ra 3.31% others 0.12% cpu_s 8.469 wall 3.308s waited 0.0s
+2026-09-24T10:12:34.212+03:00   P4-G9-p0 r1 [ 46] G9-RS#g9t W=8: stat 3.2540 ms pose 0x2a2b7926a48aab00 expect match rb 3.31% ra 5.86% others 5.19% cpu_s 8.156 wall 3.218s waited 0.0s CONTAMINATED-after(5.86%)
+2026-09-24T10:13:06.732+03:00   P4-G9-p0 r1 [ 47] G9-JAs-mid#g9p W=16: stat 4.8706 ms pose 0x32d5e235342b4143 expect match rb 1.02% ra 1.93% others 0.44% cpu_s 12.438 wall 2.445s waited 25.0s
+2026-09-24T10:13:14.091+03:00   P4-G9-p0 r1 [ 48] G9-JAs-mid#g9t W=16: stat 4.5927 ms pose 0x32d5e235342b4143 expect match rb 1.93% ra 6.39% others 4.36% cpu_s 12.109 wall 2.306s waited 0.0s CONTAMINATED-after(6.39%)
+2026-09-24T10:13:53.635+03:00   P4-G9-p0 r2 [ 49] G9-JA#g9p W=1: stat 18.9204 ms pose 0x32d5e235342b4143 expect match rb 0.79% ra 4.67% others 0.23% cpu_s 9.453 wall 9.47s waited 25.0s
+2026-09-24T10:14:08.168+03:00   P4-G9-p0 r2 [ 50] G9-JA#g9t W=1: stat 18.9421 ms pose 0x32d5e235342b4143 expect match rb 4.67% ra 1.55% others 2.56% cpu_s 9.484 wall 9.48s waited 0.0s
+2026-09-24T10:14:25.728+03:00   P4-G9-p0 r2 [ 51] G9-R#g9p W=1: stat 11.2637 ms pose 0x87e561d20589d4a5 expect match rb 1.55% ra 0.71% others 0.19% cpu_s 12.469 wall 12.471s waited 0.0s
+2026-09-24T10:14:43.135+03:00   P4-G9-p0 r2 [ 52] G9-R#g9t W=1: stat 11.4623 ms pose 0x87e561d20589d4a5 expect match rb 0.71% ra 6.2% others 2.23% cpu_s 12.344 wall 12.324s waited 0.0s CONTAMINATED-after(6.2%)
+2026-09-24T10:15:19.561+03:00   P4-G9-p0 r2 [ 53] G9-RS#g9p W=1: stat 6.0120 ms pose 0x2a2b7926a48aab00 expect match rb 2.88% ra 5.23% others 0.2% cpu_s 6.312 wall 6.323s waited 25.0s CONTAMINATED-after(5.23%)
+2026-09-24T10:15:55.776+03:00   P4-G9-p0 r2 [ 54] G9-RS#g9t W=1: stat 6.0611 ms pose 0x2a2b7926a48aab00 expect match rb 0.55% ra 1.1% others 0.37% cpu_s 6.125 wall 6.105s waited 25.0s
+2026-09-24T10:16:00.898+03:00   P4-G9-p0 r2 [ 55] G9-S16#g9p W=1: stat 0.0825 ms pose 0x8877dbb1192e9b92 expect match rb 1.1% ra 4.27% others 0.0% cpu_s 0.062 wall 0.063s waited 0.0s
+2026-09-24T10:16:06.016+03:00   P4-G9-p0 r2 [ 56] G9-S16#g9t W=1: stat 0.0811 ms pose 0x8877dbb1192e9b92 expect match rb 4.27% ra 5.31% others 3.28% cpu_s 0.047 wall 0.061s waited 0.0s CONTAMINATED-after(5.31%)
+2026-09-24T10:16:40.495+03:00   P4-G9-p0 r2 [ 57] G9-JAs-a#g9p W=1: stat 8.6716 ms pose 0x32d5e235342b4143 expect match rb 0.82% ra 0.86% others 0.38% cpu_s 4.391 wall 4.385s waited 25.0s
+2026-09-24T10:16:49.870+03:00   P4-G9-p0 r2 [ 58] G9-JAs-a#g9t W=1: stat 8.5193 ms pose 0x32d5e235342b4143 expect match rb 0.86% ra 5.29% others 3.81% cpu_s 4.312 wall 4.308s waited 0.0s CONTAMINATED-after(5.29%)
+2026-09-24T10:17:24.824+03:00   P4-G9-p0 r2 [ 59] G9-JC#g9p W=1: stat 9.6256 ms pose 0x32d5e235342b4143 expect match rb 0.86% ra 2.11% others 0.18% cpu_s 4.828 wall 4.861s waited 25.0s
+2026-09-24T10:17:34.458+03:00   P4-G9-p0 r2 [ 60] G9-JC#g9t W=1: stat 9.0387 ms pose 0x32d5e235342b4143 expect match rb 2.11% ra 4.41% others 5.07% cpu_s 4.672 wall 4.569s waited 0.0s
+2026-09-24T10:17:42.753+03:00   P4-G9-p0 r2 [ 61] G9-JAs-mid#g9p W=2: stat 6.4738 ms pose 0x32d5e235342b4143 expect match rb 4.41% ra 0.96% others 1.2% cpu_s 4.797 wall 3.246s waited 0.0s
+2026-09-24T10:17:50.956+03:00   P4-G9-p0 r2 [ 62] G9-JAs-mid#g9t W=2: stat 6.2868 ms pose 0x32d5e235342b4143 expect match rb 0.96% ra 1.34% others 0.12% cpu_s 4.594 wall 3.152s waited 0.0s
+2026-09-24T10:17:58.603+03:00   P4-G9-p0 r2 [ 63] G9-JAs-mid#g9p W=4: stat 5.1770 ms pose 0x32d5e235342b4143 expect match rb 1.34% ra 1.51% others 0.34% cpu_s 5.578 wall 2.598s waited 0.0s
+2026-09-24T10:18:06.197+03:00   P4-G9-p0 r2 [ 64] G9-JAs-mid#g9t W=4: stat 5.0734 ms pose 0x32d5e235342b4143 expect match rb 1.51% ra 0.61% others 0.34% cpu_s 5.234 wall 2.546s waited 0.0s
+2026-09-24T10:18:14.303+03:00   P4-G9-p0 r2 [ 65] G9-JA#g9p W=8: stat 6.0919 ms pose 0x32d5e235342b4143 expect match rb 0.61% ra 5.25% others 4.0% cpu_s 12.609 wall 3.055s waited 0.0s CONTAMINATED-after(5.25%)
+2026-09-24T10:18:47.463+03:00   P4-G9-p0 r2 [ 66] G9-JA#g9t W=8: stat 6.1493 ms pose 0x32d5e235342b4143 expect match rb 0.7% ra 1.41% others 0.22% cpu_s 11.703 wall 3.084s waited 25.0s
+2026-09-24T10:18:59.009+03:00   P4-G9-p0 r2 [ 67] G9-R#g9p W=8: stat 5.7974 ms pose 0x87e561d20589d4a5 expect match rb 1.41% ra 5.39% others 3.32% cpu_s 18.5 wall 6.466s waited 0.0s CONTAMINATED-after(5.39%)
+2026-09-24T10:19:35.296+03:00   P4-G9-p0 r2 [ 68] G9-R#g9t W=8: stat 5.5729 ms pose 0x87e561d20589d4a5 expect match rb 0.62% ra 3.77% others 0.19% cpu_s 18.516 wall 6.178s waited 25.0s
+2026-09-24T10:19:43.751+03:00   P4-G9-p0 r2 [ 69] G9-RS#g9p W=8: stat 3.3100 ms pose 0x2a2b7926a48aab00 expect match rb 3.77% ra 5.02% others 4.4% cpu_s 9.016 wall 3.371s waited 0.0s CONTAMINATED-after(5.02%)
+2026-09-24T10:20:17.043+03:00   P4-G9-p0 r2 [ 70] G9-RS#g9t W=8: stat 3.2677 ms pose 0x2a2b7926a48aab00 expect match rb 0.66% ra 2.53% others 0.28% cpu_s 8.953 wall 3.181s waited 25.0s
+2026-09-24T10:20:24.577+03:00   P4-G9-p0 r2 [ 71] G9-JAs-mid#g9p W=16: stat 4.9425 ms pose 0x32d5e235342b4143 expect match rb 2.53% ra 4.67% others 4.33% cpu_s 10.484 wall 2.481s waited 0.0s
+2026-09-24T10:20:31.953+03:00   P4-G9-p0 r2 [ 72] G9-JAs-mid#g9t W=16: stat 4.6314 ms pose 0x32d5e235342b4143 expect match rb 4.67% ra 2.02% others 2.14% cpu_s 12.281 wall 2.326s waited 0.0s
+2026-09-24T10:20:31.953+03:00 P4-G9-p0: re-running 17 process(es) at the end of the pass: [(1, 0, 'G9-JA', 'g9p', 1, 'contaminated'), (5, 0, 'G9-RS', 'g9p', 1, 'contaminated'), (7, 0, 'G9-S16', 'g9p', 1, 'contaminated'), (19, 0, 'G9-R', 'g9p', 8, 'contaminated'), (21, 0, 'G9-RS', 'g9p', 8, 'contaminated'), (23, 0, 'G9-JAs-mid', 'g9p', 16, 'contaminated'), (37, 1, 'G9-JAs-mid', 'g9p', 2, 'contaminated'), (39, 1, 'G9-JAs-mid', 'g9p', 4, 'contaminated'), (46, 1, 'G9-RS', 'g9t', 8, 'contaminated'), (48, 1, 'G9-JAs-mid', 'g9t', 16, 'contaminated'), (52, 2, 'G9-R', 'g9t', 1, 'contaminated'), (53, 2, 'G9-RS', 'g9p', 1, 'contaminated'), (56, 2, 'G9-S16', 'g9t', 1, 'contaminated'), (58, 2, 'G9-JAs-a', 'g9t', 1, 'contaminated'), (65, 2, 'G9-JA', 'g9p', 8, 'contaminated'), (67, 2, 'G9-R', 'g9p', 8, 'contaminated'), (69, 2, 'G9-RS', 'g9p', 8, 'contaminated')]
+2026-09-24T10:20:46.544+03:00   P4-G9-p0 r0 [  1] G9-JA#g9p W=1 RERUN (contaminated): stat 19.0661 ms pose 0x32d5e235342b4143 expect match rb 2.02% ra 1.12% others 0.26% cpu_s 9.531 wall 9.542s waited 0.0s
+2026-09-24T10:20:58.007+03:00   P4-G9-p0 r0 [  5] G9-RS#g9p W=1 RERUN (contaminated): stat 6.1027 ms pose 0x2a2b7926a48aab00 expect match rb 1.12% ra 1.28% others 0.35% cpu_s 6.406 wall 6.38s waited 0.0s
+2026-09-24T10:21:03.130+03:00   P4-G9-p0 r0 [  7] G9-S16#g9p W=1 RERUN (contaminated): stat 0.0824 ms pose 0x8877dbb1192e9b92 expect match rb 1.28% ra 5.37% others 4.66% cpu_s 0.062 wall 0.063s waited 0.0s CONTAMINATED-after(5.37%)
+2026-09-24T10:21:39.823+03:00   P4-G9-p0 r0 [ 19] G9-R#g9p W=8 RERUN (contaminated): stat 5.8973 ms pose 0x87e561d20589d4a5 expect match rb 0.74% ra 1.5% others 0.39% cpu_s 20.719 wall 6.586s waited 25.0s
+2026-09-24T10:21:48.217+03:00   P4-G9-p0 r0 [ 21] G9-RS#g9p W=8 RERUN (contaminated): stat 3.3038 ms pose 0x2a2b7926a48aab00 expect match rb 1.5% ra 5.2% others 2.97% cpu_s 8.766 wall 3.317s waited 0.0s CONTAMINATED-after(5.2%)
+2026-09-24T10:22:20.746+03:00   P4-G9-p0 r0 [ 23] G9-JAs-mid#g9p W=16 RERUN (contaminated): stat 4.8817 ms pose 0x32d5e235342b4143 expect match rb 0.63% ra 0.35% others 0.44% cpu_s 13.109 wall 2.451s waited 25.0s
+2026-09-24T10:22:29.116+03:00   P4-G9-p0 r1 [ 37] G9-JAs-mid#g9p W=2 RERUN (contaminated): stat 6.6178 ms pose 0x32d5e235342b4143 expect match rb 0.35% ra 5.1% others 1.3% cpu_s 4.984 wall 3.318s waited 0.0s CONTAMINATED-after(5.1%)
+2026-09-24T10:23:01.793+03:00   P4-G9-p0 r1 [ 39] G9-JAs-mid#g9p W=4 RERUN (contaminated): stat 5.1734 ms pose 0x32d5e235342b4143 expect match rb 0.23% ra 1.09% others 0.26% cpu_s 5.828 wall 2.596s waited 25.0s
+2026-09-24T10:23:10.104+03:00   P4-G9-p0 r1 [ 46] G9-RS#g9t W=8 RERUN (contaminated): stat 3.2369 ms pose 0x2a2b7926a48aab00 expect match rb 1.09% ra 4.06% others 0.33% cpu_s 7.828 wall 3.233s waited 0.0s
+2026-09-24T10:23:17.474+03:00   P4-G9-p0 r1 [ 48] G9-JAs-mid#g9t W=16 RERUN (contaminated): stat 4.6192 ms pose 0x32d5e235342b4143 expect match rb 4.06% ra 3.79% others 4.63% cpu_s 12.672 wall 2.319s waited 0.0s
+2026-09-24T10:23:34.745+03:00   P4-G9-p0 r2 [ 52] G9-R#g9t W=1 RERUN (contaminated): stat 10.9989 ms pose 0x87e561d20589d4a5 expect match rb 3.79% ra 1.18% others 0.67% cpu_s 12.172 wall 12.192s waited 0.0s
+2026-09-24T10:23:46.016+03:00   P4-G9-p0 r2 [ 53] G9-RS#g9p W=1 RERUN (contaminated): stat 6.0831 ms pose 0x2a2b7926a48aab00 expect match rb 1.18% ra 0.51% others 0.31% cpu_s 6.188 wall 6.192s waited 0.0s
+2026-09-24T10:23:51.139+03:00   P4-G9-p0 r2 [ 56] G9-S16#g9t W=1 RERUN (contaminated): stat 0.0823 ms pose 0x8877dbb1192e9b92 expect match rb 0.51% ra 2.45% others 0.0% cpu_s 0.047 wall 0.063s waited 0.0s
+2026-09-24T10:24:00.477+03:00   P4-G9-p0 r2 [ 58] G9-JAs-a#g9t W=1 RERUN (contaminated): stat 8.4454 ms pose 0x32d5e235342b4143 expect match rb 2.45% ra 4.84% others 4.44% cpu_s 4.328 wall 4.271s waited 0.0s
+2026-09-24T10:24:08.621+03:00   P4-G9-p0 r2 [ 65] G9-JA#g9p W=8 RERUN (contaminated): stat 6.1662 ms pose 0x32d5e235342b4143 expect match rb 4.84% ra 0.96% others 0.76% cpu_s 13.016 wall 3.093s waited 0.0s
+2026-09-24T10:24:20.027+03:00   P4-G9-p0 r2 [ 67] G9-R#g9p W=8 RERUN (contaminated): stat 5.6521 ms pose 0x87e561d20589d4a5 expect match rb 0.96% ra 0.88% others 0.26% cpu_s 18.672 wall 6.324s waited 0.0s
+2026-09-24T10:24:28.394+03:00   P4-G9-p0 r2 [ 69] G9-RS#g9p W=8 RERUN (contaminated): stat 3.2584 ms pose 0x2a2b7926a48aab00 expect match rb 0.88% ra 1.57% others 0.71% cpu_s 7.484 wall 3.287s waited 0.0s
+2026-09-24T10:24:28.395+03:00 P4-G9-p0: done
+2026-09-24T10:24:28.397+03:00 P4-G9-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T10:26:38.906+03:00 P4-G9-p1: idle reached; {'time': '2026-09-24T10:26:38.906+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T10:26:48.954+03:00 P4-G9-p1: opening receipt 4.88% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T10:26:57.082+03:00   P4-G9-p1 warm-up G9-JA#g9t W=8 (untimed): stat 6.1330 ms pose 0x32d5e235342b4143 expect match rb 4.88% ra 2.32% others 2.06% cpu_s 12.0 wall 3.076s waited 0.0s
+2026-09-24T10:27:04.434+03:00   P4-G9-p1 r0 [  1] G9-JAs-mid#g9t W=16: stat 4.5856 ms pose 0x32d5e235342b4143 expect match rb 2.32% ra 0.84% others 0.26% cpu_s 10.516 wall 2.303s waited 0.0s
+2026-09-24T10:27:11.933+03:00   P4-G9-p1 r0 [  2] G9-JAs-mid#g9p W=16: stat 4.8780 ms pose 0x32d5e235342b4143 expect match rb 0.84% ra 1.74% others 0.44% cpu_s 12.359 wall 2.449s waited 0.0s
+2026-09-24T10:27:20.297+03:00   P4-G9-p1 r0 [  3] G9-RS#g9t W=8: stat 3.3212 ms pose 0x2a2b7926a48aab00 expect match rb 1.74% ra 1.31% others 0.48% cpu_s 8.516 wall 3.285s waited 0.0s
+2026-09-24T10:27:28.756+03:00   P4-G9-p1 r0 [  4] G9-RS#g9p W=8: stat 3.3036 ms pose 0x2a2b7926a48aab00 expect match rb 1.31% ra 5.2% others 2.57% cpu_s 9.25 wall 3.379s waited 0.0s CONTAMINATED-after(5.2%)
+2026-09-24T10:28:04.852+03:00   P4-G9-p1 r0 [  5] G9-R#g9t W=8: stat 5.3200 ms pose 0x87e561d20589d4a5 expect match rb 0.41% ra 0.51% others 0.46% cpu_s 20.312 wall 5.987s waited 25.0s
+2026-09-24T10:28:16.356+03:00   P4-G9-p1 r0 [  6] G9-R#g9p W=8: stat 5.7769 ms pose 0x87e561d20589d4a5 expect match rb 0.51% ra 6.0% others 3.47% cpu_s 19.688 wall 6.423s waited 0.0s CONTAMINATED-after(6.0%)
+2026-09-24T10:28:49.499+03:00   P4-G9-p1 r0 [  7] G9-JA#g9t W=8: stat 6.1110 ms pose 0x32d5e235342b4143 expect match rb 0.58% ra 1.34% others 0.45% cpu_s 11.812 wall 3.065s waited 25.0s
+2026-09-24T10:28:57.632+03:00   P4-G9-p1 r0 [  8] G9-JA#g9p W=8: stat 6.1471 ms pose 0x32d5e235342b4143 expect match rb 1.34% ra 6.27% others 4.09% cpu_s 12.609 wall 3.083s waited 0.0s CONTAMINATED-after(6.27%)
+2026-09-24T10:29:30.197+03:00   P4-G9-p1 r0 [  9] G9-JAs-mid#g9t W=4: stat 4.9615 ms pose 0x32d5e235342b4143 expect match rb 0.55% ra 0.31% others 0.28% cpu_s 5.547 wall 2.49s waited 25.0s
+2026-09-24T10:29:37.831+03:00   P4-G9-p1 r0 [ 10] G9-JAs-mid#g9p W=4: stat 5.1503 ms pose 0x32d5e235342b4143 expect match rb 0.31% ra 5.15% others 1.4% cpu_s 5.406 wall 2.585s waited 0.0s CONTAMINATED-after(5.15%)
+2026-09-24T10:30:11.116+03:00   P4-G9-p1 r0 [ 11] G9-JAs-mid#g9t W=2: stat 6.3980 ms pose 0x32d5e235342b4143 expect match rb 1.51% ra 1.15% others 0.58% cpu_s 4.859 wall 3.209s waited 25.0s
+2026-09-24T10:30:19.486+03:00   P4-G9-p1 r0 [ 12] G9-JAs-mid#g9p W=2: stat 6.6183 ms pose 0x32d5e235342b4143 expect match rb 1.15% ra 4.96% others 0.32% cpu_s 4.969 wall 3.319s waited 0.0s
+2026-09-24T10:30:29.095+03:00   P4-G9-p1 r0 [ 13] G9-JC#g9t W=1: stat 8.9850 ms pose 0x32d5e235342b4143 expect match rb 4.96% ra 3.46% others 3.87% cpu_s 4.547 wall 4.542s waited 0.0s
+2026-09-24T10:30:38.842+03:00   P4-G9-p1 r0 [ 14] G9-JC#g9p W=1: stat 9.2573 ms pose 0x32d5e235342b4143 expect match rb 3.46% ra 0.72% others 0.42% cpu_s 4.656 wall 4.679s waited 0.0s
+2026-09-24T10:30:48.241+03:00   P4-G9-p1 r0 [ 15] G9-JAs-a#g9t W=1: stat 8.5625 ms pose 0x32d5e235342b4143 expect match rb 0.72% ra 0.76% others 0.36% cpu_s 4.312 wall 4.33s waited 0.0s
+2026-09-24T10:30:57.755+03:00   P4-G9-p1 r0 [ 16] G9-JAs-a#g9p W=1: stat 8.7999 ms pose 0x32d5e235342b4143 expect match rb 0.76% ra 1.45% others 0.29% cpu_s 4.5 wall 4.45s waited 0.0s
+2026-09-24T10:31:02.874+03:00   P4-G9-p1 r0 [ 17] G9-S16#g9t W=1: stat 0.0811 ms pose 0x8877dbb1192e9b92 expect match rb 1.45% ra 6.25% others 3.17% cpu_s 0.031 wall 0.063s waited 0.0s CONTAMINATED-after(6.25%)
+2026-09-24T10:31:33.021+03:00   P4-G9-p1 r0 [ 18] G9-S16#g9p W=1: stat 0.0817 ms pose 0x8877dbb1192e9b92 expect match rb 0.6% ra 0.64% others 0.0% cpu_s 0.062 wall 0.062s waited 25.0s
+2026-09-24T10:31:44.260+03:00   P4-G9-p1 r0 [ 19] G9-RS#g9t W=1: stat 6.1052 ms pose 0x2a2b7926a48aab00 expect match rb 0.64% ra 3.48% others 0.35% cpu_s 6.172 wall 6.161s waited 0.0s
+2026-09-24T10:31:55.552+03:00   P4-G9-p1 r0 [ 20] G9-RS#g9p W=1: stat 6.0832 ms pose 0x2a2b7926a48aab00 expect match rb 3.48% ra 3.98% others 3.73% cpu_s 6.219 wall 6.207s waited 0.0s
+2026-09-24T10:32:12.696+03:00   P4-G9-p1 r0 [ 21] G9-R#g9t W=1: stat 10.8829 ms pose 0x87e561d20589d4a5 expect match rb 3.98% ra 0.45% others 0.34% cpu_s 12.047 wall 12.064s waited 0.0s
+2026-09-24T10:32:30.061+03:00   P4-G9-p1 r0 [ 22] G9-R#g9p W=1: stat 11.1350 ms pose 0x87e561d20589d4a5 expect match rb 0.45% ra 5.16% others 0.8% cpu_s 12.359 wall 12.286s waited 0.0s CONTAMINATED-after(5.16%)
+2026-09-24T10:33:09.605+03:00   P4-G9-p1 r0 [ 23] G9-JA#g9t W=1: stat 18.9216 ms pose 0x32d5e235342b4143 expect match rb 1.69% ra 3.4% others 0.28% cpu_s 9.5 wall 9.469s waited 25.0s
+2026-09-24T10:33:24.152+03:00   P4-G9-p1 r0 [ 24] G9-JA#g9p W=1: stat 18.9795 ms pose 0x32d5e235342b4143 expect match rb 3.4% ra 1.73% others 3.27% cpu_s 9.531 wall 9.499s waited 0.0s
+2026-09-24T10:33:31.509+03:00   P4-G9-p1 r1 [ 25] G9-JAs-mid#g9t W=16: stat 4.5916 ms pose 0x32d5e235342b4143 expect match rb 1.73% ra 0.61% others 0.25% cpu_s 11.109 wall 2.306s waited 0.0s
+2026-09-24T10:33:39.052+03:00   P4-G9-p1 r1 [ 26] G9-JAs-mid#g9p W=16: stat 4.9637 ms pose 0x32d5e235342b4143 expect match rb 0.61% ra 1.0% others 0.28% cpu_s 12.906 wall 2.491s waited 0.0s
+2026-09-24T10:33:47.350+03:00   P4-G9-p1 r1 [ 27] G9-RS#g9t W=8: stat 3.3006 ms pose 0x2a2b7926a48aab00 expect match rb 1.0% ra 1.11% others 0.39% cpu_s 8.562 wall 3.219s waited 0.0s
+2026-09-24T10:33:55.743+03:00   P4-G9-p1 r1 [ 28] G9-RS#g9p W=8: stat 3.2827 ms pose 0x2a2b7926a48aab00 expect match rb 1.11% ra 5.9% others 2.03% cpu_s 7.469 wall 3.314s waited 0.0s CONTAMINATED-after(5.9%)
+2026-09-24T10:34:32.225+03:00   P4-G9-p1 r1 [ 29] G9-R#g9t W=8: stat 5.7255 ms pose 0x87e561d20589d4a5 expect match rb 0.39% ra 0.87% others 0.28% cpu_s 20.062 wall 6.37s waited 25.0s
+2026-09-24T10:34:43.666+03:00   P4-G9-p1 r1 [ 30] G9-R#g9p W=8: stat 5.6936 ms pose 0x87e561d20589d4a5 expect match rb 0.87% ra 4.64% others 4.3% cpu_s 17.859 wall 6.359s waited 0.0s
+2026-09-24T10:34:51.785+03:00   P4-G9-p1 r1 [ 31] G9-JA#g9t W=8: stat 6.1219 ms pose 0x32d5e235342b4143 expect match rb 4.64% ra 1.22% others 0.76% cpu_s 12.969 wall 3.07s waited 0.0s
+2026-09-24T10:34:59.986+03:00   P4-G9-p1 r1 [ 32] G9-JA#g9p W=8: stat 6.2846 ms pose 0x32d5e235342b4143 expect match rb 1.22% ra 0.51% others 1.86% cpu_s 13.312 wall 3.152s waited 0.0s
+2026-09-24T10:35:07.540+03:00   P4-G9-p1 r1 [ 33] G9-JAs-mid#g9t W=4: stat 4.9944 ms pose 0x32d5e235342b4143 expect match rb 0.51% ra 0.78% others 0.27% cpu_s 5.047 wall 2.506s waited 0.0s
+2026-09-24T10:35:15.210+03:00   P4-G9-p1 r1 [ 34] G9-JAs-mid#g9p W=4: stat 5.2224 ms pose 0x32d5e235342b4143 expect match rb 0.78% ra 0.9% others 0.45% cpu_s 5.391 wall 2.621s waited 0.0s
+2026-09-24T10:35:23.424+03:00   P4-G9-p1 r1 [ 35] G9-JAs-mid#g9t W=2: stat 6.3111 ms pose 0x32d5e235342b4143 expect match rb 0.9% ra 5.86% others 3.02% cpu_s 4.984 wall 3.165s waited 0.0s CONTAMINATED-after(5.86%)
+2026-09-24T10:35:56.754+03:00   P4-G9-p1 r1 [ 36] G9-JAs-mid#g9p W=2: stat 6.4901 ms pose 0x32d5e235342b4143 expect match rb 1.25% ra 0.7% others 0.18% cpu_s 4.828 wall 3.254s waited 25.0s
+2026-09-24T10:36:06.377+03:00   P4-G9-p1 r1 [ 37] G9-JC#g9t W=1: stat 9.0228 ms pose 0x32d5e235342b4143 expect match rb 0.7% ra 5.51% others 3.1% cpu_s 4.594 wall 4.56s waited 0.0s CONTAMINATED-after(5.51%)
+2026-09-24T10:36:41.269+03:00   P4-G9-p1 r1 [ 38] G9-JC#g9p W=1: stat 9.5033 ms pose 0x32d5e235342b4143 expect match rb 0.61% ra 1.94% others 0.39% cpu_s 4.844 wall 4.802s waited 25.0s
+2026-09-24T10:36:50.702+03:00   P4-G9-p1 r1 [ 39] G9-JAs-a#g9t W=1: stat 8.6318 ms pose 0x32d5e235342b4143 expect match rb 1.94% ra 4.73% others 3.96% cpu_s 4.359 wall 4.365s waited 0.0s
+2026-09-24T10:37:00.353+03:00   P4-G9-p1 r1 [ 40] G9-JAs-a#g9p W=1: stat 9.0698 ms pose 0x32d5e235342b4143 expect match rb 4.73% ra 0.68% others 1.62% cpu_s 4.562 wall 4.585s waited 0.0s
+2026-09-24T10:37:05.473+03:00   P4-G9-p1 r1 [ 41] G9-S16#g9t W=1: stat 0.0819 ms pose 0x8877dbb1192e9b92 expect match rb 0.68% ra 0.47% others 0.0% cpu_s 0.047 wall 0.062s waited 0.0s
+2026-09-24T10:37:10.592+03:00   P4-G9-p1 r1 [ 42] G9-S16#g9p W=1: stat 0.0842 ms pose 0x8877dbb1192e9b92 expect match rb 0.47% ra 0.53% others 0.0% cpu_s 0.031 wall 0.063s waited 0.0s
+2026-09-24T10:37:21.771+03:00   P4-G9-p1 r1 [ 43] G9-RS#g9t W=1: stat 6.0847 ms pose 0x2a2b7926a48aab00 expect match rb 0.53% ra 0.43% others 0.4% cpu_s 6.094 wall 6.103s waited 0.0s
+2026-09-24T10:37:33.098+03:00   P4-G9-p1 r1 [ 44] G9-RS#g9p W=1: stat 6.0551 ms pose 0x2a2b7926a48aab00 expect match rb 0.43% ra 5.47% others 3.17% cpu_s 6.312 wall 6.248s waited 0.0s CONTAMINATED-after(5.47%)
+2026-09-24T10:38:15.378+03:00   P4-G9-p1 r1 [ 45] G9-R#g9t W=1: stat 10.8849 ms pose 0x87e561d20589d4a5 expect match rb 1.12% ra 5.56% others 1.99% cpu_s 12.203 wall 12.173s waited 25.0s CONTAMINATED-after(5.56%)
+2026-09-24T10:38:57.892+03:00   P4-G9-p1 r1 [ 46] G9-R#g9p W=1: stat 11.2137 ms pose 0x87e561d20589d4a5 expect match rb 0.62% ra 5.59% others 1.23% cpu_s 12.375 wall 12.407s waited 25.0s CONTAMINATED-after(5.59%)
+2026-09-24T10:39:37.461+03:00   P4-G9-p1 r1 [ 47] G9-JA#g9t W=1: stat 18.9625 ms pose 0x32d5e235342b4143 expect match rb 0.68% ra 5.08% others 0.63% cpu_s 9.5 wall 9.49s waited 25.0s CONTAMINATED-after(5.08%)
+2026-09-24T10:40:16.994+03:00   P4-G9-p1 r1 [ 48] G9-JA#g9p W=1: stat 18.8844 ms pose 0x32d5e235342b4143 expect match rb 0.74% ra 3.58% others 0.25% cpu_s 9.453 wall 9.451s waited 25.0s
+2026-09-24T10:40:24.388+03:00   P4-G9-p1 r2 [ 49] G9-JAs-mid#g9t W=16: stat 4.6673 ms pose 0x32d5e235342b4143 expect match rb 3.58% ra 5.42% others 4.63% cpu_s 11.359 wall 2.343s waited 0.0s CONTAMINATED-after(5.42%)
+2026-09-24T10:40:56.900+03:00   P4-G9-p1 r2 [ 50] G9-JAs-mid#g9p W=16: stat 4.8512 ms pose 0x32d5e235342b4143 expect match rb 0.61% ra 0.69% others 0.24% cpu_s 14.781 wall 2.436s waited 25.0s
+2026-09-24T10:41:05.178+03:00   P4-G9-p1 r2 [ 51] G9-RS#g9t W=8: stat 3.2864 ms pose 0x2a2b7926a48aab00 expect match rb 0.69% ra 5.39% others 2.75% cpu_s 8.312 wall 3.199s waited 0.0s CONTAMINATED-after(5.39%)
+2026-09-24T10:41:38.602+03:00   P4-G9-p1 r2 [ 52] G9-RS#g9p W=8: stat 3.3196 ms pose 0x2a2b7926a48aab00 expect match rb 0.5% ra 0.43% others 0.47% cpu_s 7.953 wall 3.315s waited 25.0s
+2026-09-24T10:41:49.628+03:00   P4-G9-p1 r2 [ 53] G9-R#g9t W=8: stat 5.3146 ms pose 0x87e561d20589d4a5 expect match rb 0.43% ra 5.25% others 2.98% cpu_s 17.125 wall 5.943s waited 0.0s CONTAMINATED-after(5.25%)
+2026-09-24T10:42:26.091+03:00   P4-G9-p1 r2 [ 54] G9-R#g9p W=8: stat 5.7374 ms pose 0x87e561d20589d4a5 expect match rb 1.15% ra 3.09% others 0.35% cpu_s 20.25 wall 6.352s waited 25.0s
+2026-09-24T10:42:34.209+03:00   P4-G9-p1 r2 [ 55] G9-JA#g9t W=8: stat 6.1175 ms pose 0x32d5e235342b4143 expect match rb 3.09% ra 3.98% others 5.0% cpu_s 13.672 wall 3.068s waited 0.0s
+2026-09-24T10:42:42.355+03:00   P4-G9-p1 r2 [ 56] G9-JA#g9p W=8: stat 6.1738 ms pose 0x32d5e235342b4143 expect match rb 3.98% ra 0.9% others 1.17% cpu_s 13.094 wall 3.096s waited 0.0s
+2026-09-24T10:42:49.905+03:00   P4-G9-p1 r2 [ 57] G9-JAs-mid#g9t W=4: stat 4.9855 ms pose 0x32d5e235342b4143 expect match rb 0.9% ra 0.47% others 0.35% cpu_s 4.844 wall 2.502s waited 0.0s
+2026-09-24T10:42:57.570+03:00   P4-G9-p1 r2 [ 58] G9-JAs-mid#g9p W=4: stat 5.2112 ms pose 0x32d5e235342b4143 expect match rb 0.47% ra 1.12% others 0.56% cpu_s 5.125 wall 2.615s waited 0.0s
+2026-09-24T10:43:05.832+03:00   P4-G9-p1 r2 [ 59] G9-JAs-mid#g9t W=2: stat 6.4068 ms pose 0x32d5e235342b4143 expect match rb 1.12% ra 0.39% others 0.09% cpu_s 4.797 wall 3.212s waited 0.0s
+2026-09-24T10:43:14.161+03:00   P4-G9-p1 r2 [ 60] G9-JAs-mid#g9p W=2: stat 6.5403 ms pose 0x32d5e235342b4143 expect match rb 0.39% ra 5.68% others 2.56% cpu_s 4.969 wall 3.28s waited 0.0s CONTAMINATED-after(5.68%)
+2026-09-24T10:43:48.796+03:00   P4-G9-p1 r2 [ 61] G9-JC#g9t W=1: stat 8.9876 ms pose 0x32d5e235342b4143 expect match rb 0.62% ra 0.47% others 0.24% cpu_s 4.531 wall 4.543s waited 25.0s
+2026-09-24T10:43:58.616+03:00   P4-G9-p1 r2 [ 62] G9-JC#g9p W=1: stat 9.4129 ms pose 0x32d5e235342b4143 expect match rb 0.47% ra 5.19% others 3.51% cpu_s 4.781 wall 4.756s waited 0.0s CONTAMINATED-after(5.19%)
+2026-09-24T10:44:33.025+03:00   P4-G9-p1 r2 [ 63] G9-JAs-a#g9t W=1: stat 8.5346 ms pose 0x32d5e235342b4143 expect match rb 0.81% ra 1.6% others 0.34% cpu_s 4.297 wall 4.316s waited 25.0s
+2026-09-24T10:44:42.622+03:00   P4-G9-p1 r2 [ 64] G9-JAs-a#g9p W=1: stat 8.9592 ms pose 0x32d5e235342b4143 expect match rb 1.6% ra 5.29% others 4.51% cpu_s 4.594 wall 4.529s waited 0.0s CONTAMINATED-after(5.29%)
+2026-09-24T10:45:12.775+03:00   P4-G9-p1 r2 [ 65] G9-S16#g9t W=1: stat 0.0827 ms pose 0x8877dbb1192e9b92 expect match rb 2.73% ra 1.0% others 1.56% cpu_s 0.047 wall 0.064s waited 25.0s
+2026-09-24T10:45:17.898+03:00   P4-G9-p1 r2 [ 66] G9-S16#g9p W=1: stat 0.0814 ms pose 0x8877dbb1192e9b92 expect match rb 1.0% ra 3.38% others 1.61% cpu_s 0.062 wall 0.062s waited 0.0s
+2026-09-24T10:45:29.046+03:00   P4-G9-p1 r2 [ 67] G9-RS#g9t W=1: stat 6.0114 ms pose 0x2a2b7926a48aab00 expect match rb 3.38% ra 2.85% others 4.17% cpu_s 6.109 wall 6.067s waited 0.0s
+2026-09-24T10:45:40.371+03:00   P4-G9-p1 r2 [ 68] G9-RS#g9p W=1: stat 6.0459 ms pose 0x2a2b7926a48aab00 expect match rb 2.85% ra 0.73% others 0.41% cpu_s 6.312 wall 6.246s waited 0.0s
+2026-09-24T10:45:57.481+03:00   P4-G9-p1 r2 [ 69] G9-R#g9t W=1: stat 10.8748 ms pose 0x87e561d20589d4a5 expect match rb 0.73% ra 1.04% others 0.4% cpu_s 12.047 wall 12.031s waited 0.0s
+2026-09-24T10:46:14.915+03:00   P4-G9-p1 r2 [ 70] G9-R#g9p W=1: stat 11.1485 ms pose 0x87e561d20589d4a5 expect match rb 1.04% ra 2.25% others 3.53% cpu_s 12.391 wall 12.353s waited 0.0s
+2026-09-24T10:46:29.400+03:00   P4-G9-p1 r2 [ 71] G9-JA#g9t W=1: stat 18.8526 ms pose 0x32d5e235342b4143 expect match rb 2.25% ra 0.59% others 0.28% cpu_s 9.453 wall 9.435s waited 0.0s
+2026-09-24T10:46:43.912+03:00   P4-G9-p1 r2 [ 72] G9-JA#g9p W=1: stat 18.9085 ms pose 0x32d5e235342b4143 expect match rb 0.59% ra 3.57% others 0.28% cpu_s 9.469 wall 9.463s waited 0.0s
+2026-09-24T10:46:43.912+03:00 P4-G9-p1: re-running 19 process(es) at the end of the pass: [(4, 0, 'G9-RS', 'g9p', 8, 'contaminated'), (6, 0, 'G9-R', 'g9p', 8, 'contaminated'), (8, 0, 'G9-JA', 'g9p', 8, 'contaminated'), (10, 0, 'G9-JAs-mid', 'g9p', 4, 'contaminated'), (17, 0, 'G9-S16', 'g9t', 1, 'contaminated'), (22, 0, 'G9-R', 'g9p', 1, 'contaminated'), (28, 1, 'G9-RS', 'g9p', 8, 'contaminated'), (35, 1, 'G9-JAs-mid', 'g9t', 2, 'contaminated'), (37, 1, 'G9-JC', 'g9t', 1, 'contaminated'), (44, 1, 'G9-RS', 'g9p', 1, 'contaminated'), (45, 1, 'G9-R', 'g9t', 1, 'contaminated'), (46, 1, 'G9-R', 'g9p', 1, 'contaminated'), (47, 1, 'G9-JA', 'g9t', 1, 'contaminated'), (49, 2, 'G9-JAs-mid', 'g9t', 16, 'contaminated'), (51, 2, 'G9-RS', 'g9t', 8, 'contaminated'), (53, 2, 'G9-R', 'g9t', 8, 'contaminated'), (60, 2, 'G9-JAs-mid', 'g9p', 2, 'contaminated'), (62, 2, 'G9-JC', 'g9p', 1, 'contaminated'), (64, 2, 'G9-JAs-a', 'g9p', 1, 'contaminated')]
+2026-09-24T10:46:52.305+03:00   P4-G9-p1 r0 [  4] G9-RS#g9p W=8 RERUN (contaminated): stat 3.2783 ms pose 0x2a2b7926a48aab00 expect match rb 3.57% ra 4.13% others 4.92% cpu_s 7.266 wall 3.315s waited 0.0s
+2026-09-24T10:47:03.616+03:00   P4-G9-p1 r0 [  6] G9-R#g9p W=8 RERUN (contaminated): stat 5.5954 ms pose 0x87e561d20589d4a5 expect match rb 4.13% ra 2.14% others 1.21% cpu_s 18.453 wall 6.233s waited 0.0s
+2026-09-24T10:47:11.747+03:00   P4-G9-p1 r0 [  8] G9-JA#g9p W=8 RERUN (contaminated): stat 6.1402 ms pose 0x32d5e235342b4143 expect match rb 2.14% ra 0.56% others 0.31% cpu_s 12.766 wall 3.079s waited 0.0s
+2026-09-24T10:47:19.410+03:00   P4-G9-p1 r0 [ 10] G9-JAs-mid#g9p W=4 RERUN (contaminated): stat 5.2065 ms pose 0x32d5e235342b4143 expect match rb 0.56% ra 0.57% others 0.52% cpu_s 5.125 wall 2.613s waited 0.0s
+2026-09-24T10:47:24.531+03:00   P4-G9-p1 r0 [ 17] G9-S16#g9t W=1 RERUN (contaminated): stat 0.0821 ms pose 0x8877dbb1192e9b92 expect match rb 0.57% ra 1.83% others 0.0% cpu_s 0.031 wall 0.063s waited 0.0s
+2026-09-24T10:47:42.625+03:00   P4-G9-p1 r0 [ 22] G9-R#g9p W=1 RERUN (contaminated): stat 11.7631 ms pose 0x87e561d20589d4a5 expect match rb 1.83% ra 1.96% others 3.35% cpu_s 13.016 wall 13.013s waited 0.0s
+2026-09-24T10:47:51.055+03:00   P4-G9-p1 r1 [ 28] G9-RS#g9p W=8 RERUN (contaminated): stat 3.3345 ms pose 0x2a2b7926a48aab00 expect match rb 1.96% ra 0.96% others 0.44% cpu_s 8.25 wall 3.348s waited 0.0s
+2026-09-24T10:47:59.256+03:00   P4-G9-p1 r1 [ 35] G9-JAs-mid#g9t W=2 RERUN (contaminated): stat 6.2828 ms pose 0x32d5e235342b4143 expect match rb 0.96% ra 1.63% others 0.43% cpu_s 4.641 wall 3.151s waited 0.0s
+2026-09-24T10:48:08.858+03:00   P4-G9-p1 r1 [ 37] G9-JC#g9t W=1 RERUN (contaminated): stat 8.9692 ms pose 0x32d5e235342b4143 expect match rb 1.63% ra 2.82% others 0.3% cpu_s 4.531 wall 4.534s waited 0.0s
+2026-09-24T10:48:20.161+03:00   P4-G9-p1 r1 [ 44] G9-RS#g9p W=1 RERUN (contaminated): stat 6.0965 ms pose 0x2a2b7926a48aab00 expect match rb 2.82% ra 3.0% others 4.03% cpu_s 6.234 wall 6.225s waited 0.0s
+2026-09-24T10:48:37.477+03:00   P4-G9-p1 r1 [ 45] G9-R#g9t W=1 RERUN (contaminated): stat 11.0219 ms pose 0x87e561d20589d4a5 expect match rb 3.0% ra 0.94% others 0.41% cpu_s 12.25 wall 12.235s waited 0.0s
+2026-09-24T10:48:54.945+03:00   P4-G9-p1 r1 [ 46] G9-R#g9p W=1 RERUN (contaminated): stat 11.1682 ms pose 0x87e561d20589d4a5 expect match rb 0.94% ra 5.75% others 0.4% cpu_s 12.406 wall 12.39s waited 0.0s CONTAMINATED-after(5.75%)
+2026-09-24T10:49:34.555+03:00   P4-G9-p1 r1 [ 47] G9-JA#g9t W=1 RERUN (contaminated): stat 19.0498 ms pose 0x32d5e235342b4143 expect match rb 0.43% ra 3.06% others 0.28% cpu_s 9.531 wall 9.535s waited 25.0s
+2026-09-24T10:49:41.929+03:00   P4-G9-p1 r2 [ 49] G9-JAs-mid#g9t W=16 RERUN (contaminated): stat 4.6261 ms pose 0x32d5e235342b4143 expect match rb 3.06% ra 5.21% others 5.3% cpu_s 11.094 wall 2.323s waited 0.0s CONTAMINATED-after(5.21%)
+2026-09-24T10:50:15.238+03:00   P4-G9-p1 r2 [ 51] G9-RS#g9t W=8 RERUN (contaminated): stat 3.2846 ms pose 0x2a2b7926a48aab00 expect match rb 0.77% ra 0.95% others 0.46% cpu_s 6.984 wall 3.204s waited 25.0s
+2026-09-24T10:50:26.361+03:00   P4-G9-p1 r2 [ 53] G9-R#g9t W=8 RERUN (contaminated): stat 5.4129 ms pose 0x87e561d20589d4a5 expect match rb 0.95% ra 4.23% others 4.31% cpu_s 16.859 wall 6.044s waited 0.0s
+2026-09-24T10:50:34.697+03:00   P4-G9-p1 r2 [ 60] G9-JAs-mid#g9p W=2 RERUN (contaminated): stat 6.5549 ms pose 0x32d5e235342b4143 expect match rb 4.23% ra 1.0% others 1.76% cpu_s 4.906 wall 3.287s waited 0.0s
+2026-09-24T10:50:44.640+03:00   P4-G9-p1 r2 [ 62] G9-JC#g9p W=1 RERUN (contaminated): stat 9.6585 ms pose 0x32d5e235342b4143 expect match rb 1.0% ra 1.66% others 0.52% cpu_s 4.922 wall 4.879s waited 0.0s
+2026-09-24T10:50:54.233+03:00   P4-G9-p1 r2 [ 64] G9-JAs-a#g9p W=1 RERUN (contaminated): stat 8.9575 ms pose 0x32d5e235342b4143 expect match rb 1.66% ra 0.51% others 0.56% cpu_s 4.5 wall 4.529s waited 0.0s
+2026-09-24T10:50:54.233+03:00 P4-G9-p1: done
+2026-09-24T10:50:54.236+03:00 P5a-bridge2-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T10:53:04.685+03:00 P5a-bridge2-p0: idle reached; {'time': '2026-09-24T10:53:04.685+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T10:53:14.729+03:00 P5a-bridge2-p0: opening receipt 4.43% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T10:53:22.020+03:00   P5a-bridge2-p0 warm-up B2-JAs#g9p W=8 (untimed): stat 4.4606 ms pose 0x32d5e235342b4143 expect match rb 4.43% ra 2.8% others 2.84% cpu_s 6.328 wall 2.24s waited 0.0s
+2026-09-24T10:53:31.593+03:00   P5a-bridge2-p0 r0 [  1] B2-JAs#w4bt W=1: stat 9.0184 ms pose 0x32d5e235342b4143 expect match rb 2.8% ra 1.35% others 0.54% cpu_s 4.531 wall 4.52s waited 0.0s
+2026-09-24T10:53:41.031+03:00   P5a-bridge2-p0 r0 [  2] B2-JAs#g9p W=1: stat 8.7570 ms pose 0x32d5e235342b4143 expect match rb 1.35% ra 0.96% others 0.53% cpu_s 4.391 wall 4.387s waited 0.0s
+2026-09-24T10:53:48.320+03:00   P5a-bridge2-p0 r0 [  3] B2-JAs#w4bt W=8: stat 4.4611 ms pose 0x32d5e235342b4143 expect match rb 0.96% ra 0.39% others 0.09% cpu_s 6.156 wall 2.24s waited 0.0s
+2026-09-24T10:53:55.647+03:00   P5a-bridge2-p0 r0 [  4] B2-JAs#g9p W=8: stat 4.5333 ms pose 0x32d5e235342b4143 expect match rb 0.39% ra 5.21% others 2.7% cpu_s 5.75 wall 2.276s waited 0.0s CONTAMINATED-after(5.21%)
+2026-09-24T10:54:30.115+03:00   P5a-bridge2-p0 r1 [  5] B2-JAs#w4bt W=1: stat 8.7640 ms pose 0x32d5e235342b4143 expect match rb 0.65% ra 1.27% others 0.27% cpu_s 4.422 wall 4.391s waited 25.0s
+2026-09-24T10:54:39.556+03:00   P5a-bridge2-p0 r1 [  6] B2-JAs#g9p W=1: stat 8.7572 ms pose 0x32d5e235342b4143 expect match rb 1.27% ra 4.9% others 1.8% cpu_s 4.359 wall 4.388s waited 0.0s
+2026-09-24T10:54:46.843+03:00   P5a-bridge2-p0 r1 [  7] B2-JAs#w4bt W=8: stat 4.4508 ms pose 0x32d5e235342b4143 expect match rb 4.9% ra 2.75% others 2.58% cpu_s 6.109 wall 2.235s waited 0.0s
+2026-09-24T10:54:54.158+03:00   P5a-bridge2-p0 r1 [  8] B2-JAs#g9p W=8: stat 4.5053 ms pose 0x32d5e235342b4143 expect match rb 2.75% ra 0.53% others 0.26% cpu_s 7.219 wall 2.263s waited 0.0s
+2026-09-24T10:55:03.774+03:00   P5a-bridge2-p0 r2 [  9] B2-JAs#w4bt W=1: stat 9.1162 ms pose 0x32d5e235342b4143 expect match rb 0.53% ra 1.47% others 0.3% cpu_s 4.594 wall 4.567s waited 0.0s
+2026-09-24T10:55:13.193+03:00   P5a-bridge2-p0 r2 [ 10] B2-JAs#g9p W=1: stat 8.7150 ms pose 0x32d5e235342b4143 expect match rb 1.47% ra 0.37% others 0.36% cpu_s 4.375 wall 4.367s waited 0.0s
+2026-09-24T10:55:20.502+03:00   P5a-bridge2-p0 r2 [ 11] B2-JAs#w4bt W=8: stat 4.5007 ms pose 0x32d5e235342b4143 expect match rb 0.37% ra 5.3% others 1.04% cpu_s 6.562 wall 2.26s waited 0.0s CONTAMINATED-after(5.3%)
+2026-09-24T10:55:52.861+03:00   P5a-bridge2-p0 r2 [ 12] B2-JAs#g9p W=8: stat 4.5410 ms pose 0x32d5e235342b4143 expect match rb 0.46% ra 0.53% others 0.34% cpu_s 6.891 wall 2.281s waited 25.0s
+2026-09-24T10:55:52.861+03:00 P5a-bridge2-p0: re-running 2 process(es) at the end of the pass: [(4, 0, 'B2-JAs', 'g9p', 8, 'contaminated'), (11, 2, 'B2-JAs', 'w4bt', 8, 'contaminated')]
+2026-09-24T10:56:00.178+03:00   P5a-bridge2-p0 r0 [  4] B2-JAs#g9p W=8 RERUN (contaminated): stat 4.5167 ms pose 0x32d5e235342b4143 expect match rb 0.53% ra 2.39% others 0.26% cpu_s 7.094 wall 2.267s waited 0.0s
+2026-09-24T10:56:07.474+03:00   P5a-bridge2-p0 r2 [ 11] B2-JAs#w4bt W=8 RERUN (contaminated): stat 4.4725 ms pose 0x32d5e235342b4143 expect match rb 2.39% ra 5.41% others 4.66% cpu_s 6.359 wall 2.245s waited 0.0s CONTAMINATED-after(5.41%)
+2026-09-24T10:56:07.475+03:00 P5a-bridge2-p0: done
+2026-09-24T10:56:07.476+03:00 P5a-bridge2-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T11:01:18.010+03:00 P5a-bridge2-p1: idle reached; {'time': '2026-09-24T11:01:18.010+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T11:01:28.056+03:00 P5a-bridge2-p1: opening receipt 0.7% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T11:01:35.372+03:00   P5a-bridge2-p1 warm-up B2-JAs#g9p W=8 (untimed): stat 4.5113 ms pose 0x32d5e235342b4143 expect match rb 0.7% ra 0.84% others 0.52% cpu_s 5.938 wall 2.265s waited 0.0s
+2026-09-24T11:01:42.689+03:00   P5a-bridge2-p1 r0 [  1] B2-JAs#g9p W=8: stat 4.5153 ms pose 0x32d5e235342b4143 expect match rb 0.84% ra 2.8% others 0.3% cpu_s 6.625 wall 2.267s waited 0.0s
+2026-09-24T11:01:49.972+03:00   P5a-bridge2-p1 r0 [  2] B2-JAs#w4bt W=8: stat 4.4427 ms pose 0x32d5e235342b4143 expect match rb 2.8% ra 5.76% others 5.3% cpu_s 7.078 wall 2.231s waited 0.0s CONTAMINATED-after(5.76%)
+2026-09-24T11:02:24.445+03:00   P5a-bridge2-p1 r0 [  3] B2-JAs#g9p W=1: stat 8.7759 ms pose 0x32d5e235342b4143 expect match rb 0.89% ra 1.76% others 0.26% cpu_s 4.406 wall 4.397s waited 25.0s
+2026-09-24T11:02:33.869+03:00   P5a-bridge2-p1 r0 [  4] B2-JAs#w4bt W=1: stat 8.7345 ms pose 0x32d5e235342b4143 expect match rb 1.76% ra 5.77% others 4.29% cpu_s 4.469 wall 4.376s waited 0.0s CONTAMINATED-after(5.77%)
+2026-09-24T11:03:06.233+03:00   P5a-bridge2-p1 r1 [  5] B2-JAs#g9p W=8: stat 4.5593 ms pose 0x32d5e235342b4143 expect match rb 1.93% ra 0.6% others 0.17% cpu_s 6.5 wall 2.289s waited 25.0s
+2026-09-24T11:03:13.528+03:00   P5a-bridge2-p1 r1 [  6] B2-JAs#w4bt W=8: stat 4.4662 ms pose 0x32d5e235342b4143 expect match rb 0.6% ra 5.01% others 2.7% cpu_s 5.906 wall 2.243s waited 0.0s CONTAMINATED-after(5.01%)
+2026-09-24T11:03:47.971+03:00   P5a-bridge2-p1 r1 [  7] B2-JAs#g9p W=1: stat 8.7111 ms pose 0x32d5e235342b4143 expect match rb 0.47% ra 0.79% others 0.54% cpu_s 4.375 wall 4.365s waited 25.0s
+2026-09-24T11:03:57.407+03:00   P5a-bridge2-p1 r1 [  8] B2-JAs#w4bt W=1: stat 8.7540 ms pose 0x32d5e235342b4143 expect match rb 0.79% ra 6.18% others 2.29% cpu_s 4.359 wall 4.386s waited 0.0s CONTAMINATED-after(6.18%)
+2026-09-24T11:04:29.773+03:00   P5a-bridge2-p1 r2 [  9] B2-JAs#g9p W=8: stat 4.5672 ms pose 0x32d5e235342b4143 expect match rb 0.74% ra 0.51% others 0.34% cpu_s 5.984 wall 2.293s waited 25.0s
+2026-09-24T11:04:37.053+03:00   P5a-bridge2-p1 r2 [ 10] B2-JAs#w4bt W=8: stat 4.4392 ms pose 0x32d5e235342b4143 expect match rb 0.51% ra 5.62% others 0.52% cpu_s 5.875 wall 2.229s waited 0.0s CONTAMINATED-after(5.62%)
+2026-09-24T11:05:11.525+03:00   P5a-bridge2-p1 r2 [ 11] B2-JAs#g9p W=1: stat 8.7726 ms pose 0x32d5e235342b4143 expect match rb 0.51% ra 0.37% others 0.33% cpu_s 4.391 wall 4.396s waited 25.0s
+2026-09-24T11:05:20.919+03:00   P5a-bridge2-p1 r2 [ 12] B2-JAs#w4bt W=1: stat 8.6722 ms pose 0x32d5e235342b4143 expect match rb 0.37% ra 5.19% others 0.97% cpu_s 4.391 wall 4.346s waited 0.0s CONTAMINATED-after(5.19%)
+2026-09-24T11:05:20.919+03:00 P5a-bridge2-p1: re-running 6 process(es) at the end of the pass: [(2, 0, 'B2-JAs', 'w4bt', 8, 'contaminated'), (4, 0, 'B2-JAs', 'w4bt', 1, 'contaminated'), (6, 1, 'B2-JAs', 'w4bt', 8, 'contaminated'), (8, 1, 'B2-JAs', 'w4bt', 1, 'contaminated'), (10, 2, 'B2-JAs', 'w4bt', 8, 'contaminated'), (12, 2, 'B2-JAs', 'w4bt', 1, 'contaminated')]
+2026-09-24T11:05:53.223+03:00   P5a-bridge2-p1 r0 [  2] B2-JAs#w4bt W=8 RERUN (contaminated): stat 4.4284 ms pose 0x32d5e235342b4143 expect match rb 1.34% ra 1.01% others 0.35% cpu_s 6.328 wall 2.223s waited 25.0s
+2026-09-24T11:06:02.644+03:00   P5a-bridge2-p1 r0 [  4] B2-JAs#w4bt W=1 RERUN (contaminated): stat 8.7226 ms pose 0x32d5e235342b4143 expect match rb 1.01% ra 4.49% others 0.09% cpu_s 4.375 wall 4.37s waited 0.0s
+2026-09-24T11:06:09.921+03:00   P5a-bridge2-p1 r1 [  6] B2-JAs#w4bt W=8 RERUN (contaminated): stat 4.4372 ms pose 0x32d5e235342b4143 expect match rb 4.49% ra 4.45% others 4.6% cpu_s 6.578 wall 2.228s waited 0.0s
+2026-09-24T11:06:19.306+03:00   P5a-bridge2-p1 r1 [  8] B2-JAs#w4bt W=1 RERUN (contaminated): stat 8.6514 ms pose 0x32d5e235342b4143 expect match rb 4.45% ra 0.73% others 0.9% cpu_s 4.328 wall 4.336s waited 0.0s
+2026-09-24T11:06:26.607+03:00   P5a-bridge2-p1 r2 [ 10] B2-JAs#w4bt W=8 RERUN (contaminated): stat 4.4831 ms pose 0x32d5e235342b4143 expect match rb 0.73% ra 0.51% others 0.44% cpu_s 6.0 wall 2.252s waited 0.0s
+2026-09-24T11:06:36.008+03:00   P5a-bridge2-p1 r2 [ 12] B2-JAs#w4bt W=1 RERUN (contaminated): stat 8.6795 ms pose 0x32d5e235342b4143 expect match rb 0.51% ra 0.64% others 0.36% cpu_s 4.344 wall 4.349s waited 0.0s
+2026-09-24T11:06:36.008+03:00 P5a-bridge2-p1: done
+2026-09-24T11:06:36.009+03:00 P5b-L10spans-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T11:08:46.503+03:00 P5b-L10spans-p0: idle reached; {'time': '2026-09-24T11:08:46.503+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T11:08:56.548+03:00 P5b-L10spans-p0: opening receipt 4.03% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T11:09:05.538+03:00   P5b-L10spans-p0 warm-up L10-Son#b4db W=8 (untimed): stat 2.9377 ms pose 0xcc2a5400c66eecce expect match rb 4.03% ra 2.31% others 2.88% cpu_s 10.797 wall 3.897s waited 0.0s
+2026-09-24T11:09:13.315+03:00   P5b-L10spans-p0 r0 [  1] L10-RS-Offp#b4db W=1: stat 1.6984 ms pose 0xb7f1e9e8f91f75ab expect match rb 2.31% ra 0.62% others 0.69% cpu_s 2.688 wall 2.696s waited 0.0s
+2026-09-24T11:09:24.388+03:00   P5b-L10spans-p0 r0 [  2] L10-RS#b4db W=1: stat 5.9205 ms pose 0x2a2b7926a48aab00 expect match rb 0.62% ra 1.08% others 0.33% cpu_s 5.969 wall 5.995s waited 0.0s
+2026-09-24T11:09:31.320+03:00   P5b-L10spans-p0 r0 [  3] L10-Offp8#b4db W=8: stat 0.8810 ms pose 0x3db47fae414b655c expect match rb 1.08% ra 1.39% others 0.11% cpu_s 6.922 wall 1.838s waited 0.0s
+2026-09-24T11:09:40.280+03:00   P5b-L10spans-p0 r0 [  4] L10-Son8#b4db W=8: stat 2.9089 ms pose 0xcc2a5400c66eecce expect match rb 1.39% ra 5.74% others 3.33% cpu_s 10.219 wall 3.868s waited 0.0s CONTAMINATED-after(5.74%)
+2026-09-24T11:10:11.904+03:00   P5b-L10spans-p0 r0 [  5] L10-RS-Offp#b4db W=8: stat 1.0410 ms pose 0xb7f1e9e8f91f75ab expect match rb 1.95% ra 0.63% others 0.58% cpu_s 5.094 wall 1.516s waited 25.0s
+2026-09-24T11:10:20.224+03:00   P5b-L10spans-p0 r0 [  6] L10-RS#b4db W=8: stat 3.2863 ms pose 0x2a2b7926a48aab00 expect match rb 0.63% ra 4.74% others 0.36% cpu_s 7.859 wall 3.244s waited 0.0s
+2026-09-24T11:10:28.927+03:00   P5b-L10spans-p0 r1 [  7] L10-RS-Offp#b4db W=1: stat 1.7122 ms pose 0xb7f1e9e8f91f75ab expect match rb 4.74% ra 9.66% others 3.56% cpu_s 2.812 wall 3.625s waited 0.0s CONTAMINATED-after(9.66%)
+2026-09-24T11:11:04.986+03:00   P5b-L10spans-p0 r1 [  8] L10-RS#b4db W=1: stat 5.7822 ms pose 0x2a2b7926a48aab00 expect match rb 0.17% ra 0.37% others 0.26% cpu_s 5.969 wall 5.958s waited 25.0s
+2026-09-24T11:11:11.855+03:00   P5b-L10spans-p0 r1 [  9] L10-Offp8#b4db W=8: stat 0.8215 ms pose 0x3db47fae414b655c expect match rb 0.37% ra 0.35% others 0.22% cpu_s 6.969 wall 1.781s waited 0.0s
+2026-09-24T11:11:20.606+03:00   P5b-L10spans-p0 r1 [ 10] L10-Son8#b4db W=8: stat 2.7983 ms pose 0xcc2a5400c66eecce expect match rb 0.35% ra 0.88% others 0.14% cpu_s 11.469 wall 3.666s waited 0.0s
+2026-09-24T11:11:27.008+03:00   P5b-L10spans-p0 r1 [ 11] L10-RS-Offp#b4db W=8: stat 0.9688 ms pose 0xb7f1e9e8f91f75ab expect match rb 0.88% ra 0.88% others 0.67% cpu_s 3.75 wall 1.325s waited 0.0s
+2026-09-24T11:11:35.089+03:00   P5b-L10spans-p0 r1 [ 12] L10-RS#b4db W=8: stat 3.1112 ms pose 0x2a2b7926a48aab00 expect match rb 0.88% ra 0.35% others 0.2% cpu_s 7.797 wall 3.004s waited 0.0s
+2026-09-24T11:11:42.713+03:00   P5b-L10spans-p0 r2 [ 13] L10-RS-Offp#b4db W=1: stat 1.5918 ms pose 0xb7f1e9e8f91f75ab expect match rb 0.35% ra 0.67% others 0.15% cpu_s 2.594 wall 2.548s waited 0.0s
+2026-09-24T11:11:53.676+03:00   P5b-L10spans-p0 r2 [ 14] L10-RS#b4db W=1: stat 5.8019 ms pose 0x2a2b7926a48aab00 expect match rb 0.67% ra 0.41% others 0.18% cpu_s 5.906 wall 5.888s waited 0.0s
+2026-09-24T11:12:00.481+03:00   P5b-L10spans-p0 r2 [ 15] L10-Offp8#b4db W=8: stat 0.8121 ms pose 0x3db47fae414b655c expect match rb 0.41% ra 0.27% others 0.4% cpu_s 6.234 wall 1.719s waited 0.0s
+2026-09-24T11:12:09.236+03:00   P5b-L10spans-p0 r2 [ 16] L10-Son8#b4db W=8: stat 2.7981 ms pose 0xcc2a5400c66eecce expect match rb 0.27% ra 0.41% others 0.4% cpu_s 9.266 wall 3.665s waited 0.0s
+2026-09-24T11:12:15.636+03:00   P5b-L10spans-p0 r2 [ 17] L10-RS-Offp#b4db W=8: stat 0.9609 ms pose 0xb7f1e9e8f91f75ab expect match rb 0.41% ra 0.55% others 0.15% cpu_s 3.938 wall 1.324s waited 0.0s
+2026-09-24T11:12:23.726+03:00   P5b-L10spans-p0 r2 [ 18] L10-RS#b4db W=8: stat 3.1233 ms pose 0x2a2b7926a48aab00 expect match rb 0.55% ra 1.1% others 0.23% cpu_s 6.516 wall 3.015s waited 0.0s
+2026-09-24T11:12:23.727+03:00 P5b-L10spans-p0: re-running 2 process(es) at the end of the pass: [(4, 0, 'L10-Son8', 'b4db', 8, 'contaminated'), (7, 1, 'L10-RS-Offp', 'b4db', 1, 'contaminated')]
+2026-09-24T11:12:32.484+03:00   P5b-L10spans-p0 r0 [  4] L10-Son8#b4db W=8 RERUN (contaminated): stat 2.8067 ms pose 0xcc2a5400c66eecce expect match rb 1.1% ra 0.28% others 0.13% cpu_s 9.688 wall 3.674s waited 0.0s
+2026-09-24T11:12:40.085+03:00   P5b-L10spans-p0 r1 [  7] L10-RS-Offp#b4db W=1 RERUN (contaminated): stat 1.5820 ms pose 0xb7f1e9e8f91f75ab expect match rb 0.28% ra 0.28% others 0.08% cpu_s 2.516 wall 2.526s waited 0.0s
+2026-09-24T11:12:40.086+03:00 P5b-L10spans-p0: done
+2026-09-24T11:12:40.087+03:00 P5b-L10spans-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T11:14:50.564+03:00 P5b-L10spans-p1: idle reached; {'time': '2026-09-24T11:14:50.564+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T11:15:00.608+03:00 P5b-L10spans-p1: opening receipt 0.65% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T11:15:09.355+03:00   P5b-L10spans-p1 warm-up L10-Son#b4db W=8 (untimed): stat 2.7927 ms pose 0xcc2a5400c66eecce expect match rb 0.65% ra 1.08% others 0.51% cpu_s 10.797 wall 3.659s waited 0.0s
+2026-09-24T11:15:17.491+03:00   P5b-L10spans-p1 r0 [  1] L10-RS#b4db W=8: stat 3.1534 ms pose 0x2a2b7926a48aab00 expect match rb 1.08% ra 0.48% others 0.16% cpu_s 7.375 wall 3.056s waited 0.0s
+2026-09-24T11:15:23.905+03:00   P5b-L10spans-p1 r0 [  2] L10-RS-Offp#b4db W=8: stat 0.9614 ms pose 0xb7f1e9e8f91f75ab expect match rb 0.48% ra 0.39% others 0.0% cpu_s 3.531 wall 1.336s waited 0.0s
+2026-09-24T11:15:32.664+03:00   P5b-L10spans-p1 r0 [  3] L10-Son8#b4db W=8: stat 2.7971 ms pose 0xcc2a5400c66eecce expect match rb 0.39% ra 0.35% others 0.16% cpu_s 9.703 wall 3.676s waited 0.0s
+2026-09-24T11:15:39.454+03:00   P5b-L10spans-p1 r0 [  4] L10-Offp8#b4db W=8: stat 0.8124 ms pose 0x3db47fae414b655c expect match rb 0.35% ra 0.35% others 0.06% cpu_s 6.109 wall 1.703s waited 0.0s
+2026-09-24T11:15:50.394+03:00   P5b-L10spans-p1 r0 [  5] L10-RS#b4db W=1: stat 5.7575 ms pose 0x2a2b7926a48aab00 expect match rb 0.35% ra 0.53% others 0.15% cpu_s 5.891 wall 5.864s waited 0.0s
+2026-09-24T11:15:57.975+03:00   P5b-L10spans-p1 r0 [  6] L10-RS-Offp#b4db W=1: stat 1.5954 ms pose 0xb7f1e9e8f91f75ab expect match rb 0.53% ra 0.86% others 0.08% cpu_s 2.484 wall 2.505s waited 0.0s
+2026-09-24T11:16:06.062+03:00   P5b-L10spans-p1 r1 [  7] L10-RS#b4db W=8: stat 3.1191 ms pose 0x2a2b7926a48aab00 expect match rb 0.86% ra 1.23% others 0.26% cpu_s 7.609 wall 3.013s waited 0.0s
+2026-09-24T11:16:12.465+03:00   P5b-L10spans-p1 r1 [  8] L10-RS-Offp#b4db W=8: stat 0.9624 ms pose 0xb7f1e9e8f91f75ab expect match rb 1.23% ra 0.45% others 0.08% cpu_s 3.656 wall 1.326s waited 0.0s
+2026-09-24T11:16:21.215+03:00   P5b-L10spans-p1 r1 [  9] L10-Son8#b4db W=8: stat 2.8014 ms pose 0xcc2a5400c66eecce expect match rb 0.45% ra 0.39% others 0.11% cpu_s 9.688 wall 3.665s waited 0.0s
+2026-09-24T11:16:28.008+03:00   P5b-L10spans-p1 r1 [ 10] L10-Offp8#b4db W=8: stat 0.8089 ms pose 0x3db47fae414b655c expect match rb 0.39% ra 0.2% others 0.06% cpu_s 5.484 wall 1.709s waited 0.0s
+2026-09-24T11:16:39.014+03:00   P5b-L10spans-p1 r1 [ 11] L10-RS#b4db W=1: stat 5.7685 ms pose 0x2a2b7926a48aab00 expect match rb 0.2% ra 0.62% others 0.15% cpu_s 5.938 wall 5.931s waited 0.0s
+2026-09-24T11:16:46.588+03:00   P5b-L10spans-p1 r1 [ 12] L10-RS-Offp#b4db W=1: stat 1.5845 ms pose 0xb7f1e9e8f91f75ab expect match rb 0.62% ra 0.49% others 0.08% cpu_s 2.547 wall 2.499s waited 0.0s
+2026-09-24T11:16:54.673+03:00   P5b-L10spans-p1 r2 [ 13] L10-RS#b4db W=8: stat 3.1107 ms pose 0x2a2b7926a48aab00 expect match rb 0.49% ra 0.33% others 0.26% cpu_s 7.453 wall 3.007s waited 0.0s
+2026-09-24T11:17:01.079+03:00   P5b-L10spans-p1 r2 [ 14] L10-RS-Offp#b4db W=8: stat 0.9690 ms pose 0xb7f1e9e8f91f75ab expect match rb 0.33% ra 1.01% others 0.15% cpu_s 4.312 wall 1.33s waited 0.0s
+2026-09-24T11:17:09.830+03:00   P5b-L10spans-p1 r2 [ 15] L10-Son8#b4db W=8: stat 2.7995 ms pose 0xcc2a5400c66eecce expect match rb 1.01% ra 0.31% others 0.03% cpu_s 10.438 wall 3.666s waited 0.0s
+2026-09-24T11:17:16.636+03:00   P5b-L10spans-p1 r2 [ 16] L10-Offp8#b4db W=8: stat 0.8260 ms pose 0x3db47fae414b655c expect match rb 0.31% ra 0.14% others 0.12% cpu_s 7.219 wall 1.72s waited 0.0s
+2026-09-24T11:17:27.671+03:00   P5b-L10spans-p1 r2 [ 17] L10-RS#b4db W=1: stat 5.7745 ms pose 0x2a2b7926a48aab00 expect match rb 0.14% ra 0.57% others 0.15% cpu_s 5.922 wall 5.96s waited 0.0s
+2026-09-24T11:17:35.277+03:00   P5b-L10spans-p1 r2 [ 18] L10-RS-Offp#b4db W=1: stat 1.5977 ms pose 0xb7f1e9e8f91f75ab expect match rb 0.57% ra 0.82% others 0.0% cpu_s 2.531 wall 2.533s waited 0.0s
+2026-09-24T11:17:35.278+03:00 P5b-L10spans-p1: done
+2026-09-24T11:17:35.279+03:00 P5g-C3bG5-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T11:19:45.737+03:00 P5g-C3bG5-p0: idle reached; {'time': '2026-09-24T11:19:45.737+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T11:19:55.780+03:00 P5g-C3bG5-p0: opening receipt 1.02% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T11:20:01.949+03:00   P5g-C3bG5-p0 warm-up G5-TD-tree#tip W=8 (untimed): stat 2.2219 ms pose 0x32d5e235342b4143 expect match rb 1.02% ra 0.24% others 0.0% cpu_s 4.203 wall 1.122s waited 0.0s
+2026-09-24T11:20:15.492+03:00   P5g-C3bG5-p0 r0 [  1] G5-TA-tree-a#tip W=1: stat 16.8609 ms pose 0x32d5e235342b4143 expect match rb 0.24% ra 0.39% others 0.12% cpu_s 8.469 wall 8.478s waited 0.0s
+2026-09-24T11:20:30.025+03:00   P5g-C3bG5-p0 r0 [  2] G5-TA-ap-a#tip W=1: stat 18.8416 ms pose 0x32d5e235342b4143 expect match rb 0.39% ra 0.52% others 0.17% cpu_s 9.391 wall 9.469s waited 0.0s
+2026-09-24T11:20:38.316+03:00   P5g-C3bG5-p0 r0 [  3] G5-TD-tree#tip W=1: stat 6.4649 ms pose 0x32d5e235342b4143 expect match rb 0.52% ra 0.41% others 0.03% cpu_s 3.266 wall 3.241s waited 0.0s
+2026-09-24T11:20:47.574+03:00   P5g-C3bG5-p0 r0 [  4] G5-TD-ap#tip W=1: stat 8.4070 ms pose 0x32d5e235342b4143 expect match rb 0.41% ra 1.11% others 0.14% cpu_s 4.234 wall 4.212s waited 0.0s
+2026-09-24T11:20:54.700+03:00   P5g-C3bG5-p0 r0 [  5] G5-TA-tree-a#tip W=8: stat 4.0315 ms pose 0x32d5e235342b4143 expect match rb 1.11% ra 0.83% others 0.24% cpu_s 10.266 wall 2.06s waited 0.0s
+2026-09-24T11:21:02.722+03:00   P5g-C3bG5-p0 r0 [  6] G5-TA-ap-a#tip W=8: stat 5.8224 ms pose 0x32d5e235342b4143 expect match rb 0.83% ra 0.35% others 0.0% cpu_s 11.594 wall 2.956s waited 0.0s
+2026-09-24T11:21:08.904+03:00   P5g-C3bG5-p0 r0 [  7] G5-TD-tree#tip W=8: stat 2.2474 ms pose 0x32d5e235342b4143 expect match rb 0.35% ra 0.25% others 0.18% cpu_s 6.016 wall 1.133s waited 0.0s
+2026-09-24T11:21:15.971+03:00   P5g-C3bG5-p0 r0 [  8] G5-TD-ap#tip W=8: stat 4.0178 ms pose 0x32d5e235342b4143 expect match rb 0.25% ra 0.29% others 0.05% cpu_s 6.062 wall 2.018s waited 0.0s
+2026-09-24T11:21:29.520+03:00   P5g-C3bG5-p0 r1 [  9] G5-TA-tree-a#tip W=1: stat 16.8742 ms pose 0x32d5e235342b4143 expect match rb 0.29% ra 0.7% others 0.16% cpu_s 8.453 wall 8.485s waited 0.0s
+2026-09-24T11:21:44.077+03:00   P5g-C3bG5-p0 r1 [ 10] G5-TA-ap-a#tip W=1: stat 18.8804 ms pose 0x32d5e235342b4143 expect match rb 0.7% ra 1.13% others 0.22% cpu_s 9.422 wall 9.489s waited 0.0s
+2026-09-24T11:21:52.378+03:00   P5g-C3bG5-p0 r1 [ 11] G5-TD-tree#tip W=1: stat 6.4917 ms pose 0x32d5e235342b4143 expect match rb 1.13% ra 0.39% others 0.09% cpu_s 3.25 wall 3.255s waited 0.0s
+2026-09-24T11:22:01.609+03:00   P5g-C3bG5-p0 r1 [ 12] G5-TD-ap#tip W=1: stat 8.3568 ms pose 0x32d5e235342b4143 expect match rb 0.39% ra 0.55% others 0.26% cpu_s 4.188 wall 4.187s waited 0.0s
+2026-09-24T11:22:08.738+03:00   P5g-C3bG5-p0 r1 [ 13] G5-TA-tree-a#tip W=8: stat 4.0372 ms pose 0x32d5e235342b4143 expect match rb 0.55% ra 0.39% others 0.1% cpu_s 10.469 wall 2.064s waited 0.0s
+2026-09-24T11:22:16.764+03:00   P5g-C3bG5-p0 r1 [ 14] G5-TA-ap-a#tip W=8: stat 5.8326 ms pose 0x32d5e235342b4143 expect match rb 0.39% ra 0.4% others 0.2% cpu_s 11.969 wall 2.961s waited 0.0s
+2026-09-24T11:22:22.943+03:00   P5g-C3bG5-p0 r1 [ 15] G5-TD-tree#tip W=8: stat 2.2399 ms pose 0x32d5e235342b4143 expect match rb 0.4% ra 0.49% others 0.26% cpu_s 5.547 wall 1.129s waited 0.0s
+2026-09-24T11:22:30.010+03:00   P5g-C3bG5-p0 r1 [ 16] G5-TD-ap#tip W=8: stat 4.0238 ms pose 0x32d5e235342b4143 expect match rb 0.49% ra 0.25% others 0.48% cpu_s 5.953 wall 2.021s waited 0.0s
+2026-09-24T11:22:43.605+03:00   P5g-C3bG5-p0 r2 [ 17] G5-TA-tree-a#tip W=1: stat 16.9572 ms pose 0x32d5e235342b4143 expect match rb 0.25% ra 0.99% others 0.25% cpu_s 8.531 wall 8.527s waited 0.0s
+2026-09-24T11:22:58.172+03:00   P5g-C3bG5-p0 r2 [ 18] G5-TA-ap-a#tip W=1: stat 18.9077 ms pose 0x32d5e235342b4143 expect match rb 0.99% ra 0.55% others 0.11% cpu_s 9.484 wall 9.503s waited 0.0s
+2026-09-24T11:23:06.920+03:00   P5g-C3bG5-p0 r2 [ 19] G5-TD-tree#tip W=1: stat 7.3688 ms pose 0x32d5e235342b4143 expect match rb 0.55% ra 17.21% others 3.41% cpu_s 3.484 wall 3.693s waited 0.0s CONTAMINATED-after(17.21%)
+2026-09-24T11:24:06.243+03:00   P5g-C3bG5-p0 r2 [ 20] G5-TD-ap#tip W=1: stat 8.4204 ms pose 0x32d5e235342b4143 expect match rb 0.63% ra 0.73% others 0.35% cpu_s 4.203 wall 4.221s waited 50.1s
+2026-09-24T11:24:13.391+03:00   P5g-C3bG5-p0 r2 [ 21] G5-TA-tree-a#tip W=8: stat 4.0703 ms pose 0x32d5e235342b4143 expect match rb 0.73% ra 0.58% others 0.14% cpu_s 10.797 wall 2.081s waited 0.0s
+2026-09-24T11:24:21.417+03:00   P5g-C3bG5-p0 r2 [ 22] G5-TA-ap-a#tip W=8: stat 5.8259 ms pose 0x32d5e235342b4143 expect match rb 0.58% ra 0.41% others 0.13% cpu_s 11.766 wall 2.959s waited 0.0s
+2026-09-24T11:24:27.596+03:00   P5g-C3bG5-p0 r2 [ 23] G5-TD-tree#tip W=8: stat 2.2456 ms pose 0x32d5e235342b4143 expect match rb 0.41% ra 0.43% others 0.09% cpu_s 4.109 wall 1.132s waited 0.0s
+2026-09-24T11:24:34.670+03:00   P5g-C3bG5-p0 r2 [ 24] G5-TD-ap#tip W=8: stat 4.0350 ms pose 0x32d5e235342b4143 expect match rb 0.43% ra 1.17% others 0.1% cpu_s 5.812 wall 2.026s waited 0.0s
+2026-09-24T11:24:34.671+03:00 P5g-C3bG5-p0: re-running 1 process(es) at the end of the pass: [(19, 2, 'G5-TD-tree', 'tip', 1, 'contaminated')]
+2026-09-24T11:24:43.014+03:00   P5g-C3bG5-p0 r2 [ 19] G5-TD-tree#tip W=1 RERUN (contaminated): stat 6.5806 ms pose 0x32d5e235342b4143 expect match rb 1.17% ra 0.32% others 0.15% cpu_s 3.312 wall 3.299s waited 0.0s
+2026-09-24T11:24:43.014+03:00 P5g-C3bG5-p0: done
+2026-09-24T11:24:43.016+03:00 P5g-C3bG5-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T11:26:53.632+03:00 P5g-C3bG5-p1: idle reached; {'time': '2026-09-24T11:26:53.632+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T11:27:03.680+03:00 P5g-C3bG5-p1: opening receipt 0.68% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T11:27:09.864+03:00   P5g-C3bG5-p1 warm-up G5-TD-tree#tip W=8 (untimed): stat 2.2506 ms pose 0x32d5e235342b4143 expect match rb 0.68% ra 0.45% others 0.44% cpu_s 4.672 wall 1.135s waited 0.0s
+2026-09-24T11:27:16.927+03:00   P5g-C3bG5-p1 r0 [  1] G5-TD-ap#tip W=8: stat 4.0128 ms pose 0x32d5e235342b4143 expect match rb 0.45% ra 0.64% others 0.05% cpu_s 5.609 wall 2.015s waited 0.0s
+2026-09-24T11:27:23.110+03:00   P5g-C3bG5-p1 r0 [  2] G5-TD-tree#tip W=8: stat 2.2524 ms pose 0x32d5e235342b4143 expect match rb 0.64% ra 0.96% others 0.09% cpu_s 5.141 wall 1.135s waited 0.0s
+2026-09-24T11:27:31.131+03:00   P5g-C3bG5-p1 r0 [  3] G5-TA-ap-a#tip W=8: stat 5.8196 ms pose 0x32d5e235342b4143 expect match rb 0.96% ra 0.31% others 0.07% cpu_s 11.906 wall 2.955s waited 0.0s
+2026-09-24T11:27:38.261+03:00   P5g-C3bG5-p1 r0 [  4] G5-TA-tree-a#tip W=8: stat 4.0392 ms pose 0x32d5e235342b4143 expect match rb 0.31% ra 0.33% others 0.1% cpu_s 11.656 wall 2.064s waited 0.0s
+2026-09-24T11:27:47.510+03:00   P5g-C3bG5-p1 r0 [  5] G5-TD-ap#tip W=1: stat 8.3880 ms pose 0x32d5e235342b4143 expect match rb 0.33% ra 0.35% others 0.16% cpu_s 4.203 wall 4.202s waited 0.0s
+2026-09-24T11:27:55.860+03:00   P5g-C3bG5-p1 r0 [  6] G5-TD-tree#tip W=1: stat 6.5871 ms pose 0x32d5e235342b4143 expect match rb 0.35% ra 0.72% others 0.44% cpu_s 3.312 wall 3.302s waited 0.0s
+2026-09-24T11:28:10.408+03:00   P5g-C3bG5-p1 r0 [  7] G5-TA-ap-a#tip W=1: stat 18.8668 ms pose 0x32d5e235342b4143 expect match rb 0.72% ra 0.31% others 0.16% cpu_s 9.438 wall 9.482s waited 0.0s
+2026-09-24T11:28:24.000+03:00   P5g-C3bG5-p1 r0 [  8] G5-TA-tree-a#tip W=1: stat 16.9577 ms pose 0x32d5e235342b4143 expect match rb 0.31% ra 0.76% others 0.07% cpu_s 8.484 wall 8.527s waited 0.0s
+2026-09-24T11:28:31.068+03:00   P5g-C3bG5-p1 r1 [  9] G5-TD-ap#tip W=8: stat 4.0253 ms pose 0x32d5e235342b4143 expect match rb 0.76% ra 0.37% others 0.44% cpu_s 5.688 wall 2.021s waited 0.0s
+2026-09-24T11:28:37.248+03:00   P5g-C3bG5-p1 r1 [ 10] G5-TD-tree#tip W=8: stat 2.2458 ms pose 0x32d5e235342b4143 expect match rb 0.37% ra 0.31% others 0.09% cpu_s 5.656 wall 1.132s waited 0.0s
+2026-09-24T11:28:45.275+03:00   P5g-C3bG5-p1 r1 [ 11] G5-TA-ap-a#tip W=8: stat 5.8331 ms pose 0x32d5e235342b4143 expect match rb 0.31% ra 0.49% others 0.1% cpu_s 11.766 wall 2.961s waited 0.0s
+2026-09-24T11:28:52.414+03:00   P5g-C3bG5-p1 r1 [ 12] G5-TA-tree-a#tip W=8: stat 4.0474 ms pose 0x32d5e235342b4143 expect match rb 0.49% ra 0.71% others 0.14% cpu_s 10.562 wall 2.068s waited 0.0s
+2026-09-24T11:29:01.671+03:00   P5g-C3bG5-p1 r1 [ 13] G5-TD-ap#tip W=1: stat 8.4010 ms pose 0x32d5e235342b4143 expect match rb 0.71% ra 0.25% others 0.16% cpu_s 4.25 wall 4.209s waited 0.0s
+2026-09-24T11:29:09.974+03:00   P5g-C3bG5-p1 r1 [ 14] G5-TD-tree#tip W=1: stat 6.4999 ms pose 0x32d5e235342b4143 expect match rb 0.25% ra 0.66% others 0.24% cpu_s 3.25 wall 3.259s waited 0.0s
+2026-09-24T11:29:24.544+03:00   P5g-C3bG5-p1 r1 [ 15] G5-TA-ap-a#tip W=1: stat 18.9112 ms pose 0x32d5e235342b4143 expect match rb 0.66% ra 0.16% others 0.19% cpu_s 9.453 wall 9.505s waited 0.0s
+2026-09-24T11:29:38.139+03:00   P5g-C3bG5-p1 r1 [ 16] G5-TA-tree-a#tip W=1: stat 16.9610 ms pose 0x32d5e235342b4143 expect match rb 0.16% ra 0.57% others 0.1% cpu_s 8.5 wall 8.529s waited 0.0s
+2026-09-24T11:29:45.207+03:00   P5g-C3bG5-p1 r2 [ 17] G5-TD-ap#tip W=8: stat 4.0235 ms pose 0x32d5e235342b4143 expect match rb 0.57% ra 0.47% others 0.24% cpu_s 6.391 wall 2.02s waited 0.0s
+2026-09-24T11:29:51.386+03:00   P5g-C3bG5-p1 r2 [ 18] G5-TD-tree#tip W=8: stat 2.2477 ms pose 0x32d5e235342b4143 expect match rb 0.47% ra 0.28% others 0.0% cpu_s 3.906 wall 1.133s waited 0.0s
+2026-09-24T11:29:59.411+03:00   P5g-C3bG5-p1 r2 [ 19] G5-TA-ap-a#tip W=8: stat 5.8293 ms pose 0x32d5e235342b4143 expect match rb 0.28% ra 0.72% others 0.13% cpu_s 12.359 wall 2.959s waited 0.0s
+2026-09-24T11:30:06.599+03:00   P5g-C3bG5-p1 r2 [ 20] G5-TA-tree-a#tip W=8: stat 4.1513 ms pose 0x32d5e235342b4143 expect match rb 0.72% ra 0.65% others 0.05% cpu_s 11.234 wall 2.121s waited 0.0s
+2026-09-24T11:30:15.894+03:00   P5g-C3bG5-p1 r2 [ 21] G5-TD-ap#tip W=1: stat 8.4754 ms pose 0x32d5e235342b4143 expect match rb 0.65% ra 2.67% others 0.09% cpu_s 4.25 wall 4.246s waited 0.0s
+2026-09-24T11:30:24.202+03:00   P5g-C3bG5-p1 r2 [ 22] G5-TD-tree#tip W=1: stat 6.5101 ms pose 0x32d5e235342b4143 expect match rb 2.67% ra 0.43% others 0.12% cpu_s 3.266 wall 3.263s waited 0.0s
+2026-09-24T11:30:38.769+03:00   P5g-C3bG5-p1 r2 [ 23] G5-TA-ap-a#tip W=1: stat 18.9032 ms pose 0x32d5e235342b4143 expect match rb 0.43% ra 0.58% others 0.22% cpu_s 9.484 wall 9.501s waited 0.0s
+2026-09-24T11:30:52.355+03:00   P5g-C3bG5-p1 r2 [ 24] G5-TA-tree-a#tip W=1: stat 16.9404 ms pose 0x32d5e235342b4143 expect match rb 0.58% ra 0.52% others 0.09% cpu_s 8.5 wall 8.519s waited 0.0s
+2026-09-24T11:30:52.356+03:00 P5g-C3bG5-p1: done
+2026-09-24T11:30:52.357+03:00 P5d-L9reuseJD-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T11:33:02.890+03:00 P5d-L9reuseJD-p0: idle reached; {'time': '2026-09-24T11:33:02.890+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T11:33:12.936+03:00 P5d-L9reuseJD-p0: opening receipt 0.28% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T11:33:19.997+03:00   P5d-L9reuseJD-p0 warm-up L9-JD-off#b4db W=8 (untimed): stat 3.9928 ms pose 0x32d5e235342b4143 expect match rb 0.28% ra 0.47% others 0.05% cpu_s 5.531 wall 2.011s waited 0.0s
+2026-09-24T11:33:28.789+03:00   P5d-L9reuseJD-p0 r0 [  1] L9-JD-off#b4db W=1: stat 7.4635 ms pose 0x32d5e235342b4143 expect match rb 0.47% ra 0.41% others 0.11% cpu_s 3.75 wall 3.745s waited 0.0s
+2026-09-24T11:33:36.851+03:00   P5d-L9reuseJD-p0 r0 [  2] L9-JD-on#b4db W=1: stat 5.9959 ms pose 0x30c5438bc6ad9ffa expect match rb 0.41% ra 0.76% others 0.07% cpu_s 3.047 wall 3.015s waited 0.0s
+2026-09-24T11:33:43.883+03:00   P5d-L9reuseJD-p0 r0 [  3] L9-JD-off#b4db W=8: stat 3.9398 ms pose 0x32d5e235342b4143 expect match rb 0.76% ra 0.21% others 0.3% cpu_s 5.5 wall 1.983s waited 0.0s
+2026-09-24T11:33:50.819+03:00   P5d-L9reuseJD-p0 r0 [  4] L9-JD-on#b4db W=8: stat 3.7480 ms pose 0x30c5438bc6ad9ffa expect match rb 0.21% ra 0.48% others 0.42% cpu_s 4.906 wall 1.888s waited 0.0s
+2026-09-24T11:33:59.650+03:00   P5d-L9reuseJD-p0 r1 [  5] L9-JD-off#b4db W=1: stat 7.5300 ms pose 0x32d5e235342b4143 expect match rb 0.48% ra 1.31% others 0.16% cpu_s 3.812 wall 3.779s waited 0.0s
+2026-09-24T11:34:07.726+03:00   P5d-L9reuseJD-p0 r1 [  6] L9-JD-on#b4db W=1: stat 6.0253 ms pose 0x30c5438bc6ad9ffa expect match rb 1.31% ra 0.37% others 0.0% cpu_s 3.031 wall 3.026s waited 0.0s
+2026-09-24T11:34:14.786+03:00   P5d-L9reuseJD-p0 r1 [  7] L9-JD-off#b4db W=8: stat 3.9978 ms pose 0x32d5e235342b4143 expect match rb 0.37% ra 0.24% others 0.19% cpu_s 5.812 wall 2.012s waited 0.0s
+2026-09-24T11:34:21.731+03:00   P5d-L9reuseJD-p0 r1 [  8] L9-JD-on#b4db W=8: stat 3.7666 ms pose 0x30c5438bc6ad9ffa expect match rb 0.24% ra 0.23% others 0.0% cpu_s 4.297 wall 1.897s waited 0.0s
+2026-09-24T11:34:30.538+03:00   P5d-L9reuseJD-p0 r2 [  9] L9-JD-off#b4db W=1: stat 7.4936 ms pose 0x32d5e235342b4143 expect match rb 0.23% ra 0.37% others 0.34% cpu_s 3.781 wall 3.76s waited 0.0s
+2026-09-24T11:34:38.607+03:00   P5d-L9reuseJD-p0 r2 [ 10] L9-JD-on#b4db W=1: stat 6.0157 ms pose 0x30c5438bc6ad9ffa expect match rb 0.37% ra 0.3% others 0.29% cpu_s 3.078 wall 3.022s waited 0.0s
+2026-09-24T11:34:45.640+03:00   P5d-L9reuseJD-p0 r2 [ 11] L9-JD-off#b4db W=8: stat 3.9454 ms pose 0x32d5e235342b4143 expect match rb 0.3% ra 0.29% others 0.15% cpu_s 5.469 wall 1.986s waited 0.0s
+2026-09-24T11:34:52.576+03:00   P5d-L9reuseJD-p0 r2 [ 12] L9-JD-on#b4db W=8: stat 3.7471 ms pose 0x30c5438bc6ad9ffa expect match rb 0.29% ra 0.95% others 0.05% cpu_s 5.234 wall 1.888s waited 0.0s
+2026-09-24T11:34:52.576+03:00 P5d-L9reuseJD-p0: done
+2026-09-24T11:34:52.577+03:00 P5d-L9reuseJD-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T11:37:03.023+03:00 P5d-L9reuseJD-p1: idle reached; {'time': '2026-09-24T11:37:03.023+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T11:37:13.067+03:00 P5d-L9reuseJD-p1: opening receipt 0.33% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T11:37:20.095+03:00   P5d-L9reuseJD-p1 warm-up L9-JD-off#b4db W=8 (untimed): stat 3.9259 ms pose 0x32d5e235342b4143 expect match rb 0.33% ra 0.43% others 0.05% cpu_s 5.406 wall 1.981s waited 0.0s
+2026-09-24T11:37:27.021+03:00   P5d-L9reuseJD-p1 r0 [  1] L9-JD-on#b4db W=8: stat 3.7332 ms pose 0x30c5438bc6ad9ffa expect match rb 0.43% ra 0.31% others 0.0% cpu_s 4.938 wall 1.881s waited 0.0s
+2026-09-24T11:37:34.047+03:00   P5d-L9reuseJD-p1 r0 [  2] L9-JD-off#b4db W=8: stat 3.9279 ms pose 0x32d5e235342b4143 expect match rb 0.31% ra 0.23% others 0.05% cpu_s 6.016 wall 1.977s waited 0.0s
+2026-09-24T11:37:42.105+03:00   P5d-L9reuseJD-p1 r0 [  3] L9-JD-on#b4db W=1: stat 5.9952 ms pose 0x30c5438bc6ad9ffa expect match rb 0.23% ra 1.17% others 0.17% cpu_s 3.0 wall 3.011s waited 0.0s
+2026-09-24T11:37:50.900+03:00   P5d-L9reuseJD-p1 r0 [  4] L9-JD-off#b4db W=1: stat 7.4748 ms pose 0x32d5e235342b4143 expect match rb 1.17% ra 0.18% others 0.08% cpu_s 3.766 wall 3.75s waited 0.0s
+2026-09-24T11:37:57.838+03:00   P5d-L9reuseJD-p1 r1 [  5] L9-JD-on#b4db W=8: stat 3.7579 ms pose 0x30c5438bc6ad9ffa expect match rb 0.18% ra 0.6% others 0.16% cpu_s 3.859 wall 1.892s waited 0.0s
+2026-09-24T11:38:04.864+03:00   P5d-L9reuseJD-p1 r1 [  6] L9-JD-off#b4db W=8: stat 3.9337 ms pose 0x32d5e235342b4143 expect match rb 0.6% ra 1.14% others 0.1% cpu_s 5.062 wall 1.98s waited 0.0s
+2026-09-24T11:38:12.961+03:00   P5d-L9reuseJD-p1 r1 [  7] L9-JD-on#b4db W=1: stat 6.0671 ms pose 0x30c5438bc6ad9ffa expect match rb 1.14% ra 0.3% others 0.07% cpu_s 3.062 wall 3.047s waited 0.0s
+2026-09-24T11:38:21.761+03:00   P5d-L9reuseJD-p1 r1 [  8] L9-JD-off#b4db W=1: stat 7.4780 ms pose 0x32d5e235342b4143 expect match rb 0.3% ra 0.4% others 0.05% cpu_s 3.75 wall 3.751s waited 0.0s
+2026-09-24T11:38:28.693+03:00   P5d-L9reuseJD-p1 r2 [  9] L9-JD-on#b4db W=8: stat 3.7391 ms pose 0x30c5438bc6ad9ffa expect match rb 0.4% ra 0.47% others 0.21% cpu_s 5.438 wall 1.883s waited 0.0s
+2026-09-24T11:38:35.722+03:00   P5d-L9reuseJD-p1 r2 [ 10] L9-JD-off#b4db W=8: stat 3.9385 ms pose 0x32d5e235342b4143 expect match rb 0.47% ra 1.98% others 0.1% cpu_s 5.688 wall 1.982s waited 0.0s
+2026-09-24T11:38:43.798+03:00   P5d-L9reuseJD-p1 r2 [ 11] L9-JD-on#b4db W=1: stat 6.0332 ms pose 0x30c5438bc6ad9ffa expect match rb 1.98% ra 0.65% others 0.26% cpu_s 3.062 wall 3.031s waited 0.0s
+2026-09-24T11:38:52.607+03:00   P5d-L9reuseJD-p1 r2 [ 12] L9-JD-off#b4db W=1: stat 7.4953 ms pose 0x32d5e235342b4143 expect match rb 0.65% ra 0.26% others 0.18% cpu_s 3.766 wall 3.76s waited 0.0s
+2026-09-24T11:38:52.608+03:00 P5d-L9reuseJD-p1: done
+2026-09-24T11:38:52.609+03:00 P5e-L9reuseR-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T11:41:03.071+03:00 P5e-L9reuseR-p0: idle reached; {'time': '2026-09-24T11:41:03.071+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T11:41:13.114+03:00 P5e-L9reuseR-p0: opening receipt 0.52% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T11:41:23.459+03:00   P5e-L9reuseR-p0 warm-up L9-R-off#b4db W=8 (untimed): stat 4.7901 ms pose 0x87e561d20589d4a5 expect match rb 0.52% ra 1.1% others 0.13% cpu_s 15.859 wall 5.298s waited 0.0s
+2026-09-24T11:41:40.411+03:00   P5e-L9reuseR-p0 r0 [  1] L9-R-off#b4db W=1: stat 10.8007 ms pose 0x87e561d20589d4a5 expect match rb 1.1% ra 0.29% others 0.11% cpu_s 11.875 wall 11.906s waited 0.0s
+2026-09-24T11:41:54.199+03:00   P5e-L9reuseR-p0 r0 [  2] L9-R-on#b4db W=1: stat 7.9300 ms pose 0xc8bbe34cf6a8afc6 expect match rb 0.29% ra 0.59% others 0.16% cpu_s 8.75 wall 8.742s waited 0.0s
+2026-09-24T11:42:04.581+03:00   P5e-L9reuseR-p0 r0 [  3] L9-R-off#b4db W=8: stat 4.8148 ms pose 0x87e561d20589d4a5 expect match rb 0.59% ra 0.7% others 0.09% cpu_s 15.359 wall 5.335s waited 0.0s
+2026-09-24T11:42:14.618+03:00   P5e-L9reuseR-p0 r0 [  4] L9-R-on#b4db W=8: stat 4.5164 ms pose 0xc8bbe34cf6a8afc6 expect match rb 0.7% ra 0.2% others 0.14% cpu_s 13.766 wall 4.989s waited 0.0s
+2026-09-24T11:42:31.513+03:00   P5e-L9reuseR-p0 r1 [  5] L9-R-off#b4db W=1: stat 10.7385 ms pose 0x87e561d20589d4a5 expect match rb 0.2% ra 0.47% others 0.12% cpu_s 11.812 wall 11.848s waited 0.0s
+2026-09-24T11:42:45.221+03:00   P5e-L9reuseR-p0 r1 [  6] L9-R-on#b4db W=1: stat 7.8010 ms pose 0xc8bbe34cf6a8afc6 expect match rb 0.47% ra 0.35% others 0.08% cpu_s 8.688 wall 8.66s waited 0.0s
+2026-09-24T11:42:55.606+03:00   P5e-L9reuseR-p0 r1 [  7] L9-R-off#b4db W=8: stat 4.8285 ms pose 0x87e561d20589d4a5 expect match rb 0.35% ra 0.72% others 0.11% cpu_s 15.703 wall 5.335s waited 0.0s
+2026-09-24T11:43:05.681+03:00   P5e-L9reuseR-p0 r1 [  8] L9-R-on#b4db W=8: stat 4.5812 ms pose 0xc8bbe34cf6a8afc6 expect match rb 0.72% ra 0.5% others 0.35% cpu_s 13.828 wall 5.026s waited 0.0s
+2026-09-24T11:43:22.529+03:00   P5e-L9reuseR-p0 r2 [  9] L9-R-off#b4db W=1: stat 10.7193 ms pose 0x87e561d20589d4a5 expect match rb 0.5% ra 1.06% others 0.14% cpu_s 11.844 wall 11.801s waited 0.0s
+2026-09-24T11:43:36.188+03:00   P5e-L9reuseR-p0 r2 [ 10] L9-R-on#b4db W=1: stat 7.7762 ms pose 0xc8bbe34cf6a8afc6 expect match rb 1.06% ra 0.37% others 0.06% cpu_s 8.594 wall 8.611s waited 0.0s
+2026-09-24T11:43:46.575+03:00   P5e-L9reuseR-p0 r2 [ 11] L9-R-off#b4db W=8: stat 4.8364 ms pose 0x87e561d20589d4a5 expect match rb 0.37% ra 0.41% others 0.04% cpu_s 17.391 wall 5.34s waited 0.0s
+2026-09-24T11:43:56.624+03:00   P5e-L9reuseR-p0 r2 [ 12] L9-R-on#b4db W=8: stat 4.5194 ms pose 0xc8bbe34cf6a8afc6 expect match rb 0.41% ra 0.68% others 0.14% cpu_s 14.203 wall 5.001s waited 0.0s
+2026-09-24T11:43:56.624+03:00 P5e-L9reuseR-p0: done
+2026-09-24T11:43:56.626+03:00 P5e-L9reuseR-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T11:46:07.072+03:00 P5e-L9reuseR-p1: idle reached; {'time': '2026-09-24T11:46:07.072+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T11:46:17.115+03:00 P5e-L9reuseR-p1: opening receipt 0.78% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T11:46:27.470+03:00   P5e-L9reuseR-p1 warm-up L9-R-off#b4db W=8 (untimed): stat 4.8071 ms pose 0x87e561d20589d4a5 expect match rb 0.78% ra 0.41% others 0.06% cpu_s 15.391 wall 5.308s waited 0.0s
+2026-09-24T11:46:37.531+03:00   P5e-L9reuseR-p1 r0 [  1] L9-R-on#b4db W=8: stat 4.5334 ms pose 0xc8bbe34cf6a8afc6 expect match rb 0.41% ra 0.29% others 0.18% cpu_s 14.125 wall 5.012s waited 0.0s
+2026-09-24T11:46:47.918+03:00   P5e-L9reuseR-p1 r0 [  2] L9-R-off#b4db W=8: stat 4.8248 ms pose 0x87e561d20589d4a5 expect match rb 0.29% ra 0.45% others 0.2% cpu_s 16.453 wall 5.339s waited 0.0s
+2026-09-24T11:47:01.575+03:00   P5e-L9reuseR-p1 r0 [  3] L9-R-on#b4db W=1: stat 7.8304 ms pose 0xc8bbe34cf6a8afc6 expect match rb 0.45% ra 0.88% others 0.25% cpu_s 8.656 wall 8.61s waited 0.0s
+2026-09-24T11:47:18.486+03:00   P5e-L9reuseR-p1 r0 [  4] L9-R-off#b4db W=1: stat 10.7696 ms pose 0x87e561d20589d4a5 expect match rb 0.88% ra 0.35% others 0.28% cpu_s 11.859 wall 11.864s waited 0.0s
+2026-09-24T11:47:28.553+03:00   P5e-L9reuseR-p1 r1 [  5] L9-R-on#b4db W=8: stat 4.5365 ms pose 0xc8bbe34cf6a8afc6 expect match rb 0.35% ra 0.25% others 0.2% cpu_s 14.578 wall 5.019s waited 0.0s
+2026-09-24T11:47:38.926+03:00   P5e-L9reuseR-p1 r1 [  6] L9-R-off#b4db W=8: stat 4.8176 ms pose 0x87e561d20589d4a5 expect match rb 0.25% ra 0.65% others 0.04% cpu_s 15.875 wall 5.325s waited 0.0s
+2026-09-24T11:47:52.686+03:00   P5e-L9reuseR-p1 r1 [  7] L9-R-on#b4db W=1: stat 7.8316 ms pose 0xc8bbe34cf6a8afc6 expect match rb 0.65% ra 0.51% others 0.15% cpu_s 8.766 wall 8.712s waited 0.0s
+2026-09-24T11:48:09.558+03:00   P5e-L9reuseR-p1 r1 [  8] L9-R-off#b4db W=1: stat 10.7307 ms pose 0x87e561d20589d4a5 expect match rb 0.51% ra 0.28% others 0.15% cpu_s 11.844 wall 11.826s waited 0.0s
+2026-09-24T11:48:19.607+03:00   P5e-L9reuseR-p1 r2 [  9] L9-R-on#b4db W=8: stat 4.5217 ms pose 0xc8bbe34cf6a8afc6 expect match rb 0.28% ra 0.45% others 0.14% cpu_s 14.422 wall 5.002s waited 0.0s
+2026-09-24T11:48:29.980+03:00   P5e-L9reuseR-p1 r2 [ 10] L9-R-off#b4db W=8: stat 4.8170 ms pose 0x87e561d20589d4a5 expect match rb 0.45% ra 0.29% others 0.17% cpu_s 15.828 wall 5.324s waited 0.0s
+2026-09-24T11:48:43.659+03:00   P5e-L9reuseR-p1 r2 [ 11] L9-R-on#b4db W=1: stat 7.8076 ms pose 0xc8bbe34cf6a8afc6 expect match rb 0.29% ra 0.53% others 0.15% cpu_s 8.688 wall 8.631s waited 0.0s
+2026-09-24T11:49:00.487+03:00   P5e-L9reuseR-p1 r2 [ 12] L9-R-off#b4db W=1: stat 10.6351 ms pose 0x87e561d20589d4a5 expect match rb 0.53% ra 1.33% others 0.2% cpu_s 11.781 wall 11.781s waited 0.0s
+2026-09-24T11:49:00.487+03:00 P5e-L9reuseR-p1: done
+2026-09-24T11:49:00.488+03:00 P5f-L9reuseJAmid-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T11:51:10.922+03:00 P5f-L9reuseJAmid-p0: idle reached; {'time': '2026-09-24T11:51:10.922+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T11:51:20.968+03:00 P5f-L9reuseJAmid-p0: opening receipt 0.22% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T11:51:28.878+03:00   P5f-L9reuseJAmid-p0 warm-up L9-JA-off#b4db W=8 (untimed): stat 5.6995 ms pose 0x32d5e235342b4143 expect match rb 0.22% ra 0.39% others 0.07% cpu_s 11.969 wall 2.863s waited 0.0s
+2026-09-24T11:51:39.472+03:00   P5f-L9reuseJAmid-p0 r0 [  1] L9-JA-off-mid#b4db W=2: stat 11.0732 ms pose 0x32d5e235342b4143 expect match rb 0.39% ra 0.33% others 0.09% cpu_s 9.578 wall 5.55s waited 0.0s
+2026-09-24T11:51:49.679+03:00   P5f-L9reuseJAmid-p0 r0 [  2] L9-JA-on-mid#b4db W=2: stat 10.2909 ms pose 0x30c5438bc6ad9ffa expect match rb 0.33% ra 1.21% others 0.1% cpu_s 8.609 wall 5.16s waited 0.0s
+2026-09-24T11:51:58.484+03:00   P5f-L9reuseJAmid-p0 r0 [  3] L9-JA-off-mid#b4db W=4: stat 7.4866 ms pose 0x32d5e235342b4143 expect match rb 1.21% ra 0.98% others 0.18% cpu_s 10.062 wall 3.757s waited 0.0s
+2026-09-24T11:52:07.107+03:00   P5f-L9reuseJAmid-p0 r0 [  4] L9-JA-on-mid#b4db W=4: stat 7.1274 ms pose 0x30c5438bc6ad9ffa expect match rb 0.98% ra 0.29% others 0.27% cpu_s 9.609 wall 3.578s waited 0.0s
+2026-09-24T11:52:14.960+03:00   P5f-L9reuseJAmid-p0 r0 [  5] L9-JA-off-mid#b4db W=16: stat 5.5865 ms pose 0x32d5e235342b4143 expect match rb 0.29% ra 0.45% others 0.07% cpu_s 19.266 wall 2.807s waited 0.0s
+2026-09-24T11:52:22.759+03:00   P5f-L9reuseJAmid-p0 r0 [  6] L9-JA-on-mid#b4db W=16: stat 5.4766 ms pose 0x30c5438bc6ad9ffa expect match rb 0.45% ra 0.45% others 0.18% cpu_s 19.266 wall 2.752s waited 0.0s
+2026-09-24T11:52:33.382+03:00   P5f-L9reuseJAmid-p0 r1 [  7] L9-JA-off-mid#b4db W=2: stat 11.1236 ms pose 0x32d5e235342b4143 expect match rb 0.45% ra 0.37% others 0.19% cpu_s 9.469 wall 5.575s waited 0.0s
+2026-09-24T11:52:43.605+03:00   P5f-L9reuseJAmid-p0 r1 [  8] L9-JA-on-mid#b4db W=2: stat 10.3284 ms pose 0x30c5438bc6ad9ffa expect match rb 0.37% ra 1.19% others 0.1% cpu_s 8.75 wall 5.178s waited 0.0s
+2026-09-24T11:52:52.420+03:00   P5f-L9reuseJAmid-p0 r1 [  9] L9-JA-off-mid#b4db W=4: stat 7.5129 ms pose 0x32d5e235342b4143 expect match rb 1.19% ra 0.24% others 0.16% cpu_s 10.219 wall 3.77s waited 0.0s
+2026-09-24T11:53:01.049+03:00   P5f-L9reuseJAmid-p0 r1 [ 10] L9-JA-on-mid#b4db W=4: stat 7.1355 ms pose 0x30c5438bc6ad9ffa expect match rb 0.24% ra 1.39% others 0.17% cpu_s 9.375 wall 3.581s waited 0.0s
+2026-09-24T11:53:08.911+03:00   P5f-L9reuseJAmid-p0 r1 [ 11] L9-JA-off-mid#b4db W=16: stat 5.5950 ms pose 0x32d5e235342b4143 expect match rb 1.39% ra 0.51% others 0.07% cpu_s 20.016 wall 2.811s waited 0.0s
+2026-09-24T11:53:16.733+03:00   P5f-L9reuseJAmid-p0 r1 [ 12] L9-JA-on-mid#b4db W=16: stat 5.5199 ms pose 0x30c5438bc6ad9ffa expect match rb 0.51% ra 0.33% others 0.18% cpu_s 19.047 wall 2.773s waited 0.0s
+2026-09-24T11:53:27.356+03:00   P5f-L9reuseJAmid-p0 r2 [ 13] L9-JA-off-mid#b4db W=2: stat 11.1224 ms pose 0x32d5e235342b4143 expect match rb 0.33% ra 0.42% others 0.26% cpu_s 9.578 wall 5.575s waited 0.0s
+2026-09-24T11:53:37.578+03:00   P5f-L9reuseJAmid-p0 r2 [ 14] L9-JA-on-mid#b4db W=2: stat 10.3207 ms pose 0x30c5438bc6ad9ffa expect match rb 0.42% ra 1.11% others 0.32% cpu_s 8.594 wall 5.174s waited 0.0s
+2026-09-24T11:53:46.394+03:00   P5f-L9reuseJAmid-p0 r2 [ 15] L9-JA-off-mid#b4db W=4: stat 7.5126 ms pose 0x32d5e235342b4143 expect match rb 1.11% ra 0.57% others 0.18% cpu_s 10.688 wall 3.769s waited 0.0s
+2026-09-24T11:53:55.009+03:00   P5f-L9reuseJAmid-p0 r2 [ 16] L9-JA-on-mid#b4db W=4: stat 7.1051 ms pose 0x30c5438bc6ad9ffa expect match rb 0.57% ra 0.78% others 0.03% cpu_s 9.0 wall 3.567s waited 0.0s
+2026-09-24T11:54:02.869+03:00   P5f-L9reuseJAmid-p0 r2 [ 17] L9-JA-off-mid#b4db W=16: stat 5.6001 ms pose 0x32d5e235342b4143 expect match rb 0.78% ra 0.41% others 0.38% cpu_s 18.844 wall 2.814s waited 0.0s
+2026-09-24T11:54:10.683+03:00   P5f-L9reuseJAmid-p0 r2 [ 18] L9-JA-on-mid#b4db W=16: stat 5.5050 ms pose 0x30c5438bc6ad9ffa expect match rb 0.41% ra 0.35% others 0.11% cpu_s 19.016 wall 2.766s waited 0.0s
+2026-09-24T11:54:10.683+03:00 P5f-L9reuseJAmid-p0: done
+2026-09-24T11:54:10.685+03:00 P5f-L9reuseJAmid-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T11:56:21.166+03:00 P5f-L9reuseJAmid-p1: idle reached; {'time': '2026-09-24T11:56:21.166+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T11:56:31.209+03:00 P5f-L9reuseJAmid-p1: opening receipt 1.11% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T11:56:39.118+03:00   P5f-L9reuseJAmid-p1 warm-up L9-JA-off#b4db W=8 (untimed): stat 5.6940 ms pose 0x32d5e235342b4143 expect match rb 1.11% ra 0.3% others 0.31% cpu_s 10.562 wall 2.86s waited 0.0s
+2026-09-24T11:56:46.920+03:00   P5f-L9reuseJAmid-p1 r0 [  1] L9-JA-on-mid#b4db W=16: stat 5.4779 ms pose 0x30c5438bc6ad9ffa expect match rb 0.3% ra 0.35% others 0.07% cpu_s 17.641 wall 2.753s waited 0.0s
+2026-09-24T11:56:54.778+03:00   P5f-L9reuseJAmid-p1 r0 [  2] L9-JA-off-mid#b4db W=16: stat 5.5931 ms pose 0x32d5e235342b4143 expect match rb 0.35% ra 0.64% others 0.04% cpu_s 18.734 wall 2.81s waited 0.0s
+2026-09-24T11:57:03.390+03:00   P5f-L9reuseJAmid-p1 r0 [  3] L9-JA-on-mid#b4db W=4: stat 7.1011 ms pose 0x30c5438bc6ad9ffa expect match rb 0.64% ra 0.51% others 0.08% cpu_s 9.062 wall 3.565s waited 0.0s
+2026-09-24T11:57:12.200+03:00   P5f-L9reuseJAmid-p1 r0 [  4] L9-JA-off-mid#b4db W=4: stat 7.5006 ms pose 0x32d5e235342b4143 expect match rb 0.51% ra 0.31% others 0.24% cpu_s 10.391 wall 3.764s waited 0.0s
+2026-09-24T11:57:22.424+03:00   P5f-L9reuseJAmid-p1 r0 [  5] L9-JA-on-mid#b4db W=2: stat 10.3273 ms pose 0x30c5438bc6ad9ffa expect match rb 0.31% ra 0.93% others 0.27% cpu_s 8.828 wall 5.177s waited 0.0s
+2026-09-24T11:57:33.043+03:00   P5f-L9reuseJAmid-p1 r0 [  6] L9-JA-off-mid#b4db W=2: stat 11.1175 ms pose 0x32d5e235342b4143 expect match rb 0.93% ra 0.39% others 0.14% cpu_s 9.438 wall 5.572s waited 0.0s
+2026-09-24T11:57:40.844+03:00   P5f-L9reuseJAmid-p1 r1 [  7] L9-JA-on-mid#b4db W=16: stat 5.4794 ms pose 0x30c5438bc6ad9ffa expect match rb 0.39% ra 0.43% others 0.22% cpu_s 17.219 wall 2.754s waited 0.0s
+2026-09-24T11:57:48.709+03:00   P5f-L9reuseJAmid-p1 r1 [  8] L9-JA-off-mid#b4db W=16: stat 5.6103 ms pose 0x32d5e235342b4143 expect match rb 0.43% ra 0.46% others 0.11% cpu_s 18.875 wall 2.819s waited 0.0s
+2026-09-24T11:57:57.328+03:00   P5f-L9reuseJAmid-p1 r1 [  9] L9-JA-on-mid#b4db W=4: stat 7.1181 ms pose 0x30c5438bc6ad9ffa expect match rb 0.46% ra 0.78% others 0.11% cpu_s 9.391 wall 3.573s waited 0.0s
+2026-09-24T11:58:06.143+03:00   P5f-L9reuseJAmid-p1 r1 [ 10] L9-JA-off-mid#b4db W=4: stat 7.5102 ms pose 0x32d5e235342b4143 expect match rb 0.78% ra 0.35% others 0.16% cpu_s 10.438 wall 3.768s waited 0.0s
+2026-09-24T11:58:16.375+03:00   P5f-L9reuseJAmid-p1 r1 [ 11] L9-JA-on-mid#b4db W=2: stat 10.3415 ms pose 0x30c5438bc6ad9ffa expect match rb 0.35% ra 0.57% others 0.13% cpu_s 8.734 wall 5.185s waited 0.0s
+2026-09-24T11:58:26.997+03:00   P5f-L9reuseJAmid-p1 r1 [ 12] L9-JA-off-mid#b4db W=2: stat 11.1257 ms pose 0x32d5e235342b4143 expect match rb 0.57% ra 0.76% others 0.14% cpu_s 9.438 wall 5.576s waited 0.0s
+2026-09-24T11:58:34.799+03:00   P5f-L9reuseJAmid-p1 r2 [ 13] L9-JA-on-mid#b4db W=16: stat 5.4848 ms pose 0x30c5438bc6ad9ffa expect match rb 0.76% ra 0.24% others 0.07% cpu_s 18.797 wall 2.756s waited 0.0s
+2026-09-24T11:58:42.661+03:00   P5f-L9reuseJAmid-p1 r2 [ 14] L9-JA-off-mid#b4db W=16: stat 5.6021 ms pose 0x32d5e235342b4143 expect match rb 0.24% ra 0.21% others 0.14% cpu_s 18.641 wall 2.814s waited 0.0s
+2026-09-24T11:58:51.276+03:00   P5f-L9reuseJAmid-p1 r2 [ 15] L9-JA-on-mid#b4db W=4: stat 7.1113 ms pose 0x30c5438bc6ad9ffa expect match rb 0.21% ra 0.51% others 0.08% cpu_s 9.625 wall 3.57s waited 0.0s
+2026-09-24T11:59:00.101+03:00   P5f-L9reuseJAmid-p1 r2 [ 16] L9-JA-off-mid#b4db W=4: stat 7.5354 ms pose 0x32d5e235342b4143 expect match rb 0.51% ra 0.6% others 0.13% cpu_s 10.203 wall 3.781s waited 0.0s
+2026-09-24T11:59:10.327+03:00   P5f-L9reuseJAmid-p1 r2 [ 17] L9-JA-on-mid#b4db W=2: stat 10.3338 ms pose 0x30c5438bc6ad9ffa expect match rb 0.6% ra 0.37% others 0.15% cpu_s 8.641 wall 5.181s waited 0.0s
+2026-09-24T11:59:20.945+03:00   P5f-L9reuseJAmid-p1 r2 [ 18] L9-JA-off-mid#b4db W=2: stat 11.1182 ms pose 0x32d5e235342b4143 expect match rb 0.37% ra 1.1% others 0.14% cpu_s 9.453 wall 5.572s waited 0.0s
+2026-09-24T11:59:20.945+03:00 P5f-L9reuseJAmid-p1: done
+2026-09-24T11:59:20.946+03:00 P5c-C3bG4-p0: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T12:01:31.438+03:00 P5c-C3bG4-p0: idle reached; {'time': '2026-09-24T12:01:31.438+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T12:01:41.482+03:00 P5c-C3bG4-p0: opening receipt 0.44% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T12:04:41.293+03:00   P5c-C3bG4-p0 warm-up C3b-G4#bpb W=1 (untimed): stat 0.1448 ms rb 0.44% ra 0.57% others 0.16% cpu_s 174.719 wall 174.767s waited 0.0s
+2026-09-24T12:07:40.127+03:00   P5c-C3bG4-p0 r0 [  1] C3b-G4#bpb W=1: stat 0.1457 ms rb 0.57% ra 0.8% others 0.17% cpu_s 174.125 wall 173.793s waited 0.0s
+2026-09-24T12:10:42.331+03:00   P5c-C3bG4-p0 r1 [  2] C3b-G4#bpb W=1: stat 0.1445 ms rb 0.8% ra 0.3% others 0.18% cpu_s 177.703 wall 177.161s waited 0.0s
+2026-09-24T12:13:44.404+03:00   P5c-C3bG4-p0 r2 [  3] C3b-G4#bpb W=1: stat 0.1450 ms rb 0.3% ra 0.36% others 0.18% cpu_s 176.875 wall 177.03s waited 0.0s
+2026-09-24T12:13:44.405+03:00 P5c-C3bG4-p0: done
+2026-09-24T12:13:44.406+03:00 P5c-C3bG4-p1: idle rule (wait_idle6.ps1, up to 30 polls)
+2026-09-24T12:15:54.872+03:00 P5c-C3bG4-p1: idle reached; {'time': '2026-09-24T12:15:54.872+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-24T12:16:04.917+03:00 P5c-C3bG4-p1: opening receipt 0.3% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-24T12:19:01.830+03:00   P5c-C3bG4-p1 warm-up C3b-G4#bpb W=1 (untimed): stat 0.1441 ms rb 0.3% ra 1.31% others 0.16% cpu_s 172.078 wall 171.87s waited 0.0s
+2026-09-24T12:21:57.567+03:00   P5c-C3bG4-p1 r0 [  1] C3b-G4#bpb W=1: stat 0.1447 ms rb 1.31% ra 0.79% others 0.14% cpu_s 170.406 wall 170.694s waited 0.0s
+2026-09-24T12:24:54.803+03:00   P5c-C3bG4-p1 r1 [  2] C3b-G4#bpb W=1: stat 0.1443 ms rb 0.79% ra 0.74% others 0.17% cpu_s 172.609 wall 172.191s waited 0.0s
+2026-09-24T12:27:54.346+03:00   P5c-C3bG4-p1 r2 [  3] C3b-G4#bpb W=1: stat 0.1444 ms rb 0.74% ra 0.29% others 0.19% cpu_s 174.922 wall 174.5s waited 0.0s
+2026-09-24T12:27:54.346+03:00 P5c-C3bG4-p1: done
+2026-09-24T12:27:54.360+03:00 WINDOW END exit 0: complete; counters {'timed': 505, 'rerun': 61, 'warm': 24, 'voided_processes': 0}; binaries after all match

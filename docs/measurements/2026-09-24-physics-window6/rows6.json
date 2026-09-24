@@ -1,0 +1,1125 @@
+{
+ "_doc": [
+  "Window 6 (2026-09-24, quiet from 08:10 MSK, timed passes end by 12:45). One list, blocks in PRIORITY order; each block = 2 passes x 3 rounds (K = 6 per cell), pass 0 W ascending with arms alternating inside a W group, pass 1 the whole list reversed, one untimed warm-up process per pass.",
+  "P1 L10 pre-C0 refutation (08-DESIGN-REV2.3.md:221; E8 recipe l10/plan.md:454). P2 L9 C0 refutation -> C4 (02-DESIGN-REV1.md:380 and the G-TW L9b arms :408-410). P3 tree broadphase C3b query cost (c3b/design.md:215-226, two binaries: no --bp-kernel flag). P4 L11 G9 remainder (window 5 analysis.md:227; L11 02-DESIGN-REV1.md:359-371; row spellings = window 4b rows.json). P5 extras (only if the budget allows). P5 order: bridge 2, L10 spans (J-Son W8, R-S W1/8), C3b G5 same-binary tree vs allpairs on the tip, L9 J-D, L9 R, L9 J-A W 2/4/16, C3b G4 criterion (longest, last).",
+  "Every runner process: <row args> --workers W --steps S --window a..b --csv <cwd>/run.csv --pose-out <cwd>/pose.bin --label <id>#<role>@W<W> [--arm-profiler] --expect-pose gate/fixtures/<pose_ref>.pose; exit 4 on a pose mismatch.",
+  "Statistic per process: the mean of wall_ns over the row's window (zone columns: per-process mean and median over the window, the row's metric_windows and the all-frozen tail); per cell: MEDIAN over K; spreads relative to the median, as in windows 3-5: r = (max - min), i = IQR, s = SE of the median = 1.2533 * sd / sqrt(K); B against A is CLAIMED iff |B/A - 1| > 2*sqrt(sA^2 + sB^2) under BOTH r and s (i printed)."
+ ],
+ "protocol": {
+  "k_per_cell": 6,
+  "passes": 2,
+  "rounds_per_pass": 3,
+  "receipt_s_between_processes": 5.0,
+  "receipt_s_before_pass": 10.0,
+  "busy_pct_limit": 5.0,
+  "rerun_contaminated_once_at_end_of_pass": true,
+  "void_pass_on_build_process": true,
+  "placement": "P-none",
+  "idle_rule": "tools/wait_idle6.ps1: 0 build procs (cargo/rustc/link/lld-link/dxc/clippy-driver/cl/msbuild/miri/cargo-miri) AND 0 procs whose image is under D:/wt/_targets or D:/wt/mq-* on 3 consecutive 60-s polls, 10-s cpu < 5 %; up to 30 polls (30 min) per wait; a timeout STOPS the window",
+  "hard_stop_local": "12:45"
+ },
+ "binaries": {
+  "b4db": {
+   "exe": "bin/runner_4db26681.exe",
+   "commit": "4db266815005e684d6ecd7c312b38170dc2c33e0",
+   "kind": "runner"
+  },
+  "c4db": {
+   "exe": "bin/classes_4db26681.exe",
+   "commit": "4db266815005e684d6ecd7c312b38170dc2c33e0",
+   "kind": "classes"
+  },
+  "par": {
+   "exe": "bin/runner_6dd1f916.exe",
+   "commit": "6dd1f916d5399b7bbe80429bdfde4e5c0bd63848",
+   "kind": "runner"
+  },
+  "tip": {
+   "exe": "bin/runner_983480a9.exe",
+   "commit": "983480a9a1aaf1d28e9c17b08c0c06821176cacf",
+   "kind": "runner"
+  },
+  "g9p": {
+   "exe": "bin/runner_0ca312bd.exe",
+   "commit": "0ca312bd8d696cec739f27d13c98343f4e1d1a9b",
+   "kind": "runner"
+  },
+  "g9t": {
+   "exe": "bin/runner_cbd86a65.exe",
+   "commit": "cbd86a6525175fc18500b9733997d78c2cbc3e44",
+   "kind": "runner"
+  },
+  "w4bt": {
+   "exe": "bin/runner_w4btip.exe",
+   "commit": "f8873aaeef02474e95a205f543d57511fe010691",
+   "kind": "runner"
+  },
+  "bpb": {
+   "exe": "bin/bpbench_983480a9.exe",
+   "commit": "983480a9a1aaf1d28e9c17b08c0c06821176cacf",
+   "kind": "criterion"
+  }
+ },
+ "blocks": [
+  {
+   "name": "P1-L10",
+   "item": "P1",
+   "warmup": [
+    "L10-Son",
+    "b4db",
+    1
+   ]
+  },
+  {
+   "name": "P2a-L9classes",
+   "item": "P2",
+   "warmup": [
+    "L9-classes",
+    "c4db",
+    1
+   ]
+  },
+  {
+   "name": "P2b-L9reuse",
+   "item": "P2",
+   "warmup": [
+    "L9-JA-off",
+    "b4db",
+    8
+   ]
+  },
+  {
+   "name": "P3-C3b",
+   "item": "P3",
+   "warmup": [
+    "C3b-TD-tree",
+    "tip",
+    8
+   ]
+  },
+  {
+   "name": "P4-G9",
+   "item": "P4",
+   "warmup": [
+    "G9-JA",
+    "g9t",
+    8
+   ]
+  },
+  {
+   "name": "P5a-bridge2",
+   "item": "P5",
+   "warmup": [
+    "B2-JAs",
+    "g9p",
+    8
+   ]
+  },
+  {
+   "name": "P5b-L10spans",
+   "item": "P5",
+   "warmup": [
+    "L10-Son",
+    "b4db",
+    8
+   ]
+  },
+  {
+   "name": "P5g-C3bG5",
+   "item": "P5",
+   "warmup": [
+    "G5-TD-tree",
+    "tip",
+    8
+   ]
+  },
+  {
+   "name": "P5d-L9reuseJD",
+   "item": "P5",
+   "warmup": [
+    "L9-JD-off",
+    "b4db",
+    8
+   ]
+  },
+  {
+   "name": "P5e-L9reuseR",
+   "item": "P5",
+   "warmup": [
+    "L9-R-off",
+    "b4db",
+    8
+   ]
+  },
+  {
+   "name": "P5f-L9reuseJAmid",
+   "item": "P5",
+   "warmup": [
+    "L9-JA-off",
+    "b4db",
+    8
+   ]
+  },
+  {
+   "name": "P5c-C3bG4",
+   "item": "P5",
+   "warmup": [
+    "C3b-G4",
+    "bpb",
+    1
+   ]
+  }
+ ],
+ "rows": [
+  {
+   "id": "L10-Offp",
+   "block": "P1-L10",
+   "binaries": [
+    "b4db"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--sleeping",
+    "--broadphase",
+    "tree",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 1000,
+   "window": [
+    264,
+    1000
+   ],
+   "armed": true,
+   "pose_ref": "Offp-J1000",
+   "broadphase": "Tree",
+   "note": "Off-prime (E8): Tree + L9 reuse on + L11 + L5, sleeping on; the decisive cell: STOP L10 if the median < 0.584 ms"
+  },
+  {
+   "id": "L10-Son",
+   "block": "P1-L10",
+   "binaries": [
+    "b4db"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--sleeping"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 1000,
+   "window": [
+    264,
+    1000
+   ],
+   "armed": true,
+   "pose_ref": "Son-J1000",
+   "broadphase": "AllPairs",
+   "note": "the lane base's own J-Son row (AllPairs, reuse off): context and the alternating arm"
+  },
+  {
+   "id": "L9-classes",
+   "block": "P2a-L9classes",
+   "binaries": [
+    "c4db"
+   ],
+   "kind": "classes",
+   "args": [
+    "--bench"
+   ],
+   "workers": [
+    1
+   ],
+   "note": "C0 refutation reading dt_np(1) band; per-class ns/pair; STOP C4 if the predicted band lies below 1.0 ms"
+  },
+  {
+   "id": "L9-JA-off",
+   "block": "P2b-L9reuse",
+   "binaries": [
+    "b4db"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "off"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "J500",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "L9-JA-on",
+   "block": "P2b-L9reuse",
+   "binaries": [
+    "b4db"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JAon500",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "L9-JA-a-off",
+   "block": "P2b-L9reuse",
+   "binaries": [
+    "b4db"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "off"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "J500",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "L9-JA-a-on",
+   "block": "P2b-L9reuse",
+   "binaries": [
+    "b4db"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JAon500",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "C3b-TA-armed",
+   "block": "P3-C3b",
+   "binaries": [
+    "par",
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "J500",
+   "broadphase": "Tree"
+  },
+  {
+   "id": "C3b-TD-tree",
+   "block": "P3-C3b",
+   "binaries": [
+    "par",
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "pose_ref": "J500",
+   "broadphase": "Tree"
+  },
+  {
+   "id": "G9-JA",
+   "block": "P4-G9",
+   "binaries": [
+    "g9p",
+    "g9t"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "pose_ref": "J500",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "G9-R",
+   "block": "P4-G9",
+   "binaries": [
+    "g9p",
+    "g9t"
+   ],
+   "args": [
+    "--scene",
+    "rest",
+    "--solver",
+    "colored"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 1100,
+   "window": [
+    600,
+    1100
+   ],
+   "armed": true,
+   "pose_ref": "R1100",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "G9-RS",
+   "block": "P4-G9",
+   "binaries": [
+    "g9p",
+    "g9t"
+   ],
+   "args": [
+    "--scene",
+    "rest",
+    "--sleeping"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 800,
+   "window": [
+    300,
+    800
+   ],
+   "armed": true,
+   "pose_ref": "RS800",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "G9-S16",
+   "block": "P4-G9",
+   "binaries": [
+    "g9p",
+    "g9t"
+   ],
+   "args": [
+    "--scene",
+    "s16",
+    "--cfg",
+    "a"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 300,
+   "window": [
+    0,
+    300
+   ],
+   "armed": true,
+   "pose_ref": "S16-300",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "G9-JAs-mid",
+   "block": "P4-G9",
+   "binaries": [
+    "g9p",
+    "g9t"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "as"
+   ],
+   "workers": [
+    2,
+    4,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "pose_ref": "J500",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "G9-JAs-a",
+   "block": "P4-G9",
+   "binaries": [
+    "g9p",
+    "g9t"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "as"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": true,
+   "pose_ref": "J500",
+   "broadphase": "AllPairs",
+   "note": "the canary's reference (win4b J-As-a)"
+  },
+  {
+   "id": "G9-JC",
+   "block": "P4-G9",
+   "binaries": [
+    "g9p",
+    "g9t"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "as"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": true,
+   "canary_of": "G9-JAs-a",
+   "canary_frac": 0.05,
+   "pose_ref": "J500",
+   "broadphase": "AllPairs",
+   "note": "the canary J-C (win4b): --canary-frac 0.05 --canary-ref-ns = the latest G9-JAs-a window mean of the same binary and W; must be SEEN"
+  },
+  {
+   "id": "B2-JAs",
+   "block": "P5a-bridge2",
+   "binaries": [
+    "w4bt",
+    "g9p"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "as"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "pose_ref": "J500",
+   "broadphase": "AllPairs",
+   "note": "window 5 analysis 5.1: window 4b's tip (L11 C2) vs window 5's parent (C2 + the line merge) on J-As, W=8 with a W=1 control"
+  },
+  {
+   "id": "L10-Offp8",
+   "block": "P5b-L10spans",
+   "binaries": [
+    "b4db"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--sleeping",
+    "--broadphase",
+    "tree",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    8
+   ],
+   "steps": 1000,
+   "window": [
+    264,
+    1000
+   ],
+   "armed": true,
+   "pose_ref": "Offp-J1000",
+   "broadphase": "Tree"
+  },
+  {
+   "id": "L10-Son8",
+   "block": "P5b-L10spans",
+   "binaries": [
+    "b4db"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--sleeping"
+   ],
+   "workers": [
+    8
+   ],
+   "steps": 1000,
+   "window": [
+    264,
+    1000
+   ],
+   "armed": true,
+   "pose_ref": "Son-J1000",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "L10-RS-Offp",
+   "block": "P5b-L10spans",
+   "binaries": [
+    "b4db"
+   ],
+   "args": [
+    "--scene",
+    "rest",
+    "--sleeping",
+    "--broadphase",
+    "tree",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 800,
+   "window": [
+    300,
+    800
+   ],
+   "armed": true,
+   "pose_ref": "RSOffp800",
+   "broadphase": "Tree"
+  },
+  {
+   "id": "L10-RS",
+   "block": "P5b-L10spans",
+   "binaries": [
+    "b4db"
+   ],
+   "args": [
+    "--scene",
+    "rest",
+    "--sleeping"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 800,
+   "window": [
+    300,
+    800
+   ],
+   "armed": true,
+   "pose_ref": "RS800",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "C3b-G4",
+   "block": "P5c-C3bG4",
+   "binaries": [
+    "bpb"
+   ],
+   "kind": "criterion",
+   "args": [
+    "--bench",
+    "--noplot",
+    "^bp_g4_(scene/(tree|tree_rowwalk)/(j100|1240)|(uniform|disparity)/(tree|tree_rowwalk)/1000)$"
+   ],
+   "workers": [
+    1
+   ],
+   "note": "same-binary LeafList (tree) vs RowWalk (tree_rowwalk) on the J snapshot, scene/1240, uniform/1000, disparity/1000; LeafList/RowWalk > 0.55 on J refutes attribution A; a uniform/disparity ratio outside [0.30, 0.60] says the model is structurally wrong"
+  },
+  {
+   "id": "L9-JD-off",
+   "block": "P5d-L9reuseJD",
+   "binaries": [
+    "b4db"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--contact-reuse",
+    "off"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "J500",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "L9-JD-on",
+   "block": "P5d-L9reuseJD",
+   "binaries": [
+    "b4db"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JAon500",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "G5-TA-tree-a",
+   "block": "P5g-C3bG5",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "J500",
+   "broadphase": "Tree"
+  },
+  {
+   "id": "G5-TA-ap-a",
+   "block": "P5g-C3bG5",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "allpairs"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "J500",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "G5-TD-tree",
+   "block": "P5g-C3bG5",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "pose_ref": "J500",
+   "broadphase": "Tree"
+  },
+  {
+   "id": "G5-TD-ap",
+   "block": "P5g-C3bG5",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "allpairs"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "armed": false,
+   "pose_ref": "J500",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "L9-R-off",
+   "block": "P5e-L9reuseR",
+   "binaries": [
+    "b4db"
+   ],
+   "args": [
+    "--scene",
+    "rest",
+    "--solver",
+    "colored",
+    "--contact-reuse",
+    "off"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 1100,
+   "window": [
+    600,
+    1100
+   ],
+   "armed": false,
+   "pose_ref": "R1100",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "L9-R-on",
+   "block": "P5e-L9reuseR",
+   "binaries": [
+    "b4db"
+   ],
+   "args": [
+    "--scene",
+    "rest",
+    "--solver",
+    "colored",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 1100,
+   "window": [
+    600,
+    1100
+   ],
+   "armed": false,
+   "pose_ref": "Ron1100",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "L9-JA-off-mid",
+   "block": "P5f-L9reuseJAmid",
+   "binaries": [
+    "b4db"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "off"
+   ],
+   "workers": [
+    2,
+    4,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "J500",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "L9-JA-on-mid",
+   "block": "P5f-L9reuseJAmid",
+   "binaries": [
+    "b4db"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "on"
+   ],
+   "workers": [
+    2,
+    4,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JAon500",
+   "broadphase": "AllPairs"
+  }
+ ]
+}

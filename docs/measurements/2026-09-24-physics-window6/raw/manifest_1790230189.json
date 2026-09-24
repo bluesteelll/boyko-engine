@@ -1,0 +1,443 @@
+{
+ "generated": "2026-09-24T09:09:49.785+03:00",
+ "rows_json": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\\scratchpad\\win6\\rows6.json",
+ "binaries": {
+  "b4db": {
+   "exe": "bin/runner_4db26681.exe",
+   "commit": "4db266815005e684d6ecd7c312b38170dc2c33e0",
+   "kind": "runner",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\\scratchpad\\win6\\bin\\runner_4db26681.exe",
+   "sha256": "da674e392c1028c30099095702ba628da5134a6414ff0b49704a481a0e43d87c"
+  },
+  "c4db": {
+   "exe": "bin/classes_4db26681.exe",
+   "commit": "4db266815005e684d6ecd7c312b38170dc2c33e0",
+   "kind": "classes",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\\scratchpad\\win6\\bin\\classes_4db26681.exe",
+   "sha256": "8f084c483527ab111df62777b73bb429018755a779745289bf92ebba66c0ada5"
+  },
+  "par": {
+   "exe": "bin/runner_6dd1f916.exe",
+   "commit": "6dd1f916d5399b7bbe80429bdfde4e5c0bd63848",
+   "kind": "runner",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\\scratchpad\\win6\\bin\\runner_6dd1f916.exe",
+   "sha256": "228f35140b1c207d04764f76df5cb1867de39c9b89c5e0db56fce60d55672c33"
+  },
+  "tip": {
+   "exe": "bin/runner_983480a9.exe",
+   "commit": "983480a9a1aaf1d28e9c17b08c0c06821176cacf",
+   "kind": "runner",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\\scratchpad\\win6\\bin\\runner_983480a9.exe",
+   "sha256": "f93e5fec1c1ec176bd86c1db21b4020ff2dbbda7bd7e0d12a0f8040c29821ebd"
+  },
+  "g9p": {
+   "exe": "bin/runner_0ca312bd.exe",
+   "commit": "0ca312bd8d696cec739f27d13c98343f4e1d1a9b",
+   "kind": "runner",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\\scratchpad\\win6\\bin\\runner_0ca312bd.exe",
+   "sha256": "3993684b9f0ab8d99981cf8571a6ad988d1a14dd09675e065a8d22cb78507d1e"
+  },
+  "g9t": {
+   "exe": "bin/runner_cbd86a65.exe",
+   "commit": "cbd86a6525175fc18500b9733997d78c2cbc3e44",
+   "kind": "runner",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\\scratchpad\\win6\\bin\\runner_cbd86a65.exe",
+   "sha256": "9c7caff172cc2ef5fe34d7cb58720e16901ca62e0df78fb2a8a8088c2c8b597e"
+  },
+  "w4bt": {
+   "exe": "bin/runner_w4btip.exe",
+   "commit": "f8873aaeef02474e95a205f543d57511fe010691",
+   "kind": "runner",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\\scratchpad\\win6\\bin\\runner_w4btip.exe",
+   "sha256": "29dbd993ea817c1125f36a09e1b06efc65116ae0e0edadaeb9d602991eac3df0"
+  },
+  "bpb": {
+   "exe": "bin/bpbench_983480a9.exe",
+   "commit": "983480a9a1aaf1d28e9c17b08c0c06821176cacf",
+   "kind": "criterion",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\\scratchpad\\win6\\bin\\bpbench_983480a9.exe",
+   "sha256": "e601fd46c03ae7437dc565167abf331872ba07947a01f798bf199a207ffec0be"
+  }
+ },
+ "fixtures": {
+  "Offp-J1000": {
+   "hash": "0x3db47fae414b655c",
+   "recorded_by": "cells/L10-Offp_b4db_W1",
+   "binary": "b4db",
+   "commit": "4db266815005e684d6ecd7c312b38170dc2c33e0",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--sleeping",
+    "--broadphase",
+    "tree",
+    "--contact-reuse",
+    "on",
+    "--workers",
+    "1",
+    "--steps",
+    "1000",
+    "--window",
+    "264..1000",
+    "--csv",
+    "run.csv",
+    "--pose-out",
+    "pose.bin",
+    "--label",
+    "gate:L10-Offp#b4db@W1",
+    "--arm-profiler"
+   ],
+   "known": null
+  },
+  "Son-J1000": {
+   "hash": "0xcc2a5400c66eecce",
+   "recorded_by": "cells/L10-Son_b4db_W1",
+   "binary": "b4db",
+   "commit": "4db266815005e684d6ecd7c312b38170dc2c33e0",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--sleeping",
+    "--workers",
+    "1",
+    "--steps",
+    "1000",
+    "--window",
+    "264..1000",
+    "--csv",
+    "run.csv",
+    "--pose-out",
+    "pose.bin",
+    "--label",
+    "gate:L10-Son#b4db@W1",
+    "--arm-profiler"
+   ],
+   "known": null
+  },
+  "J500": {
+   "hash": "0x32d5e235342b4143",
+   "recorded_by": "cells/L9-JA-off_b4db_W1",
+   "binary": "b4db",
+   "commit": "4db266815005e684d6ecd7c312b38170dc2c33e0",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "off",
+    "--workers",
+    "1",
+    "--steps",
+    "500",
+    "--window",
+    "0..500",
+    "--csv",
+    "run.csv",
+    "--pose-out",
+    "pose.bin",
+    "--label",
+    "gate:L9-JA-off#b4db@W1"
+   ],
+   "known": "0x32d5e235342b4143"
+  },
+  "JAon500": {
+   "hash": "0x30c5438bc6ad9ffa",
+   "recorded_by": "cells/L9-JA-on_b4db_W1",
+   "binary": "b4db",
+   "commit": "4db266815005e684d6ecd7c312b38170dc2c33e0",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--contact-reuse",
+    "on",
+    "--workers",
+    "1",
+    "--steps",
+    "500",
+    "--window",
+    "0..500",
+    "--csv",
+    "run.csv",
+    "--pose-out",
+    "pose.bin",
+    "--label",
+    "gate:L9-JA-on#b4db@W1"
+   ],
+   "known": null
+  },
+  "R1100": {
+   "hash": "0x87e561d20589d4a5",
+   "recorded_by": "cells/G9-R_g9p_W1",
+   "binary": "g9p",
+   "commit": "0ca312bd8d696cec739f27d13c98343f4e1d1a9b",
+   "args": [
+    "--scene",
+    "rest",
+    "--solver",
+    "colored",
+    "--workers",
+    "1",
+    "--steps",
+    "1100",
+    "--window",
+    "600..1100",
+    "--csv",
+    "run.csv",
+    "--pose-out",
+    "pose.bin",
+    "--label",
+    "gate:G9-R#g9p@W1",
+    "--arm-profiler"
+   ],
+   "known": "0x87e561d20589d4a5"
+  },
+  "RS800": {
+   "hash": "0x2a2b7926a48aab00",
+   "recorded_by": "cells/G9-RS_g9p_W1",
+   "binary": "g9p",
+   "commit": "0ca312bd8d696cec739f27d13c98343f4e1d1a9b",
+   "args": [
+    "--scene",
+    "rest",
+    "--sleeping",
+    "--workers",
+    "1",
+    "--steps",
+    "800",
+    "--window",
+    "300..800",
+    "--csv",
+    "run.csv",
+    "--pose-out",
+    "pose.bin",
+    "--label",
+    "gate:G9-RS#g9p@W1",
+    "--arm-profiler"
+   ],
+   "known": "0x2a2b7926a48aab00"
+  },
+  "S16-300": {
+   "hash": "0x8877dbb1192e9b92",
+   "recorded_by": "cells/G9-S16_g9p_W1",
+   "binary": "g9p",
+   "commit": "0ca312bd8d696cec739f27d13c98343f4e1d1a9b",
+   "args": [
+    "--scene",
+    "s16",
+    "--cfg",
+    "a",
+    "--workers",
+    "1",
+    "--steps",
+    "300",
+    "--window",
+    "0..300",
+    "--csv",
+    "run.csv",
+    "--pose-out",
+    "pose.bin",
+    "--label",
+    "gate:G9-S16#g9p@W1",
+    "--arm-profiler"
+   ],
+   "known": "0x8877dbb1192e9b92"
+  },
+  "RSOffp800": {
+   "hash": "0xb7f1e9e8f91f75ab",
+   "recorded_by": "cells/L10-RS-Offp_b4db_W1",
+   "binary": "b4db",
+   "commit": "4db266815005e684d6ecd7c312b38170dc2c33e0",
+   "args": [
+    "--scene",
+    "rest",
+    "--sleeping",
+    "--broadphase",
+    "tree",
+    "--contact-reuse",
+    "on",
+    "--workers",
+    "1",
+    "--steps",
+    "800",
+    "--window",
+    "300..800",
+    "--csv",
+    "run.csv",
+    "--pose-out",
+    "pose.bin",
+    "--label",
+    "gate:L10-RS-Offp#b4db@W1",
+    "--arm-profiler"
+   ],
+   "known": null
+  },
+  "Ron1100": {
+   "hash": "0xc8bbe34cf6a8afc6",
+   "recorded_by": "cells/L9-R-on_b4db_W1",
+   "binary": "b4db",
+   "commit": "4db266815005e684d6ecd7c312b38170dc2c33e0",
+   "args": [
+    "--scene",
+    "rest",
+    "--solver",
+    "colored",
+    "--contact-reuse",
+    "on",
+    "--workers",
+    "1",
+    "--steps",
+    "1100",
+    "--window",
+    "600..1100",
+    "--csv",
+    "run.csv",
+    "--pose-out",
+    "pose.bin",
+    "--label",
+    "gate:L9-R-on#b4db@W1"
+   ],
+   "known": null
+  }
+ },
+ "protocol": {
+  "k_per_cell": 6,
+  "passes": 2,
+  "rounds_per_pass": 3,
+  "receipt_s_between_processes": 5.0,
+  "receipt_s_before_pass": 10.0,
+  "busy_pct_limit": 5.0,
+  "rerun_contaminated_once_at_end_of_pass": true,
+  "void_pass_on_build_process": true,
+  "placement": "P-none",
+  "idle_rule": "tools/wait_idle6.ps1: 0 build procs (cargo/rustc/link/lld-link/dxc/clippy-driver/cl/msbuild/miri/cargo-miri) AND 0 procs whose image is under D:/wt/_targets or D:/wt/mq-* on 3 consecutive 60-s polls, 10-s cpu < 5 %; up to 30 polls (30 min) per wait; a timeout STOPS the window",
+  "hard_stop_local": "12:45"
+ },
+ "blocks": [
+  {
+   "name": "P1-L10",
+   "item": "P1",
+   "warmup": [
+    "L10-Son",
+    "b4db",
+    1
+   ]
+  },
+  {
+   "name": "P2a-L9classes",
+   "item": "P2",
+   "warmup": [
+    "L9-classes",
+    "c4db",
+    1
+   ]
+  },
+  {
+   "name": "P2b-L9reuse",
+   "item": "P2",
+   "warmup": [
+    "L9-JA-off",
+    "b4db",
+    8
+   ]
+  },
+  {
+   "name": "P3-C3b",
+   "item": "P3",
+   "warmup": [
+    "C3b-TD-tree",
+    "tip",
+    8
+   ]
+  },
+  {
+   "name": "P4-G9",
+   "item": "P4",
+   "warmup": [
+    "G9-JA",
+    "g9t",
+    8
+   ]
+  },
+  {
+   "name": "P5a-bridge2",
+   "item": "P5",
+   "warmup": [
+    "B2-JAs",
+    "g9p",
+    8
+   ]
+  },
+  {
+   "name": "P5b-L10spans",
+   "item": "P5",
+   "warmup": [
+    "L10-Son",
+    "b4db",
+    8
+   ]
+  },
+  {
+   "name": "P5g-C3bG5",
+   "item": "P5",
+   "warmup": [
+    "G5-TD-tree",
+    "tip",
+    8
+   ]
+  },
+  {
+   "name": "P5d-L9reuseJD",
+   "item": "P5",
+   "warmup": [
+    "L9-JD-off",
+    "b4db",
+    8
+   ]
+  },
+  {
+   "name": "P5e-L9reuseR",
+   "item": "P5",
+   "warmup": [
+    "L9-R-off",
+    "b4db",
+    8
+   ]
+  },
+  {
+   "name": "P5f-L9reuseJAmid",
+   "item": "P5",
+   "warmup": [
+    "L9-JA-off",
+    "b4db",
+    8
+   ]
+  },
+  {
+   "name": "P5c-C3bG4",
+   "item": "P5",
+   "warmup": [
+    "C3b-G4",
+    "bpb",
+    1
+   ]
+  }
+ ],
+ "cutoff": "2026-09-24T12:45:00",
+ "test": false,
+ "resume": false
+}

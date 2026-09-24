@@ -1,0 +1,17 @@
+jolt: pairs 9559 non_box 0 separated 5044 (slow 5044 fast 0) touching 4515 (slow 4515 fast 0); first separating axis A-face 4982 B-face 61 edge 1; axes an early exit evaluates 1.79 of 15 per separated pair
+jolt: the carried separating axis rejected 5044 of the 5044 separated pairs without the SAT (L9 C2)
+jolt: separated 5044 pairs 45.2 ns/pair (NOT A RESULT: timed on a shared machine; read in a quiet window)
+jolt: touching 4515 pairs 437.3 ns/pair (NOT A RESULT: timed on a shared machine; read in a quiet window)
+jolt: stream 9559 pairs 233.4 ns/pair (NOT A RESULT: timed on a shared machine; read in a quiet window)
+jolt: design refutation reading dt_np(1) in [1.083, 1.674] ms (NOT A RESULT off a quiet window; the design stops below 1.0 ms)
+rest: pairs 9570 non_box 0 separated 2889 (slow 2889 fast 0) touching 6681 (slow 6681 fast 0); first separating axis A-face 2625 B-face 239 edge 25; axes an early exit evaluates 2.33 of 15 per separated pair
+rest: the carried separating axis rejected 2889 of the 2889 separated pairs without the SAT (L9 C2)
+rest: separated 2889 pairs 52.5 ns/pair (NOT A RESULT: timed on a shared machine; read in a quiet window)
+rest: touching 6681 pairs 457.6 ns/pair (NOT A RESULT: timed on a shared machine; read in a quiet window)
+rest: stream 9570 pairs 340.0 ns/pair (NOT A RESULT: timed on a shared machine; read in a quiet window)
+rest: design refutation reading dt_np(1) in [1.830, 2.597] ms (NOT A RESULT off a quiet window; the design stops below 1.0 ms)
+rain: pairs 5934 non_box 0 separated 4560 (slow 0 fast 4560) touching 1374 (slow 0 fast 1374); first separating axis A-face 3580 B-face 744 edge 236; axes an early exit evaluates 2.91 of 15 per separated pair
+rain: the carried separating axis rejected 4323 of the 4560 separated pairs without the SAT (L9 C2)
+rain: fast 5934 pairs 208.0 ns/pair (NOT A RESULT: timed on a shared machine; read in a quiet window)
+rain: stream 5934 pairs 208.0 ns/pair (NOT A RESULT: timed on a shared machine; read in a quiet window)
+SUMMARY {"mode":"bench","scenes":[{"scene":"jolt","pairs":9559,"non_box":0,"slow_separated":5044,"fast_separated":0,"slow_touching":4515,"fast_touching":0,"first_axis":[4982,61,1],"early_exit_axes":9047,"sep_axis_hits":5044,"timings_not_a_result":{"separated":{"pairs":5044,"ns_per_pair":45.18},"touching":{"pairs":4515,"ns_per_pair":437.28},"stream":{"pairs":9559,"ns_per_pair":233.37}}},{"scene":"rest","pairs":9570,"non_box":0,"slow_separated":2889,"fast_separated":0,"slow_touching":6681,"fast_touching":0,"first_axis":[2625,239,25],"early_exit_axes":6718,"sep_axis_hits":2889,"timings_not_a_result":{"separated":{"pairs":2889,"ns_per_pair":52.51},"touching":{"pairs":6681,"ns_per_pair":457.60},"stream":{"pairs":9570,"ns_per_pair":340.00}}},{"scene":"rain","pairs":5934,"non_box":0,"slow_separated":0,"fast_separated":4560,"slow_touching":0,"fast_touching":1374,"first_axis":[3580,744,236],"early_exit_axes":13251,"sep_axis_hits":4323,"timings_not_a_result":{"fast":{"pairs":5934,"ns_per_pair":208.02},"stream":{"pairs":5934,"ns_per_pair":208.00}}}]}
