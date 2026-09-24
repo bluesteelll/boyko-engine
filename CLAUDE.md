@@ -209,20 +209,20 @@ The repair belongs in those two crates, not in the gate.
 
 The four commands above run **none** of the `#[ignore]`d tests.
 [tests/ignore_reasons_census.rs](tests/ignore_reasons_census.rs) prints what exists on every run
-(`cargo test -p boyko-engine --test ignore_reasons_census -- --nocapture`). Measured 2026-09-23 on
-`u/b3` at `7d5a0015` (rung B3), it read:
+(`cargo test -p boyko-engine --test ignore_reasons_census -- --nocapture`). Measured 2026-09-24 on
+`u/d-m0` (rung D-M0, which adds one `solo` site to B3's `7d5a0015` reading), it read:
 
 ```text
-[ignore census] 355 sites (191 plain, 164 cfg_attr) across 12 crates, 1812 .rs files walked, 0 waivers
+[ignore census] 356 sites (192 plain, 164 cfg_attr) across 12 crates, 1821 .rs files walked, 0 waivers
 [ignore classes] <none>=1, deferred=19, feature+gpu=1, feature+gpu-cap=3, feature+gpu-windowed+gpu-cap=4,
   feature+miri-slow=1, flaky=1, generator=7, gpu=29, gpu-cap=1, gpu-windowed=120, gpu-windowed+gpu-cap=1,
-  miri-slow=130, miri-unsupported=27, slow=9, solo=1; scopes: miri-only=156, native=198, release-only=1;
+  miri-slow=130, miri-unsupported=27, slow=9, solo=2; scopes: miri-only=156, native=199, release-only=1;
   rule inputs: 127 sites call a device entry, 2 exist only under Miri, 9 are feature-conditioned
 ```
 
 ⚠️ **Every count in this section is a snapshot, and the census's printed lines are the only
 figures to quote — read the run, not this paragraph.** `MIN_SITES` is a floor, so a prose count
-can drift arbitrarily far and stay green. How the count moved (164 → 280 → … → 355) is in
+can drift arbitrarily far and stay green. How the count moved (164 → 280 → … → 355 → 356) is in
 `git log -p CLAUDE.md`, not here.
 
 Every site states its requirement **and its class**, and the census fails the build if a new one
@@ -268,14 +268,20 @@ not the grep.
 **Leg: device-free ignored tests** — the plain `solo`/`slow` sites. Any machine, no GPU.
 
 ```powershell
-rg -n '^[^/]*#\[ignore = "(solo|slow):' -g '*.rs'      # 4 sites at 7d5a0015
+rg -n '^[^/]*#\[ignore = "(solo|slow):' -g '*.rs'      # 5 sites on u/d-m0 (4 at 7d5a0015)
 ```
 
-Each site's reason names its command (a `solo` site adds `--test-threads=1`), for example:
+Each site's reason names its command (a `solo` site adds `--test-threads=1`). The two `solo` sites:
 
 ```powershell
 cargo test -p boyko-log --test l14_sink_policy -- --ignored --test-threads=1
+cargo test -p boyko-ecs --lib ecs::memory::component_pool::tests::commit_floor_tests::os_truth_row1_default_pool_at_full_capacity -- --ignored --exact --test-threads=1
 ```
+
+Each must print `running 1 test`. The second is rung D-M0's commit-floor oracle at a default pool's
+full capacity (G3 row 1 of the packing plan). It is `solo` for its cost in commit charge, about
+768 MiB of process-wide Windows commit, not for its time. It is selected with `--exact` because a
+bare `-- --ignored` over the lib binary would also sweep in any ignored lib test that lands later.
 
 Select by name (`--exact <test>`) wherever a binary also holds a no-leg class: `ui_s0_measure.rs`
 carries one `slow` gate beside two `generator` harnesses, and a bare `-- --ignored` sweeps the
