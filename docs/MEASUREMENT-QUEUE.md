@@ -1419,6 +1419,154 @@ duplicate pose files.
 
 ---
 
+## 14. Physics — L10's pre-C0 refutation, L9's C0 reading and the C4 decision, the tree query after C3b, and the rest of L11's G9 — TIMED 2026-09-24 (window 6)
+
+**RESULT, 2026-09-24, window 6: four levers on one window, each read against its own design's rule.** One
+window, complete, under the window-3 protocol block (the 2026-09-19 ruling: median over K separate processes of
+the process statistic; spread = min-max, IQR, the median's SE; claimed iff |effect| > 2*hypot(spread_A,
+spread_B) under BOTH min-max and SE, IQR printed, r / i / s below; 5-s receipts between processes, > 5 % =>
+re-run once at the end of the pass; a 10-s receipt and three quiet 60-s polls before each pass, up to 30 polls; a
+build or lane process at any point of a timed pass voids the pass; no band void; P-none; every process ran with
+`--expect-pose` against its row's fixture). **K = 6** (two passes x three rounds per block, the arms alternating
+inside each W group, pass 1 reversed; twelve blocks in priority order). Owner's workstation (Ryzen 9 5900HS,
+8C/16T, High performance), inside the owner's quiet declaration 08:10-13:10 +03:00; timed 09:09:49-12:27:54,
+complete, 0 voided passes, every binary re-checked against its sha256 after the window. rustc 1.98.1
+`x86_64-pc-windows-msvc`, no RUSTFLAGS, `CARGO_INCREMENTAL=0`, cargo `parity` (the criterion exe: `bench`).
+Binaries (sha256 prefixes, `bin/SHA256SUMS`), five built from `git archive` trees under one pruned `Cargo.lock`
+(LF sha256 `530cc386…` = the trunk's tracked lock `5f8de754…` minus `boyko-symcensus`, which these trees do not
+have), each build's `Compiling boyko-physics (path)` line naming its tree: `4db26681` (the trunk, L9 C0-C3, reuse
+switchable) runner `da674e39` and class bench `8f084c48`; `6dd1f916` (C3b's parent, query RowWalk) `228f3514`;
+`983480a9` (C3b's tip, LeafList) runner `f93e5fec` and criterion `broadphase` `e601fd46`; three copied
+byte-identical: window 5's parent `0ca312bd` `3993684b` and tip `cbd86a65` `9c7caff1`, window 4b's tip `f8873aae`
+`29dbd993`. 553 records: 529 processes (24 warm-ups, 444 originals, 61 re-runs) and 24 pass markers; 436 of 444
+slots used (53 by their re-run); 8 dropped because both attempts were hot, so those cells are K = 5. Every used
+process: exit 0, void 0, `expect_pose: match` with the hash equal to its fixture (nine fixtures, four of them new:
+J with reuse `0x30c5438bc6ad9ffa`, L10's Off′ on J `0x3db47fae414b655c`, R with reuse `0xc8bbe34cf6a8afc6`, R-S
+Off′ `0xb7f1e9e8f91f75ab`), workers = W, msvc, mask `0xffff`, TreeDiag `static_rebuilds 1, members 1, evictions
+0` on tree rows and all zero on AllPairs, drops 0. The untimed pose gate: 126 processes, 0 failing; six 501-step
+red controls exit 4. Contamination: 620 receipts, median 0.85 %, p90 5.13 %, max 17.21 %, 69 over 5 % (all after
+the process; `claude.exe` on top in 67; no build or lane process at any); the during-process witness over the used
+set median 0.26 %, p95 3.87 %, max 5.07 %; the idle rule: 24 waits, 78 polls, never a build or lane process.
+**Jolt was not run**: v5.6.0's window-3 cells, recomputed, are the only reference (owner ruling 2026-09-21).
+
+### 14.1 L10 — the pre-C0 refutation (P1) and the armed Off′ spans (P5b)
+
+- **The refutation does NOT fire: L10 continues.** The bar (`levers/L10-sleeping/08-DESIGN-REV2.3.md:221`): stop
+  before C0 if the armed Off′ span on J-Son at W=1, K=6, on the lane base reads below 0.584 ms (= 0.6 x 0.59 +
+  0.23). `L10-Offp` (`4db26681`: `--scene jolt --gap 0.5 --cfg a --sleeping --broadphase tree --contact-reuse on`,
+  1000 steps, armed) reads **1.4670 ms [1.4566-1.4826] over the literal window [264,1000)** and **1.3043 ms
+  [1.2935-1.3218] over the all-frozen tail** (the pile freezes at step 274, not 264; the tail is the design's Off′,
+  `06-DESIGN-REV2.2.md:253`): +0.883 / +0.720 ms (+151 % / +123 %) above the bar, the smallest process 2.2-2.5x
+  the bar, claimed under all three readings. Both readings sit inside the design's 0.82-1.59 band; 0.292 us per
+  logical manifold (design 0.18-0.35). The alternating arm `L10-Son` (AllPairs, reuse off) reads 4.6973 ms.
+- **Off′ is 3.230 ms under J-Son, and that drop is the Tree (bp -1.722) plus L9b (np -1.677), not L10.** Off′(1)'s
+  tail spans: bp 0.2520 (query 0.1949), np 0.6438, graph 0.1160, solve 0.2196, remainder 0.0687 ms. By arithmetic,
+  L10's gain ceiling on the J-Son tail is 1.155-1.195 ms at W=1 (C3b ~0.715-0.740, C3a ~0.190-0.205, C3c ~0.247),
+  3.3x its realized-gain gate of 0.35 ms, and 0.60-0.70 ms at W=8 (Off′(8) 0.817, tail 0.780) against 0.14 ms.
+  C3c's 0.247 exists only with the Tree.
+- **P5b, for the R gate:** R-S Off′ 1.594 / 0.966 ms at W = 1 / 8 (bp 0.245, np 0.835, graph 0.188, solve 0.266),
+  R-S 5.778 / 3.121 ms, so the R gate is 0.6 x (Off′_RS - 0.25) = **0.806 / 0.429 ms**. J-Son(8) 2.799 ms.
+- Not claimed: L10's own gain (C0-C3a are untimed; the split by commit is arithmetic).
+
+### 14.2 L9 — the C0 reading and the C4 decision (P2, P5d, P5e, P5f)
+
+- **(a) The class-bench band is CLEAR** (`levers/L9-contact-reuse/02-DESIGN-REV1.md:380`; FIRES iff high < 1.0,
+  AMBIGUOUS iff low < 1.0 <= high): low **1.0771 ms** [1.0729-1.1125], high 1.6659; the low end is claimed above
+  1.0 under all three readings, and all six per-process lows are >= 1.073. Per-class costs on J: separated 45.24
+  ns, touching **435.56 ns**, stream 232.69 (N_sep 5,044, N_touch 4,515). On `4db26681` the separated class is
+  already post-L9a, so the band prices essentially L9b alone.
+- **(b) The realized-gain rule PASSES** (`:407-410`): one binary, J-A `--contact-reuse off` against `on`, W=1,
+  [100,500): **18.1605 -> 16.3152 ms, Delta-T(1) = 1.845 ms (-10.16 %), claimed under all three readings, against
+  a bar of 0.6 x 1.4994 = 0.900 ms** (the prediction 0.9897 x 4,515 x (435.56 - [100, 60]) ns = [1.4994, 1.6782]
+  ms): 2.05x the bar, the worst process pairing +1.781. The armed twins: the narrowphase span Delta-t_np(1) =
+  2.4093 -> 0.6846 = **1.725 ms**, solve -0.110 (manifolds 4,519.26 -> 4,467.67), reused 4,457.5 and full 46.7
+  pairs per step (h >= 0.9896). At W=8 +0.142 / +0.179 ms ([0,500) / [100,500), IQR and SE). All of L9 (L9a,
+  cross-binary, plus L9b): the narrowphase 3.076 -> 0.685 ms at W=1, 2.39 ms against the design's 1.4-2.5.
+- **G-TW's other rows, off/on on one binary, all claimed faster:** J-D -19.57 % / -4.86 % at W 1 / 8; R -27.16 % /
+  -6.09 % (manifolds +3.8 %); J-A -7.13 / -5.28 / -2.06 % at W 2 / 4 / 16. No claimed regression at any W. Poses:
+  the reuse-off rows equal the C0 fixtures; reuse on gives J `0x30c5438bc6ad9ffa` at every W and on cfg a and
+  default, and R `0xc8bbe34cf6a8afc6` at W 1 / 8.
+- **Decision: BUILD C4**: `contact_reuse = true` by default, the only value-changing commit (`:161-165`, `:384`).
+  It moves the J/R/J-Son/R-S pose fixtures (J500 -> `0x30c5438bc6ad9ffa`, R1100 -> `0xc8bbe34cf6a8afc6`),
+  `PINNED_FINAL_HASH` and `A7_R1_D_MAX_BITS` (the reuse-off run stays at `0x3a3c_3896`), A7-R1's docs, A7-R2's
+  freeze step, G2/G7/G8, H8's manifold count and every per-manifold denominator, the box-pile goldens and the tree
+  lane's J-pose pins; from then on cross-window bridges use reuse-off rows (`analysis.md` § 2.3).
+- Still owed to G-TW, on the C4 binary: the canary on the L9 binary, J-D and R at W 2/4/16, the armed W8
+  per-contact table, and the formal A/B (this window's ran on C3's switch, the same code path).
+
+### 14.3 The tree broadphase — the query after C3b (P3, P5g, P5c)
+
+- **C3b SHIPS (LeafList stays).** Parent `6dd1f916` (RowWalk) against tip `983480a9` (LeafList) on the armed
+  `C3b-TA-armed` row (`--cfg a --broadphase tree`): t_q (the per-process median of `phys_bp_query_ns` over
+  [100,500)) **0.4044 -> 0.2102 ms at W=1 (0.520x) and 0.4126 -> 0.2129 at W=8 (0.516x)**, claimed under all three
+  readings; c_q = t_q / 1,240 rows = 169.5 / 171.7 ns. Criterion on the tip, one binary: LeafList/RowWalk j100
+  **0.330** (0.1446 against 0.4388 ms), 1240 0.330, uniform 0.525, disparity 0.457: none >= 1, J <= 0.55, uniform
+  and disparity inside [0.30, 0.60]. The step: armed T -1.0 % / -5.0 %, the default tree row 6.946 -> 6.814 /
+  2.618 -> 2.431 ms at W = 1 / 8 (none claimed under the window rule).
+- **G4 rule 1 and the G5 span gate are cleared:** the tree span 0.4637 -> **0.2714** / 0.4738 -> **0.2758** ms
+  against 0.36 / 0.35 (0.308 / 0.267 in the P5g block), and the J snapshot 0.1446 <= 0.30 ms. G5 on the tip, one
+  binary: Delta-bp(8) = 1.698 ms against the >= 1.03 bar (W=1 1.808); tree against AllPairs -22.6 % / -44.2 % on
+  the default row and -10.3 % / -30.6 % armed, at W 1 / 8, all claimed.
+- **Attribution A is REFUTED, and F3 is TAKEN UP.** The same armed cell in the P5g block (same binary, same
+  arguments but the output paths) reads **0.2354 ms at W=1, +11.96 % over the P3 block, claimed** (W=8
+  reproduces, -1.7 %); the two blocks' value ranges do not overlap, and the cause is untested. t_q > 0.21 ms is
+  claimed there, so attribution A is refuted (the measured c_q matches attribution B's disparity-calibrated
+  172-192 ns, while the bench ratio matches A's model). c_q = 169.5-189.8 ns is above 150 ns in both blocks, so F3,
+  the reserve kd median-split leaf order (`c3b/design.md:168-172`), is taken up. Pooled K=12: 0.2222 ms, c_q 179.2
+  ns.
+- **C2 is flagged, not built.** Its letter (t_q >= 0.235 ms) is not robust: -10.5 % below it, claimed, in the P3
+  block; 0.2354, on the bar and not claimed, in P5g. D6 (`levers/broadphase/04-DESIGN-REV2.md:204-214`) fires in
+  both blocks (saving 0.167 / 0.164 ms = 6.9 / 7.3 % of T(8)). The analysis recommends F3 first and C2 after F3's
+  re-time.
+- **The default flip (the tree lane's C4) is not decided here:** G4 rule 1 and the span gate are cleared; rules 6,
+  8 and 9 remain (`c3b/design.md:237-241`).
+- Against Jolt v5.6.0 (window 3's cells; a reading): the tip's tree default row is 0.693x / 0.662x at W=1 (P3 /
+  P5g block, IQR and SE) and 0.946x (not claimed) / 0.874x (IQR and SE) at W=8; the AllPairs default 1.566x,
+  claimed.
+- Not claimed: a same-binary armed C3b A/B (the runner has no `--bp-kernel`); the cause of the W=1 block shift.
+
+### 14.4 L11 — the rest of G9 on C3 (P4) and bridge 2 (P5a)
+
+- **PASS: no row is claimed slower under either rule.** Window 5's parent `0ca312bd` against its tip `cbd86a65`
+  (the same two binaries), tip against parent: J-A -0.11 % / -0.68 % (W 1 / 8), R -3.65 % / -4.70 %, R-S -0.46 % /
+  -0.91 %, S16 -0.32 %, J-As -3.72 / -4.23 / -5.34 % (W 2 / 4 / 16; W16 claimed faster), J-As-a -4.07 %, J-C
+  -4.09 %. Armed stages (reading B): warm_apply on J-As-a W1 **0.5278 -> 0.2979 ms (-0.2299, claimed)**, the -0.19
+  bar passed again (window 5: -0.2325); R -0.291 / -0.301 ms; wide colours not claimed slower (-4.65 %, -1.70 %,
+  +0.69 %); solve_build and store not claimed except R-S store -11 % (faster) and S16's store 60 -> 80 ns (two timer
+  quanta, 0.02 % of an unclaimed step; a reading, not a FAIL).
+- **The canary is SEEN:** its span reads 1.0008x / 1.0006x the injection (tip / parent, every process within
+  0.42 %); the step rise is +0.4481 ms on the tip (105 %), claimed under all three, and +0.4694 on the parent
+  (106 %), claimed under SE only (G9's own form).
+- **G9 is not formally closed:** J-A at W 2/4/16 was not run, and the design's K=12 is not met (every cell is K = 6
+  or 5).
+- **Bridge 2 HOLDS** (window 4b's tip `f8873aae` against window 5's parent on J-As, interleaved): +0.16 % at W=1
+  (not claimed), **+1.75 % (+0.078 ms) at W=8, SE only**. The line merge costs at most 1.75 % at W=8, so window 5's
+  +11.5 % was mostly machine state.
+
+**Bridges and what they qualify** (`analysis.md` § 6). Every same-binary cross-window bridge holds under the
+window rule (at W=1 within 1.2 %; at W=8 -4.2 % under IQR and SE and +5.0 % under SE only). At W=8 SE alone sees a
++-4-6 % window term, which qualifies every cross-window W=8 ratio (tree/Jolt 0.874-0.946, window 5's 1.057, the L11
+chain). Window 4's RowWalk t_q at W=1 does not reproduce on the parent binary (0.4140 -> 0.4044, -2.32 %,
+claimed): today's parent cost is 326.1 / 332.7 ns per row at W = 1 / 8, not 333.9. Two in-window duplicates fail
+(the tip's armed-tree t_q at W=1, +11.96 %; the tip's default tree row at W=8, -7.6 %), so a single-block
+absolute-threshold decision (C2's 0.235, "into the band", D6, a single-block T(8) headline) is not robust;
+interleaved within-block comparisons are unaffected.
+
+**Not claimed / not measured.** L10's own gain; L9's G-TW on a C4 binary; a same-binary armed C3b A/B; G9's J-A
+at W 2/4/16 and its K=12; the Tree as the shipped default; any re-run of Jolt.
+
+Receipts: `docs/measurements/2026-09-24-physics-window6/`: `README.md` (the protocol block, the binaries table
+with the `Compiling` lines and the pruned lock, the idle-rule summary, what was reused from windows 3, 4, 4b and 5
+and why), `analysis.md` (the analyst's reduction, verbatim), `plan.md`, `rows6.json`, `run_window.sh`,
+`dryrun.txt`, `wait_log.txt`, `progress.txt`, `WINDOW_DONE`, `bin/SHA256SUMS`, `bin/COMMIT.txt` (no exe
+committed), `logs/` (the builds and `pruned_Cargo.lock.txt`), `raw/` (`runs.jsonl`, `manifest_1790230189.json`,
+`window_state.json`, `window_log.txt`, the 24 pass directories, `reduction.json`, `tables.md`; one `pose.bin` per
+distinct pose, not one per process), `gate/` (the gate log and JSONs and the nine fixtures), `tools/`,
+`analyst/`. `test/`, the exported trees, the gate's per-process directories, the exes, `__pycache__/` and the
+duplicate pose files are not in the tree.
+
+---
+
 ## When an entry is done
 
 Strike it with the date and the receipt's location, rather than deleting it. An entry that was run

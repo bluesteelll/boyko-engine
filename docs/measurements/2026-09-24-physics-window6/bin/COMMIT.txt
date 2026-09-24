@@ -1,0 +1,26 @@
+Window 6 binaries (2026-09-24). Toolchain rustc 1.98.1 (48a229cea 2026-09-01) stable-x86_64-pc-windows-msvc,
+CARGO_INCREMENTAL=0, CARGO_BUILD_JOBS=5, no RUSTFLAGS (x86-64-v3 from each tree's .cargo/config.toml [target.*]).
+Trees exported with `git -C D:/wt/lighttable archive <sha> | tar -x -C scratchpad/win6/trees/<sha>/`; D:/wt/lighttable's
+Cargo.lock (LF sha256 5f8de754e85aeebd7838ff01156cbfc5f815e89b8052a1f50dd8a7e090191bcb) copied in; the build pruned
+it (the `boyko-symcensus` package these trees do not have) to LF sha256
+530cc386380c3b1315bd0158713ed33eec639a5d188a28493b976e3b6c6d9af0 in all three trees (identical).
+
+runner_4db26681.exe  4db266815005e684d6ecd7c312b38170dc2c33e0  trunk integ/unified, L9 C0-C3 merged (reuse dormant, switchable)
+  cargo bench --no-run --profile parity -p boyko-physics --bench jolt_parity_pyramid, CARGO_TARGET_DIR=D:/wt/_targets/win6-4db26681
+  'Compiling boyko-physics v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\scratchpad\win6\trees\4db26681\crates\boyko_physics)'
+  logs/build_4db26681.log (Finished `parity` in 1m 23s)
+classes_4db26681.exe 4db266815005e684d6ecd7c312b38170dc2c33e0  the L9 class bench (narrowphase_classes), same tree and target dir
+  cargo bench --no-run --profile parity -p boyko-physics --bench narrowphase_classes; logs/build_4db26681_classes.log
+runner_6dd1f916.exe  6dd1f916d5399b7bbe80429bdfde4e5c0bd63848  C3b's parent (tree query = RowWalk)
+  'Compiling boyko-physics v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\scratchpad\win6\trees\6dd1f916\crates\boyko_physics)'
+  logs/build_6dd1f916.log (CARGO_TARGET_DIR=D:/wt/_targets/win6-6dd1f916)
+runner_983480a9.exe  983480a9a1aaf1d28e9c17b08c0c06821176cacf  C3b's tip (tree query = LeafList), = trunk before L9
+  'Compiling boyko-physics v0.1.0 (C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\scratchpad\win6\trees\983480a9\crates\boyko_physics)'
+  logs/build_983480a9.log (CARGO_TARGET_DIR=D:/wt/_targets/win6-983480a9)
+bpbench_983480a9.exe 983480a9a1aaf1d28e9c17b08c0c06821176cacf  benches/broadphase.rs (criterion), `bench` profile
+  cargo bench --no-run -p boyko-physics --bench broadphase; logs/build_983480a9_broadphase.log (same compiling path as above)
+runner_0ca312bd.exe  0ca312bd8d696cec739f27d13c98343f4e1d1a9b  window 5's runner_parent.exe (L11 C2 + the line merge), copied, sha256 = window 5's
+runner_cbd86a65.exe  cbd86a6525175fc18500b9733997d78c2cbc3e44  window 5's runner_tip.exe (tree + L11 C0-C3), copied, sha256 = window 5's
+runner_w4btip.exe    f8873aaeef02474e95a205f543d57511fe010691  window 4b's runner_tip.exe (L11 C2), copied, sha256 = window 4b's (29dbd993...)
+Provenance of the three copied runners: d9f1cf70.../scratchpad/win5/bin/COMMIT.txt and .../win4b/bin/COMMIT.txt
+(both SHA256SUMS re-checked OK on 2026-09-24 before the copy).
