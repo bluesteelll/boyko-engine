@@ -726,7 +726,9 @@ pub(crate) fn collide_pair<'r>(
 ///    output, the record is copied to this step's slot, and the hysteresis table is written only on
 ///    a step whose key set changed (ruling W1).
 /// 3. **The full collision** — the classifier biased by the hint. A slow pair builds a record from
-///    a contact and emits that record's refresh (D7); any other pair emits the contact.
+///    a contact and emits that record's refresh (D7); any other pair emits the contact, and so
+///    does every pair whose answer is the best face's own contact
+///    ([`BoxBoxOutcome::BestFace`], never recorded).
 ///
 /// A `REC` tag never carries `SEP`, so at most one of 1 and 2 applies.
 #[inline]
@@ -767,6 +769,13 @@ fn collide_box_pair(
                 }
             }
         }
+        // The best face's own contact for a pair whose every edge axis claims more than the face
+        // allows (the thinbox lane): emitted as a non-slow pair's contact is, and never recorded —
+        // a record of its speculative point would refresh to no manifold on its own poses.
+        BoxBoxOutcome::BestFace(c) => {
+            let tag = PairTag::box_contact(c.reference_axis, c.manifold.count > 0);
+            PairOut::today(Some(c.manifold), Some(c.reference_axis), tag)
+        }
         BoxBoxOutcome::Separated(axis) => {
             debug_assert!(
                 axis < SAT_AXIS_COUNT,
@@ -802,7 +811,8 @@ fn slow_geom(
 }
 
 /// A slow pair's record `record` (in the current roles) on this step's boxes: the hit's output,
-/// or `None` for a miss (the shapes changed, the criterion failed, the edge degenerated). `tag` is
+/// or `None` for a miss (the shapes changed, the criterion failed, the edge degenerated, or the
+/// edge claims more than the face allows). `tag` is
 /// the previous step's tag in the current roles, whose axis is the record's.
 #[inline]
 #[allow(clippy::too_many_arguments)]
@@ -838,7 +848,7 @@ fn reuse_record(
         Refreshed::Separated(sep) => {
             Some(PairOut::today(None, None, PairTag::box_separated_by_record(sep)))
         }
-        Refreshed::Degenerate => None,
+        Refreshed::Degenerate | Refreshed::Stale => None,
     }
 }
 
@@ -870,8 +880,8 @@ fn record_contact(
             }
         }
         // An edge record re-evaluates the very axis the full collision chose, on the same
-        // boxes: it overlaps and exists. Kept total rather than trusted.
-        Refreshed::Separated(_) | Refreshed::Degenerate => {
+        // boxes: it overlaps, exists and is within the face bound. Kept total rather than trusted.
+        Refreshed::Separated(_) | Refreshed::Degenerate | Refreshed::Stale => {
             debug_assert!(false, "invariant: a record refreshes to a contact on the poses it was built on");
             let tag = PairTag::box_contact(axis, c.manifold.count > 0);
             PairOut::today(Some(c.manifold), Some(axis), tag)

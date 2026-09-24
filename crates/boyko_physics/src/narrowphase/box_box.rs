@@ -68,7 +68,9 @@
 //! names the feature a contact was built on — the reference face `face_contact` picked, re-derived
 //! from the contact's axis and normal with the same [`most_aligned_face`], or the edge pair — and
 //! [`refresh_edge`] re-evaluates an edge record's axis exactly as [`sat`] evaluates its candidate
-//! of that index and builds today's edge contact on it.
+//! of that index and builds today's edge contact on it, or misses when that edge claims more than
+//! the face allows (the fallback's bound, [`edge_depth_bound`]). A fallback answer on the best
+//! face ([`BoxBoxOutcome::BestFace`]) is never recorded.
 //!
 //! ZERO `unsafe`, no heap allocation (fixed-size stack buffers), deterministic.
 
@@ -784,7 +786,7 @@ pub fn box_box_contact(
     let a = Obb::new(a_center, a_rotation, a_half);
     let b = Obb::new(b_center, b_rotation, b_half);
     match box_box_classify(&a, &b, body_a, body_b, last_axis) {
-        BoxBoxOutcome::Contact(c) => Some(c),
+        BoxBoxOutcome::Contact(c) | BoxBoxOutcome::BestFace(c) => Some(c),
         BoxBoxOutcome::Separated(_)
         | BoxBoxOutcome::StillSeparated(_)
         | BoxBoxOutcome::NoContact => None,
@@ -795,14 +797,20 @@ pub fn box_box_contact(
 pub(crate) enum BoxBoxOutcome {
     /// The boxes touch: the manifold and the SAT axis to persist for the hysteresis.
     Contact(BoxBoxContact),
+    /// The boxes touch, and every edge axis claims more than the best face allows: the best face's
+    /// own contact ([`edge_fallback`]), often one speculative point. A contact like any other to
+    /// the solver, but a reuse record is never built from it: a record refreshes a face point
+    /// only while it lies at or below the reference face, so a record of a speculative point would
+    /// refresh to no manifold on its own poses (`narrowphase/reuse.rs`).
+    BestFace(BoxBoxContact),
     /// The SAT separated the boxes on this canonical axis (`0..15`), the first negative one in
     /// canonical order.
     Separated(u8),
     /// The pair's carried separating axis (`0..15`) still separates the boxes, so the SAT did not
     /// run (L9a (ii), [`box_box_classify_carried`]).
     StillSeparated(u8),
-    /// No contact for any other reason: no face axis (a degenerate rotation), a degenerate
-    /// reference face, or a fallback with no edge axis.
+    /// No contact for any other reason: no face axis (a degenerate rotation) or a degenerate
+    /// reference face.
     NoContact,
 }
 
@@ -902,9 +910,10 @@ pub(crate) fn box_box_classify(
                         (m, sat.face.index)
                     }
                     None => {
-                        return BoxBoxOutcome::Contact(
-                            edge_fallback(a, b, &sat, body_a, body_b).into_contact(),
-                        );
+                        return match edge_fallback(a, b, &sat, body_a, body_b) {
+                            Fallback::Edge(c) => BoxBoxOutcome::Contact(c),
+                            Fallback::BestFace(c) => BoxBoxOutcome::BestFace(c),
+                        };
                     }
                 },
                 Err(FaceMiss::Degenerate) => return BoxBoxOutcome::NoContact,
@@ -974,20 +983,35 @@ pub(crate) fn contact_feature(a: &Obb, b: &Obb, c: &BoxBoxContact) -> FeatureRef
 
 /// What [`refresh_edge`] found.
 pub(crate) enum EdgeRefresh {
-    /// The edge axis overlaps: today's edge contact on it.
+    /// The edge axis overlaps within the face bound: today's edge contact on it.
     Contact(Manifold),
     /// The edge axis separates the boxes, on this canonical axis (`6..15`).
     Separated(u8),
     /// The edge pair is parallel now: no axis.
     Degenerate,
+    /// The edge axis claims more than the pair's best face allows ([`edge_depth_bound`]): the
+    /// record is stale, and the pair misses (the thinbox lane's R1).
+    Stale,
 }
 
 /// Re-evaluates the edge axis `A.axes[ea] × B.axes[eb]` of the boxes `(a, b)` and, when it
-/// overlaps, builds today's edge contact on it (L9b D5, the refresh of an edge record).
+/// overlaps, builds today's edge contact on it (L9b D5, the refresh of an edge record) — unless
+/// the edge claims more than the face allows, which is [`EdgeRefresh::Stale`].
 ///
 /// The axis is built and evaluated exactly as [`sat`] builds and evaluates its candidate of the same
 /// index, so a negative depth is a negative SAT candidate — the pair is separated exactly — and on
 /// the poses the record was built on the contact is the full collision's, bit for bit.
+///
+/// **The face bound (R1, `design_rev2.md` §7.2).** A near-parallel edge axis swings by the
+/// rotation over the edges' cross-product length, so a record reused through a rotation L9's
+/// criterion keeps can claim metres where the boxes overlap by micrometres. The six face candidates
+/// are evaluated as [`sat`] evaluates them, in the same order, only to compute the fallback's bound
+/// [`edge_depth_bound`] of the shallowest; an edge deeper than it misses, and the full collision
+/// answers. No face's sign decides anything: only the edge's own axis decides `Separated`. On a
+/// record's own poses it cannot fire: a recorded edge is the SAT's own (shallower than the face),
+/// a hint held against an edge best (within 1.05 × the face) or a fallback edge (within the bound
+/// by the fallback's choice), and the same `eval_axis` calls give the same bits here — while the
+/// fallback's phantom answer is never recorded ([`BoxBoxOutcome::BestFace`]).
 #[inline]
 pub(crate) fn refresh_edge(
     a: &Obb,
@@ -1006,6 +1030,22 @@ pub(crate) fn refresh_edge(
     };
     if cand.depth < 0.0 {
         return EdgeRefresh::Separated(index as u8);
+    }
+    let faces: [Option<AxisCandidate>; 6] = core::array::from_fn(|i| {
+        if i < 3 {
+            eval_axis(a, b, a.axes[i], SatClass::FaceA(i), i)
+        } else {
+            eval_axis(a, b, b.axes[i - 3], SatClass::FaceB(i - 3), i)
+        }
+    });
+    let stale = match shallowest(&faces) {
+        Some(face) => cand.depth > edge_depth_bound(face.depth, a, b),
+        None => true,
+    };
+    if stale {
+        #[cfg(feature = "narrowphase-counts")]
+        fallback_census::REFRESH_STALE.fetch_add(1, Relaxed);
+        return EdgeRefresh::Stale;
     }
     match edge_contact(a, b, &cand, ea, eb, body_a, body_b) {
         Some(m) => EdgeRefresh::Contact(m),
@@ -1120,8 +1160,9 @@ enum Fallback {
 }
 
 impl Fallback {
-    /// The contact, whichever the answer.
-    #[inline]
+    /// The contact, whichever the answer: the frozen `pre_l9` oracle's view, which has no outcome
+    /// to tell them apart ([`box_box_classify`] keeps them apart).
+    #[cfg(test)]
     fn into_contact(self) -> BoxBoxContact {
         match self {
             Self::Edge(c) | Self::BestFace(c) => c,
@@ -1216,7 +1257,8 @@ fn face_corner(
     manifold
 }
 
-/// Counts of [`edge_fallback`]'s decisions (`thinbox` lane, `design_rev2.md` §6.2, §8), under the
+/// Counts of [`edge_fallback`]'s decisions and of [`refresh_edge`]'s stale misses (`thinbox` lane,
+/// `design_rev2.md` §6.2, §8), under the
 /// non-default `narrowphase-counts` feature only; without it the module and every counting
 /// statement do not exist.
 ///
@@ -1237,6 +1279,10 @@ pub mod fallback_census {
     pub(super) static HINT_CAPPED: AtomicU64 = AtomicU64::new(0);
     /// Phantom answers whose face clip kept nothing, answered by the corner backstop.
     pub(super) static CORNER: AtomicU64 = AtomicU64::new(0);
+    /// Edge-record refreshes the face bound turned stale ([`super::EdgeRefresh::Stale`]): a reused
+    /// edge that would claim more than the face allows. Each is a miss that re-runs the full
+    /// collision.
+    pub(super) static REFRESH_STALE: AtomicU64 = AtomicU64::new(0);
     /// The largest `chosen.depth − face` of an accepted fallback edge, as `f32` bits.
     static MAX_ACCEPTED_EXCESS_BITS: AtomicU32 = AtomicU32::new(0);
 
@@ -1260,6 +1306,8 @@ pub mod fallback_census {
         pub hint_capped: u64,
         /// Phantom answers from the empty-clip corner backstop.
         pub corner: u64,
+        /// Edge-record refreshes the face bound turned stale (contact reuse only).
+        pub refresh_stale: u64,
         /// The largest `chosen.depth − face` of an accepted fallback edge, `0.0` if none exceeded
         /// the face.
         pub max_accepted_excess: f32,
@@ -1272,6 +1320,7 @@ pub mod fallback_census {
             phantom: PHANTOM.swap(0, Relaxed),
             hint_capped: HINT_CAPPED.swap(0, Relaxed),
             corner: CORNER.swap(0, Relaxed),
+            refresh_stale: REFRESH_STALE.swap(0, Relaxed),
             max_accepted_excess: f32::from_bits(MAX_ACCEPTED_EXCESS_BITS.swap(0, Relaxed)),
         }
     }
@@ -3356,7 +3405,9 @@ mod tests {
             let a = Obb::from_frame(p.ca, &frame_of(p.qa), p.ha);
             let b = Obb::from_frame(p.cb, &frame_of(p.qb), p.hb);
             match box_box_classify(&a, &b, A, B, p.hint) {
-                BoxBoxOutcome::Contact(c) => (Some(contact_words(&c)), None),
+                BoxBoxOutcome::Contact(c) | BoxBoxOutcome::BestFace(c) => {
+                    (Some(contact_words(&c)), None)
+                }
                 BoxBoxOutcome::Separated(axis) => (None, Some(axis)),
                 BoxBoxOutcome::StillSeparated(_) => {
                     panic!("box_box_classify reads no carried axis")
@@ -3568,7 +3619,9 @@ mod tests {
             let a = Obb::from_frame(p.ca, &frame_of(p.qa), p.ha);
             let b = Obb::from_frame(p.cb, &frame_of(p.qb), p.hb);
             match box_box_classify_carried(&a, &b, A, B, sep, || p.hint) {
-                BoxBoxOutcome::Contact(c) => (Some(contact_words(&c)), None, false),
+                BoxBoxOutcome::Contact(c) | BoxBoxOutcome::BestFace(c) => {
+                    (Some(contact_words(&c)), None, false)
+                }
                 BoxBoxOutcome::Separated(axis) => (None, Some(axis), false),
                 BoxBoxOutcome::StillSeparated(axis) => (None, Some(axis), true),
                 BoxBoxOutcome::NoContact => (None, None, false),
