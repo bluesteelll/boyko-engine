@@ -728,10 +728,27 @@ mod tests {
 
     /// U-P1 — D4 step policy table: MIN floor, in-band doubling, MAX clamp,
     /// request-dominant, and the saturating belt.
+    ///
+    /// Packing plan S2 re-derivation of the first row (cut PC-3): it read
+    /// `pool_commit_step(0, G) == POOL_MIN_SLAB`, which held only while
+    /// `POOL_MIN_SLAB` WAS `G`. With `POOL_MIN_SLAB == COMMIT_PAGE` a first
+    /// request of one page is the floor case, and a first request of one
+    /// granule is request-dominant (`max(page, G) == G`); both are pinned.
     #[test]
     fn pool_commit_step_policy_table() {
         // Fresh pool (data_committed = 0): the MIN_SLAB floor.
-        assert_eq!(pool_commit_step(0, G), POOL_MIN_SLAB, "first grow = one granule");
+        assert_eq!(
+            pool_commit_step(0, COMMIT_PAGE),
+            POOL_MIN_SLAB,
+            "first grow of one page = the MIN_SLAB floor"
+        );
+        assert_eq!(pool_commit_step(0, G), G, "a first request of one granule is request-dominant");
+        // Plan D3: the ladder doubles (×2, not ×4) below the granule as well.
+        assert_eq!(
+            pool_commit_step(COMMIT_PAGE, 2 * COMMIT_PAGE),
+            COMMIT_PAGE,
+            "doubling below the granule"
+        );
         // In-band doubling: step equals the committed size.
         assert_eq!(pool_commit_step(4 * G, 5 * G), 4 * G, "doubling inside the band");
         assert_eq!(pool_commit_step(8 * MIB, 8 * MIB + G), 8 * MIB, "doubling at 8 MiB");

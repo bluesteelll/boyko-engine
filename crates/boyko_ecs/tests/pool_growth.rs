@@ -39,6 +39,8 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use boyko_ecs::ecs::constants::{COMMIT_GRANULE, pool_base_stagger};
+use boyko_ecs::ecs::core::commands::Command;
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::component::hooks::HookContext;
 use boyko_ecs::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
@@ -428,11 +430,21 @@ fn migration_into_grown_target_preserves_bytes_and_ticks() {
 //        the nested drain grows the pool; no double-apply; counts exact.
 // ════════════════════════════════════════════════════════════════════════════
 
-/// 64-byte hooked payload: the first slab covers rows [0, 1024), so the
-/// 1024th fire (row 1023 — the LAST row of slab 1) arms the nested spawns,
-/// which land at rows 1024-1026 and drive `grow_rows` from INSIDE the
+/// 64-byte hooked payload. The outer spawns fill the pool EXACTLY to a
+/// commit frontier, and the fire that fills its last row arms the nested
+/// spawns, which land past it and drive `grow_rows` from INSIDE the
 /// re-entrant deferred-hook drain while the outer apply window is live
 /// (plan D4 "Re-entrancy" — pinned by I-3).
+///
+/// Packing plan S2 re-derivation (critique W2): the frontier used to be
+/// 1024 rows — one 64 KiB granule of data — for every id. On the page ladder
+/// the frontiers are `(COMMIT_PAGE · 2^k - σ) / 64`, so with a hard-coded 1024
+/// the nested spawns landed inside already-committed rows for 63 of 64
+/// staggers and nothing grew in the hook, while the test stayed green. The
+/// outer count is now the frontier at 64 KiB of committed data,
+/// `(COMMIT_GRANULE - σ) / 64` (a rung on every arm), computed from the
+/// derive-minted id's own σ, and a probe command pins that the pool was
+/// exactly full when the nested drain began.
 #[derive(Component)]
 #[component(on_add = i3_on_add)]
 #[repr(C)]
@@ -453,19 +465,40 @@ struct I3PayBundle {
     c: I3Pay,
 }
 
-const I3_OUTER: usize = 1024;
 const I3_NESTED: usize = 3;
 
 static I3_FIRES: AtomicUsize = AtomicUsize::new(0);
+/// The fire that arms the nested spawns: the outer count, set per run.
+static I3_ARM_AT: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// `committed_rows` of the `I3Pay` pool as the nested drain begins.
+static I3_FRONTIER_BEFORE_NESTED: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Records the `I3Pay` pool's committed frontier when it applies. Enqueued
+/// ahead of the nested spawns, so FIFO order applies it just before them.
+struct I3ProbeFrontier;
+
+impl Command for I3ProbeFrontier {
+    fn apply(self, world: &mut EcsMaster) {
+        let arch_id = world.get_or_create_archetype(&[I3Pay::component_id()]);
+        let committed = world
+            .archetype_master()
+            .get_archetype(arch_id)
+            .and_then(|a| a.component_pools().get_pool(I3Pay::component_id()))
+            .map_or(usize::MAX, |p| p.committed_rows());
+        I3_FRONTIER_BEFORE_NESTED.store(committed, SEQ);
+    }
+}
 
 unsafe fn i3_on_add(mut w: DeferredEcsMaster<'_>, _ctx: HookContext) {
     let n = I3_FIRES.fetch_add(1, SEQ) + 1;
-    // Fire #1024 == the spawn that fills the first slab's last row. Enqueue
-    // nested spawns INTO THE SAME ARCHETYPE; they apply during the
-    // re-entrant drain and cross the slab boundary. The nested entities'
-    // own on_add fires re-enter this hook with n > 1024 -> no re-arm ->
-    // the chain terminates (the 14a re-entrancy contract).
-    if n == I3_OUTER {
+    // The arming fire == the spawn that fills the committed frontier's last
+    // row. Enqueue a frontier probe, then nested spawns INTO THE SAME
+    // ARCHETYPE; they apply during the re-entrant drain and cross the
+    // frontier. The nested entities' own on_add fires re-enter this hook
+    // with n past the arming fire -> no re-arm -> the chain terminates (the
+    // 14a re-entrancy contract).
+    if n == I3_ARM_AT.load(SEQ) {
+        w.commands().add(I3ProbeFrontier);
         for k in 0..I3_NESTED as u64 {
             w.commands().spawn(I3PayBundle { c: I3Pay::new(1_000_000 + k) });
         }
@@ -473,29 +506,43 @@ unsafe fn i3_on_add(mut w: DeferredEcsMaster<'_>, _ctx: HookContext) {
 }
 
 /// I-3 (plan §Test matrix): nested growth works, no double-apply, final
-/// counts exact. 1024 outer deferred spawns + 3 hook-deferred nested spawns
-/// = 1027 entities, 1027 hook fires (each spawn fires on_add EXACTLY once —
-/// a double-apply would inflate both), pool frontier grown past the
-/// boundary, and the value checksum proves every row landed exactly once.
+/// counts exact. `I3_OUTER` outer deferred spawns (1024 - id % 64 on the
+/// 4 KiB page) + 3 hook-deferred nested spawns, one hook fire per entity
+/// (each spawn fires on_add EXACTLY once — a double-apply would inflate
+/// both), the pool exactly full when the nested drain began and grown past
+/// that frontier by it, and the value checksum proves every row landed
+/// exactly once.
 #[test]
-#[cfg_attr(miri, ignore = "miri-slow: 1027 deferred spawns driving a re-entrant hook drain (see the file's # Miri note)")]
+#[cfg_attr(miri, ignore = "miri-slow: ~1027 deferred spawns driving a re-entrant hook drain (see the file's # Miri note)")]
 fn hook_deferred_spawns_grow_same_archetype_at_slab_boundary() {
     I3_FIRES.store(0, SEQ);
+    I3_FRONTIER_BEFORE_NESTED.store(usize::MAX, SEQ);
 
     let mut world = EcsMaster::new();
-    let _ = I3Pay::component_id();
+    let sigma = pool_base_stagger(I3Pay::component_id().0);
+    // The committed frontier at 64 KiB of data from the page floor: a rung
+    // of the ladder, so the one-at-a-time outer spawns fill it exactly.
+    let i3_outer = (COMMIT_GRANULE - sigma) / 64;
+    I3_ARM_AT.store(i3_outer, SEQ);
 
-    world.run_system(|mut cmds: Commands| {
-        for i in 0..I3_OUTER as u64 {
+    world.run_system(move |mut cmds: Commands| {
+        for i in 0..i3_outer as u64 {
             cmds.spawn(I3PayBundle { c: I3Pay::new(i) });
         }
     });
 
-    let total = I3_OUTER + I3_NESTED;
+    let total = i3_outer + I3_NESTED;
     assert_eq!(
         world.entity_count(),
         total,
-        "1024 outer + 3 nested entities — nested spawns applied exactly once"
+        "the outer + 3 nested entities — nested spawns applied exactly once"
+    );
+    // Anti-vacuity: the nested drain began with the pool exactly full, so
+    // the nested spawns could not land in rows already committed.
+    assert_eq!(
+        I3_FRONTIER_BEFORE_NESTED.load(SEQ),
+        i3_outer,
+        "the pool's frontier as the nested drain began (σ = {sigma})"
     );
     assert_eq!(
         I3_FIRES.load(SEQ),
@@ -503,7 +550,7 @@ fn hook_deferred_spawns_grow_same_archetype_at_slab_boundary() {
         "on_add fired exactly once per spawned entity (no double-apply)"
     );
 
-    // Checksum: every outer id 0..1024 and every nested id 1e6..1e6+3
+    // Checksum: every outer id 0..i3_outer and every nested id 1e6..1e6+3
     // present exactly once; pads intact (the boundary-crossing rows were
     // written into freshly committed pages).
     let view = world.query::<&I3Pay, ()>();
@@ -514,7 +561,7 @@ fn hook_deferred_spawns_grow_same_archetype_at_slab_boundary() {
         })
         .fold((0usize, 0u64), |(c, s), p| (c + 1, s + p.id));
     assert_eq!(count, total);
-    let expected_outer: u64 = (I3_OUTER as u64 - 1) * (I3_OUTER as u64) / 2;
+    let expected_outer: u64 = (i3_outer as u64 - 1) * (i3_outer as u64) / 2;
     let expected_nested: u64 = (0..I3_NESTED as u64).map(|k| 1_000_000 + k).sum();
     assert_eq!(sum, expected_outer + expected_nested, "id checksum exact");
 
@@ -530,8 +577,8 @@ fn hook_deferred_spawns_grow_same_archetype_at_slab_boundary() {
         .expect("pool exists");
     assert_eq!(pool.count(), total);
     assert!(
-        pool.committed_rows() >= total && pool.committed_rows() > I3_OUTER,
-        "nested growth committed past the 1024-row boundary (committed = {})",
+        pool.committed_rows() >= total && pool.committed_rows() > i3_outer,
+        "nested growth committed past the {i3_outer}-row frontier (committed = {})",
         pool.committed_rows()
     );
 }
@@ -735,19 +782,26 @@ struct UP8Bundle {
 /// U-P8, archetype level (★R1-1, plan §Test matrix): every
 /// `SpawnAtCommand::apply` calls `Archetype::reserve_capacity(1)`
 /// UNCONDITIONALLY (Phase B `grow_rows` on every pool) — legal only because
-/// of the idempotent no-op arm. Witness through the public surface: the
-/// first spawn commits each pool's first slab; subsequent spawns (capacity
-/// already committed) must leave `committed_rows` of EVERY pool exactly
-/// unchanged. Without the ★R1-1 early-out each satisfied
-/// `reserve_capacity(1)` would commit a fresh doubling slab per spawn — the
-/// critic-Round-1 CRITICAL memory explosion.
+/// of the idempotent no-op arm. Witness through the public surface: once
+/// every pool's committed frontier leaves room for ten more rows, ten more
+/// spawns must leave `committed_rows` of EVERY pool exactly unchanged.
+/// Without the ★R1-1 early-out each satisfied `reserve_capacity(1)` would
+/// commit a fresh doubling slab per spawn — the critic-Round-1 CRITICAL
+/// memory explosion.
+///
+/// Packing plan S2 re-derivation (critique W2): the room used to come from
+/// the first spawn alone — one 64 KiB granule, 1024 / 8192 rows. The first
+/// page holds `(COMMIT_PAGE - σ) / stride` rows, which for `UP8Big` (64 B)
+/// is ONE row at σ = 4032 and for `UP8Small` (8 B) eight, so "ten more fit
+/// after the first spawn" held only for the ids this binary happened to
+/// mint. The warm-up now spawns singly until every pool has that room.
 #[test]
 fn reserve_capacity_idempotent_across_repeat_spawns() {
     let mut world = EcsMaster::new();
     let _ = UP8Small::component_id();
     let _ = UP8Big::component_id();
 
-    // First spawn: grows every pool once (first slab).
+    // First spawn: grows every pool once (its first page).
     world.run_system(|mut cmds: Commands| {
         cmds.spawn(UP8Bundle { s: UP8Small { a: 0 }, b: UP8Big { x: 0, pad: [0; 7] } });
     });
@@ -773,23 +827,36 @@ fn reserve_capacity_idempotent_across_repeat_spawns() {
             .collect()
     };
 
-    let after_first = snapshot(&world);
     assert!(
-        after_first.iter().all(|&c| c > 0),
-        "the first spawn committed each pool's first slab: {after_first:?}"
+        snapshot(&world).iter().all(|&c| c > 0),
+        "the first spawn committed each pool's first page: {:?}",
+        snapshot(&world)
     );
+
+    // Warm-up: spawn singly until every pool's frontier is >= 10 rows past
+    // the live count (bounded: a few ladder rungs at most).
+    let mut live = 1u64;
+    while snapshot(&world).iter().any(|&c| c < live as usize + 10) {
+        assert!(live < 64, "the ladder must open 10 rows of room within 64 spawns");
+        world.run_system(move |mut cmds: Commands| {
+            cmds.spawn(UP8Bundle { s: UP8Small { a: live }, b: UP8Big { x: live, pad: [live; 7] } });
+        });
+        live += 1;
+    }
+    assert_eq!(world.entity_count(), live as usize);
+    let after_first = snapshot(&world);
 
     // Ten more spawns: each apply's reserve_capacity(1) is satisfied -> the
     // grow_rows no-op arm -> frontiers must not move by a single row.
-    world.run_system(|mut cmds: Commands| {
-        for i in 1..=10u64 {
+    world.run_system(move |mut cmds: Commands| {
+        for i in live..live + 10 {
             cmds.spawn(UP8Bundle {
                 s: UP8Small { a: i },
                 b: UP8Big { x: i, pad: [i; 7] },
             });
         }
     });
-    assert_eq!(world.entity_count(), 11);
+    assert_eq!(world.entity_count(), live as usize + 10);
 
     let after_more = snapshot(&world);
     assert_eq!(

@@ -48,8 +48,8 @@
 //! `#![cfg(miri)]` — only compiles under Miri. Native behavioral coverage of
 //! the same semantics lives in `phase22_tags.rs` / `phase22_static_tags.rs` /
 //! `phase22_empty_archetype.rs` and the Phase-22 proptest suites. Entity
-//! counts are kept tiny (Miri is ~100x slower); the ONE deliberate exception
-//! is the GROW1-ZST second-commit test, whose 16 K iterations are leaf-level
+//! counts are kept tiny (Miri is ~100x slower); the largest loop is the
+//! GROW1-ZST second-commit test, whose at most ~1 K iterations are leaf-level
 //! ZST pool adds (no migrations, no hooks, no commands — see its doc).
 //!
 //! # Registry budget discipline (see `tests/phase22_tags.rs` header)
@@ -63,6 +63,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use boyko_ecs::ecs::constants::{COMMIT_PAGE, pool_base_stagger};
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::component::component_registry::{self};
 use boyko_ecs::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
@@ -450,7 +451,9 @@ fn miri_world_teardown_drops_live_zst_tag_rows() {
 #[derive(Clone, Copy)]
 struct ZstGrowTag;
 
-/// First-commit shape: committed_rows 0 -> (granule/4).min(reserve). Cheap.
+/// First-commit shape: committed_rows 0 -> ((COMMIT_PAGE - σ) / 4).min(reserve),
+/// which is the 8-row reserve for every σ (the first tick page holds >= 16
+/// rows). Cheap.
 #[test]
 fn miri_zst_pool_first_commit_and_ceiling() {
     let mut pool = ComponentPool::new(ZstGrowTag::component_id().0, 8);
@@ -462,7 +465,7 @@ fn miri_zst_pool_first_commit_and_ceiling() {
         assert_eq!(pool.add_typed(ZstGrowTag), Some(i), "add returns the tail index");
     }
     assert_eq!(pool.count(), 8);
-    assert_eq!(pool.committed_rows(), 8, "one tick granule covers the whole 8-row reserve");
+    assert_eq!(pool.committed_rows(), 8, "the first tick page covers the whole 8-row reserve");
     assert!(pool.is_full(), "len == reserve_rows");
 
     // Ceiling: None with zero observable state change.
@@ -478,62 +481,72 @@ fn miri_zst_pool_first_commit_and_ceiling() {
     assert!(pool.get_raw(8).is_none(), "out-of-bounds read is None");
 }
 
-/// THE second-commit boundary: ticks are 4 B/row, one commit granule
-/// (64 KiB) covers 16,384 rows — add #16,385 drives `grow_rows_zst` to its
-/// SECOND `vm.commit` pair (doubling, Z4 strict growth) through the public
-/// `add_typed` funnel.
+/// THE second-commit boundary: ticks are 4 B/row and the tick frontier is
+/// measured from the sub-region's absolute page floor (packing plan D2), so
+/// the first tick page covers `(COMMIT_PAGE - σ) / 4` rows — add #that+1
+/// drives `grow_rows_zst` to its SECOND `vm.commit` pair (doubling, Z4
+/// strict growth) through the public `add_typed` funnel.
 ///
-/// COST NOTE (tiny-count rule exception): 16,385 iterations of a LEAF ZST
-/// add (len check + zero-size write + len bump — no migrations, no hooks,
-/// no commands), the cheapest op per iteration in this suite. Under the
-/// Miri fallback arm the reservation is one eager 256 KiB `alloc_zeroed`
-/// and `commit` is bookkeeping-only, so the loop is interpreter-bound, not
-/// allocation-bound. If this test ever exceeds a reasonable wall-time
-/// budget, gate it with `#[cfg_attr(miri, ignore = "...")]` and keep the
-/// first-commit sibling (the in-crate
-/// `zst_pool_growth_two_successive_commits` unit test pins the same gate
-/// natively via direct `grow_rows` calls).
+/// Re-derived in S2 (cut PC-5/PC-6): the granule version filled 16,384 rows
+/// (one 64 KiB tick granule) and its boundary add was clamped to a 20,000-row
+/// reserve (Z5). Both shapes are kept: the fill is the first tick PAGE, whose
+/// row count depends on the derive-minted id's σ, and the reserve sits 512
+/// rows past it — inside the second page's reach, `(2 · COMMIT_PAGE - σ) / 4`
+/// — so the boundary commit is still clamped by the ceiling (asserted, so
+/// the clamp cannot silently stop binding; critique O3).
+///
+/// COST NOTE: at most 1,025 iterations of a LEAF ZST add (len check +
+/// zero-size write + len bump — no migrations, no hooks, no commands), down
+/// from 16,385 on the granule ladder. Under the Miri fallback arm the
+/// reservation is one eager `alloc_zeroed` and `commit` is bookkeeping-only,
+/// so the loop is interpreter-bound, not allocation-bound.
 #[test]
 fn miri_zst_pool_grow_second_commit() {
-    const GRANULE_ROWS: usize = (64 * 1024) / 4; // 16,384
-    const RESERVE: usize = 20_000;
+    let id = ZstGrowTag::component_id().0;
+    let sigma = pool_base_stagger(id);
+    let first_page_rows = (COMMIT_PAGE - sigma) / 4;
+    let reserve = first_page_rows + 512;
+    assert!(
+        (2 * COMMIT_PAGE - sigma) / 4 > reserve,
+        "the second tick page must over-reach the reserve, or the Z5 clamp is not exercised"
+    );
 
-    let mut pool = ComponentPool::new(ZstGrowTag::component_id().0, RESERVE);
+    let mut pool = ComponentPool::new(id, reserve);
     let buffer_before = pool.buffer_ptr();
 
-    // Fill exactly one granule of rows: ONE commit event at the first add.
-    for _ in 0..GRANULE_ROWS {
+    // Fill exactly one tick page of rows: ONE commit event at the first add.
+    for _ in 0..first_page_rows {
         pool.add_typed(ZstGrowTag).expect("under the reserve ceiling");
     }
-    assert_eq!(pool.count(), GRANULE_ROWS);
+    assert_eq!(pool.count(), first_page_rows);
     assert_eq!(
         pool.committed_rows(),
-        GRANULE_ROWS,
-        "first commit = one tick granule = 16,384 rows"
+        first_page_rows,
+        "first commit = one tick page = (COMMIT_PAGE - σ) / 4 rows"
     );
 
     // The boundary add: needed_t crosses the frontier -> second commit pair
-    // (64 KiB -> 128 KiB), clamped to the 20,000-row reserve.
+    // (one tick page -> two), clamped to the reserve.
     pool.add_typed(ZstGrowTag).expect("boundary add under the ceiling");
-    assert_eq!(pool.count(), GRANULE_ROWS + 1);
+    assert_eq!(pool.count(), first_page_rows + 1);
     assert_eq!(
         pool.committed_rows(),
-        RESERVE,
-        "second commit: (2G/4).min(reserve_rows) == 20,000 (Z5 clamp)"
+        reserve,
+        "second commit: ((2 · COMMIT_PAGE - σ) / 4).min(reserve_rows) == reserve (Z5 clamp)"
     );
 
-    // Base stability + a live read on each side of the granule boundary.
+    // Base stability + a live read on each side of the page boundary.
     assert_eq!(pool.buffer_ptr(), buffer_before, "dangling base stable across both commits");
-    assert!(pool.get_typed::<ZstGrowTag>(0).is_some(), "row 0 (first granule)");
+    assert!(pool.get_typed::<ZstGrowTag>(0).is_some(), "row 0 (first tick page)");
     assert!(
-        pool.get_typed::<ZstGrowTag>(GRANULE_ROWS).is_some(),
-        "row 16,384 (second granule)"
+        pool.get_typed::<ZstGrowTag>(first_page_rows).is_some(),
+        "the first row past the first tick page"
     );
 
     // swap_remove across the boundary: tick lockstep machinery runs over
-    // the freshly committed second granule.
+    // the freshly committed second tick page.
     assert!(pool.swap_remove(0), "swap_remove(0) pulls the boundary row down");
-    assert_eq!(pool.count(), GRANULE_ROWS);
+    assert_eq!(pool.count(), first_page_rows);
 }
 
 // ════════════════════════════════════════════════════════════════════════════

@@ -547,10 +547,8 @@ fn checked_slab_round(bytes: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ecs::constants::COMMIT_GRANULE;
     use crate::ecs::identifiers::primitives::EntityId;
 
-    const G: usize = COMMIT_GRANULE;
     const SIZE: usize = size_of::<EntityId>(); // 8 on the 64-bit target
     const MIN_ELEMS: usize = POOL_MIN_SLAB / SIZE;
 
@@ -732,13 +730,18 @@ mod tests {
     }
 
     /// Grow policy: first event is request-dominant vs MIN_SLAB, then doubling,
-    /// every frontier granule-aligned.
+    /// every frontier page-aligned.
+    ///
+    /// Packing plan S2 re-derivation: the alignment pin read "a multiple of
+    /// `COMMIT_GRANULE`", which the first frontier no longer is — it is one
+    /// `COMMIT_PAGE` (`MIN_ELEMS` = 4096 / 8 = 512 `EntityId`s, was 8192).
     #[test]
     fn grow_policy() {
         let mut c = col(64 * MIN_ELEMS);
         c.push(eid(0)); // first event: MIN_SLAB (request 1 elem < MIN_SLAB)
         assert_eq!(c.committed_elems(), MIN_ELEMS, "first event commits MIN_SLAB");
-        assert!((c.committed_elems() * SIZE).is_multiple_of(G), "frontier granule-aligned");
+        assert_eq!(c.committed_elems() * SIZE, COMMIT_PAGE, "the first frontier is one page");
+        assert!((c.committed_elems() * SIZE).is_multiple_of(COMMIT_PAGE), "frontier page-aligned");
 
         // Fill to the frontier, one more push doubles.
         while c.len() < MIN_ELEMS {

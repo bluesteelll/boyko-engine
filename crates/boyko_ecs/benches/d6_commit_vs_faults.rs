@@ -42,9 +42,9 @@
 //!   add). Each such add carries one `grow_rows` → `vm.commit` syscall over the
 //!   freshly-committed slab; it WRITES exactly ONE row (one first-touch fault).
 //!   So (i) = the commit syscalls + a bounded handful of slab-head faults (==
-//!   the number of crossings, typically 1-3 for a 10k×16 B fill — the
-//!   request-dominant first step commits ~the whole slab). This is an UPPER
-//!   bound on the pure-syscall cost.
+//!   the number of crossings: 7 for a 10k×16 B fill on the 4 KiB page ladder
+//!   at id 449's σ = 64, rungs at 252 … 16 380 rows; it was 1-3 on the 64 KiB
+//!   granule). This is an UPPER bound on the pure-syscall cost.
 //! * **(ii) commit + write (the cold path)** — fresh pool; time the ENTIRE
 //!   `add` fill of rows `0..N` (every crossing + every write). = syscalls +
 //!   ALL demand-zero faults + N memcpys. The g5-cold analog.
@@ -58,10 +58,12 @@
 //!
 //! # Overshoot control
 //!
-//! (i) also records `committed_rows()` and the committed DATA bytes
-//! (`committed_rows × stride`, granule-rounded) vs the `N × stride` written
-//! bytes. If commit overshoots ≥2× it inflates the syscall side — reported as
-//! the overshoot ratio.
+//! (i) also records `committed_rows()` and the committed DATA bytes vs the
+//! `N × stride` written bytes. The data frontier is measured from the
+//! sub-region's absolute page floor (packing plan D2), so the committed bytes
+//! are `σ + committed_rows × stride` rounded up to `COMMIT_PAGE`, with `σ =
+//! pool_base_stagger(449)`. If commit overshoots ≥2× it inflates the syscall
+//! side — reported as the overshoot ratio.
 //!
 //! Run: `cargo bench -p boyko-ecs --bench d6_commit_vs_faults`.
 //!
@@ -84,6 +86,7 @@ static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use boyko_ecs::ecs::constants::{COMMIT_PAGE, pool_base_stagger};
 use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 use boyko_ecs::ecs::memory::component_pool::ComponentPool;
@@ -109,8 +112,6 @@ const N: usize = 10_000;
 /// commit-step doubling. 1 M rows × 16 B = 16 MB — comfortably above the
 /// 160 KB the N-row fill commits, so a single doubling step covers it.
 const RESERVE_ROWS: usize = 1_000_000;
-
-const COMMIT_GRANULE: usize = 64 * 1024;
 
 #[inline]
 fn pos_bytes(p: &PosLike) -> &[u8] {
@@ -152,14 +153,19 @@ fn fill_fresh_pool(row: &PosLike) {
             commit_sum += t0.elapsed();
         } else {
             // No syscall: this add only writes a row (faults a fresh page
-            // roughly every COMMIT_GRANULE/STRIDE adds within the slab).
+            // roughly every COMMIT_PAGE/STRIDE adds within the slab).
             pool.add(bytes).expect("fill stays below the reserve ceiling");
         }
     }
     let whole = whole_start.elapsed();
 
     let committed_rows = pool.committed_rows();
-    let committed_data_bytes = (committed_rows * STRIDE).next_multiple_of(COMMIT_GRANULE);
+    // Packing plan S2 re-derivation: the model was `committed_rows × STRIDE`
+    // rounded up to a local 64 KiB `COMMIT_GRANULE` copy. The page ladder
+    // measures the frontier from the page floor, so the stagger pad is
+    // inside it, and it rounds to the page.
+    let committed_data_bytes =
+        (pool_base_stagger(D6_ID.0) + committed_rows * STRIDE).next_multiple_of(COMMIT_PAGE);
 
     COMMIT_ONLY.lock().expect("sink poisoned").push(commit_sum);
     COLD_FILL.lock().expect("sink poisoned").push(whole);
