@@ -111,7 +111,9 @@
 //! `phys_pass_relax` = substeps × relax; `phys_color_wide` / `phys_color_narrow` = (wide / narrow
 //! colors) × sweeps, the class recomputed from `ConstraintGraph` and `Manifolds` with the frozen
 //! islands' manifolds excluded exactly as the solve excludes them; the sleep zones 1 / 2 / 1 when
-//! sleeping is on; `phys_np_dispatch`, `phys_np_compact` and `phys_np_axis_commit` 1 each when the
+//! sleeping is on; `phys_sleep_classify` and the `phys_sleep_held` counter (the held rows) 1 each
+//! when the step's sleep-skip mode is `Sets` (L10: colored, sleeping on, `--sleep-skip` unset or
+//! `sets`); `phys_np_dispatch`, `phys_np_compact` and `phys_np_axis_commit` 1 each when the
 //! recomputed narrowphase chunk count C is at least 2, else 0; each counter once, with its value
 //! equal to the recomputed slots, pairs, manifolds, points and C. C is recomputed by
 //! [`expected_np_chunks`], this runner's copy of the narrowphase's chunk rule, from the exported
@@ -177,8 +179,9 @@
 //! --sleeping [on|off]          set sleeping (L10 C1a). A bare --sleeping is `on`, the spelling
 //!                              every recipe recorded before C1a uses. Unset, the --cfg decides:
 //!                              cfg-A/As/B off, --cfg default the tree's PhysicsConfig default
-//! --sleep-skip off|sets        L10's frozen-pair skip mode; refused until L10 C2a adds
-//!                              PhysicsConfig::sleep_skip
+//! --sleep-skip off|sets        set PhysicsConfig::sleep_skip (L10 C2a), with sleeping on only.
+//!                              Unset, the tree's default (sets). Until L10 C3b holds islands
+//!                              the two give one hash
 //! --threshold T                sleep threshold (speed², with --sleeping on)
 //! --frozen-by K                void unless every dynamic row is frozen on step K (R-S: 300;
 //!                              with --sleeping on)
@@ -329,14 +332,16 @@ use boyko_physics::profiling::{
     PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY, PHYS_INTEGRATE, PHYS_NP_AXIS_COMMIT,
     PHYS_NP_CHUNKS, PHYS_NP_COMPACT, PHYS_NP_DISPATCH, PHYS_NP_FULL, PHYS_NP_MANIFOLDS,
     PHYS_NP_PAIRS, PHYS_NP_POINTS, PHYS_NP_REUSED, PHYS_NP_SEP_HITS, PHYS_PASS_BIASED, PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_SLEEP_BEGIN,
-    PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD,
+    PHYS_SLEEP_CLASSIFY, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD, PHYS_SLOTS_NARROW,
+    PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD,
     PHYS_STORE, PHYS_WARM_APPLY, PHYS_WRITE_BACK, SPAN_ZONE_COUNT, SPAN_ZONES,
     WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED,
 };
 use boyko_physics::resources::{
     BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
-    PairClasses, PhysicsConfig, SolverScratch,
+    PairClasses, PhysicsConfig, SleepSkip, SolverScratch,
 };
+use boyko_physics::sleep_sets::SleepSets;
 use boyko_physics::solver::SoftStepSolver;
 
 // ── Scene constants (Jolt `PyramidScene.h`, transcribed) ─────────────────────
@@ -463,15 +468,23 @@ enum CfgKind {
     Default,
 }
 
-/// L10's frozen-pair skip mode as `--sleep-skip` names it (rev 2.2 Δ1: Replay is retired). Parsed
-/// now so a recipe can spell it; refused by [`validate`] until L10 C2a adds
-/// `PhysicsConfig::sleep_skip`.
+/// L10's frozen-pair skip mode as `--sleep-skip` names it (rev 2.2 Δ1: Replay is retired).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SleepSkipArg {
     /// Every pair computed, as without L10.
     Off,
     /// Held islands' pairs skipped (L10 C3b).
     Sets,
+}
+
+impl SleepSkipArg {
+    /// The configuration value.
+    fn mode(self) -> SleepSkip {
+        match self {
+            Self::Off => SleepSkip::Off,
+            Self::Sets => SleepSkip::Sets,
+        }
+    }
 }
 
 /// The parsed command line.
@@ -735,10 +748,19 @@ fn validate(a: &Args) -> Result<(), String> {
         return Err("--threshold needs --sleeping on".into());
     }
     if let Some(mode) = a.sleep_skip {
-        return Err(format!(
-            "--sleep-skip {mode:?}: this tree's PhysicsConfig has no sleep_skip (L10 C2a adds it), \
-             so the row would run a mode it cannot select"
-        ));
+        // The mode is read only with sleeping on (a sleeping-off world runs Off whatever it
+        // says), so a sleeping-off row would carry a mode it never ran.
+        let sleeping = match (a.sleeping, a.cfg) {
+            (Some(on), _) => on,
+            (None, CfgKind::Default) => PhysicsConfig::default().sleeping,
+            (None, _) => false,
+        };
+        if !sleeping || a.solver == SolverKind::Reference {
+            return Err(format!(
+                "--sleep-skip {mode:?} needs sleeping on and the colored solver: elsewhere the \
+                 row would carry a mode it never runs"
+            ));
+        }
     }
     if let Some(d) = a.reuse_distance {
         if a.contact_reuse != Some(true) {
@@ -924,6 +946,9 @@ fn configure(cfg: &mut PhysicsConfig, args: &Args) {
     if let Some(t) = args.threshold {
         cfg.sleep_threshold = t;
     }
+    if let Some(mode) = args.sleep_skip {
+        cfg.sleep_skip = mode.mode();
+    }
     if let Some(np) = args.parallel_np {
         cfg.parallel_narrowphase = np;
     }
@@ -1063,6 +1088,12 @@ struct Shape {
     non_box: u64,
     /// The narrowphase's own pair classes (`Manifolds::pair_classes`, from its tags).
     classes: PairClasses,
+    /// Rows L10's sleep-skip held after the step's broadphase (`SleepSets::stats`), `0` off the
+    /// colored pipeline.
+    held_rows: u64,
+    /// Pairs L10's tree seam withheld from the stream (`SleepSets::stats`), `0` off the colored
+    /// pipeline.
+    withheld: u64,
 }
 
 /// Recomputes this step's color classes and narrowphase output. A frozen island's manifolds are
@@ -1070,8 +1101,10 @@ struct Shape {
 /// — using the per-step decision `IslandSleep::is_island_frozen` reports (`end_step` does not
 /// change it, so it still describes the step that just ran).
 fn step_shape(world: &EcsMaster, colored: bool, sleeping: bool, bp_prev: &mut TreeDiag) -> Shape {
-    let manifolds = world.resource::<Manifolds>().manifolds();
+    // The stream the graph colours: `ConstraintGraph::color` indexes it (L10 C2a).
+    let manifolds = world.resource::<Manifolds>().solver_manifolds();
     let bp = world.resource::<BroadphaseTree>().diag();
+    let sleep_stats = world.try_resource::<SleepSets>().map(SleepSets::stats).unwrap_or_default();
     let bodies = world.resource::<SolverScratch>().bodies();
     let is_box = |row: BodyIndex| matches!(bodies[row.0 as usize].shape, ColliderShape::Box { .. });
     let candidate_pairs = world.resource::<ContactPairs>().pairs();
@@ -1086,6 +1119,8 @@ fn step_shape(world: &EcsMaster, colored: bool, sleeping: bool, bp_prev: &mut Tr
         bp_rebuilds: (bp.static_rebuilds + bp.sleeper_rebuilds)
             - (bp_prev.static_rebuilds + bp_prev.sleeper_rebuilds),
         bp_kinds_moved: bp.wide_rows != bp_prev.wide_rows || bp.excluded_rows != bp_prev.excluded_rows,
+        held_rows: u64::from(sleep_stats.held_rows),
+        withheld: u64::from(sleep_stats.withheld_pairs),
         ..Shape::default()
     };
     *bp_prev = bp;
@@ -1154,6 +1189,9 @@ struct Structure {
     brute_max_rows: u32,
     /// `PhysicsConfig::contact_reuse`.
     contact_reuse: bool,
+    /// L10's step mode is `Sets`: the colored pipeline with sleeping on and
+    /// `PhysicsConfig::sleep_skip == Sets`, so the broadphase runs the sleep-skip's prologue.
+    sets: bool,
 }
 
 /// The narrowphase's chunk count for a step of `pairs` candidate pairs, or 0 when it runs the
@@ -1190,6 +1228,7 @@ fn check_step(
         broadphase,
         brute_max_rows,
         contact_reuse,
+        sets,
     } = st;
     let n_sys = zones.systems.len();
     for (k, (name, _)) in zones.systems.iter().enumerate() {
@@ -1200,7 +1239,11 @@ fn check_step(
     let sweeps = substeps * (1 + relax);
     let c = u64::from(colored);
     let sl = u64::from(colored && sleeping);
-    let np_chunks = expected_np_chunks(parallel_np, shape.pairs, lanes);
+    let l10 = u64::from(sets);
+    // The narrowphase collides the stream: the logical pairs less the ones L10's tree seam
+    // withheld (design 06 §8).
+    let stream = shape.pairs - shape.withheld;
+    let np_chunks = expected_np_chunks(parallel_np, stream, lanes);
     let np = u64::from(np_chunks >= 2);
     // The tree path, derived from the configuration and the row count — never from the
     // implementation: `Tree` above `brute_max_rows` opens the four spans and emits the three
@@ -1226,6 +1269,7 @@ fn check_step(
         (&PHYS_SLEEP_BEGIN, sl),
         (&PHYS_SLEEP_FREEZE, 2 * sl),
         (&PHYS_SLEEP_END, sl),
+        (&PHYS_SLEEP_CLASSIFY, l10),
         (&PHYS_NP_DISPATCH, np),
         (&PHYS_NP_COMPACT, np),
         (&PHYS_NP_AXIS_COMMIT, np),
@@ -1242,16 +1286,17 @@ fn check_step(
     }
     let base = n_sys + SPAN_ZONES.len();
     // L9's pair classes close over the step's pairs (ruling W4): the tags' own non-box count is
-    // the shapes', the four classes sum to the pairs, and a row without reuse reuses nothing.
+    // the shapes', the five classes (L10's held skips among them, design 06 §8) sum to the
+    // stream, and a row without reuse reuses nothing.
     let cl = shape.classes;
-    if (cl.pairs, cl.non_box) != (shape.pairs, shape.non_box)
-        || cl.full + cl.reused + cl.sep_hits + cl.non_box != shape.pairs
+    if (cl.pairs, cl.non_box) != (stream, shape.non_box)
+        || cl.full + cl.reused + cl.sep_hits + cl.non_box + cl.held_skipped != stream
         || (!contact_reuse && cl.reused != 0)
     {
         return Err(format!(
-            "the pair classes {cl:?} do not close over {} pairs ({} non-box, contact_reuse \
-             {contact_reuse})",
-            shape.pairs, shape.non_box
+            "the pair classes {cl:?} do not close over {stream} stream pairs ({} non-box, \
+             contact_reuse {contact_reuse})",
+            shape.non_box
         ));
     }
     // On a tree-path step every row is queried or a member (`q + m == N`: these scenes have no
@@ -1259,7 +1304,7 @@ fn check_step(
     let expected_counters: [(&ZoneHandle, u64, u64); COUNTER_ZONE_COUNT] = [
         (&PHYS_SLOTS_WIDE, c, shape.wide_slots),
         (&PHYS_SLOTS_NARROW, c, shape.narrow_slots),
-        (&PHYS_NP_PAIRS, 1, shape.pairs),
+        (&PHYS_NP_PAIRS, 1, stream),
         (&PHYS_NP_MANIFOLDS, 1, shape.manifolds),
         (&PHYS_NP_POINTS, 1, shape.points),
         (&PHYS_BP_PAIRS, 1, shape.pairs),
@@ -1270,6 +1315,7 @@ fn check_step(
         (&PHYS_NP_REUSED, 1, cl.reused),
         (&PHYS_NP_SEP_HITS, 1, cl.sep_hits),
         (&PHYS_NP_FULL, 1, cl.full),
+        (&PHYS_SLEEP_HELD, l10, shape.held_rows),
     ];
     for &(handle, want_n, want_v) in &expected_counters {
         let k = base + counter_index(handle);
@@ -1447,7 +1493,7 @@ fn run(args: &Args) -> ExitCode {
     let traffic_before = ring_traffic();
     let mut rig = build(args, canary_ns);
     let colored = args.solver == SolverKind::Colored;
-    let (substeps, relax, sleeping, parallel_np, contact_reuse, config_json) = {
+    let (substeps, relax, sleeping, sleep_skip, parallel_np, contact_reuse, config_json) = {
         let cfg = rig.world.resource::<PhysicsConfig>();
         let tree_brute_max_rows = rig.world.resource::<BroadphaseTree>().brute_max_rows();
         let json = format!(
@@ -1455,8 +1501,8 @@ fn run(args: &Args) -> ExitCode {
              \"tree_brute_max_rows\":{tree_brute_max_rows},\
              \"simd\":{},\"simd_solve\":{},\"parallel_solve\":{},\"parallel_broadphase\":{},\
              \"parallel_narrowphase\":{},\"contact_reuse\":{},\"contact_reuse_distance\":{},\
-             \"sleeping\":{},\"sleep_threshold\":{},\"sleep_frames\":{},\"colored\":{},\
-             \"contact_hertz\":{},\"contact_damping\":{}}}",
+             \"sleeping\":{},\"sleep_skip\":{},\"sleep_threshold\":{},\"sleep_frames\":{},\
+             \"colored\":{},\"contact_hertz\":{},\"contact_damping\":{}}}",
             cfg.substeps,
             cfg.relax_iterations,
             json_str(&format!("{:?}", cfg.broadphase)),
@@ -1469,6 +1515,7 @@ fn run(args: &Args) -> ExitCode {
             cfg.contact_reuse,
             json_f64(f64::from(cfg.contact_reuse_distance)),
             cfg.sleeping,
+            json_str(&format!("{:?}", cfg.sleep_skip)),
             json_f64(f64::from(cfg.sleep_threshold)),
             cfg.sleep_frames,
             cfg.colored,
@@ -1479,6 +1526,7 @@ fn run(args: &Args) -> ExitCode {
             u64::from(cfg.substeps),
             u64::from(cfg.relax_iterations),
             cfg.sleeping,
+            cfg.sleep_skip,
             cfg.parallel_narrowphase,
             cfg.contact_reuse,
             json,
@@ -1509,6 +1557,7 @@ fn run(args: &Args) -> ExitCode {
         broadphase,
         brute_max_rows,
         contact_reuse,
+        sets: colored && sleeping && sleep_skip == SleepSkip::Sets,
     };
     let mut bp_prev = rig.world.resource::<BroadphaseTree>().diag();
     let n_cols = zones.as_ref().map_or(0, ZoneTable::len);
@@ -1621,8 +1670,11 @@ fn run(args: &Args) -> ExitCode {
             let passes = ns(values[span(&PHYS_PASS_BIASED)]) + ns(values[span(&PHYS_PASS_RELAX)]);
             let colors = ns(values[span(&PHYS_COLOR_WIDE)]) + ns(values[span(&PHYS_COLOR_NARROW)]);
             // The solve's own samples: every span but the narrowphase's, which the narrowphase
-            // system pushes from whichever thread runs it.
-            let np_spans = [&PHYS_NP_DISPATCH, &PHYS_NP_COMPACT, &PHYS_NP_AXIS_COMMIT].map(span);
+            // system pushes from whichever thread runs it, and L10's classification, which the
+            // broadphase system pushes likewise.
+            let np_spans =
+                [&PHYS_NP_DISPATCH, &PHYS_NP_COMPACT, &PHYS_NP_AXIS_COMMIT, &PHYS_SLEEP_CLASSIFY]
+                    .map(span);
             let solve_samples: u64 = (n_sys..n_sys + SPAN_ZONES.len())
                 .filter(|k| !np_spans.contains(k))
                 .map(|k| counts[k])
@@ -1677,6 +1729,7 @@ fn run(args: &Args) -> ExitCode {
     } else {
         let sum = classes[window.0..window.1].iter().fold(PairClasses::default(), |s, c| PairClasses {
             pairs: s.pairs + c.pairs,
+            held_skipped: s.held_skipped + c.held_skipped,
             non_box: s.non_box + c.non_box,
             sep_hits: s.sep_hits + c.sep_hits,
             reused: s.reused + c.reused,

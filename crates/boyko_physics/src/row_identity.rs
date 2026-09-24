@@ -299,6 +299,16 @@ impl RemapCursor {
         remap
     }
 
+    /// Classifies the consumer against the current gather as [`remap`](Self::remap) does, but
+    /// counts nothing and never stamps: a reader that must know how ANOTHER consumer will
+    /// classify this step, before that consumer runs (L10 A1.1 reads `IslandSleep`'s latch
+    /// cursor and the pair carry's cursor this way, design 04 D9 / 06 B1).
+    #[inline]
+    #[expect(dead_code, reason = "L10 C3b's broadphase prologue (A1.1) is the first reader")]
+    pub(crate) fn peek<'a>(&self, rows: &'a RowIdentity) -> RowRemap<'a> {
+        rows.classify(self.synced_seq)
+    }
+
     /// Records that the consumer's state is now keyed by the current gather's rows.
     #[inline]
     pub(crate) fn stamp(&mut self, rows: &RowIdentity) {

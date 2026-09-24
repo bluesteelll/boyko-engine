@@ -761,7 +761,7 @@ fn box_pile_scene() -> BoxPileOutcome {
             .manifolds()
             .iter()
             .filter(|m| pair.contains(&m.body_a.0) && pair.contains(&m.body_b.0))
-            .flat_map(|m| m.points[..usize::from(m.count)].iter())
+            .flat_map(|m| m.points.into_iter().take(usize::from(m.count)))
             .fold(0.0f32, |d, p| d.max(-p.separation))
     };
 

@@ -242,6 +242,23 @@ impl PairTag {
         self.axis().is_some()
     }
 
+    /// The tag of a slot L10's sleep-skip did not collide this step because an endpoint is
+    /// held (design 06 B1, `0x0C00` as ruled): `HIT | SEPHIT`, a pair no collision can write,
+    /// since a box pair's tag carries at most one of the two. It has no `REC` and no `SEP`, so
+    /// the next step's join reads it as stateless.
+    ///
+    /// Its axis nibble reads `0`, not none, and it carries no `BOX` bit, so every classifier
+    /// tests [`is_held_skip`](Self::is_held_skip) BEFORE any single-bit test (design 08 B1′,
+    /// rule 5): a `HIT` test would call it a reuse hit, a `SEPHIT` test a carried-axis hit, a
+    /// `BOX` test a non-box pair, and [`rekeys`](Self::rekeys) must never see it.
+    pub(crate) const HELD_SKIP: Self = Self(Self::HIT | Self::SEPHIT);
+
+    /// Whether this is [`HELD_SKIP`](Self::HELD_SKIP): the whole tag, not a bit of it.
+    #[inline]
+    pub(crate) const fn is_held_skip(self) -> bool {
+        self.0 == Self::HELD_SKIP.0
+    }
+
     /// This tag as seen by the pair with bodies A and B exchanged (a join whose two rows swapped
     /// order): both axis fields name the same geometric axes in the exchanged roles.
     #[inline]
@@ -679,7 +696,7 @@ impl PairCarry {
     /// rotation ordinal).
     pub(crate) fn stamp(&mut self, pairs: &ContactPairs, rows: &RowIdentity) {
         self.cursor.stamp(rows);
-        self.seq = if pairs.seq() == rows.gather_seq() && self.len == pairs.pairs().len() {
+        self.seq = if pairs.seq() == rows.gather_seq() && self.len == pairs.pairs_stream().len() {
             pairs.seq()
         } else {
             NO_SEQ

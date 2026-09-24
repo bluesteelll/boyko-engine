@@ -89,7 +89,9 @@ use boyko_ecs::ecs::core::component::scratch::{ScratchColumn, ScratchSolveView};
 use boyko_macros::Resource as ResourceDerive;
 use boyko_threadpool::try_with_active_pool;
 
-use super::contact::{BodyEffective, effective_mass, is_dynamic_row, tangent_basis};
+use super::contact::{
+    BodyEffective, effective_inv_mass, effective_mass, is_dynamic_row, tangent_basis,
+};
 use super::simd;
 // O2: the soft constants, the immovable-surface view, and the soft-coefficient
 // derivation are SHARED from the reference solver — a single source of truth so
@@ -1598,8 +1600,11 @@ impl ColoredSoftStepSolver {
                 is_dynamic_row(b.inv_mass) || b.inv_inertia == Mat3::ZERO,
                 "static row (inv_mass == 0) must have inv_inertia == Mat3::ZERO for the *_movable angular no-op"
             );
+            // L10 D8 (ruling W1): the graph's colouring predicate reads the same function
+            // over the same flag, so the write guards and the colouring cannot disagree. No row
+            // is held before C3b.
             view.push(BodyEffective {
-                inv_mass: b.inv_mass,
+                inv_mass: effective_inv_mass(b.inv_mass, false),
                 inv_inertia: b.inv_inertia,
                 linear_velocity: b.linear_velocity,
                 angular_velocity: b.angular_velocity,

@@ -22,7 +22,8 @@ use crate::narrowphase::carry::{NO_SEQ, PairCarry, PairTag, build_jumpers};
 use crate::narrowphase::reuse::RowFrame;
 use crate::row_identity::{NO_ISLAND_KEY, NO_ROW, RemapCursor, RowIdentity, RowRemap, SleepLatch};
 use crate::scratch_ids::{
-    body_state_id, broadphase_column_id, graph_column_id, register_broadphase_column_layouts,
+    bodies_prev_id, body_state_id, broadphase_column_id, graph_column_id,
+    register_broadphase_column_layouts,
     box_axis_cache_id, contact_pairs_id, contact_pairs_prev_id, jumper_bits_id, manifolds_id,
     np_stage_id, row_frames_id,
     register_narrowphase_column_layouts,
@@ -33,6 +34,13 @@ use crate::scratch_ids::{
 };
 use crate::broadphase_tree::sphere_bound_feasible;
 use crate::systems::body_bounding_radius;
+
+#[path = "resources_views.rs"]
+mod views;
+
+pub use views::{
+    HELD_BASE, IslandIter, IslandManifolds, ManifoldsIter, ManifoldsView, PairsIter, PairsView,
+};
 
 /// Number of bits in one [`BitSet256`] chunk.
 const BITS_PER_CHUNK: usize = 256;
@@ -132,6 +140,26 @@ pub enum SdfNarrowphaseKernel {
     /// `sdf_simd::o9_kernel_tests::x8_bits_eq_scalar_bits_widened_proptest`, kept
     /// `#[ignore]`d and RED rather than widened to a tolerance.
     Avx2,
+}
+
+/// How a sleeping world treats its frozen islands (L10, `levers/L10-sleeping/`): the mode the
+/// colored broadphase records for each step, read only when
+/// [`PhysicsConfig::sleeping`] is on (a world with sleeping off runs [`Off`](Self::Off) whatever
+/// this says).
+///
+/// Every mode yields the same observables — poses, velocities, sleep latches, the logical
+/// contact views, island ids and queries, warm-start seeds — bit for bit: [`Off`](Self::Off) is
+/// the oracle the other mode is gated against.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SleepSkip {
+    /// A frozen island is still collided every step; only its solve and integrate are
+    /// skipped (the O8 path). The oracle.
+    Off,
+    /// A frozen, clean island is HELD: its pairs skip the narrowphase, the SDF stage, the
+    /// colouring and the solve, and its contacts are kept for the views (DEFAULT). Until L10
+    /// C3b builds the held store nothing is held, so this runs exactly as [`Off`](Self::Off).
+    #[default]
+    Sets,
 }
 
 /// Global physics tunables (plan D1; P2 W1 soft-constraint set).
@@ -410,6 +438,14 @@ pub struct PhysicsConfig {
     /// **Default OFF** so an un-opted colored world is BYTE-IDENTICAL to the O6/O7
     /// colored solve (the campaign 0%-gate); enabling it is the entire opt-in.
     pub sleeping: bool,
+    /// How a sleeping world treats its frozen islands (L10; default [`SleepSkip::Sets`]);
+    /// only meaningful when [`sleeping`](Self::sleeping) is `true`, and only on the colored
+    /// path, where the broadphase records it for the step.
+    ///
+    /// Every value gives the same observables bit for bit ([`SleepSkip::Off`] is the oracle),
+    /// so it changes cost, never a result. Until L10 C3b builds the held store, `Sets` holds
+    /// nothing and runs exactly as `Off`.
+    pub sleep_skip: SleepSkip,
     /// Per-island SPEED² threshold below which an island is a sleep CANDIDATE (default
     /// [`DEFAULT_SLEEP_THRESHOLD`]); only meaningful when [`sleeping`](Self::sleeping)
     /// is `true`.
@@ -601,6 +637,8 @@ impl Default for PhysicsConfig {
             // Default OFF so an un-opted colored world is BYTE-IDENTICAL to the O6/O7
             // colored solve (the campaign 0%-gate); sleeping is a pure opt-in.
             sleeping: false,
+            // L10: the mode a sleeping world runs; inert while `sleeping` is off.
+            sleep_skip: SleepSkip::Sets,
             sleep_threshold: DEFAULT_SLEEP_THRESHOLD,
             sleep_frames: DEFAULT_SLEEP_FRAMES,
             // Default OFF so an un-opted world runs no soft-body work (the campaign
@@ -786,10 +824,22 @@ impl ContactPairs {
         self.seq_prev
     }
 
-    /// The contiguous read slice over this step's candidate pairs, in the
-    /// deterministic `(min, max)` order the broadphase emitted.
+    /// This step's LOGICAL candidate pairs, in the deterministic `(min, max)` order (L10 design
+    /// 04 D6): the pairs the broadphase emitted into the stream, merged with the pairs L10's
+    /// tree seam withholds for held islands, so the view is the exact set every broadphase kind
+    /// emits with the sleep-skip off.
+    ///
+    /// Nothing is withheld before L10 C3c, so today the view is the stream element for element.
     #[inline]
-    pub fn pairs(&self) -> &[(BodyIndex, BodyIndex)] {
+    pub fn pairs(&self) -> PairsView<'_> {
+        PairsView::new(self.pairs.as_read_slice())
+    }
+
+    /// The pairs the narrowphase collides this step: the broadphase's stream, `(min, max)`
+    /// sorted, WITHOUT the pairs L10's tree seam withholds. The narrowphase's chunk count, its
+    /// pair tags and the pair carry index this list (design 06 D-D D2).
+    #[inline]
+    pub(crate) fn pairs_stream(&self) -> &[(BodyIndex, BodyIndex)] {
         self.pairs.as_read_slice()
     }
 
@@ -2583,7 +2633,12 @@ impl Manifolds {
     /// separating axis their previous step carried, without running the SAT (L9a (ii)).
     /// O(pairs).
     pub fn separated_axis_hits(&self) -> usize {
-        self.pair_carry.tags().iter().filter(|t| t.has(PairTag::SEPHIT)).count()
+        // L10 rule 5 (design 08 B1′): a held-skip tag carries SEPHIT and is not a hit.
+        self.pair_carry
+            .tags()
+            .iter()
+            .filter(|t| !t.is_held_skip() && t.has(PairTag::SEPHIT))
+            .count()
     }
 
     /// Diagnostic: the last narrowphase's candidate pairs by how each was collided (L9), from
@@ -2592,7 +2647,11 @@ impl Manifolds {
         let tags = self.pair_carry.tags();
         let mut c = PairClasses { pairs: tags.len() as u64, ..PairClasses::default() };
         for t in tags {
-            if !t.has(PairTag::BOX) {
+            // L10 rule 5 (design 08 B1′): the held-skip tag first, before any single-bit test —
+            // it has no BOX bit and carries both HIT and SEPHIT.
+            if t.is_held_skip() {
+                c.held_skipped += 1;
+            } else if !t.has(PairTag::BOX) {
                 c.non_box += 1;
             } else if t.has(PairTag::SEPHIT) {
                 c.sep_hits += 1;
@@ -2659,11 +2718,51 @@ impl Manifolds {
         self.np_dispatches += 1;
     }
 
-    /// The contiguous read slice over this step's solver manifolds, in the
-    /// deterministic pair order.
+    /// This step's LOGICAL solver manifolds, in the order the sleep-skip off would emit them
+    /// (L10 design 04 D6): the stream the narrowphase and the SDF stage wrote, merged with the
+    /// manifolds L10 keeps for held islands by their canonical ordinal (body-body pairs by
+    /// `(a, b)`, then SDF contacts by row).
+    ///
+    /// The view yields [`Manifold`]s by value and has no `Index`: a held manifold is rebuilt
+    /// from its island's row table, and a caller that mixed the view's positions with the
+    /// solver's indices would read the wrong one. [`solver_manifolds`](Self::solver_manifolds)
+    /// is the stream the graph and the solve index.
+    ///
+    /// Nothing is kept before L10 C3b, so today the view is the stream element for element.
     #[inline]
-    pub fn manifolds(&self) -> &[Manifold] {
+    pub fn manifolds(&self) -> ManifoldsView<'_> {
+        ManifoldsView::new(self.manifolds.as_read_slice())
+    }
+
+    /// The contiguous read slice over this step's STREAM solver manifolds, in the deterministic
+    /// pair order: what the constraint graph colours and the solve reads, and what
+    /// [`ConstraintGraph::color`] indexes. Without L10's held manifolds (see
+    /// [`manifolds`](Self::manifolds)).
+    #[inline]
+    pub fn solver_manifolds(&self) -> &[Manifold] {
         self.manifolds.as_read_slice()
+    }
+
+    /// The manifold behind handle `handle` (L10 design 04 D6): a stream index below
+    /// [`HELD_BASE`], or `HELD_BASE + slot` for a kept manifold. `None` for a handle that names
+    /// nothing. Handles are what [`ConstraintGraph::island`] yields, valid until the next step.
+    #[inline]
+    pub fn get(&self, handle: u32) -> Option<Manifold> {
+        if handle < HELD_BASE {
+            self.solver_manifolds().get(handle as usize).copied()
+        } else {
+            // No manifold is kept before L10 C3b.
+            None
+        }
+    }
+
+    /// The position handle `handle` holds in [`manifolds`](Self::manifolds), the order the
+    /// sleep-skip off would emit (L10 design 04 D6), or `None` for a handle that names nothing.
+    /// With nothing kept, a stream index is its own position.
+    #[inline]
+    pub fn position_of(&self, handle: u32) -> Option<usize> {
+        let i = handle as usize;
+        (handle < HELD_BASE && i < self.solver_manifolds().len()).then_some(i)
     }
 
     /// The contiguous read slice over this step's sensor / trigger overlaps.
@@ -2687,11 +2786,14 @@ impl Manifolds {
 }
 
 /// The last narrowphase's candidate pairs by how each was collided (L9), from the pair tags
-/// ([`Manifolds::pair_classes`]): `non_box + sep_hits + reused + full == pairs`.
+/// ([`Manifolds::pair_classes`]): `non_box + sep_hits + reused + full + held_skipped == pairs`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PairClasses {
     /// Candidate pairs the narrowphase tagged.
     pub pairs: u64,
+    /// Pairs L10's sleep-skip did not collide because an endpoint is held (their tag is the
+    /// held-skip tag, classed before any other test). `0` until L10 C3b holds islands.
+    pub held_skipped: u64,
     /// Sphere-sphere and sphere-box pairs.
     pub non_box: u64,
     /// Box pairs the separating axis they carried from the previous step rejected, the SAT not
@@ -2947,18 +3049,37 @@ impl ConstraintGraph {
         &self.color_contacts.as_read_slice()[start..end]
     }
 
-    /// Manifold indices of island `island`. Returns an empty slice for
+    /// The manifolds of island `island`, as handles (L10 design 04 D6): stream indices into
+    /// [`Manifolds::solver_manifolds`] below [`HELD_BASE`], and `HELD_BASE + slot` for the
+    /// manifolds L10 keeps for a held island. [`Manifolds::get`] resolves a handle, and
+    /// [`Manifolds::position_of`] maps it to its position in [`Manifolds::manifolds`]. Empty for
     /// `island >= n_islands`.
+    ///
+    /// Nothing is kept before L10 C3b, so today every handle is a stream index, in ascending
+    /// order.
     #[inline]
-    pub fn island(&self, island: u32) -> &[u32] {
+    pub fn island(&self, island: u32) -> IslandManifolds<'_> {
         let i = island as usize;
         let starts = self.island_manifold_start.as_read_slice();
         if i + 1 >= starts.len() {
-            return &[];
+            return IslandManifolds::new(&[]);
         }
         let start = starts[i] as usize;
         let end = starts[i + 1] as usize;
-        &self.island_manifolds.as_read_slice()[start..end]
+        IslandManifolds::new(&self.island_manifolds.as_read_slice()[start..end])
+    }
+
+    /// The number of manifolds of island `island` (L10 design 04 D7): its stream manifolds plus
+    /// the manifolds kept for it while it is held — what [`island`](Self::island) yields, and
+    /// what the sleep step keys the island by. `0` for `island >= n_islands`.
+    #[inline]
+    pub fn island_len(&self, island: u32) -> u32 {
+        let i = island as usize;
+        let starts = self.island_manifold_start.as_read_slice();
+        if i + 1 >= starts.len() {
+            return 0;
+        }
+        starts[i + 1] - starts[i]
     }
 
     /// Compacted island id of dynamic body `row`, or [`NO_ISLAND`](Self::NO_ISLAND)
@@ -4355,6 +4476,16 @@ pub struct SolverScratch {
     /// U5–U7 delete it). Refilled by [`physics_gather`](crate::systems::physics_gather)
     /// only, so a direct drive that never gathers leaves every consumer on `Identity`.
     pub(crate) rows: RowIdentity,
+    /// The previous step's post-solve snapshot: the baseline L10's broadphase tests a row's
+    /// inputs against (design 04 D2 R3, D3). The gather swaps it with
+    /// [`bodies`](Self::bodies) — O(1), the two columns alternate roles — only on a step
+    /// whose sleep-skip mode is active ([`keep_baseline`](Self::keep_baseline)), so a world
+    /// with sleeping off never touches it.
+    bodies_prev: ScratchColumn<BodyState>,
+    /// The gather sequence `bodies_prev` was kept on, or `0` before the first keep: the
+    /// broadphase trusts the baseline only when this is the current gather, so a mode written
+    /// between the gather and the broadphase yields no baseline rather than a wrong one.
+    baseline_seq: u64,
 }
 
 impl Default for SolverScratch {
@@ -4383,7 +4514,28 @@ impl SolverScratch {
                 rows.max(scratch_reserve_rows(size_of::<f32>())),
             ),
             rows: RowIdentity::with_capacity(rows),
+            // The same reserve as `bodies`: the two columns swap roles.
+            bodies_prev: ScratchColumn::new(bodies_prev_id(), reserve),
+            baseline_seq: 0,
         }
+    }
+
+    /// Keeps the current snapshot as the resting baseline of the gather that is about to
+    /// refill it (L10 design 04 D3): the snapshot and the baseline columns swap, O(1), and the
+    /// baseline is stamped with the current gather sequence. Called by the gather after it opens
+    /// the gather and before it clears the snapshot, only when a sleep-skip mode is active.
+    #[inline]
+    pub(crate) fn keep_baseline(&mut self) {
+        core::mem::swap(&mut self.bodies, &mut self.bodies_prev);
+        self.baseline_seq = self.rows.gather_seq();
+    }
+
+    /// The resting baseline — the previous step's post-solve snapshot, by previous row — when
+    /// the current gather kept one ([`keep_baseline`](Self::keep_baseline)), else `None`.
+    #[inline]
+    #[expect(dead_code, reason = "L10 C3b's broadphase prologue (A1.3, the R3 test) is the first reader")]
+    pub(crate) fn baseline(&self) -> Option<&[BodyState]> {
+        (self.baseline_seq == self.rows.gather_seq()).then(|| self.bodies_prev.as_read_slice())
     }
 
     /// The contiguous read slice over the gathered bodies (`[0, len)` live span).

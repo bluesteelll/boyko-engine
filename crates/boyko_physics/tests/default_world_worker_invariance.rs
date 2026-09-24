@@ -196,7 +196,7 @@ fn state_hash(world: &mut EcsMaster) -> u64 {
 /// manifolds' point counts.
 fn widest_color_slots(world: &EcsMaster) -> usize {
     let graph = world.resource::<ConstraintGraph>();
-    let manifolds = world.resource::<Manifolds>().manifolds();
+    let manifolds = world.resource::<Manifolds>().solver_manifolds();
     (0..graph.n_colors())
         .map(|c| {
             graph
@@ -260,7 +260,7 @@ fn run(workers: usize, parallel_solve: bool, parallel_narrowphase: bool, simd_so
     let np_dispatches = world.resource::<Manifolds>().narrowphase_dispatches() - np_before;
     let last = (
         world.resource::<SolverScratch>().bodies().to_vec(),
-        world.resource::<Manifolds>().manifolds().to_vec(),
+        world.resource::<Manifolds>().manifolds().iter().collect::<Vec<_>>(),
     );
     Run {
         hashes,

@@ -74,7 +74,7 @@ use crate::math::Vec3;
 use crate::narrowphase::axis_cache::SAT_AXIS_COUNT;
 use crate::narrowphase::box_box::{BoxBoxContact, BoxBoxOutcome, Obb, box_box_classify_carried};
 use crate::narrowphase::carry::{CarryIn, PairTag};
-use crate::narrowphase::dispatch::try_parallel;
+use crate::narrowphase::dispatch::try_parallel_sets;
 use crate::narrowphase::feature_vertex_face;
 use crate::narrowphase::reuse::{
     PairGeom, Prev, Refreshed, ReuseRecord, ReuseStep, RowFrame, build, criterion,
@@ -87,12 +87,13 @@ use crate::profiling::{
 };
 use crate::resources::{
     BodyState, BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs, IntegrationMode,
-    IslandSleep, Manifolds, PhysicsConfig, SdfNarrowphaseKernel, SolverScratch,
+    IslandSleep, Manifolds, PhysicsConfig, SdfNarrowphaseKernel, SleepSkip, SolverScratch,
 };
-use crate::row_identity::RowKey;
+use crate::row_identity::{RowIdentity, RowKey};
 use crate::sdf_query::{SdfField, sample_sdf};
+use crate::sleep_sets::{Route, RowCls, SleepSets, np_route};
 use crate::solver::colored::ColoredSoftStepSolver;
-use crate::solver::contact::is_dynamic_row;
+use crate::solver::contact::{effective_inv_mass, is_dynamic_row};
 use crate::solver::RigidSolver;
 
 /// Minimum SDF gradient length for a usable contact normal (P2 W5, O3).
@@ -263,6 +264,13 @@ pub fn physics_gather(
     // set is unchanged), so `finish_gather` can tell where every body sat one gather ago.
     // `iter_entities` yields exactly the `iter()` sequence.
     scratch.rows.begin_gather();
+    // L10 D3 (design 04): under an active sleep-skip mode the previous step's post-solve
+    // snapshot is kept as the broadphase's resting baseline — the snapshot and the baseline
+    // swap, O(1), stamped with this gather — before the refill below clears the snapshot. Never
+    // under the default (sleeping off) nor on a world without the colored pipeline.
+    if cfg.colored && cfg.sleeping && cfg.sleep_skip != SleepSkip::Off {
+        scratch.keep_baseline();
+    }
     let n = {
         let SolverScratch { bodies, rows, .. } = &mut *scratch;
         let mut bodies = bodies.build_view();
@@ -328,6 +336,9 @@ pub fn physics_gather(
 /// stamped with this gather's sequence ([`ContactPairs::rotate`], L9 D9): the narrowphase's pair
 /// carry joins this step's pairs against it, reading the jumper bitset the rotation rebuilds on a
 /// step whose rows moved (L10 C0). All three arms fill the list the rotation hands them.
+///
+/// This is the reference pipeline's broadphase. A world wired with the colored pipeline runs
+/// [`physics_broadphase_colored`] instead, which adds L10's sleep-skip around the same arms.
 //
 // `clippy::needless_pass_by_value`: see `physics_gather`.
 #[allow(clippy::needless_pass_by_value)]
@@ -338,12 +349,53 @@ pub fn physics_broadphase(
     mut tree: ResMut<BroadphaseTree>,
     mut pairs: ResMut<ContactPairs>,
 ) {
-    let bodies = scratch.bodies();
     let pairs = &mut *pairs;
     // L9 D9: before the kind match, so every arm fills the swapped-in list. On a step whose
     // rows moved it also rebuilds the carry's jumper bitset (L10 C0, design 06 Δ9).
     pairs.rotate(&scratch.rows);
+    broadphase_arms(scratch.bodies(), &scratch.rows, &cfg, &mut grid, &mut tree, pairs);
+}
 
+/// The colored pipeline's broadphase (L10 design 04 D15): [`physics_broadphase`]'s rotation and
+/// kind arms, with L10's sleep-skip prologue between them — registered only where the colored
+/// pipeline inserts [`IslandSleep`] and [`SleepSets`], while the reference pipeline keeps
+/// [`physics_broadphase`].
+///
+/// The prologue records the step's sleep-skip mode — `Off` when sleeping is off, else
+/// [`PhysicsConfig::sleep_skip`] — which every later stage reads instead of the configuration
+/// (design 04 D9). Nothing is held before L10 C3b, so the pair list is the reference
+/// broadphase's, bit for bit.
+//
+// `clippy::needless_pass_by_value`: see `physics_gather`.
+#[allow(clippy::needless_pass_by_value)]
+pub fn physics_broadphase_colored(
+    scratch: Res<SolverScratch>,
+    cfg: Res<PhysicsConfig>,
+    mut grid: ResMut<BroadphaseGrid>,
+    mut tree: ResMut<BroadphaseTree>,
+    mut pairs: ResMut<ContactPairs>,
+    mut sets: ResMut<SleepSets>,
+) {
+    let pairs = &mut *pairs;
+    // L9 D9 and L10 C0, as above: the prologue reads the jumper bitset the rotation builds.
+    pairs.rotate(&scratch.rows);
+    // L10 A1 (design 04; C2a: the step mode only).
+    sets.open_step(&cfg, &scratch.rows);
+    broadphase_arms(scratch.bodies(), &scratch.rows, &cfg, &mut grid, &mut tree, pairs);
+}
+
+/// The broadphase's kind arms over the rotated list (the body of [`physics_broadphase`] after the
+/// rotation), shared by both pipelines' broadphase systems: the list's fill, its order assert and
+/// its counter.
+#[inline]
+fn broadphase_arms(
+    bodies: &[BodyState],
+    rows: &RowIdentity,
+    cfg: &PhysicsConfig,
+    grid: &mut BroadphaseGrid,
+    tree: &mut BroadphaseTree,
+    pairs: &mut ContactPairs,
+) {
     match cfg.broadphase {
         // The shipped all-pairs loop, kept VERBATIM so the default path's asm is
         // byte-identical to before O2 (the 0%-gate). DO NOT refactor this arm.
@@ -383,16 +435,17 @@ pub fn physics_broadphase(
         // The tree broadphase: the exact set, serial, on the calling thread. The row
         // identity is the gather's (`scratch.rows`), which the tree's verify uses to
         // carry its static set through a row change.
-        BroadphaseKind::Tree => tree.step(bodies, &scratch.rows, pairs),
+        BroadphaseKind::Tree => tree.step(bodies, rows, pairs),
     }
 
     // Strict: the pairs are unique as well as sorted. The narrowphase's hysteresis
     // table is keyed by pair, and the parallel narrowphase's hint argument (Lemma 1 in
     // `narrowphase/axis_cache.rs`) needs every key to appear once per frame.
     debug_assert!(
-        pairs.pairs().windows(2).all(|w| w[0] < w[1]),
+        pairs.pairs_stream().windows(2).all(|w| w[0] < w[1]),
         "invariant: broadphase pairs must be emitted unique and in sorted (min, max) order"
     );
+    // The LOGICAL pair count (L10 design 04 runner O3): the stream until L10 C3c withholds.
     counter!(PHYS_BP_PAIRS, pairs.pairs().len() as u64);
 }
 
@@ -454,16 +507,70 @@ pub fn physics_narrowphase(
     cfg: Res<PhysicsConfig>,
     mut manifolds: ResMut<Manifolds>,
 ) {
+    let _ = narrowphase_step::<false>(&scratch, &pairs, &cfg, &mut manifolds, &[]);
+}
+
+/// The colored pipeline's narrowphase (L10 design 04 D15, 08 D1′/D-H): [`physics_narrowphase`]
+/// with its arm chosen by the step's [`SleepSets`] — the `Sets` arm when the broadphase said so,
+/// which skips the pairs of held islands, else the `Off` arm, which collides every pair as
+/// [`physics_narrowphase`] does. Registered only where the colored pipeline inserts
+/// [`SleepSets`].
+///
+/// Nothing is held before L10 C3b, whose broadphase first writes the per-row classification
+/// the `Sets` arm reads, so the broadphase never selects it yet and every step takes the `Off`
+/// arm, bit for bit the reference narrowphase.
+//
+// `clippy::needless_pass_by_value`: see `physics_gather`.
+#[allow(clippy::needless_pass_by_value)]
+pub fn physics_narrowphase_colored(
+    scratch: Res<SolverScratch>,
+    pairs: Res<ContactPairs>,
+    cfg: Res<PhysicsConfig>,
+    mut manifolds: ResMut<Manifolds>,
+    mut sets: ResMut<SleepSets>,
+) {
+    if sets.np_sets() {
+        let skips = narrowphase_step::<true>(&scratch, &pairs, &cfg, &mut manifolds, sets.row_cls());
+        sets.note_held_skips(skips);
+    } else {
+        let _ = narrowphase_step::<false>(&scratch, &pairs, &cfg, &mut manifolds, &[]);
+    }
+}
+
+/// One step of the narrowphase on L10's arm `SETS` (the body of [`physics_narrowphase`]):
+/// the hysteresis table's frame, the pair carry's classification, the parallel chunks or the
+/// serial loop, the carry's stamp and the step's counters. Returns the number of pairs the
+/// `Sets` arm skipped for a held endpoint (`0` on the `Off` arm). `cls` is the step's per-row
+/// classification, read on the `Sets` arm only.
+#[inline]
+fn narrowphase_step<const SETS: bool>(
+    scratch: &SolverScratch,
+    contact_pairs: &ContactPairs,
+    cfg: &PhysicsConfig,
+    manifolds: &mut Manifolds,
+    cls: &[RowCls],
+) -> u32 {
     let bodies = scratch.bodies();
-    let contact_pairs = &*pairs;
-    let pairs = contact_pairs.pairs();
-    let manifolds = &mut *manifolds;
+    // The stream: the pairs this step collides, which its tags index (L10 design 06 D-D D2).
+    let pairs = contact_pairs.pairs_stream();
     // Ensure the per-pair hysteresis cache can hold this frame's pairs; it is NOT
     // cleared (a single in-place table — this frame reads last frame's axes). When the
     // rows changed since the cache was last keyed, every box pair's previous axis is
     // pre-read through the row identity map first, before any write of this step
-    // (defect A, interim).
-    let prefetched = manifolds.box_axis_cache.begin_frame_synced(pairs, bodies, &scratch.rows);
+    // (defect A, interim). The table is sized by the LOGICAL pair count (L10 design 04 A3),
+    // which is the stream's until L10 C3c withholds pairs.
+    let keys = manifolds.box_axis_cache.begin_frame_synced(
+        pairs,
+        contact_pairs.pairs().len(),
+        bodies,
+        &scratch.rows,
+    );
+    let prefetched = keys.prefetched;
+    debug_assert_eq!(
+        keys.any(),
+        manifolds.box_axis_cache.keys_changed(),
+        "invariant: the key change's causes union to the table's keys_changed"
+    );
     // L9b: the step's reuse parameters, and whether a hit must re-key its hysteresis entry
     // (ruling W1), which `begin_frame_synced` has just settled.
     let reuse = ReuseStep::new(
@@ -477,34 +584,37 @@ pub fn physics_narrowphase(
     let carry = manifolds.pair_carry.source(contact_pairs, &scratch.rows).with_reuse(reuse);
     // L5: the flag is a request; the dispatch returns 0 whenever it runs no chunk, and
     // then the serial loop below produces the step's streams.
-    let chunks = if cfg.parallel_narrowphase {
-        try_parallel(manifolds, bodies, pairs, prefetched, carry)
+    let (chunks, parallel_skips) = if cfg.parallel_narrowphase {
+        try_parallel_sets::<SETS>(manifolds, bodies, pairs, prefetched, carry, cls)
     } else {
-        0
+        (0, 0)
     };
-    if chunks == 0 {
-        narrowphase_serial_with(manifolds, bodies, pairs, prefetched, carry);
-    }
+    let held_skips = if chunks == 0 {
+        narrowphase_serial_sets::<SETS>(manifolds, bodies, pairs, prefetched, carry, cls)
+    } else {
+        parallel_skips
+    };
     manifolds.pair_carry.stamp(contact_pairs, &scratch.rows);
 
     // Profiling: the step's narrowphase work, counted after the loop from what it emitted,
     // so the loop itself carries no instrument. The point sum walks the solver's manifolds
     // only while the profiler is armed.
     counter!(PHYS_NP_PAIRS, pairs.len() as u64);
-    counter!(PHYS_NP_MANIFOLDS, manifolds.manifolds().len() as u64);
+    counter!(PHYS_NP_MANIFOLDS, manifolds.solver_manifolds().len() as u64);
     counter!(
         PHYS_NP_POINTS,
-        manifolds.manifolds().iter().map(|m| u64::from(m.count)).sum::<u64>()
+        manifolds.solver_manifolds().iter().map(|m| u64::from(m.count)).sum::<u64>()
     );
     counter!(PHYS_NP_CHUNKS, chunks as u64);
     // L9: the step's pair classes, from the tags in one walk, only while the profiler is armed.
-    // `full + reused + sep_hits + non-box = pairs` (the closure a reader checks).
+    // `full + reused + sep_hits + non-box + held-skipped = pairs` (the closure a reader checks).
     if boyko_diag::zone_enabled!(PHYS_NP_FULL) {
         let classes = manifolds.pair_classes();
         counter!(PHYS_NP_REUSED, classes.reused);
         counter!(PHYS_NP_SEP_HITS, classes.sep_hits);
         counter!(PHYS_NP_FULL, classes.full);
     }
+    held_skips
 }
 
 /// [`narrowphase_serial_with`] with no pair carry and contact reuse off: every pair misses its
@@ -520,6 +630,18 @@ pub(crate) fn narrowphase_serial(
     narrowphase_serial_with(manifolds, bodies, pairs, prefetched, CarryIn::NONE);
 }
 
+/// [`narrowphase_serial_sets`] on the `Off` arm: for the tests' direct callers.
+#[cfg(test)]
+pub(crate) fn narrowphase_serial_with(
+    manifolds: &mut Manifolds,
+    bodies: &[BodyState],
+    pairs: &[(BodyIndex, BodyIndex)],
+    prefetched: bool,
+    carry: CarryIn<'_>,
+) {
+    let _ = narrowphase_serial_sets::<false>(manifolds, bodies, pairs, prefetched, carry, &[]);
+}
+
 /// The serial narrowphase loop: every candidate pair in `(min, max)` order, the
 /// manifold pushed into the solver buffer or the sensor-overlap buffer, the pair's tag
 /// and reuse record written (L9 D9), and a box-box pair's chosen axis written into the
@@ -530,13 +652,20 @@ pub(crate) fn narrowphase_serial(
 /// oracle that path's gates compare against. `prefetched` is what
 /// `BoxAxisCache::begin_frame_synced` returned for this frame; `carry` is what
 /// `PairCarry::source` returned for it.
-pub(crate) fn narrowphase_serial_with(
+///
+/// `SETS` is L10's arm (design 08 D1′), with the parallel chunks' route predicate: on the
+/// `Sets` arm a non-sensor pair with a held endpoint is not collided — it writes the held-skip
+/// tag, no axis (the serial form of the chunks' `AXIS_NONE` commit) and no manifold — and the
+/// loop returns how many it skipped. On the `Off` arm (`cls` unread) every pair is collided and
+/// it returns `0`.
+pub(crate) fn narrowphase_serial_sets<const SETS: bool>(
     manifolds: &mut Manifolds,
     bodies: &[BodyState],
     pairs: &[(BodyIndex, BodyIndex)],
     prefetched: bool,
     carry: CarryIn<'_>,
-) {
+    cls: &[RowCls],
+) -> u32 {
     // Disjoint field borrows of one `Manifolds`: two refill views, the hysteresis cache,
     // the frame column and the pair carry. The views are taken once for the whole pair
     // loop, not per push.
@@ -565,6 +694,7 @@ pub(crate) fn narrowphase_serial_with(
     let tags = tag_view.as_mut_slice();
     let mut record_view = record_column.build_view();
     let records = record_view.as_mut_slice();
+    let mut held_skips = 0u32;
 
     for (k, &(a, b)) in pairs.iter().enumerate() {
         let ba = &bodies[a.0 as usize];
@@ -577,16 +707,27 @@ pub(crate) fn narrowphase_serial_with(
         // the pre-S5 push).
         let is_overlap = ba.is_sensor || bb.is_sensor;
 
-        let PairOut { manifold, axis, tag, record } = collide_pair(
-            a,
-            b,
-            ba,
-            bb,
-            frames,
-            reuse,
-            || join.prev(a, b),
-            || axis_cache.read_hint(prefetched, k, a, b),
-        );
+        let PairOut { manifold, axis, tag, record } = match np_route::<SETS>(cls, a, b) {
+            // L10 (design 08 D1′): a held endpoint — the held-skip tag, no `set` (the mirror
+            // keys the held pair, design 06 D-C) and no manifold.
+            Route::Skip => {
+                held_skips += 1;
+                PairOut::held_skip()
+            }
+            Route::Stream => collide_pair(
+                a,
+                b,
+                ba,
+                bb,
+                frames,
+                reuse,
+                || join.prev(a, b),
+                || axis_cache.read_hint(prefetched, k, a, b),
+            ),
+            Route::Restore => {
+                unreachable!("invariant: no pair routes to the kept source before L10 C3b builds it")
+            }
+        };
         if let Some(axis) = axis {
             // Persist this frame's chosen reference axis for next frame's
             // hysteresis bias (per body pair, deterministic).
@@ -620,6 +761,7 @@ pub(crate) fn narrowphase_serial_with(
             }
         }
     }
+    held_skips
 }
 
 /// One candidate pair's collision (L9 D9): what both narrowphase paths store for it.
@@ -649,6 +791,13 @@ impl PairOut {
     fn non_box(manifold: Option<Manifold>) -> Self {
         let tag = PairTag::non_box(pushes(manifold.as_ref()));
         Self::today(manifold, None, tag)
+    }
+
+    /// The output of a pair L10's sleep-skip did not collide because an endpoint is held
+    /// (design 08 D1′): no manifold, no axis, the held-skip tag, no record.
+    #[inline]
+    pub(crate) fn held_skip() -> Self {
+        Self::today(None, None, PairTag::HELD_SKIP)
     }
 }
 
@@ -1472,12 +1621,14 @@ pub fn physics_build_graph(
     // MT soundness: this MUST be the SAME predicate the colored solve's `*_movable`
     // write guard uses — the coloring grants exclusive per-color ownership only to
     // the rows it marks dynamic here, so the solve may write ONLY those rows. Both
-    // sites route through `is_dynamic_row` so they cannot drift (see its docs).
+    // sites route through `is_dynamic_row` so they cannot drift (see its docs), over the
+    // same `effective_inv_mass` of the same row (L10 D8, ruling W1; no row is held before
+    // L10 C3b).
     let is_dynamic = |row: u32| {
         let i = row as usize;
-        i < bodies.len() && is_dynamic_row(bodies[i].inv_mass)
+        i < bodies.len() && is_dynamic_row(effective_inv_mass(bodies[i].inv_mass, false))
     };
-    graph.build(manifolds.manifolds(), n_dynamic, is_dynamic);
+    graph.build(manifolds.solver_manifolds(), n_dynamic, is_dynamic);
 }
 
 /// Runs the colored TGS-Soft solver for one step over the prebuilt
@@ -1529,7 +1680,7 @@ pub fn physics_solve_colored(
     if cfg.sleeping {
         solver.solve_colored_sleeping(
             &cfg,
-            manifolds.manifolds(),
+            manifolds.solver_manifolds(),
             &graph,
             &mut scratch,
             &mut sleep,
@@ -1538,7 +1689,7 @@ pub fn physics_solve_colored(
         // Sleeping off: byte-identical to the O6/O7 colored path; `IslandSleep` is
         // resolved (so the param exists) but never read or written.
         let _ = &mut sleep;
-        solver.solve_colored(&cfg, manifolds.manifolds(), &graph, &mut scratch);
+        solver.solve_colored(&cfg, manifolds.solver_manifolds(), &graph, &mut scratch);
     }
 }
 
@@ -1563,7 +1714,7 @@ pub fn physics_solve_step<S: RigidSolver>(
     if solver.is_noop() {
         return;
     }
-    solver.solve(&cfg, manifolds.manifolds(), &mut scratch);
+    solver.solve(&cfg, manifolds.solver_manifolds(), &mut scratch);
 }
 
 /// Writes the solved snapshot back into the [`RigidBody`] column for touched

@@ -219,7 +219,7 @@ fn state_hash(world: &mut EcsMaster) -> u64 {
 /// The widest color of the last step, in slots (per color, its manifolds' point counts).
 fn widest_color_slots(world: &EcsMaster) -> usize {
     let graph = world.resource::<ConstraintGraph>();
-    let manifolds = world.resource::<Manifolds>().manifolds();
+    let manifolds = world.resource::<Manifolds>().solver_manifolds();
     (0..graph.n_colors())
         .map(|c| {
             graph

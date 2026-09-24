@@ -39,6 +39,25 @@ pub(crate) fn is_dynamic_row(inv_mass: f32) -> bool {
     inv_mass != 0.0
 }
 
+/// The inverse mass the graph and the colored solve see for a row: its gathered `inv_mass`,
+/// or `0` for a row L10's sleep-skip holds (design 04 D8, ruling W1).
+///
+/// The ONE input of both sites [`is_dynamic_row`] must agree across: the graph's
+/// colouring, union and filing predicate (`movable(r) = is_dynamic_row(effective_inv_mass(..))`,
+/// [`physics_build_graph`](crate::systems::physics_build_graph)) and the colored solve's
+/// `build_bodies`, whose `BodyEffective::inv_mass` every write guard, the gravity and
+/// position integrate, the inertia refresh, the O8 freeze capture and the write-back read.
+/// Fed the same flag column in the same step, the two are identical by construction, so a
+/// held row is immovable to the colouring AND to every write: a manifold naming it could
+/// differ in value, never race.
+///
+/// `held` is `false` for every row until L10 C3b holds islands (C2a: plumbing under `Off`),
+/// so this returns `inv_mass` exactly and both sites are unchanged.
+#[inline]
+pub(crate) fn effective_inv_mass(inv_mass: f32, held: bool) -> f32 {
+    if held { 0.0 } else { inv_mass }
+}
+
 /// Builds an orthonormal tangent basis `(t1, t2)` for the unit contact normal
 /// `n` (P2 W2 — the friction plane).
 ///

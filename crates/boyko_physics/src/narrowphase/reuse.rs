@@ -707,7 +707,7 @@ mod tests {
         let tags = m.pair_carry.tags();
         let records = m.pair_carry.records();
         FrameOut {
-            stream: m.manifolds().iter().map(manifold_words).collect(),
+            stream: m.solver_manifolds().iter().map(manifold_words).collect(),
             tags: tags.to_vec(),
             records: tags
                 .iter()

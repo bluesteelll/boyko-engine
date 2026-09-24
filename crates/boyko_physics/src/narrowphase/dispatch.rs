@@ -2,9 +2,18 @@
 //! collided on a worker of the ambient pool, and the chunks' output joined back in pair order.
 //!
 //! Requested by [`PhysicsConfig::parallel_narrowphase`](crate::resources::PhysicsConfig) and
-//! entered from [`physics_narrowphase`](crate::systems::physics_narrowphase) through
-//! [`try_parallel`], which returns the number of chunks it ran, or `0` when it ran none and the
-//! serial loop must produce the step.
+//! entered from [`physics_narrowphase`](crate::systems::physics_narrowphase) (and its colored
+//! variant) through [`try_parallel_sets`], which returns the number of chunks it ran, or `0`
+//! when it ran none and the serial loop must produce the step.
+//!
+//! # L10's arm (design 08 D1′)
+//!
+//! [`np_chunk`] and the serial loop share one route predicate, `sleep_sets::np_route`, chosen
+//! by a const generic hoisted out of the loop: on the `Off` arm every pair is collided (the
+//! route is constant and folds away); on the `Sets` arm a non-sensor pair with a held endpoint
+//! writes the held-skip tag and an `AXIS_NONE` commit through the same two per-slot writes, and
+//! each chunk stores its skip count in its own slot of a second function-local array (design
+//! 06 D-D D3). No new `unsafe` site: the skip reuses the tag and commit writes.
 //!
 //! # Chunking (D4)
 //!
@@ -91,7 +100,7 @@
 //!   `phys_np_axis_commit`) open on the calling thread only, and the dispatch zone only after
 //!   the chunk count said the step dispatches. No zone runs inside a chunk task.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use boyko_diag::zone;
 use boyko_ecs::ecs::core::component::scratch::{ScratchColumn, ScratchSolveView};
@@ -103,6 +112,7 @@ use crate::narrowphase::carry::{CarryIn, PairJoin, PairTag};
 use crate::narrowphase::reuse::{ReuseRecord, RowFrame, fill_row_frames};
 use crate::profiling::{PHYS_NP_AXIS_COMMIT, PHYS_NP_COMPACT, PHYS_NP_DISPATCH};
 use crate::resources::{BodyState, Manifolds};
+use crate::sleep_sets::{Route, RowCls, np_route};
 use crate::systems::{PairOut, collide_pair};
 
 /// Chunks per pool lane: the solver's measured work-stealing oversubscription
@@ -188,6 +198,21 @@ pub(crate) struct NpChunkCtx<'a> {
     records: ScratchSolveView<'a, ReuseRecord>,
     /// One packed `(solver run, sensor run)` word per chunk.
     meta: &'a [AtomicU64],
+    /// L10: this step's per-row sleep-skip classification, read by the `Sets` arm's route
+    /// only (design 08 D1′); empty on the `Off` arm.
+    cls: &'a [RowCls],
+    /// L10: one held-skip count per chunk (design 06 D-D D3), stored once by its chunk; empty
+    /// on the `Off` arm, which skips nothing.
+    skips: &'a [AtomicU32],
+}
+
+impl<'a> NpChunkCtx<'a> {
+    /// This context with L10's `Sets`-arm inputs: the step's per-row classification and one
+    /// held-skip count per chunk.
+    #[inline]
+    pub(crate) fn with_sleep(self, cls: &'a [RowCls], skips: &'a [AtomicU32]) -> Self {
+        Self { cls, skips, ..self }
+    }
 }
 
 /// Grows the staging column and the per-pair commit to at least the pair count, fills the step's
@@ -229,7 +254,20 @@ pub(crate) fn prepare<'a>(
         "invariant: the stage, the commit, the tags and (on a step that reuses) the records hold \
          a row for every candidate pair"
     );
-    NpChunkCtx { bodies, pairs, frames, hints, join, stage, commit, tags, records, meta }
+    NpChunkCtx {
+        bodies,
+        pairs,
+        frames,
+        hints,
+        join,
+        stage,
+        commit,
+        tags,
+        records,
+        meta,
+        cls: &[],
+        skips: &[],
+    }
 }
 
 /// Grows the staging column to `n` rows; the fill covers only the new rows.
@@ -243,6 +281,11 @@ fn grow_stage(stage: &mut ScratchColumn<Manifold>, n: usize) {
 /// pair's axis into its commit row, its tag into its tag row and its reuse record, if it wrote one,
 /// into its record row (L9 D9), and the two run lengths into `meta[chunk]`.
 ///
+/// `SETS` is L10's arm (design 08 D1′): on the `Sets` arm a non-sensor pair with a held endpoint
+/// is not collided — its slot takes the held-skip tag and commits no axis, through the same two
+/// writes a collided pair makes, and it stages no manifold — and the chunk stores its skip count
+/// into `skips[chunk]`. On the `Off` arm every pair is collided, as before L10.
+///
 /// # Safety
 /// * `ctx` came from [`prepare`] for these pairs, so `hi <= ctx.pairs.len()` is within the stage,
 ///   the commit and the tag views — and within the record view on a step that reuses, the only
@@ -253,7 +296,12 @@ fn grow_stage(stage: &mut ScratchColumn<Manifold>, n: usize) {
 ///   guarantees.
 /// * Nothing holds a slice over the stage, the commit, the tags or the records until every chunk
 ///   of the step has returned (the scope's join, or `std::thread::scope`'s).
-pub(crate) unsafe fn np_chunk(ctx: NpChunkCtx<'_>, chunk: usize, lo: usize, hi: usize) {
+pub(crate) unsafe fn np_chunk<const SETS: bool>(
+    ctx: NpChunkCtx<'_>,
+    chunk: usize,
+    lo: usize,
+    hi: usize,
+) {
     debug_assert!(
         lo <= hi && hi <= ctx.pairs.len(),
         "invariant: a chunk owns a sub-range of the candidate pairs"
@@ -264,48 +312,66 @@ pub(crate) unsafe fn np_chunk(ctx: NpChunkCtx<'_>, chunk: usize, lo: usize, hi: 
     let mut join = ctx.join.cursor();
     let mut wo = lo;
     let mut ws = hi;
+    let mut held_skips = 0u32;
     for k in lo..hi {
         let (a, b) = ctx.pairs[k];
         let ba = &ctx.bodies[a.0 as usize];
         let bb = &ctx.bodies[b.0 as usize];
-        let mut hint = None;
-        let PairOut { manifold, axis, tag, record } = collide_pair(
-            a,
-            b,
-            ba,
-            bb,
-            ctx.frames,
-            reuse,
-            || join.prev(a, b),
-            || {
-                hint = ctx.hints.read(k, a, b);
-                hint
-            },
-        );
-        // The skip rule (D3): without a pre-read, a pair whose hint already names the axis
-        // it chose would `set` the value its slot holds — an identity (Lemma 2).
-        let commit = match axis {
-            Some(chosen) if prefetched || hint != Some(chosen) => {
-                debug_assert!(
-                    chosen < usize::from(SAT_AXIS_COUNT),
-                    "invariant: a chosen SAT axis is 0..15"
-                );
-                chosen as u8
+        let (PairOut { manifold, tag, record, .. }, commit) = match np_route::<SETS>(ctx.cls, a, b) {
+            // L10 (design 08 D1′): a held endpoint. The axis commit is AXIS_NONE (the mirror
+            // keys the held pair serially before the scope, design 06 D-C) and the tag is the
+            // held-skip tag.
+            Route::Skip => {
+                held_skips += 1;
+                (PairOut::held_skip(), AXIS_NONE)
             }
-            _ => AXIS_NONE,
+            Route::Stream => {
+                let mut hint = None;
+                let out = collide_pair(
+                    a,
+                    b,
+                    ba,
+                    bb,
+                    ctx.frames,
+                    reuse,
+                    || join.prev(a, b),
+                    || {
+                        hint = ctx.hints.read(k, a, b);
+                        hint
+                    },
+                );
+                // The skip rule (D3): without a pre-read, a pair whose hint already names the
+                // axis it chose would `set` the value its slot holds — an identity (Lemma 2).
+                let commit = match out.axis {
+                    Some(chosen) if prefetched || hint != Some(chosen) => {
+                        debug_assert!(
+                            chosen < usize::from(SAT_AXIS_COUNT),
+                            "invariant: a chosen SAT axis is 0..15"
+                        );
+                        chosen as u8
+                    }
+                    _ => AXIS_NONE,
+                };
+                (out, commit)
+            }
+            Route::Restore => {
+                unreachable!("invariant: no pair routes to the kept source before L10 C3b builds it")
+            }
         };
         // SAFETY: `lo <= k < hi <= commit.len()` (the caller's contract and `prepare`'s
         //   growth), so row `k` is in bounds; this chunk owns `[lo, hi)` and no other thread
         //   touches that row while it runs (the caller's contract). The base carries the
         //   column's own write provenance (`solve_base`), never a slice reborrow. `u8` has no
-        //   drop glue, so overwriting last step's byte is a plain store.
+        //   drop glue, so overwriting last step's byte is a plain store. A pair L10 skipped
+        //   writes `AXIS_NONE` through this same store, under the same ownership.
         unsafe { ctx.commit.row_ptr(k).write(commit) };
         // SAFETY: `lo <= k < hi <= tags.len()` (the caller's contract and `prepare`'s growth of
         //   the tag column to the pair count), so row `k` is in bounds; this chunk owns `[lo, hi)`
         //   and no other thread touches that row while it runs (the caller's contract). The base
         //   is the column's own write base (`solve_base`), never a slice reborrow, and no slice
         //   over the tag column exists until the scope has joined. `PairTag` is a `u16` with no
-        //   drop glue, so overwriting last step's value is a plain store.
+        //   drop glue, so overwriting last step's value is a plain store. A pair L10 skipped
+        //   writes `PairTag::HELD_SKIP` through this same store, under the same ownership.
         unsafe { ctx.tags.row_ptr(k).write(tag) };
         if let Some(record) = record {
             // SAFETY: a record exists only on a step that reuses, and `prepare` then asserted,
@@ -349,6 +415,10 @@ pub(crate) unsafe fn np_chunk(ctx: NpChunkCtx<'_>, chunk: usize, lo: usize, hi: 
     // Relaxed: the reader is the calling thread after the scope's join, which orders this
     // store (and every staging write above) before its load.
     ctx.meta[chunk].store(pack_runs(wo - lo, hi - ws), Ordering::Relaxed);
+    if SETS {
+        // Relaxed, as `meta`: the scope's join orders it before the caller's load.
+        ctx.skips[chunk].store(held_skips, Ordering::Relaxed);
+    }
 }
 
 /// Joins the chunks' runs into the two streams, in ascending chunk order: each solver run
@@ -390,12 +460,9 @@ pub(crate) fn compact(
     );
 }
 
-/// The parallel narrowphase for one step. Returns the number of chunks it ran, or `0` when it
-/// ran none — no pool, fewer than two lanes, fewer than two chunks, or more pairs than the
-/// stage can hold — and the caller must run the serial loop.
-///
-/// `prefetched` is what `BoxAxisCache::begin_frame_synced` returned for this frame; it must
-/// have run first. `carry` is what `PairCarry::source` returned for it (L9 D9).
+/// [`try_parallel_sets`] on the `Off` arm, returning the chunk count: for the tests' direct
+/// callers.
+#[cfg(test)]
 pub(crate) fn try_parallel(
     manifolds: &mut Manifolds,
     bodies: &[BodyState],
@@ -403,20 +470,49 @@ pub(crate) fn try_parallel(
     prefetched: bool,
     carry: CarryIn<'_>,
 ) -> usize {
+    try_parallel_sets::<false>(manifolds, bodies, pairs, prefetched, carry, &[]).0
+}
+
+/// The parallel narrowphase for one step. Returns the number of chunks it ran — `0` when it ran
+/// none: no pool, fewer than two lanes, fewer than two chunks, or more pairs than the stage can
+/// hold, and the caller must run the serial loop — and the number of pairs it skipped for a held
+/// endpoint (L10; always `0` on the `Off` arm).
+///
+/// `pairs` is the stream, so the chunk count is the stream's (design 06 D-D D2). `prefetched`
+/// is what `BoxAxisCache::begin_frame_synced` returned for this frame; it must have run first.
+/// `carry` is what `PairCarry::source` returned for it (L9 D9). `SETS` is L10's arm, and `cls`
+/// the step's per-row classification, read on the `Sets` arm only.
+pub(crate) fn try_parallel_sets<const SETS: bool>(
+    manifolds: &mut Manifolds,
+    bodies: &[BodyState],
+    pairs: &[(BodyIndex, BodyIndex)],
+    prefetched: bool,
+    carry: CarryIn<'_>,
+    cls: &[RowCls],
+) -> (usize, u32) {
     let n = pairs.len();
     try_with_active_pool(|pool| {
         let chunks = chunk_count(n, pool.num_threads());
         if chunks == 0 {
-            return 0;
+            return (0, 0);
         }
         if n > manifolds.np_stage.capacity()
             || n > manifolds.box_axis_cache.commit_capacity()
             || n > manifolds.pair_carry.capacity()
         {
-            return beyond_stage_ceiling();
+            return (beyond_stage_ceiling(), 0);
         }
         debug_assert!(chunks <= NP_MAX_CHUNKS, "invariant: chunk_count clamps to NP_MAX_CHUNKS");
         let meta: [AtomicU64; NP_MAX_CHUNKS] = [const { AtomicU64::new(0) }; NP_MAX_CHUNKS];
+        // L10 (design 06 D-D D3): the `Sets` arm's per-chunk skip counts, a function-local array
+        // like `meta`, summed after the join. The `Off` arm skips nothing and keeps none.
+        let skip_counts: [AtomicU32; NP_MAX_CHUNKS];
+        let skips: &[AtomicU32] = if SETS {
+            skip_counts = [const { AtomicU32::new(0) }; NP_MAX_CHUNKS];
+            &skip_counts[..chunks]
+        } else {
+            &[]
+        };
         {
             let _zone = zone!(PHYS_NP_DISPATCH);
             // `ctx.meta` is cut to the step's chunk count, so a task reads `chunks` and `n`
@@ -426,7 +522,8 @@ pub(crate) fn try_parallel(
             // chunks of a lane-bound W = 16 step. Capturing the 128-byte context by value
             // with the cuts would have been 168 bytes a cell: 24 a block, so W = 8 (48
             // chunks) took two blocks and W = 16 three. C4's census pins the block count.
-            let ctx = prepare(manifolds, bodies, pairs, prefetched, carry, &meta[..chunks]);
+            let ctx = prepare(manifolds, bodies, pairs, prefetched, carry, &meta[..chunks])
+                .with_sleep(cls, skips);
             let ctx = &ctx;
             pool.scope(|scope| {
                 for chunk in 0..chunks {
@@ -444,8 +541,9 @@ pub(crate) fn try_parallel(
                         //   distinct chunk indices, so no two tasks share a stage row, a
                         //   commit row, a tag row, a record row or a `meta` slot; nothing takes
                         //   a slice over the stage, the commit, the tags or the records until
-                        //   `pool.scope` has joined every task.
-                        unsafe { np_chunk(*ctx, chunk, lo, hi) }
+                        //   `pool.scope` has joined every task. On the `Sets` arm `ctx.skips`
+                        //   holds one slot per chunk, and a chunk stores only its own.
+                        unsafe { np_chunk::<SETS>(*ctx, chunk, lo, hi) }
                     });
                 }
             });
@@ -459,9 +557,11 @@ pub(crate) fn try_parallel(
             manifolds.box_axis_cache.commit_axes(pairs);
         }
         manifolds.note_np_dispatch();
-        chunks
+        // Relaxed: the scope's join orders every chunk's store before these loads.
+        let held_skips = skips.iter().map(|s| s.load(Ordering::Relaxed)).sum();
+        (chunks, held_skips)
     })
-    .unwrap_or(0)
+    .unwrap_or((0, 0))
 }
 
 /// The step has more candidate pairs than the staging column (7.06M rows natively), the
@@ -723,7 +823,7 @@ mod tests {
         let tags = m.pair_carry.tags();
         let records = m.pair_carry.records();
         Outcome {
-            out: m.manifolds().iter().map(manifold_words).collect(),
+            out: m.solver_manifolds().iter().map(manifold_words).collect(),
             sensor: m.sensor_overlaps().iter().map(manifold_words).collect(),
             table: m.box_axis_cache.table_state(),
             fingerprint: m.box_axis_cache.fingerprint(),
@@ -767,7 +867,7 @@ mod tests {
             //   n, so the chunks' ranges are disjoint, and they run one after another on this
             //   thread; no slice over the stage, the commit, the tags or the records is taken
             //   until `compact`.
-            unsafe { np_chunk(ctx, chunk, cuts[chunk], cuts[chunk + 1]) };
+            unsafe { np_chunk::<false>(ctx, chunk, cuts[chunk], cuts[chunk + 1]) };
         }
         compact(m, chunks, |c| (cuts[c], cuts[c + 1]), &meta);
         m.box_axis_cache.commit_axes(&scene.pairs);
@@ -1162,7 +1262,7 @@ mod tests {
                         //   partition `[0, n)`, so the three threads write disjoint rows and
                         //   distinct `meta` slots; nothing reads the stage, the commit, the tags
                         //   or the records until `std::thread::scope` has joined all three.
-                        unsafe { np_chunk(ctx, chunk, lo, hi) }
+                        unsafe { np_chunk::<false>(ctx, chunk, lo, hi) }
                     });
                 }
             });

@@ -97,8 +97,9 @@ use boyko_physics::profiling::{
     PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY, PHYS_INTEGRATE, PHYS_NP_AXIS_COMMIT,
     PHYS_NP_CHUNKS, PHYS_NP_COMPACT, PHYS_NP_DISPATCH, PHYS_NP_FULL, PHYS_NP_MANIFOLDS,
     PHYS_NP_PAIRS, PHYS_NP_POINTS, PHYS_NP_REUSED, PHYS_NP_SEP_HITS, PHYS_PASS_BIASED,
-    PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_SLEEP_BEGIN,
-    PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD,
+    PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_SLEEP_BEGIN, PHYS_SLEEP_CLASSIFY,
+    PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE,
+    PHYS_SOLVE_BUILD,
     PHYS_STORE, PHYS_WARM_APPLY, PHYS_WRITE_BACK, SPAN_ZONE_COUNT, SPAN_ZONES,
     WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED,
 };
@@ -146,7 +147,7 @@ struct StepShape {
 /// resources — what the solve was handed, not what it built.
 fn step_shape(scene: &Scene) -> StepShape {
     let graph = scene.world.resource::<ConstraintGraph>();
-    let manifolds = scene.world.resource::<Manifolds>().manifolds();
+    let manifolds = scene.world.resource::<Manifolds>().solver_manifolds();
     let mut shape = StepShape {
         wide_colors: 0,
         narrow_colors: 0,
@@ -364,6 +365,9 @@ fn physics_zones_count_exactly() {
             (&PHYS_SLEEP_BEGIN, sl),
             (&PHYS_SLEEP_FREEZE, 2 * sl),
             (&PHYS_SLEEP_END, sl),
+            // L10: the harness keeps the default sleep-skip mode (Sets), so the broadphase runs
+            // the sleep-skip's prologue on every sleeping step.
+            (&PHYS_SLEEP_CLASSIFY, sl),
             (&PHYS_NP_DISPATCH, np),
             (&PHYS_NP_COMPACT, np),
             (&PHYS_NP_AXIS_COMMIT, np),
@@ -404,6 +408,8 @@ fn physics_zones_count_exactly() {
             (&PHYS_NP_REUSED, 1, classes.reused),
             (&PHYS_NP_SEP_HITS, 1, classes.sep_hits),
             (&PHYS_NP_FULL, 1, classes.full),
+            // L10: once per sleeping step (the classification's), nothing held before C3b.
+            (&PHYS_SLEEP_HELD, sl, 0),
         ];
         for (k, &(handle, samples, value)) in expected_counters.iter().enumerate() {
             assert!(

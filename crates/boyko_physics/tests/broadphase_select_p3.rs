@@ -267,8 +267,8 @@ fn run_pairs_and_manifolds(
     world.resource_mut::<PhysicsConfig>().broadphase_select = BroadphaseSelectMode::Manual;
     world.resource_mut::<PhysicsConfig>().broadphase = kind;
     schedule.run(&mut world);
-    let pairs = world.resource::<ContactPairs>().pairs().to_vec();
-    let manifolds = world.resource::<Manifolds>().manifolds().to_vec();
+    let pairs = world.resource::<ContactPairs>().pairs().iter().copied().collect::<Vec<_>>();
+    let manifolds = world.resource::<Manifolds>().manifolds().iter().collect::<Vec<_>>();
     (pairs, manifolds)
 }
 

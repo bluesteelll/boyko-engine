@@ -4977,8 +4977,14 @@
                 grid.build(scratch.bodies(), pairs);
                 let prefetched = manifolds
                     .box_axis_cache
-                    .begin_frame_synced(pairs.pairs(), scratch.bodies(), &scratch.rows);
-                narrowphase_serial(manifolds, scratch.bodies(), pairs.pairs(), prefetched);
+                    .begin_frame_synced(
+                        pairs.pairs_stream(),
+                        pairs.pairs().len(),
+                        scratch.bodies(),
+                        &scratch.rows,
+                    )
+                    .prefetched;
+                narrowphase_serial(manifolds, scratch.bodies(), pairs.pairs_stream(), prefetched);
                 if sdf_plane {
                     let mut out = manifolds.manifolds.build_view();
                     for (row, b) in scratch.bodies().iter().enumerate() {
@@ -4997,7 +5003,7 @@
                     solver,
                     scratch,
                     sleep.as_mut(),
-                    manifolds.manifolds(),
+                    manifolds.solver_manifolds(),
                     hash,
                     wide_steps,
                 );

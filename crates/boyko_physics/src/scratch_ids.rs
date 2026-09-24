@@ -53,6 +53,7 @@ use crate::narrowphase::carry::PairTag;
 use crate::narrowphase::reuse::{ReuseRecord, RowFrame};
 use crate::resources::{BodyState, IslandScratch};
 use crate::row_identity::{RowKey, SleepLatch};
+use crate::sleep_sets::RowCls;
 use crate::solver::contact::BodyEffective;
 use crate::solver::soft_step::{ManifoldConstraint, PointConstraint};
 use crate::solver::colored::{CohortCold, CohortHead, ManifoldTag, RankBlock};
@@ -897,6 +898,130 @@ pub(crate) fn sleep_island_scratch_id() -> ComponentId {
     ComponentId::new(SCRATCH_ID_SLEEP_ISLAND_SCRATCH)
 }
 
+// ── L10's per-row columns: the resting baseline and the row classification (C2a) ──
+//
+// `SolverScratch::bodies_prev`, the previous step's post-solve `BodyState` snapshot (the
+// broadphase's resting baseline, design 04 D3), and `SleepSets::row_cls`, the per-row
+// classification every stage reads (A1.3). Neither is a cohort of its own:
+//
+// * `bodies_prev` SWAPS roles with the gather snapshot on every step a sleep-skip mode is
+//   active (O(1), the design's choice over a copy), so on alternate steps it IS the snapshot
+//   and is swept beside everything `SCRATCH_ID_BODY_STATE` is swept beside: the solver cohort
+//   (`build_bodies`, the integrate, the write-back), the gather loop's row-identity upper run,
+//   the tree's verify and the broadphase + narrowphase union (the grid's radii, the frame
+//   fill), the soft coupling's per-row reaction, the graph's predicate and the sleep step's
+//   latch and island scratch. The resting test reads it beside `prev_row` too. Its slot must
+//   clear every one of those families.
+// * `row_cls` is read beside both snapshots at one row (the resting test), and beside the same
+//   families in every stage that reads it, so its slot must clear them and both snapshots.
+//
+// Every slot in 404..=386 (the ids between the island scratch and the floor) belongs to the
+// broadphase + narrowphase union (slots 29..=4) or the soft coupling (3, 2), so the two land on
+// slots 1 and 0, the soft graph's: a cohort swept over particles, never beside a body row. Both
+// are COMPUTED by the search below rather than hand-picked, so a cohort that moves re-derives
+// them, and the floor assert further down fires if a move pushes them below the floor.
+
+/// Every run of ids a body-row snapshot is swept beside, as `(top, bottom)` pairs.
+const BODY_SNAPSHOT_FAMILIES: [(usize, usize); 9] = [
+    (SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM),
+    (SCRATCH_ID_GRAPH_TOP, SCRATCH_ID_GRAPH_BOTTOM),
+    (SCRATCH_ID_BROADPHASE_TOP, SCRATCH_ID_NARROWPHASE_BOTTOM),
+    (SCRATCH_ID_SOFT_COUPLING_TOP, SCRATCH_ID_SOFT_COUPLING_BOTTOM),
+    (SCRATCH_ID_ROW_IDENTITY_TOP, SCRATCH_ID_ROW_ADDED),
+    (SCRATCH_ID_ROW_PREV, SCRATCH_ID_ROW_IDENTITY_BOTTOM),
+    (SCRATCH_ID_SLEEP_LATCH, SCRATCH_ID_SLEEP_LATCH),
+    (SCRATCH_ID_TREE_TOP, SCRATCH_ID_TREE_BOTTOM),
+    (SCRATCH_ID_SLEEP_ISLAND_SCRATCH, SCRATCH_ID_SLEEP_ISLAND_SCRATCH),
+];
+
+/// Whether `id` shares a stagger slot with any id of any run in `runs`.
+const fn shares_stagger_slot_with_any(id: usize, runs: &[(usize, usize)]) -> bool {
+    let mut i = 0;
+    while i < runs.len() {
+        if shares_stagger_slot(id, runs[i].0, runs[i].1) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The highest id at or below `start` whose stagger slot clears every run in `runs`.
+///
+/// Fails const evaluation (underflow) if no id at or below `start` clears them.
+const fn highest_id_clear_of_all(start: usize, runs: &[(usize, usize)]) -> usize {
+    let mut id = start;
+    while shares_stagger_slot_with_any(id, runs) {
+        id -= 1;
+    }
+    id
+}
+
+/// Synthetic id for `SolverScratch::bodies_prev` (L10 C2a, design 04 D3): the highest id below
+/// the island scratch whose slot clears every family the gather snapshot is swept beside.
+pub(crate) const SCRATCH_ID_BODIES_PREV: usize =
+    highest_id_clear_of_all(SCRATCH_ID_SLEEP_ISLAND_SCRATCH - 1, &BODY_SNAPSHOT_FAMILIES);
+
+/// Every run `row_cls` is swept beside: a body snapshot's families plus both snapshots.
+const ROW_CLS_FAMILIES: [(usize, usize); 11] = [
+    BODY_SNAPSHOT_FAMILIES[0],
+    BODY_SNAPSHOT_FAMILIES[1],
+    BODY_SNAPSHOT_FAMILIES[2],
+    BODY_SNAPSHOT_FAMILIES[3],
+    BODY_SNAPSHOT_FAMILIES[4],
+    BODY_SNAPSHOT_FAMILIES[5],
+    BODY_SNAPSHOT_FAMILIES[6],
+    BODY_SNAPSHOT_FAMILIES[7],
+    BODY_SNAPSHOT_FAMILIES[8],
+    (SCRATCH_ID_BODY_STATE, SCRATCH_ID_BODY_STATE),
+    (SCRATCH_ID_BODIES_PREV, SCRATCH_ID_BODIES_PREV),
+];
+
+/// Synthetic id for `SleepSets::row_cls` (L10 C2a, design 04 A1.3): the highest id below
+/// `bodies_prev` whose slot clears both snapshots and every family they are swept beside.
+pub(crate) const SCRATCH_ID_SLEEP_ROW_CLS: usize =
+    highest_id_clear_of_all(SCRATCH_ID_BODIES_PREV - 1, &ROW_CLS_FAMILIES);
+
+// The swap: `bodies_prev` stands in for the gather snapshot on alternate steps, so it must clear
+// every family `SCRATCH_ID_BODY_STATE` is asserted clear of above, and the two must not share a
+// slot (the resting test reads both at one row).
+const _: () = assert!(
+    !shares_stagger_slot_with_any(SCRATCH_ID_BODIES_PREV, &BODY_SNAPSHOT_FAMILIES)
+        && SCRATCH_ID_BODIES_PREV % POOL_STAGGER_LINES != SCRATCH_ID_BODY_STATE % POOL_STAGGER_LINES,
+    "bodies_prev swaps roles with the BodyState snapshot, and its slot is one of a family the \
+     snapshot is swept beside"
+);
+
+const _: () = assert!(
+    !shares_stagger_slot_with_any(SCRATCH_ID_SLEEP_ROW_CLS, &ROW_CLS_FAMILIES),
+    "row_cls is read beside both BodyState snapshots and their families, and its slot is one of \
+     theirs"
+);
+
+const _: () = assert!(
+    SCRATCH_ID_SLEEP_ROW_CLS < SCRATCH_ID_BODIES_PREV
+        && SCRATCH_ID_BODIES_PREV < SCRATCH_ID_SLEEP_ISLAND_SCRATCH,
+    "the L10 per-row columns sit below the island scratch, row_cls lowest"
+);
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_BODIES_PREV`].
+#[inline]
+pub(crate) fn bodies_prev_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_BODIES_PREV)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_SLEEP_ROW_CLS`].
+#[inline]
+pub(crate) fn sleep_row_cls_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_SLEEP_ROW_CLS)
+}
+
+/// Registers the element layout of every [`SleepSets`](crate::sleep_sets::SleepSets) column,
+/// idempotently: the per-row `RowCls`.
+pub(crate) fn register_sleep_sets_layouts() {
+    register_layout::<RowCls>(SCRATCH_ID_SLEEP_ROW_CLS);
+}
+
 /// The lowest id the physics scratch region may occupy.
 ///
 /// The region grows DOWNWARD from the top of the id space while production
@@ -922,12 +1047,13 @@ pub(crate) fn sleep_island_scratch_id() -> ComponentId {
 /// and the census above is the thing to re-run before moving this number again.
 const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 128;
 
-// The sleep island scratch, one id below the broadphase-tree cohort, is the region's lowest
-// edge today (L10 C0). The floor is asserted against the LOWEST id rather than against
-// whichever cohort happened to be last when this was written — add a cohort below and move
-// this assert with it.
+// `SleepSets::row_cls`, the lower of L10's two per-row columns below the island scratch, is the
+// region's lowest edge today (L10 C2a; it sits ON the floor, so the next id below it needs the
+// floor moved). The floor is asserted against the LOWEST id rather than against whichever
+// cohort happened to be last when this was written — add a cohort below and move this assert
+// with it.
 const _: () = assert!(
-    SCRATCH_ID_SLEEP_ISLAND_SCRATCH >= SCRATCH_REGION_MIN_ID
+    SCRATCH_ID_SLEEP_ROW_CLS >= SCRATCH_REGION_MIN_ID
         && SCRATCH_ID_SLEEP_ISLAND_SCRATCH < SCRATCH_ID_TREE_BOTTOM,
     "the physics scratch region has grown below SCRATCH_REGION_MIN_ID; production \
      ids climb from 0 and the reserved region is no longer comfortably out of \
@@ -1008,6 +1134,7 @@ pub(crate) fn register_scratch_layouts() {
     register_solver_tail_layouts();
     register_row_identity_layouts();
     register_layout::<IslandScratch>(SCRATCH_ID_SLEEP_ISLAND_SCRATCH);
+    register_layout::<BodyState>(SCRATCH_ID_BODIES_PREV);
 }
 
 /// Registers the [`Layout`](std::alloc::Layout) of every contact column's element

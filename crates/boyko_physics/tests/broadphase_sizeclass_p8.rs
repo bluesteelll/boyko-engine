@@ -69,7 +69,7 @@ fn all_pairs(bodies: &[BodyState]) -> Vec<(BodyIndex, BodyIndex)> {
 fn grid_pairs(grid: &mut BroadphaseGrid, bodies: &[BodyState]) -> Vec<(BodyIndex, BodyIndex)> {
     let mut out = ContactPairs::with_capacity(0);
     grid.build(bodies, &mut out);
-    out.pairs().to_vec()
+    out.pairs().iter().copied().collect::<Vec<_>>()
 }
 
 /// Asserts the size-class grid pair set is bit-identical (same `(min, max)` order)
