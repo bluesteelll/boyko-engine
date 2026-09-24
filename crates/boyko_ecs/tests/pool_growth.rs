@@ -232,13 +232,16 @@ fn cross_ceiling_spawn_100k_one_archetype() {
 
 // ════════════════════════════════════════════════════════════════════════════
 // I-2 — migration-into-grown-target: 2500 entities migrate {Src} -> {Src,Tag}
-//        in one apply window; the target's 64-B pool grows mid-apply (3 commit
-//        events); source bytes preserved; retained ticks preserved (no Added
-//        re-fire), inserted component fires Added exactly once.
+//        in one apply window; the target's 64-B pool grows mid-apply, one
+//        commit rung at a time; source bytes preserved; retained ticks
+//        preserved (no Added re-fire), inserted component fires Added exactly
+//        once.
 // ════════════════════════════════════════════════════════════════════════════
 
-/// 64-byte source payload: one granule = 1024 rows, so 2500 migrations cross
-/// TWO slab boundaries inside the target pool mid-apply.
+/// 64-byte source payload. The migrations insert one row at a time, so the
+/// target pool climbs its commit ladder mid-apply: from `(4096 - σ) / 64` rows
+/// to `(262144 - σ) / 64` in seven events on the 4 KiB page (packing plan D2;
+/// it crossed two 64 KiB granule boundaries before).
 #[derive(Component)]
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -584,10 +587,13 @@ fn hook_deferred_spawns_grow_same_archetype_at_slab_boundary() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// I-4 — for_each_chunk single-slice witness after crossing a slab boundary.
+// I-4 — for_each_chunk single-slice witness after growth past 2048 rows.
 // ════════════════════════════════════════════════════════════════════════════
 
-/// 64-byte payload (boundary at 1024 rows): 3000 rows span 3 commit events.
+/// 64-byte payload. `spawn_batch` reserves all 3000 rows in ONE
+/// request-dominant commit (`Archetype::reserve_capacity`). This line used to
+/// say the 3000 rows spanned three commit events; the batch path never took
+/// more than one, on either commit quantum.
 #[derive(Component)]
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -603,8 +609,8 @@ struct I4Bundle {
 
 const I4_N: usize = 3_000;
 
-/// I-4 (plan §Test matrix / D10): after the pool crosses >= 2 slab
-/// boundaries, `for_each_chunk` over the archetype must still yield exactly
+/// I-4 (plan §Test matrix / D10): after the pool grows past 2048 rows,
+/// `for_each_chunk` over the archetype must still yield exactly
 /// ONE contiguous slice (`len == entity_count`) whose contents match
 /// per-entity random-access reads — in-place extension preserves the
 /// whole-archetype single-slice contract (the demo's zero-copy GPU upload
@@ -666,7 +672,8 @@ fn for_each_chunk_single_slice_after_growth() {
         );
     }
 
-    // The witness is only meaningful if growth actually crossed boundaries.
+    // The witness is only meaningful if the pool actually grew past its
+    // first rungs.
     let arch_id = world.get_or_create_archetype(&[I4Pay::component_id()]);
     let pool = world
         .archetype_master()
@@ -677,7 +684,7 @@ fn for_each_chunk_single_slice_after_growth() {
         .expect("pool");
     assert!(
         pool.committed_rows() >= I4_N && pool.committed_rows() > 2048,
-        "the pool crossed >= 2 slab boundaries (committed = {})",
+"the frontier covers the batch past 2048 rows (committed = {})",
         pool.committed_rows()
     );
 }

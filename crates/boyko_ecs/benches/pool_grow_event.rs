@@ -38,8 +38,12 @@
 //! row count never reaches the 16 M ceiling, so no clamp distorts it).
 //!
 //! With a 16-B stride the D4 trace per ladder is: data commits of
-//! 64 KiB x2, 128 KiB, 256 KiB, 512 KiB, 1 MiB, 2 MiB, 4 MiB, 8 MiB,
-//! 16 MiB, 32 MiB, then 64 MiB x2 (doubling clamps at `POOL_MAX_SLAB`).
+//! 4 KiB x2, 8 KiB, 16 KiB, 32 KiB, 64 KiB, 128 KiB, 256 KiB, 512 KiB,
+//! 1 MiB, 2 MiB, 4 MiB, 8 MiB, 16 MiB, 32 MiB, then 64 MiB x2 (doubling
+//! clamps at `POOL_MAX_SLAB`). The ladder starts at one `COMMIT_PAGE`
+//! (packing plan D1/D2); id 448's stagger is 0, so its row frontiers are
+//! exact multiples of 256 rows. The three gated classes are all still rungs
+//! of this ladder.
 //! The ladder stops right after the second full 64 MiB event (frontier
 //! 128 MiB -> 192 MiB), i.e. after 8,388,609 adds (~128 MiB of 16-B row
 //! writes, ~40-150 ms wall per iteration) — `sample_size(10)` +

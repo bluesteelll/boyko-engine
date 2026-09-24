@@ -469,13 +469,13 @@ impl ComponentPool {
     /// # Why this exists
     ///
     /// A `ComponentPool` reservation is `[pad | data | added_ticks |
-    /// changed_ticks]` and `grow_rows` commits ALL THREE at
-    /// [`COMMIT_GRANULE`](crate::ecs::constants::COMMIT_GRANULE) = 64 KiB
-    /// granularity. Two tick regions at 4 B/row is **8 B of change detection per
-    /// row on top of the datum**, so a tracked column costs 3.0x a plain
-    /// `Vec<u32>`, 2.0x a `Vec<u64>` and 9.0x a `Vec<bool>` in commit charge —
-    /// and the first non-empty grow makes >= 3 x 64 KiB = 192 KiB resident per
-    /// column regardless of row count.
+    /// changed_ticks]` and `grow_rows` commits ALL THREE, each on its own
+    /// [`COMMIT_PAGE`](crate::ecs::constants::COMMIT_PAGE) ladder. Two tick
+    /// regions at 4 B/row is **8 B of change detection per row on top of the
+    /// datum**, so a tracked column costs 3.0x a plain `Vec<u32>`, 2.0x a
+    /// `Vec<u64>` and 9.0x a `Vec<bool>` in commit charge — and the first
+    /// non-empty grow makes three pages (12 KiB) resident per tracked column
+    /// regardless of row count, where an untracked one makes one (4 KiB).
     ///
     /// [`ScratchColumn`] declares it never reads a tick ("There is NO
     /// change-detection tick use — this is raw scratch"), and that claim is

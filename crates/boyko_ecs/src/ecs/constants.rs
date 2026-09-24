@@ -78,7 +78,10 @@ pub const SIMD_BUFFER_ALIGN: usize = 32;
 /// is +125 GiB VA — noise against the 3.4 TiB pool budget — plus ≤ 2
 /// VMAs/VADs per MATERIALIZED column (committed prefix + `PROT_NONE` tail)
 /// ⇒ +2,000, still ≥ 3× headroom under `vm.max_map_count`. Resident floor:
-/// one `POOL_MIN_SLAB` (64 KiB) commit per NON-EMPTY column — empty
+/// one `POOL_MIN_SLAB` (one `COMMIT_PAGE`, 4 KiB) commit per NON-EMPTY
+/// `VmColumn`, and one page per sub-region of a non-empty `ComponentPool` —
+/// 12 KiB tracked, 4 KiB untracked (packing plan D2; before it, 64 KiB per
+/// `VmColumn` and 192 / 384 KiB per tracked pool at σ = 0 / σ ≠ 0) — empty
 /// archetypes/stores commit nothing. The dense bookkeeping arrays stay small
 /// heap `Vec`s (F4: floor + amortized growth), so none of this eagerly
 /// commits resident memory on the syscall arms.
@@ -246,8 +249,11 @@ const _: () = assert!(
 /// The result is always a multiple of [`CACHE_LINE_SIZE`] (64 B), hence a
 /// multiple of [`SIMD_BUFFER_ALIGN`] (the const assert above pins this), so the
 /// staggered data base preserves the AVX2 alignment contract. It is strictly
-/// less than one page (`< 64 × 64 = 4096`), so it costs at most one extra
-/// lazily-committed page per pool.
+/// less than one page (`< POOL_STAGGER_SPAN = 64 × 64 = 4096 <= COMMIT_PAGE`),
+/// and it costs no extra committed page: the commit ladder measures every
+/// frontier from the sub-region's absolute page floor, so the pad sits inside
+/// the sub-region's first page (packing plan D2, D4). On the granule ladder
+/// this sentence was false — the pad cost a whole extra granule per sub-region.
 /// # Contract for a COHORT of columns (why this is `pub`)
 ///
 /// The stagger is a pure function of `component_id % POOL_STAGGER_LINES`, so
