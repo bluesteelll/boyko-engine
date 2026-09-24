@@ -46,9 +46,9 @@
 //!
 //! # Configurations (`--cfg`, `--solver`)
 //!
-//! The runner sets every knob it depends on explicitly, so a change of a shipped default (the
-//! colored solver and `simd_solve` became the defaults in `56c1e9e7`, 2026-09-18) cannot change
-//! what a row measures:
+//! The runner sets every knob it depends on explicitly but one, so a change of a shipped default
+//! (the colored solver and `simd_solve` became the defaults in `56c1e9e7`, 2026-09-18) cannot
+//! change what a row measures; the one is `contact_reuse` (below the list):
 //!
 //! * `--cfg a` (cfg-A, H7): the colored solve; `parallel_solve = W > 1` (`--parallel-solve` could
 //!   force it on at W = 1 until L4 retired J-P1); `parallel_narrowphase` follows `parallel_solve`
@@ -92,7 +92,10 @@
 //! combination, and ω₁ comes from a zero-work spawn/join microbench from L4 on.
 //!
 //! `substeps`, `relax_iterations`, `simd` and the soft-contact constants stay at the tree's
-//! defaults and are printed in the summary.
+//! defaults and are printed in the summary. So does `contact_reuse` under every `--cfg` unless
+//! `--contact-reuse` sets it, and that default is a value knob: it is on since L9 C4, so a row
+//! without the flag runs contact reuse, and `--contact-reuse off` is the exact narrowphase — the
+//! spelling every cross-window bridge and every pre-C4 pose fixture needs from C4 on.
 //!
 //! # The profile (`--arm-profiler`)
 //!

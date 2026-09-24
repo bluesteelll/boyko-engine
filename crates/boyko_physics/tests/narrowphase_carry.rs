@@ -20,7 +20,7 @@
 //! (`Manifolds::pair_carry_jumper_builds` rose by one), the carry was never Reset, and carried
 //! separating axes rejected pairs on both steps (`Manifolds::separated_axis_hits`).
 //!
-//! The census runs twice, on two worlds: with contact reuse off (the default), and forced on (L9
+//! The census runs twice, on two worlds, each setting the flag: contact reuse off, and on (L9
 //! C3), where the pairs also read, copy and rebuild their reuse records — through a row move, a
 //! flipped join and a jumper search among them. The reuse-on arm's witness: pairs reused their
 //! records on both steps of every cycle.
