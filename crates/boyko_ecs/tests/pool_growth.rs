@@ -509,7 +509,7 @@ unsafe fn i3_on_add(mut w: DeferredEcsMaster<'_>, _ctx: HookContext) {
 }
 
 /// I-3 (plan §Test matrix): nested growth works, no double-apply, final
-/// counts exact. `I3_OUTER` outer deferred spawns (1024 - id % 64 on the
+/// counts exact. `i3_outer` outer deferred spawns (1024 - id % 64 on the
 /// 4 KiB page) + 3 hook-deferred nested spawns, one hook fire per entity
 /// (each spawn fires on_add EXACTLY once — a double-apply would inflate
 /// both), the pool exactly full when the nested drain began and grown past

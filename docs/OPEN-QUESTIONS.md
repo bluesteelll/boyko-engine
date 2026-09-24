@@ -1226,7 +1226,7 @@ ruling below is unaffected; the margins in point 1 are re-derived on both sides.
    files.
 3. **Option (b) cannot be built with the engine's own primitive.** `VmColumn::new` asserts
    `COMMIT_PAGE.is_multiple_of(size_of::<T>())` (`COMMIT_GRANULE` before D-M0)
-   ([`vm_column.rs:151-156`](../crates/boyko_ecs/src/ecs/memory/vm_column.rs)) and 40 ∤ 4096 (nor
+   ([`vm_column.rs:168-173`](../crates/boyko_ecs/src/ecs/memory/vm_column.rs)) and 40 ∤ 4096 (nor
    65536), so
    the correction's "flat column" of a 40 B row type collapses into a pool-reusing variant that
    saves 25 % while paying 100 %. And `grep -rniw "resource" crates/boyko_serialize/src/` returns

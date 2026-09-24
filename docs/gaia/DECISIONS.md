@@ -767,7 +767,7 @@ per query**, not 4000 row visits — queries are signature-filtered.
 **Rejected: (b) a new RESOURCE region in the byte format.** It buys **129 536 B** on that table
 (25%), or 326 144 B (62%) **only if a new tick-free VM primitive is also written** — because
 `VmColumn<T>::new` **panics** unless `size_of::<T>()` divides the commit granule
-(`crates/boyko_ecs/src/ecs/memory/vm_column.rs:144-149`), and 40 does not, nor do 48, 56 or 72. So a
+(`crates/boyko_ecs/src/ecs/memory/vm_column.rs:168-173`), and 40 does not, nor do 48, 56 or 72. So a
 resource-owned flat column cannot use the engine's bare column primitive at all; it must reuse
 `ComponentPool` — which requires a registered `ComponentId`, i.e. the row type is a `Component`
 anyway, and which unconditionally lays out `[data | added | changed]`. Against **0.13 MB**, the

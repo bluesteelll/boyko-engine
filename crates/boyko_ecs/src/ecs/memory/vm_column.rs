@@ -23,9 +23,9 @@
 //!
 //! # `T: Copy` — no element drop
 //!
-//! Every consumer stores a plain-old-data id (`EntityId`, `#[repr(transparent)]`
-//! over `usize`, or — for `EntityReservoir`'s recycled-entity stack — a 16-byte
-//! `Entity`). The bound is `T: Copy`, so `swap_remove` and `clear` never run
+//! Every consumer stores plain-old-data — ids, bare integers, and two 16-byte
+//! `#[repr(C)]` records; the full list is under *Supported element domain*
+//! below. The bound is `T: Copy`, so `swap_remove` and `clear` never run
 //! a destructor: a removed element is simply overwritten and the length rolled
 //! back. This is the whole reason the primitive is small and unsafe-light — it
 //! is deliberately NOT a general `Vec` replacement for droppable `T`.
@@ -40,12 +40,29 @@
 //! a `T` whose size does not divide the page (e.g. 12 or 24 bytes) would
 //! floor `committed_elems` below the byte frontier and the unix arm's
 //! `mprotect` would reject the recommit of a LEGAL growth with a release
-//! assert-panic. All current consumers store the 8-byte `EntityId` or the
-//! 16-byte `Entity`, and the log ring a 16-byte line and bytes; each divides
-//! the 4 KiB page. The divisor is the commit quantum, which the packing plan
-//! (D1) lowered from the 64 KiB granule to the page, so the domain tightened
-//! from "divides 65 536" to "divides 4 096": the only sizes it newly refuses
-//! are 8, 16, 32 and 64 KiB. (Same pin as
+//! assert-panic.
+//!
+//! The consumers, every instantiation in the workspace (the type is
+//! `pub(crate)`, so no other crate can add one):
+//!
+//! | column | `T` | `size_of::<T>()` |
+//! |---|---|---|
+//! | `Archetype.entity_ids` | `EntityId` (`#[repr(transparent)]` over `usize`) | 8 |
+//! | `DenseStore.s2e` | `EntityId` | 8 |
+//! | `EntityReservoir.free` | `Entity` (const-asserted at its site) | 16 |
+//! | `Assets.slot_word`, `Assets.refcount` | `u32` | 4 |
+//! | `PathIndex.entries` | `PathEntry` (`#[repr(C)]` `u64` + `u32` + `u32`) | 16 |
+//! | `LogRing.lines` | `LogLine` (const-asserted at its site) | 16 |
+//! | `LogRing.arena` | `u8` | 1 |
+//! | `EntityMaster::check_invariants` scratch, in-crate unit tests | `EntityId` | 8 |
+//!
+//! Each of 1, 4, 8 and 16 divides 4 096, and so also divides the 64 KiB
+//! commit page of the non-`x86_64` arm.
+//!
+//! The divisor is the commit quantum, which the packing plan (D1) lowered
+//! from the 64 KiB granule to the page, so the domain tightened from
+//! "divides 65 536" to "divides 4 096": the only sizes it newly refuses are
+//! 8, 16, 32 and 64 KiB. (Same pin as
 //! `InlandStore`'s `COMMIT_GRANULE.is_multiple_of(SLOT_SIZE)` const assert,
 //! whose slabs are still granule-stepped, made a constructor assert here
 //! because `T` is generic.)
