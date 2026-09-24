@@ -565,7 +565,7 @@ D9 requires EG2 to duplicate and the arms §4 requires it to write:
 | the duplicated `migrate_entity_attach_ids` body | **7** | `&mut *source_ptr`; `&mut *target_ptr`; `slice::from_raw_parts` over the retained row; `read_added_tick`; `read_changed_tick`; the four-call retained write block; `(*target_ptr).flags` (`migration_helpers.rs:1962~`) |
 | **U5**, new | 1 | the added ids' byte write |
 | S1's and S2's `add_tag`-shaped presence read | 2 | `&*inland.archetype_ptr()`, one each (`tag_api.rs:130`) |
-| S3 | 3 | the `addr_of!((*p).component_pools)` projection and `write_changed_tick` on the table arm (`component_pool.rs:1879`), and the dense arm's store through `changed_ticks_ptr` (`component/dense/dense_store.rs:782`) |
+| S3 | 3 | the `addr_of!((*p).component_pools)` projection and `write_changed_tick` on the table arm (`component_pool.rs:1992`), and the dense arm's store through `changed_ticks_ptr` (`component/dense/dense_store.rs:782`) |
 
 The seven duplicated **`unsafe`** blocks land with their **original** `// SAFETY:` comments, which
 remain true verbatim — that is a property of D9's duplication, not an exemption from principle 8.
@@ -1392,10 +1392,10 @@ learned that lesson — which is why the instruction is to take the list from th
   the partially-uninitialised row (and the release test reds without Miri).~~ **STRUCK (D26): the
   predicted artifact does not exist in EITHER profile, and this is a red whose subject was not what
   it named.** `write_at_unchecked_initialized` copies `self.component_layout.size()` bytes, **not**
-  `bytes.len()` (`component_pool.rs:2055~`), so the destination row is always FULLY initialised; the
+  `bytes.len()` (`component_pool.rs:2168~`), so the destination row is always FULLY initialised; the
   fault is an out-of-bounds **read** past the caller's slice. And in debug — which is how
   `cargo miri test` builds — the pool's own
-  `debug_assert_eq!(bytes.len(), self.component_layout.size(), …)` (`component_pool.rs:2041~`) fires
+  `debug_assert_eq!(bytes.len(), self.component_layout.size(), …)` (`component_pool.rs:2154~`) fires
   first, so Miri never reaches the copy. **The repaired mutation:** delete S1's length check *and*
   the pool's `debug_assert_eq!`, and run gate 10's Miri leg → Miri reds on the OOB read of the
   caller's slice. Both deletions restored under `cmp`. *(A one-line mutation cannot express this
@@ -2562,7 +2562,7 @@ kernel commit; it did exactly that here. Every `migration_helpers.rs`, `componen
   call graph; the duplication is uncalled code. The number that CHANGED is the review cost, not the
   image cost — see the `unsafe` census correction in §6, which was under-counting by twelve.
 * 🟢 **S3 needs no new pool-layer mechanism.** Table: `get_component_changed_tick`'s prologue
-  (`component_api.rs:367`) plus `ComponentPool::write_changed_tick` (`component_pool.rs:1879`),
+  (`component_api.rs:367`) plus `ComponentPool::write_changed_tick` (`component_pool.rs:1992`),
   whose receiver is `&self`. Dense: a store through `changed_ticks_ptr`
   (`component/dense/dense_store.rs:782`). *(`stamp_slot_ticks` is NOT the one: it stamps `added` too,
   and S3 must preserve it.)*
@@ -2930,10 +2930,10 @@ figure is written beside it instead.
 | `g1` | FAILED | FAILED | `tests/seam_by_id.rs:251~` — *"a fresh attach stamps the changed tick at current_tick"*, `left: None  right: Some(Tick(0))` |
 | `g1c` | FAILED | FAILED | `tests/seam_by_id.rs:307~` — *"the size-0 column got a committed row with a tick, exactly like a data column"* |
 | `g14` | FAILED | FAILED | `tests/seam_by_id.rs:1647~` — *"exactly one drop, performed by the world at teardown"*, `left: 0  right: 1` |
-| `g13b` | FAILED | **ok** | `component_pool.rs:2169~` — *"commit_units: start_row 2 != current count 1 (rows must extend the tail)"*, `left: 2  right: 1` |
+| `g13b` | FAILED | **ok** | `component_pool.rs:2282~` — *"commit_units: start_row 2 != current count 1 (rows must extend the tail)"*, `left: 2  right: 1` |
 | `g16` | FAILED | **ok** | same assertion, same numbers |
 | `g18` | FAILED | **ok** | same assertion, same numbers |
-| `g15b` (in-`src` unit gate) | FAILED | **ok** | `component_pool.rs:1592~` — *"unit_ptr: idx out of bounds"* |
+| `g15b` (in-`src` unit gate) | FAILED | **ok** | `component_pool.rs:1705~` — *"unit_ptr: idx out of bounds"* |
 | `g13` | **ok** | **ok** | — |
 
 1. **`--release` is NOT load-bearing for gate 14.** The struck sentence said the lockstep

@@ -27,21 +27,82 @@
 //!
 //! # Geometry
 //!
-//! All raw-pool tests use a 1024-byte stride so ONE commit granule
-//! (64 KiB) covers exactly 64 rows — slab boundaries at rows 64 / 128 / 256
-//! keep iteration counts Miri-cheap while still crossing >= 2 growth events
-//! (the small-ceiling D2 constructor mapping is the test knob — ★R1-9).
+//! All raw-pool tests use a 1024-byte stride, so the commit ladder (packing
+//! plan D2: doubling from one 4 KiB `COMMIT_PAGE`, measured from the data
+//! sub-region's absolute page floor) passes a new frontier every few rows and
+//! crosses >= 2 growth events within a Miri-cheap iteration count (the
+//! small-ceiling D2 constructor mapping is the test knob — ★R1-9). Under Miri
+//! `COMMIT_PAGE` is still 4 KiB: its cfg is `target_arch`, which Miri keeps.
+//!
+//! A frontier is `(committed data bytes - σ) / 1024` with `σ =
+//! pool_base_stagger(id)`, and a derive-minted id depends on mint order, so
+//! every frontier pinned below is computed by [`Ladder`] from the fixture's
+//! OWN id (cut PC-6) rather than written down. The granule ladder's frontiers
+//! (64 / 128 / 256) did not depend on σ. `miri_page_floor_ladder_at_a_pinned_
+//! nonzero_stagger` pins a fixed id whose σ is known to be non-zero, which is
+//! what the UG-08 mutation row (drop `- σ` from `grow_rows`' row count) needs:
+//! the obligation-11 debug twin fires there under Miri.
 
 #![cfg(miri)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use boyko_ecs::ecs::constants::{COMMIT_GRANULE, COMMIT_PAGE, POOL_MAX_SLAB, pool_base_stagger};
 use boyko_ecs::ecs::core::component::component::Component;
+use boyko_ecs::ecs::core::component::component_registry;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::system::Commands;
+use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 use boyko_ecs::ecs::memory::component_pool::ComponentPool;
 use boyko_macros::{Bundle, Component};
+
+/// The packing plan's D2 data ladder for one explicit-ceiling pool of
+/// `stride`-byte rows, re-derived from the pool's own stagger: doubling from
+/// one `COMMIT_PAGE`, request-dominant, capped at `align_up_page(σ +
+/// data_len)`, rows clamped to the ceiling.
+struct Ladder {
+    sigma: usize,
+    stride: usize,
+    reserve_rows: usize,
+    data_cap: usize,
+    data: usize,
+    rows: usize,
+}
+
+impl Ladder {
+    fn new(component_id: usize, stride: usize, reserve_rows: usize) -> Self {
+        let sigma = pool_base_stagger(component_id);
+        let data_len = (reserve_rows * stride).next_multiple_of(COMMIT_GRANULE);
+        Self {
+            sigma,
+            stride,
+            reserve_rows,
+            data_cap: (sigma + data_len).next_multiple_of(COMMIT_PAGE),
+            data: 0,
+            rows: 0,
+        }
+    }
+
+    /// The committed-row frontier after a request for `n` rows (an `add`
+    /// grows exactly when it finds `count == committed_rows`, asking for
+    /// `count + 1`).
+    fn grow(&mut self, n: usize) -> usize {
+        if n > self.rows && n <= self.reserve_rows {
+            let needed = (self.sigma + n * self.stride).next_multiple_of(COMMIT_PAGE);
+            let step = self.data.clamp(COMMIT_PAGE, POOL_MAX_SLAB).max(needed - self.data);
+            self.data = (self.data + step).min(self.data_cap);
+            self.rows = ((self.data - self.sigma) / self.stride).min(self.reserve_rows);
+        }
+        self.rows
+    }
+
+    /// The frontier after `adds` one-row-at-a-time adds into a fresh pool.
+    fn after_adds(component_id: usize, stride: usize, reserve_rows: usize, adds: usize) -> usize {
+        let mut ladder = Self::new(component_id, stride, reserve_rows);
+        (1..=adds).map(|n| ladder.grow(n)).last().unwrap_or(0)
+    }
+}
 
 /// 1024-byte POD payload: one granule = 64 rows (see file header geometry).
 #[derive(Component)]
@@ -65,45 +126,47 @@ fn make_pad1k_pool(cap: usize) -> ComponentPool {
 
 /// M-XI (1) — multi-slab growth bookkeeping + address stability under TB.
 ///
-/// A 1 x 256 pool spans 4 granules; 200 adds drive 3 growth events
-/// (committed_rows 64 -> 128 -> 256). Pins the frontier transitions at the
-/// exact boundary adds, the write-once base pointers across all events,
-/// and full value round-trips through rows on every slab.
+/// A 1 x 256 pool; 200 adds drive the page ladder through its frontiers
+/// (re-derived, packing plan S2: `(4096 · 2^k - σ) / 1024` capped at 256 —
+/// 4, 8, 16, 32, 64, 128, 256 at σ = 0 and 3, 7, 15, 31, 63, 127, 255 at
+/// σ = 64; it was 64 -> 128 -> 256 on the granule ladder, for every σ). Pins
+/// the frontier after every add, the write-once base pointers across all
+/// events, and full value round-trips through rows on every commit.
 #[test]
 fn miri_multi_slab_growth_bookkeeping_and_stability() {
     let mut pool = make_pad1k_pool(256);
     assert_eq!(pool.component_layout().size(), 1024, "fixture stride pin");
     assert_eq!(pool.capacity(), 256, "D2 mapping: reserve_rows = 1 * 256");
     assert_eq!(pool.committed_rows(), 0, "D3: zero initial commit");
+    let mut ladder = Ladder::new(pool.component_id(), 1024, 256);
 
     pool.add_typed(Pad1K::new(0)).expect("row 0");
-    assert_eq!(pool.committed_rows(), 64, "first commit = one granule = 64 rows");
+    assert_eq!(pool.committed_rows(), ladder.grow(1), "first commit: the first data page(s)");
     let base = pool.buffer_ptr();
     let row0 = pool.get_raw(0).expect("row 0 live");
     // (Tick-base stability is pinned by the in-file U-P2 unit test — the
     // tick accessors are pub(crate) and unreachable from tests/.)
 
+    let mut events = 1;
     for i in 1..200u64 {
+        let before = pool.committed_rows();
         pool.add_typed(Pad1K::new(i)).expect("under the 256-row ceiling");
-        // Frontier transitions exactly at the slab boundaries (D4 doubling:
-        // 64 KiB -> 128 KiB -> 256 KiB).
-        let expected = match pool.count() {
-            n if n <= 64 => 64,
-            n if n <= 128 => 128,
-            _ => 256,
-        };
         assert_eq!(
             pool.committed_rows(),
-            expected,
+            ladder.grow(pool.count()),
             "frontier after {} adds",
             pool.count()
         );
+        if pool.committed_rows() != before {
+            events += 1;
+        }
     }
     assert_eq!(pool.count(), 200);
-    assert_eq!(pool.committed_rows(), 256);
+    assert_eq!(pool.committed_rows(), Ladder::after_adds(pool.component_id(), 1024, 256, 200));
+    assert!(events >= 3, "the 200 adds must cross >= 2 commit boundaries (events = {events})");
 
     // Write-once base pointers never moved (Soundness item 1 under TB).
-    assert_eq!(pool.buffer_ptr(), base, "data base stable across 3 growths");
+    assert_eq!(pool.buffer_ptr(), base, "data base stable across every growth");
     assert_eq!(pool.get_raw(0).expect("row 0"), row0, "row-0 ptr stable");
 
     // Every row on every slab round-trips through the recomputed row_ptr.
@@ -114,10 +177,10 @@ fn miri_multi_slab_growth_bookkeeping_and_stability() {
     }
 }
 
-/// M-XI (2) — swap_remove ACROSS a slab boundary under TB: the last row
-/// (living on the second/third slab) is memcpy'd into a hole on the first
-/// slab — the cross-boundary row_ptr pair the in-place design must keep
-/// inside one allocated object (★R1-8).
+/// M-XI (2) — swap_remove ACROSS commit boundaries under TB: the last row
+/// (committed several growth events after the first) is memcpy'd into a hole
+/// in an earlier commit — the cross-boundary row_ptr pair the in-place design
+/// must keep inside one allocated object (★R1-8).
 #[test]
 fn miri_swap_remove_across_slab_boundary() {
     let mut pool = make_pad1k_pool(256);
@@ -125,9 +188,16 @@ fn miri_swap_remove_across_slab_boundary() {
     for i in 0..130u64 {
         pool.add_typed(Pad1K::new(i)).expect("130 rows fit");
     }
-    assert_eq!(pool.committed_rows(), 256, "130 rows crossed two boundaries");
+    // Re-derived (S2): the frontier after 130 adds is the ladder's — 256 at
+    // σ = 0, 255 at σ = 64 (was 256 for every σ).
+    assert_eq!(
+        pool.committed_rows(),
+        Ladder::after_adds(pool.component_id(), 1024, 256, 130),
+        "130 rows crossed the commit boundaries"
+    );
+    assert!(pool.committed_rows() >= 130);
 
-    // Hole on slab 1 (row 10), donor on slab 3 (row 129).
+    // Hole in the second commit at most (row 10), donor in the last (row 129).
     assert!(pool.swap_remove(10), "swap_remove(10) in bounds");
     assert_eq!(pool.count(), 129);
     let moved = pool.get_typed::<Pad1K>(10).expect("hole refilled");
@@ -165,8 +235,9 @@ struct DropPad1KComp {
     inner: DropPad1K,
 }
 
-/// M-XI (3) — drop-count-exact across a growth boundary under TB: 70 rows
-/// cross the 64-row boundary; one swap_remove drops exactly one; pool Drop
+/// M-XI (3) — drop-count-exact across growth boundaries under TB: 70 rows
+/// cross the page ladder's boundaries up to the 64-KiB one; one swap_remove
+/// drops exactly one; pool Drop
 /// drops exactly the 69 survivors (and never touches the uninit
 /// `[len, committed_rows)` tail — a drop there would be TB-UB on top of
 /// the count mismatch).
@@ -184,7 +255,12 @@ fn miri_drop_count_exact_across_boundary() {
         .expect("70 rows fit under the 128 ceiling");
     }
     assert_eq!(counter.load(Ordering::Relaxed), 0, "growth dropped nothing");
-    assert_eq!(pool.committed_rows(), 128, "the boundary crossing grew the frontier");
+    // Re-derived (S2): 128 at σ = 0, 127 at σ = 64 (was 128 for every σ).
+    assert_eq!(
+        pool.committed_rows(),
+        Ladder::after_adds(id.0, 1024, 128, M),
+        "the boundary crossings grew the frontier"
+    );
 
     assert!(pool.swap_remove(3), "swap_remove(3) in bounds");
     assert_eq!(counter.load(Ordering::Relaxed), 1, "swap_remove drops exactly one");
@@ -228,6 +304,57 @@ fn miri_ceiling_exhaustion_zero_state_change() {
     assert_eq!(before, after, "rejected add: state EXACTLY unchanged");
     for i in 0..4u64 {
         assert_eq!(pool.get_typed::<Pad1K>(i as usize).expect("live").id, i);
+    }
+}
+
+/// A fixed-id 1024-byte payload for the stagger-pinned ladder test below.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Pad1KPinned {
+    id: u64,
+    pad: [u64; 127],
+}
+
+/// Fixed, not derive-minted: σ = (500 % 64) · 64 = 3328 whatever the mint
+/// order, far above this binary's handful of derive-minted ids.
+const PINNED_ID: usize = 500;
+
+impl Component for Pad1KPinned {
+    fn component_id() -> ComponentId {
+        component_registry::register_layout::<Pad1KPinned>(PINNED_ID);
+        ComponentId(PINNED_ID)
+    }
+}
+
+/// M-XI (4b) — the page ladder at a KNOWN non-zero stagger (critique O1):
+/// σ = 3328, so `σ + 1024 > 4096` and the first data commit is TWO pages
+/// (rows (8192 - 3328) / 1024 = 4), the D2 edge case where the stagger pad
+/// pushes a row across the first page. Every frontier is pinned against
+/// [`Ladder`], the data base is pinned at σ within its page, and every row
+/// round-trips. This is the UG-08 mutation row's target: with the `- σ`
+/// dropped from `grow_rows`' row count, the first grow exposes 8 rows and
+/// the obligation-11 debug twin (`σ + rows · stride <= data_committed`)
+/// fires under Miri.
+#[test]
+fn miri_page_floor_ladder_at_a_pinned_nonzero_stagger() {
+    let id = Pad1KPinned::component_id();
+    let sigma = pool_base_stagger(id.0);
+    assert_eq!(sigma, 3328, "the fixture needs σ != 0 and σ + 1024 > COMMIT_PAGE");
+    let mut pool = ComponentPool::new(id.0, 256);
+    let mut ladder = Ladder::new(id.0, 1024, 256);
+    assert_eq!(pool.buffer_ptr() as usize % COMMIT_PAGE, sigma, "the data base carries σ");
+
+    for i in 0..40u64 {
+        pool.add_typed(Pad1KPinned { id: i, pad: [i ^ 0x5A5A; 127] }).expect("under 256");
+        assert_eq!(pool.committed_rows(), ladder.grow(pool.count()), "after {} adds", i + 1);
+        if i == 0 {
+            assert_eq!(pool.committed_rows(), (2 * COMMIT_PAGE - sigma) / 1024, "two pages");
+        }
+    }
+    assert_eq!(pool.committed_rows(), Ladder::after_adds(id.0, 1024, 256, 40));
+    for i in 0..40u64 {
+        let got = pool.get_typed::<Pad1KPinned>(i as usize).expect("live row");
+        assert_eq!((got.id, got.pad[126]), (i, i ^ 0x5A5A), "row {i} round-trips");
     }
 }
 

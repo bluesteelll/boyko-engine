@@ -4,7 +4,7 @@ use std::cell::UnsafeCell;
 use std::ptr::NonNull;
 
 use crate::ecs::constants::{
-    SIMD_BUFFER_ALIGN, pool_align_up_granule, pool_base_stagger, pool_byte_layout,
+    COMMIT_PAGE, SIMD_BUFFER_ALIGN, pool_align_up_page, pool_base_stagger, pool_byte_layout,
     pool_commit_step, pool_reserve_rows,
 };
 use crate::ecs::core::change_detection::Tick;
@@ -29,18 +29,21 @@ const _: () = assert!(std::mem::align_of::<UnsafeCell<Tick>>() == 4);
 /// `ComponentPool` is size-pinned at 128 B by a const assert below, with no
 /// spare byte for a `bool`. A sentinel costs zero bytes AND zero branches:
 /// `grow_rows`'s tick-commit guard is already `if t_new > self.ticks_committed`,
-/// and `t_new` is bounded by `tick_len` (itself bounded by the reservation), so
-/// `usize::MAX` makes that guard uniformly false without a single new `if` on
-/// the cold path — and without touching the layout, which is what keeps the
-/// `debug_assert!(t_new <= layout.tick_len)` proof step above it TRUE.
+/// and `t_new` is bounded by the tick cap `align_up_page(stagger + tick_len)`
+/// (itself inside the reservation), so `usize::MAX` makes that guard uniformly
+/// false without a single new `if` on the cold path — and without touching the
+/// layout, which is what keeps the `debug_assert!(t_new <= tick_cap)` proof
+/// step above it TRUE (packing plan obligation 3).
 ///
 /// ⚠ The alternative — zeroing `tick_len` in the layout — is UNSOUND and was
 /// rejected with its mechanism: that assert fires BEFORE the commit guard, and
-/// with `tick_len == 0` every `t_new = align_up(rows * 4, 64 KiB) >= 65 536`
-/// trips it on every debug build and every Miri run. Reserved-uncommitted is
-/// also the form the approved remediation prescribes verbatim
-/// (`docs/ARCH-AUDIT-ECS-DATA-REMEDIATION.md`, "tick sub-regions
-/// reserved-uncommitted").
+/// with `tick_len == 0` its bound collapses to `align_up_page(stagger)` — 0 at
+/// `stagger == 0`, one page otherwise — so `t_new = align_up_page(stagger +
+/// rows * 4)` trips it at the first grow of every unstaggered pool and as soon
+/// as any other pool outgrows one tick page, on every debug build and every
+/// Miri run. Reserved-uncommitted is also the form the approved remediation
+/// prescribes verbatim (`docs/ARCH-AUDIT-ECS-DATA-REMEDIATION.md`, "tick
+/// sub-regions reserved-uncommitted").
 pub(crate) const UNTRACKED_TICKS: usize = usize::MAX;
 
 // Phase 4 Seam 3 (IM-1 / IM-6): the `vm: VmReservation` -> `backing:
@@ -194,11 +197,15 @@ pub struct ComponentPool {
     /// Component layout (cached from registry for performance).
     component_layout: Layout,
 
-    /// Committed bytes of the data sub-region; granule-aligned, monotonic
-    /// (cold-path bookkeeping for `grow_rows`).
+    /// Committed bytes of the data sub-region, measured from its absolute
+    /// PAGE FLOOR (reservation offset 0), so it includes the stagger pad; a
+    /// `COMMIT_PAGE` multiple, monotonic (cold-path bookkeeping for
+    /// `grow_rows`, packing plan D2).
     data_committed: usize,
 
-    /// Committed bytes of EACH tick sub-region; granule-aligned, monotonic.
+    /// Committed bytes of EACH tick sub-region, measured from that
+    /// sub-region's absolute page floor (`added_off - stagger`,
+    /// `changed_off - stagger`); a `COMMIT_PAGE` multiple, monotonic.
     ///
     /// [`UNTRACKED_TICKS`] is a SENTINEL, not a byte count: it marks a pool
     /// built by [`ComponentPool::new_untracked`], whose tick sub-regions stay
@@ -462,13 +469,13 @@ impl ComponentPool {
     /// # Why this exists
     ///
     /// A `ComponentPool` reservation is `[pad | data | added_ticks |
-    /// changed_ticks]` and `grow_rows` commits ALL THREE at
-    /// [`COMMIT_GRANULE`](crate::ecs::constants::COMMIT_GRANULE) = 64 KiB
-    /// granularity. Two tick regions at 4 B/row is **8 B of change detection per
-    /// row on top of the datum**, so a tracked column costs 3.0x a plain
-    /// `Vec<u32>`, 2.0x a `Vec<u64>` and 9.0x a `Vec<bool>` in commit charge —
-    /// and the first non-empty grow makes >= 3 x 64 KiB = 192 KiB resident per
-    /// column regardless of row count.
+    /// changed_ticks]` and `grow_rows` commits ALL THREE, each on its own
+    /// [`COMMIT_PAGE`](crate::ecs::constants::COMMIT_PAGE) ladder. Two tick
+    /// regions at 4 B/row is **8 B of change detection per row on top of the
+    /// datum**, so a tracked column costs 3.0x a plain `Vec<u32>`, 2.0x a
+    /// `Vec<u64>` and 9.0x a `Vec<bool>` in commit charge — and the first
+    /// non-empty grow makes three pages (12 KiB) resident per tracked column
+    /// regardless of row count, where an untracked one makes one (4 KiB).
     ///
     /// [`ScratchColumn`] declares it never reads a tick ("There is NO
     /// change-detection tick use — this is raw scratch"), and that claim is
@@ -539,38 +546,40 @@ impl ComponentPool {
         Self::new(component_id, pool_reserve_rows(component_size))
     }
 
-    /// P2-CACHE-FIX commit helper: commits a sub-region byte frontier that
-    /// begins at a NON-granule leading offset.
+    /// Commits one sub-region's frontier step on the page-floor ladder
+    /// (packing plan D2): the reservation bytes `[floor + old, floor + new)`.
     ///
-    /// `base_off` is the sub-region's start within the reservation — for the
-    /// staggered layout it is `data_off` / `added_off` / `changed_off`, each
-    /// `≡ stagger (mod COMMIT_GRANULE)` with `stagger < COMMIT_GRANULE`. `old`
-    /// and `new` are the OLD/NEW sub-region-relative, granule-aligned commit
-    /// frontiers (`new > old`). `VmReservation::commit` requires granule-aligned
-    /// absolute ranges, so this commits the granule-aligned superset
-    /// `[align_down(base_off + old, G), align_up(base_off + new, G))` (the
-    /// boundary granule shared with the previous-region tail is re-committed
-    /// idempotently — `commit` preserves already-written contents, so J-XI
-    /// never-written-reads-zero is unaffected).
+    /// `floor` is the sub-region's absolute PAGE FLOOR, `offset - stagger`:
+    /// `0` for data, `data_len` for `added`, `data_len + tick_len` for
+    /// `changed`. Every sub-region offset is `≡ stagger (mod COMMIT_PAGE)` and
+    /// `stagger < POOL_STAGGER_SPAN <= COMMIT_PAGE` (const-asserted), so the
+    /// floor is a page multiple and the stagger pad is committed with the
+    /// sub-region's first page. `old` / `new` are frontiers measured from that
+    /// floor: page multiples by induction over the ladder (`pool_commit_step`
+    /// of page multiples, capped at a page multiple), `new > old`. The OS is
+    /// therefore told exactly `new - old` bytes — no rounding and no overshoot,
+    /// where the granule ladder's `align_down`/`align_up` pair committed a whole
+    /// extra granule per sub-region whenever the stagger was non-zero.
+    ///
+    /// The name predates the page floors and is kept: UG-15 leg (2) pins this
+    /// body by exact symbol name (P29-2).
     ///
     /// IM-3: grow is Host-only in Phase 4 — the caller funnels through
     /// `host_vm_mut`, which `unreachable!`s on a Device pool (never minted).
     #[cold]
     #[inline(never)]
-    fn commit_subregion(&mut self, base_off: usize, old: usize, new: usize) {
+    fn commit_subregion(&mut self, floor: usize, old: usize, new: usize) {
+        // D2 obligation 5 (strict growth; `VmReservation::commit`'s `new > old`).
         debug_assert!(new > old, "commit_subregion: empty or backwards range");
-        const G: usize = crate::ecs::constants::COMMIT_GRANULE;
-        // `align_down` of `base_off + old`: when `old == 0` this floors the
-        // sub-region's leading pad onto granule 0 (the pad must be committed
-        // with the data/tick prefix); otherwise it lands on the granule
-        // boundary at or below the previously committed frontier.
-        let abs_old = (base_off + old) & !(G - 1);
-        let abs_new = pool_align_up_granule(base_off + new);
+        // D2 obligation 6 (page alignment of both ends).
         debug_assert!(
-            abs_new > abs_old,
-            "commit_subregion: granule-rounded range is empty"
+            floor.is_multiple_of(COMMIT_PAGE)
+                && old.is_multiple_of(COMMIT_PAGE)
+                && new.is_multiple_of(COMMIT_PAGE),
+            "commit_subregion: floor {floor} + [{old}, {new}) is not page-aligned \
+             (D2 obligation 6)"
         );
-        self.backing.host_vm_mut().commit(abs_old, abs_new);
+        self.backing.host_vm_mut().commit(floor + old, floor + new);
     }
 
     /// Phase X.I D4 — the single cold growth funnel: ensures rows `[0, n)`
@@ -586,9 +595,12 @@ impl ComponentPool {
     ///
     /// Growth policy: data-region byte doubling clamped to
     /// `[POOL_MIN_SLAB, POOL_MAX_SLAB]`, request-dominant
-    /// (`constants::pool_commit_step`). O(1) in live rows — no bytes
-    /// copied, no bytes written; the base pointers never move (in-place
-    /// frontier commits on the pool's own reservation).
+    /// (`constants::pool_commit_step`), on absolute page floors (packing plan
+    /// D2): every frontier is measured from its sub-region's page floor and
+    /// steps by whole `COMMIT_PAGE`s, so a one-row column commits exactly one
+    /// page per sub-region. O(1) in live rows — no bytes copied, no bytes
+    /// written; the base pointers never move (in-place frontier commits on the
+    /// pool's own reservation).
     ///
     /// # Panics
     ///
@@ -621,71 +633,101 @@ impl ComponentPool {
         // the SAME stagger `new` used MUST be recomputed here (from the stored
         // `component_id`) so every commit offset matches the construction-time
         // layout — `pool_byte_layout` is the single source of truth for both.
-        let layout = pool_byte_layout(
-            self.reserve_rows,
-            stride,
-            pool_base_stagger(self.component_id),
-        );
+        let stagger = pool_base_stagger(self.component_id);
+        let layout = pool_byte_layout(self.reserve_rows, stride, stagger);
 
-        // GROW1-XI proof 1: n <= reserve_rows => n*stride <=
-        // reserve_rows*stride <= data_len, and data_len is a granule
-        // multiple => align_up(n*stride, G) <= data_len. The mul cannot
-        // overflow: reserve_rows*stride was overflow-checked at construction.
-        let needed = pool_align_up_granule(n * stride);
+        // Packing plan D2 — absolute page floors. Each sub-region's floor is
+        // its offset minus the stagger (data 0, added `data_len`, changed
+        // `data_len + tick_len`), and every frontier field is measured from its
+        // floor, so it includes the stagger pad. `data_len` and `tick_len` are
+        // granule multiples and `stagger < COMMIT_PAGE`, so each cap below is
+        // the sub-region length at `stagger == 0` and length + one page
+        // otherwise.
+        let added_floor = layout.data_len;
+        let changed_floor = layout.data_len + layout.tick_len;
+        let data_cap = pool_align_up_page(stagger + layout.data_len);
+        let tick_cap = pool_align_up_page(stagger + layout.tick_len);
+
+        // GROW1-XI proof 1 / D2 obligation 2: n <= reserve_rows => stagger +
+        // n*stride <= stagger + data_len => needed <= data_cap, and data_cap
+        // <= data_len + COMMIT_PAGE <= added_floor + tick_len: in bounds. The
+        // mul cannot overflow: reserve_rows*stride was overflow-checked at
+        // construction.
+        let needed = pool_align_up_page(stagger + n * stride);
         debug_assert!(
-            needed <= layout.data_len,
-            "GROW1-XI step 1: needed overruns the data sub-region"
+            needed <= data_cap,
+            "GROW1-XI step 1 / D2 obligation 2: needed overruns the data cap"
         );
-        // GROW1-XI corollary 0a: past both guards `n > committed_rows`, and
-        // the clamped case is excluded by the ceiling check, so `needed >
-        // data_committed` — the saturating_sub inside `pool_commit_step` is
-        // a belt that never actually saturates.
+        // GROW1-XI corollary 0a / D2 obligation 5: past both guards `n >
+        // committed_rows`, and the clamped case is excluded by the ceiling
+        // check. Before the first grow `data_committed == 0 < needed`; after
+        // it `committed_rows == (data_committed - stagger) / stride` unclamped,
+        // so `stagger + n*stride > data_committed`, and `needed` (a page
+        // round-up) exceeds the page multiple `data_committed` — the
+        // saturating_sub inside `pool_commit_step` never actually saturates.
         debug_assert!(
             needed > self.data_committed,
             "GROW1-XI corollary 0a: grow_rows reached the commit path with a satisfied request"
         );
 
         let step = pool_commit_step(self.data_committed, needed);
-        // GROW1-XI proof 2: step >= needed - data_committed by the
-        // request-dominant max, and the min(data_len) clamp cannot bite
-        // below `needed` (needed <= data_len) => new_d >= needed, and
-        // new_d > data_committed strictly (the vm.rs `new > old`
-        // debug_assert is unreachable from this caller — GROW1-XI 0b).
-        let new_d = (self.data_committed + step).min(layout.data_len);
-        // P2-CACHE-FIX: the data sub-region begins at the non-granule
-        // `layout.data_off` (the per-pool stagger pad), so the commit is the
-        // granule-aligned superset of `[data_off + data_committed, data_off +
-        // new_d)`. `commit_subregion` panics only on genuine OS OOM.
-        self.commit_subregion(layout.data_off, self.data_committed, new_d);
+        // GROW1-XI proof 2 / D2 obligations 2, 5, 6: step >= needed -
+        // data_committed by the request-dominant max, and the min(data_cap)
+        // clamp cannot bite below `needed` (needed <= data_cap) => new_d >=
+        // needed > data_committed strictly (GROW1-XI 0b). Every term is a page
+        // multiple, so new_d is one.
+        let new_d = (self.data_committed + step).min(data_cap);
+        // `commit_subregion` panics only on genuine OS OOM.
+        self.commit_subregion(0, self.data_committed, new_d);
 
-        // GROW1-XI proofs 3 + 4: new_d >= needed >= n*stride =>
-        // floor(new_d/stride) >= n; the min(reserve_rows) is LOAD-BEARING —
-        // granule padding can make floor(data_len/stride) > reserve_rows,
-        // and the tick sub-regions are sized for reserve_rows only.
-        let rows = (new_d / stride).min(self.reserve_rows);
+        // GROW1-XI proofs 3 + 4 / D2 obligation 1: new_d >= needed >= stagger
+        // + n*stride => floor((new_d - stagger) / stride) >= n. No underflow:
+        // new_d >= COMMIT_PAGE > stagger. The min(reserve_rows) is
+        // LOAD-BEARING — page padding can make the quotient exceed
+        // reserve_rows, and the tick sub-regions are sized for reserve_rows
+        // only.
+        let rows = ((new_d - stagger) / stride).min(self.reserve_rows);
         debug_assert!(
             rows >= n,
             "GROW1-XI step 3: post-grow committed_rows must cover the request"
         );
-
-        // GROW1-XI proof 5: rows <= reserve_rows => align_up(rows*4, G) <=
-        // align_up(reserve_rows*4, G) = tick_len.
-        let t_new = pool_align_up_granule(rows * 4);
+        // D2 obligation 11 (coverage twin of obligation 1): every exposed row
+        // lies inside committed data pages — the direction `row_ptr` relies on.
         debug_assert!(
-            t_new <= layout.tick_len,
-            "GROW1-XI step 5: tick commit overruns the tick sub-region"
+            stagger + rows * stride <= new_d,
+            "D2 obligation 11: committed rows overrun the committed data pages"
+        );
+
+        // GROW1-XI proof 5 / D2 obligation 3: rows <= reserve_rows =>
+        // stagger + rows*4 <= stagger + tick_len => t_new <= tick_cap. The
+        // bound is the cap, not `tick_len`: at stagger > 0 and full capacity
+        // t_new legitimately reaches tick_len + COMMIT_PAGE.
+        let t_new = pool_align_up_page(stagger + rows * 4);
+        debug_assert!(
+            t_new <= tick_cap,
+            "GROW1-XI step 5 / D2 obligation 3: tick commit overruns the tick cap"
+        );
+        // D2 obligation 4: the `changed` interval ends inside the reservation
+        // (`os_len` holds two whole tick sub-regions plus a granule of slack
+        // at stagger > 0; exactly two at stagger == 0).
+        debug_assert!(
+            changed_floor + t_new <= layout.os_len,
+            "D2 obligation 4: the changed-tick commit overruns the reservation"
         );
         if t_new > self.ticks_committed {
-            // P2-CACHE-FIX: both tick sub-regions begin at non-granule offsets
-            // (`added_off`/`changed_off` ≡ stagger mod G), so each commits the
-            // granule-aligned superset of its `[*_off + ticks_committed, *_off
-            // + t_new)` range via `commit_subregion`.
-            self.commit_subregion(layout.added_off, self.ticks_committed, t_new);
-            self.commit_subregion(layout.changed_off, self.ticks_committed, t_new);
+            self.commit_subregion(added_floor, self.ticks_committed, t_new);
+            self.commit_subregion(changed_floor, self.ticks_committed, t_new);
             // ★Q6: the frontier field is written only AFTER the commits it
             // describes succeed (panic-coherent on a mid-grow OS OOM).
             self.ticks_committed = t_new;
         }
+        // D2 obligation 12 (coverage twin of obligation 3): a tracked pool's
+        // exposed rows lie inside committed tick pages. An untracked pool
+        // never touches a tick, and its sentinel skipped both commits above.
+        debug_assert!(
+            !self.is_tracked() || stagger + rows * 4 <= self.ticks_committed,
+            "D2 obligation 12: committed rows overrun the committed tick pages"
+        );
         self.data_committed = new_d;
         self.committed_rows = rows;
         true
@@ -707,24 +749,31 @@ impl ComponentPool {
     ///   and the stride>0 path's `new_d / stride` division are structurally
     ///   unreachable.
     /// * **Z2 (policy)**: reuses `pool_commit_step(ticks_committed,
-    ///   needed_t)` with `needed_t = align_up(n * 4, G)` — the same
-    ///   request-dominant doubling, applied to the tick byte frontier.
-    /// * **Z3 (in-bounds)**: `n <= reserve_rows ⇒ n*4 <= reserve_rows*4 ⇒
-    ///   needed_t <= tick_len` (tick_len is a granule multiple), and
-    ///   `t_new = (ticks_committed + step).min(tick_len)` never overruns
-    ///   the sub-region.
+    ///   needed_t)` with `needed_t = align_up_page(stagger + n * 4)` — the
+    ///   same request-dominant doubling, applied to the tick byte frontier,
+    ///   which (packing plan D2) is measured from each tick sub-region's
+    ///   absolute page floor: `added` at 0 (the data region has length 0),
+    ///   `changed` at `tick_len`.
+    /// * **Z3 (in-bounds)**: `n <= reserve_rows ⇒ stagger + n*4 <= stagger +
+    ///   tick_len ⇒ needed_t <= tick_cap = align_up_page(stagger +
+    ///   tick_len)`, and `t_new = (ticks_committed + step).min(tick_cap)`
+    ///   never overruns it; `tick_len + tick_cap <= os_len` (obligation 4).
     /// * **Z4 (strict growth)**: past the guards `n > committed_rows`. The
     ///   reserve-clamp case is excluded (`committed_rows == reserve_rows`
-    ///   would contradict `n <= reserve_rows < n`), so `committed_rows =
-    ///   ticks_committed / 4` exactly (granule multiples are divisible by
-    ///   4), hence `n*4 > ticks_committed`, hence `needed_t >= n*4 >
-    ///   ticks_committed`, and with Z3 `t_new >= needed_t >
+    ///   would contradict `n <= reserve_rows < n`). Before the first grow
+    ///   `ticks_committed == 0 < COMMIT_PAGE <= needed_t`; after it
+    ///   `committed_rows = (ticks_committed - stagger) / 4` exactly (a page
+    ///   multiple minus a 64-B multiple is divisible by 4), hence `stagger +
+    ///   n*4 > ticks_committed`, hence `needed_t > ticks_committed` (a page
+    ///   round-up past a page multiple), and with Z3 `t_new >= needed_t >
     ///   ticks_committed` — BOTH tick commits satisfy the vm `new > old`
     ///   assert.
-    /// * **Z5 (sufficiency)**: `committed_rows' = (t_new / 4)
-    ///   .min(reserve_rows) >= n`, since `t_new >= needed_t >= n*4` and
-    ///   `n <= reserve_rows` (debug-asserted — the GROW1-XI step-3
-    ///   analogue). Callers never retry.
+    /// * **Z5 (sufficiency)**: `committed_rows' = ((t_new - stagger) / 4)
+    ///   .min(reserve_rows) >= n`, since `t_new >= needed_t >= stagger + n*4`
+    ///   and `n <= reserve_rows` (debug-asserted — the GROW1-XI step-3
+    ///   analogue). No underflow: `t_new >= COMMIT_PAGE > stagger`. Callers
+    ///   never retry. Its coverage twin `stagger + rows*4 <= t_new` is
+    ///   debug-asserted too.
     /// * **Z6 (panic coherence)**: `ticks_committed` and `committed_rows`
     ///   are written only AFTER both commits succeed (★Q6 pattern
     ///   preserved — a mid-grow OS OOM leaves the frontier fields
@@ -759,13 +808,17 @@ impl ComponentPool {
             "Z1: added ticks start at the stagger pad (vacuous data region)"
         );
 
+        // D2 page floors of the two tick sub-regions (see Z2) and the tick cap.
+        let changed_floor = layout.tick_len;
+        let tick_cap = pool_align_up_page(stagger + layout.tick_len);
+
         // Z2: the tick byte frontier drives the policy. The mul cannot
         // overflow: `reserve_rows * 4` was overflow-checked by
         // `pool_byte_layout` at construction and `n <= reserve_rows`.
-        let needed_t = pool_align_up_granule(n * 4);
+        let needed_t = pool_align_up_page(stagger + n * 4);
         debug_assert!(
-            needed_t <= layout.tick_len,
-            "Z3: tick request overruns the tick sub-region"
+            needed_t <= tick_cap,
+            "Z3: tick request overruns the tick cap"
         );
         debug_assert!(
             needed_t > self.ticks_committed,
@@ -773,33 +826,93 @@ impl ComponentPool {
         );
 
         let step = pool_commit_step(self.ticks_committed, needed_t);
-        let t_new = (self.ticks_committed + step).min(layout.tick_len);
+        let t_new = (self.ticks_committed + step).min(tick_cap);
         debug_assert!(
             t_new > self.ticks_committed,
             "Z4: the tick frontier must grow strictly (vm `new > old` precondition)"
         );
+        debug_assert!(
+            changed_floor + t_new <= layout.os_len,
+            "Z3 / D2 obligation 4: the changed-tick commit overruns the reservation"
+        );
 
         // Z3 + Z4: both tick frontiers are strictly growing and in-bounds of
-        // the reservation (`align_up(changed_off + tick_len, G) == os_len`).
-        // P2-CACHE-FIX: the tick sub-regions begin at non-granule offsets
-        // (`added_off`/`changed_off` ≡ stagger mod G), so each commits the
-        // granule-aligned superset of its range via `commit_subregion`. Panics
-        // only on genuine OS OOM (same contract as the stride > 0 path).
-        self.commit_subregion(layout.added_off, self.ticks_committed, t_new);
-        self.commit_subregion(layout.changed_off, self.ticks_committed, t_new);
+        // the reservation. Panics only on genuine OS OOM (same contract as
+        // the stride > 0 path).
+        self.commit_subregion(0, self.ticks_committed, t_new);
+        self.commit_subregion(changed_floor, self.ticks_committed, t_new);
 
-        // Z5: the min(reserve_rows) is LOAD-BEARING — granule padding can
-        // make tick_len / 4 exceed reserve_rows.
-        let rows = (t_new / 4).min(self.reserve_rows);
+        // Z5: the min(reserve_rows) is LOAD-BEARING — page padding can make
+        // the quotient exceed reserve_rows.
+        let rows = ((t_new - stagger) / 4).min(self.reserve_rows);
         debug_assert!(
             rows >= n,
             "Z5: post-grow committed_rows must cover the request"
+        );
+        // Z5's coverage twin: every exposed row's tick slots lie inside the
+        // committed tick pages.
+        debug_assert!(
+            stagger + rows * 4 <= t_new,
+            "Z5 coverage: committed rows overrun the committed tick pages"
         );
 
         // Z6: frontier fields written only AFTER both commits succeeded.
         self.ticks_committed = t_new;
         self.committed_rows = rows;
         true
+    }
+
+    /// Test-only memory model of this pool (packing plan D7, obligation 10):
+    /// the byte length of the UNION of the three committed intervals, each read
+    /// at its sub-region's absolute page floor (`sub-region offset - stagger`):
+    ///
+    /// * data: `[0, data_committed)`;
+    /// * added: `[data_len, data_len + ticks_committed)`;
+    /// * changed: `[data_len + tick_len, data_len + tick_len + ticks_committed)`.
+    ///
+    /// Both tick intervals are empty on an untracked pool, and the data
+    /// interval is empty on a ZST pool.
+    ///
+    /// The union, not the sum `data_committed + 2 * ticks_committed`: adjacent
+    /// intervals share a page wherever the earlier region's ladder has reached
+    /// its cap, and which boundaries that happens at depends on the geometry.
+    /// The OS-truth tests (`commit_floor_tests`) hold this model to the pages
+    /// the kernel actually reports, so a model that merely restates the
+    /// arithmetic cannot pass them.
+    #[cfg(test)]
+    pub(crate) fn committed_bytes(&self) -> usize {
+        let layout = pool_byte_layout(
+            self.reserve_rows,
+            self.component_layout.size(),
+            pool_base_stagger(self.component_id),
+        );
+        let ticks = if self.is_tracked() { self.ticks_committed } else { 0 };
+        let (dl, tl) = (layout.data_len, layout.tick_len);
+        // Already sorted by start: 0 <= data_len <= data_len + tick_len.
+        let intervals = [
+            (0, self.data_committed),
+            (dl, dl + ticks),
+            (dl + tl, dl + tl + ticks),
+        ];
+        let mut total = 0;
+        let mut open: Option<(usize, usize)> = None;
+        for (start, end) in intervals {
+            if end <= start {
+                continue;
+            }
+            open = match open {
+                Some((s, e)) if start <= e => Some((s, e.max(end))),
+                Some((s, e)) => {
+                    total += e - s;
+                    Some((start, end))
+                }
+                None => Some((start, end)),
+            };
+        }
+        if let Some((s, e)) = open {
+            total += e - s;
+        }
+        total
     }
 
     /// Byte pointer for row `idx`, computed from the stable reservation base.
@@ -2472,6 +2585,9 @@ mod tests {
     //   Phase X.B dense-equivalence tests below: 224..226
     //   Phase X.I growth tests below:  226, 227
     //   Phase 22 ZST (tag) pool tests below: 228, 229
+    //   packing-plan commit-floor oracle (`commit_floor_tests` below):
+    //     127..=130, 162, 176, 188..=193, 230..=293, 318, 319, 382..=385,
+    //     447..=449 — the census and the reasons are in that module's header
     const POS_ID: ComponentId = ComponentId(220);
     const VEL_ID: ComponentId = ComponentId(221);
     const OTHER_ID: ComponentId = ComponentId(222);
@@ -3288,17 +3404,20 @@ mod tests {
     // ====================================================================
     // Phase X.I W4 — the growth test matrix (U-P2 … U-P5, U-P8).
     //
-    // Geometry note shared by every test below: the fixtures use a 64-byte
-    // stride so ONE commit granule (`COMMIT_GRANULE` = 64 KiB of DATA
-    // bytes) covers exactly 1024 rows — slab boundaries therefore sit at
-    // rows 1024 / 2048 / 4096 under the D4 doubling policy
-    // (64 KiB -> 128 KiB -> 256 KiB), and a 4096-row pool spans
-    // 4 granules = 3 data-commit events when filled by an `add` loop.
+    // Geometry note shared by every test below (re-derived for the packing
+    // plan's page ladder, S2): the fixtures use a 64-byte stride, and the
+    // ladder commits DATA from the sub-region's absolute page floor, so the
+    // committed-row frontier after committing `d` data bytes is
+    // `(d - σ) / 64` with `σ = pool_base_stagger(id)`. For `Stride64` (id 226,
+    // σ = 2176) on the 4 KiB page the one-row-at-a-time frontiers are 30, 94,
+    // 222, 478, 990, 2014, 4062 and then the 4096-row ceiling: a 4096-row
+    // pool's `add` loop takes 8 data-commit events (it took 3 on the 64 KiB
+    // granule, whose frontiers sat at 1024 / 2048 / 4096 for every σ).
     // ====================================================================
 
     /// Phase X.I W4 fixture: a 64-byte POD component (8 x u64). `tag` makes
     /// every row distinguishable; `pad` brings the stride to exactly one
-    /// 64th of a commit granule (see geometry note above).
+    /// cache line (see geometry note above).
     #[repr(C)]
     #[derive(Clone, Copy, PartialEq, Debug)]
     struct Stride64 {
@@ -3329,22 +3448,51 @@ mod tests {
         ComponentPool::new(STRIDE64_ID.0, cap)
     }
 
-    /// U-P2 — the address-stability witness (plan §Test matrix).
+    /// The committed-row frontiers a one-row-at-a-time fill of a
+    /// `make_stride64_pool(cap)` pool passes through (packing plan D2): the
+    /// data ladder doubles from one `COMMIT_PAGE` measured from the absolute
+    /// page floor, so rung `k` exposes `(COMMIT_PAGE * 2^k - σ) / 64` rows,
+    /// until the ceiling clamps. `2^k` pages stay below `POOL_MAX_SLAB` for
+    /// every `cap` these tests use.
+    fn stride64_rungs(cap: usize) -> Vec<usize> {
+        use crate::ecs::constants::{COMMIT_PAGE, pool_base_stagger};
+
+        let sigma = pool_base_stagger(STRIDE64_ID.0);
+        let mut rungs = Vec::new();
+        let mut data = COMMIT_PAGE;
+        loop {
+            let rows = ((data - sigma) / 64).min(cap);
+            rungs.push(rows);
+            if rows == cap {
+                return rungs;
+            }
+            data *= 2;
+        }
+    }
+
+    /// U-P2 — the address-stability witness (plan §Test matrix), and the
+    /// packing plan's G5 stagger-placement pin.
     ///
     /// Pins THE central Phase X.I soundness claim (Soundness item 1): the
     /// three write-once base pointers (`buffer_ptr`, `added_ticks_ptr`,
     /// `changed_ticks_ptr`) and any previously returned row pointer stay
-    /// bit-identical across >= 3 data-commit growth events, and pre-growth
+    /// bit-identical across every data-commit growth event, and pre-growth
     /// VALUES (component bytes + stamped ticks) remain readable through the
-    /// recorded pointers. A 4096-row pool of 64-B rows spans 4 granules
-    /// (256 KiB) -> the add loop drives 3 commits: 64 KiB (row 0),
-    /// 128 KiB (row 1024), 256 KiB (row 2048).
+    /// recorded pointers. A 4096-row pool of 64-B rows filled by an add loop
+    /// passes the 8 frontiers of the geometry note (the name predates the page
+    /// ladder, under which the 64 KiB granule's 3 events became 8).
+    ///
+    /// G5: before the first grow and after the last, each base sits at
+    /// `pool_base_stagger(id)` within its commit page. A page-floor commit that
+    /// ever moved a base (instead of committing below it) would read 0 here;
+    /// nothing else in the tree pins a pool's actual base offset.
     ///
     /// Miri: ignored (4096-add loop; the M-XI suite covers the identical
     /// bookkeeping with a small-granule-count geometry under Tree Borrows).
     #[test]
     #[cfg_attr(miri, ignore = "miri-slow: a 4096-add loop; the M-XI suite (miri_pool_growth.rs) pins the identical bookkeeping at small-granule geometry")]
     fn address_stability_across_three_slab_growths() {
+        use crate::ecs::constants::{COMMIT_PAGE, pool_base_stagger};
         use crate::ecs::core::change_detection::Tick;
 
         let mut pool = make_stride64_pool(4096);
@@ -3352,10 +3500,28 @@ mod tests {
         assert_eq!(pool.capacity(), 4096, "D2 mapping: reserve_rows = 1 * 4096");
         assert_eq!(pool.committed_rows(), 0, "D3: zero initial commit");
 
-        // First add: triggers the first 64 KiB commit (1024 rows).
+        // G5 before the first grow: every base carries the stagger.
+        let sigma = pool_base_stagger(STRIDE64_ID.0);
+        assert_eq!(sigma, 2176, "id 226 ⇒ σ = 34 × 64 (the geometry note's numbers)");
+        let stagger_placement = |p: &ComponentPool| {
+            [
+                p.buffer_ptr() as usize % COMMIT_PAGE,
+                p.added_ticks_ptr() as usize % COMMIT_PAGE,
+                p.changed_ticks_ptr() as usize % COMMIT_PAGE,
+            ]
+        };
+        assert_eq!(stagger_placement(&pool), [sigma; 3], "G5 before the first grow");
+
+        // The frontiers the add loop must pass through (geometry note).
+        let rungs = stride64_rungs(4096);
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(rungs, [30, 94, 222, 478, 990, 2014, 4062, 4096]);
+
+        // First add: the first data page — (COMMIT_PAGE - σ) / 64 rows (was
+        // one 64 KiB granule = 1024 rows).
         let v0 = Stride64::new(0xA5A5_0000);
         pool.add_typed(v0).expect("row 0 fits under the ceiling");
-        assert_eq!(pool.committed_rows(), 1024, "first commit = one granule = 1024 rows");
+        assert_eq!(pool.committed_rows(), rungs[0], "first commit = one page from the floor");
 
         // Record every base pointer + the row-0 pointer BEFORE further growth,
         // and stamp a distinctive pre-growth tick on row 0.
@@ -3365,13 +3531,19 @@ mod tests {
         let changed_before = pool.changed_ticks_ptr();
         pool.fill_ticks(0, 1, Tick::new(7));
 
-        // Grow across the remaining slab boundaries via the warm add path:
-        // rows 1..4096 cross commits at len = 1024 and len = 2048.
+        // Grow across every remaining rung via the warm add path, recording
+        // each frontier the pool actually passes.
+        let mut seen = vec![pool.committed_rows()];
         for i in 1..4096u64 {
             pool.add_typed(Stride64::new(i)).expect("under the 4096-row ceiling");
+            if pool.committed_rows() != *seen.last().expect("seeded above") {
+                seen.push(pool.committed_rows());
+            }
         }
         assert_eq!(pool.count(), 4096, "all 4096 rows live");
         assert_eq!(pool.committed_rows(), 4096, "frontier reached the full reserve");
+        assert_eq!(seen, rungs, "the add loop passes exactly the ladder's frontiers");
+        assert!(seen.len() >= 8, "the plan's G5 asks for >= 8 growth events");
 
         // (1) POINTER identity: all recorded pointers are bit-identical —
         // growth never remapped or relocated anything.
@@ -3396,14 +3568,20 @@ mod tests {
         assert_eq!(t_add, Tick::new(7), "pre-growth added tick survives growth");
         assert_eq!(t_chg, Tick::new(7), "pre-growth changed tick survives growth");
 
-        // (3) Boundary rows on both sides of each slab edge read back correctly.
-        for &row in &[1023usize, 1024, 2047, 2048, 4095] {
+        // (3) Boundary rows on both sides of each commit edge read back
+        // correctly: `f - 1` is the last row of one commit, `f` the first of
+        // the next (x86_64: 29/30, 93/94, …, 4061/4062), plus the last row.
+        let edges = rungs[..rungs.len() - 1].iter().flat_map(|&f| [f - 1, f]);
+        for row in edges.chain([4095]) {
             assert_eq!(
                 *pool.get_typed::<Stride64>(row).expect("boundary row typed read"),
                 Stride64::new(row as u64),
-                "row {row} (slab-boundary +/- 1) must hold its written value"
+                "row {row} (commit-boundary +/- 1) must hold its written value"
             );
         }
+
+        // G5 after the last grow.
+        assert_eq!(stagger_placement(&pool), [sigma; 3], "G5 after the last grow");
     }
 
     /// U-P3 — reserve-ceiling exhaustion leaves the pool state EXACTLY
@@ -3419,8 +3597,8 @@ mod tests {
             pool.add_typed(Stride64::new(i)).expect("rows 0..4 fit under the ceiling");
         }
         // min(rows_from_committed_bytes, reserve_rows) clamps the frontier to
-        // the ceiling (GROW1-XI step 4): one granule covers 1024 rows of data
-        // but the pool may only ever expose 4.
+        // the ceiling (GROW1-XI step 4): the first data page covers
+        // (4096 - 2176) / 64 = 30 rows but the pool may only ever expose 4.
         assert_eq!(pool.committed_rows(), 4, "frontier clamps to the 4-row ceiling");
         assert!(pool.is_full(), "len == reserve_rows is the ceiling");
 
@@ -3473,24 +3651,37 @@ mod tests {
     /// violation, no new accessors. The `read_added_tick`-style accessors
     /// (whose contract requires `index < count()`) are used only below `len`.
     ///
-    /// Sequence: first add commits the granule -> every never-written slot
-    /// in `[1, 1024)` reads `Tick::ZERO`; fill to the 1024-row boundary and
-    /// stamp `[0, 1024)`; the 1025th add grows across the boundary ->
-    /// pre-grow stamps at rows 1023/1022 survive, the freshly-grown row 1024
-    /// reads ZERO until stamped (write-before-read), then reads its stamp,
-    /// and the new never-written tail `[1025, 2048)` reads ZERO.
+    /// Sequence (packing plan S2: re-derived on the page ladder, from
+    /// `stride64_rungs`; x86_64 numbers in brackets): first add commits the
+    /// first data page -> every never-written slot in `[1, r0)` reads
+    /// `Tick::ZERO` [r0 = 30]; fill to the `r0` boundary and stamp `[0, r0)`;
+    /// the next add grows the DATA across the boundary [to 94] -> pre-grow
+    /// stamps at rows `r0 - 1`/`r0 - 2` survive, the freshly-grown row `r0`
+    /// reads ZERO until stamped (write-before-read), then reads its stamp, and
+    /// the new never-written tail reads ZERO. Then the fill continues to the
+    /// first rung whose rows outgrow the first TICK page [478 -> 990, ticks
+    /// 4096 -> 8192 B]: stamps below it survive, and the never-written tail,
+    /// which now reaches into the freshly committed tick page, reads ZERO.
+    /// (On the 64 KiB granule the one crossing was 1024 -> 2048 and the tick
+    /// granule never moved.)
     #[test]
-    #[cfg_attr(miri, ignore = "miri-slow: 1025 adds + two 1023-slot raw tick scans; the tick bases are pub(crate), so no tests/ Miri suite can reach this surface")]
+    #[cfg_attr(miri, ignore = "miri-slow: ~1000 adds + raw tick scans on both sides of two boundaries; the tick bases are pub(crate), so no tests/ Miri suite can reach this surface")]
     fn tick_lockstep_and_jxi_zero_at_slab_boundary() {
+        use crate::ecs::constants::{COMMIT_PAGE, pool_base_stagger};
         use crate::ecs::core::change_detection::Tick;
 
         let mut pool = make_stride64_pool(4096);
+        let rungs = stride64_rungs(4096);
+        let (r0, r1) = (rungs[0], rungs[1]);
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!((r0, r1), (30, 94));
 
-        // Row 0 commits the first granule (1024 rows of data; the tick
-        // granule covers 16384 slots, so ticks are committed well past the
-        // data frontier — lockstep by ROWS, saturating by bytes).
+        // Row 0 commits the first data page (r0 rows); the first tick page
+        // covers every one of them (σ + 4·r0 <= COMMIT_PAGE) — lockstep by
+        // ROWS, saturating by bytes.
         pool.add_typed(Stride64::new(0)).expect("row 0");
-        assert_eq!(pool.committed_rows(), 1024);
+        assert_eq!(pool.committed_rows(), r0);
+        assert_eq!(pool.ticks_committed, COMMIT_PAGE, "one tick page per tick sub-region");
 
         // J-XI (1): every never-written tick slot in [len, committed_rows)
         // reads Tick::ZERO through the raw base pointers.
@@ -3506,41 +3697,41 @@ mod tests {
         }
 
         // Fill to the boundary and stamp every live row.
-        for i in 1..1024u64 {
-            pool.add_typed(Stride64::new(i)).expect("rows 1..1024");
+        for i in 1..r0 as u64 {
+            pool.add_typed(Stride64::new(i)).expect("rows 1..r0");
         }
-        assert_eq!(pool.count(), 1024);
-        assert_eq!(pool.committed_rows(), 1024, "len reached the first-slab frontier");
-        pool.fill_ticks(0, 1024, Tick::new(5));
+        assert_eq!(pool.count(), r0);
+        assert_eq!(pool.committed_rows(), r0, "len reached the first-page frontier");
+        pool.fill_ticks(0, r0, Tick::new(5));
 
-        // Cross the boundary: row 1024 triggers grow_rows(1025) -> 2048 rows.
-        pool.add_typed(Stride64::new(1024)).expect("row 1024 grows the pool");
-        assert_eq!(pool.committed_rows(), 2048, "doubling: 64 KiB -> 128 KiB = 2048 rows");
+        // Cross the boundary: row r0 triggers grow_rows(r0 + 1) -> r1 rows.
+        pool.add_typed(Stride64::new(r0 as u64)).expect("row r0 grows the pool");
+        assert_eq!(pool.committed_rows(), r1, "doubling: one data page -> two");
 
         // Pre-grow stamps at [boundary-2, boundary-1] survived the grow.
-        // SAFETY: 1022/1023 < count(); &pool shared read, no writer.
-        let (t1022, t1023) = unsafe { (pool.read_added_tick(1022), pool.read_added_tick(1023)) };
-        assert_eq!(t1022, Tick::new(5), "stamp at boundary-2 survives the grow");
-        assert_eq!(t1023, Tick::new(5), "stamp at boundary-1 survives the grow");
+        // SAFETY: r0-2 / r0-1 < count(); &pool shared read, no writer.
+        let (t_m2, t_m1) = unsafe { (pool.read_added_tick(r0 - 2), pool.read_added_tick(r0 - 1)) };
+        assert_eq!(t_m2, Tick::new(5), "stamp at boundary-2 survives the grow");
+        assert_eq!(t_m1, Tick::new(5), "stamp at boundary-1 survives the grow");
 
-        // The freshly-grown-then-added row 1024: never stamped -> ZERO (J-XI
+        // The freshly-grown-then-added row r0: never stamped -> ZERO (J-XI
         // on a demand-committed page), then write-before-read round-trips.
-        // SAFETY: 1024 < count() == 1025; &pool exclusive in this test.
-        let t1024_unstamped = unsafe { pool.read_added_tick(1024) };
+        // SAFETY: r0 < count() == r0 + 1; &pool exclusive in this test.
+        let t_unstamped = unsafe { pool.read_added_tick(r0) };
         assert_eq!(
-            t1024_unstamped,
+            t_unstamped,
             Tick::ZERO,
             "a freshly committed, never-stamped tick slot reads ZERO"
         );
-        // SAFETY: 1024 < count(); single-threaded test holds exclusive access.
+        // SAFETY: r0 < count(); single-threaded test holds exclusive access.
         unsafe {
-            pool.write_added_tick(1024, Tick::new(9));
-            pool.write_changed_tick(1024, Tick::new(9));
+            pool.write_added_tick(r0, Tick::new(9));
+            pool.write_changed_tick(r0, Tick::new(9));
         }
         // SAFETY: as above.
-        let (a1024, c1024) = unsafe { (pool.read_added_tick(1024), pool.read_changed_tick(1024)) };
-        assert_eq!(a1024, Tick::new(9), "write-before-read: stamped added tick reads back");
-        assert_eq!(c1024, Tick::new(9), "write-before-read: stamped changed tick reads back");
+        let (a_r0, c_r0) = unsafe { (pool.read_added_tick(r0), pool.read_changed_tick(r0)) };
+        assert_eq!(a_r0, Tick::new(9), "write-before-read: stamped added tick reads back");
+        assert_eq!(c_r0, Tick::new(9), "write-before-read: stamped changed tick reads back");
 
         // J-XI (2): the newly committed never-written tail also reads ZERO.
         for i in pool.count()..pool.committed_rows() {
@@ -3549,10 +3740,47 @@ mod tests {
             assert_eq!(a, Tick::ZERO, "post-grow never-written added slot {i} reads ZERO");
             assert_eq!(c, Tick::ZERO, "post-grow never-written changed slot {i} reads ZERO");
         }
+
+        // The TICK-page boundary: fill to the frontier of the last rung whose
+        // rows the first tick page still covers, stamp, then take one more add.
+        let sigma = pool_base_stagger(STRIDE64_ID.0);
+        let tick_edge = *rungs
+            .iter()
+            .rev()
+            .find(|&&f| sigma + 4 * f <= COMMIT_PAGE)
+            .expect("the first rung fits one tick page");
+        let next = rungs[rungs.iter().position(|&f| f == tick_edge).expect("a rung") + 1];
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!((tick_edge, next), (478, 990));
+        while pool.count() < tick_edge {
+            let i = pool.count() as u64;
+            pool.add_typed(Stride64::new(i)).expect("under the 4096-row ceiling");
+        }
+        assert_eq!(pool.committed_rows(), tick_edge);
+        assert_eq!(pool.ticks_committed, COMMIT_PAGE, "still one tick page");
+        pool.fill_ticks(0, tick_edge, Tick::new(6));
+        pool.add_typed(Stride64::new(tick_edge as u64)).expect("the tick-page crossing");
+        assert_eq!(pool.committed_rows(), next);
+        assert_eq!(
+            pool.ticks_committed,
+            (sigma + 4 * next).next_multiple_of(COMMIT_PAGE),
+            "the grow committed the tick pages the new rows need"
+        );
+        assert!(pool.ticks_committed > COMMIT_PAGE, "a second tick page was committed");
+        // SAFETY: tick_edge - 1 < count(); &pool shared read, no writer.
+        let t_edge = unsafe { pool.read_changed_tick(tick_edge - 1) };
+        assert_eq!(t_edge, Tick::new(6), "the last stamp below the tick-page edge survives");
+        for i in pool.count()..pool.committed_rows() {
+            // SAFETY: i < committed_rows() — documented validity window.
+            let (a, c) = unsafe { (*(*added.add(i)).get(), *(*changed.add(i)).get()) };
+            assert_eq!(a, Tick::ZERO, "never-written added slot {i} past the tick edge reads ZERO");
+            assert_eq!(c, Tick::ZERO, "never-written changed slot {i} past the tick edge reads ZERO");
+        }
     }
 
-    /// Phase X.I W4 fixture: a 64-byte drop-counting component so the
-    /// drop-accounting boundary sits at 1024 rows (one granule).
+    /// Phase X.I W4 fixture: a 64-byte drop-counting component. At id 227
+    /// (σ = 2240) its page-ladder frontiers are 29, 93, 221, 477, 989, 2013
+    /// rows (they sat at 1024 rows, one granule, on the granule ladder).
     #[repr(C)]
     struct DropPad64 {
         counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -3578,9 +3806,9 @@ mod tests {
         }
     }
 
-    /// U-P5 — drop-count-exact across a growth boundary. 1500 64-B rows
-    /// cross the 1024-row slab boundary (one mid-sequence growth event);
-    /// 5 pops + 3 swap_removes drop exactly 8; pool Drop drops exactly the
+    /// U-P5 — drop-count-exact across growth boundaries. 1500 64-B rows
+    /// cross five commit boundaries (six growth events, the last to 2013
+    /// rows); 5 pops + 3 swap_removes drop exactly 8; pool Drop drops exactly the
     /// 1492 survivors. Total == 1500 — every value dropped EXACTLY once,
     /// no uninit `[len, committed_rows)` slot dropped, and the growth event
     /// itself dropped nothing (O(1), zero bytes copied, zero drops).
@@ -3594,7 +3822,7 @@ mod tests {
         let mut pool = ComponentPool::new(DROP_PAD_ID.0, 4096);
 
         let counter = Arc::new(AtomicUsize::new(0));
-        const M: usize = 1500; // crosses the 1024-row boundary
+        const M: usize = 1500; // crosses the 989-row boundary, among others
         for _ in 0..M {
             pool.add_typed(DropPad64 {
                 counter: Arc::clone(&counter),
@@ -3614,7 +3842,7 @@ mod tests {
         }
         assert_eq!(counter.load(Ordering::Relaxed), 5, "5 pops drop exactly 5");
 
-        // One sub-boundary row, one row that crossed the boundary.
+        // One row of the first commit, one row past the 989-row boundary.
         assert!(pool.swap_remove(10), "swap_remove(10) in bounds");
         assert!(pool.swap_remove(1100), "swap_remove(1100) in bounds");
         assert!(pool.swap_remove(0), "swap_remove(0) in bounds");
@@ -3640,18 +3868,32 @@ mod tests {
     /// `false` with zero state change. This is the guard that makes
     /// `Archetype::reserve_capacity` Phase B's UNCONDITIONAL `grow_rows`
     /// calls legal (the critic-Round-1 CRITICAL fix).
+    ///
+    /// Packing plan S2 re-derivation (x86_64 numbers in brackets): the first
+    /// grow is request-dominant, `align_up_page(σ + 100 * 64)` of data from the
+    /// floor [12 288 B -> (12 288 - 2176) / 64 = 158 rows; was one granule =
+    /// 1024 rows], and the real grow after the no-ops is the doubling arm
+    /// [24 576 B -> 350 rows; was 64 KiB -> 128 KiB = 2048 rows].
     #[test]
     fn grow_rows_idempotent_below_frontier() {
-        let mut pool = make_stride64_pool(4096);
+        use crate::ecs::constants::{COMMIT_PAGE, pool_base_stagger};
 
-        // First real grow: request 100 -> one granule -> 1024 rows.
+        let mut pool = make_stride64_pool(4096);
+        let sigma = pool_base_stagger(STRIDE64_ID.0);
+        let first_data = (sigma + 100 * 64).next_multiple_of(COMMIT_PAGE);
+        let first_rows = (first_data - sigma) / 64;
+        let doubled_rows = (2 * first_data - sigma) / 64;
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!((first_rows, doubled_rows), (158, 350));
+
+        // First real grow: request 100 -> first_rows.
         assert!(pool.grow_rows(100), "grow within the ceiling succeeds");
-        assert_eq!(pool.committed_rows(), 1024, "one granule = 1024 rows of 64 B");
+        assert_eq!(pool.committed_rows(), first_rows, "request-dominant first commit");
 
         // Idempotent no-op arm, exercised repeatedly at several n values
         // including the n == committed_rows edge and n == 0.
         for _round in 0..2 {
-            for &n in &[0usize, 1, 100, 1023, 1024] {
+            for n in [0usize, 1, 100, first_rows - 1, first_rows] {
                 let before = pool.committed_rows();
                 assert!(
                     pool.grow_rows(n),
@@ -3667,8 +3909,8 @@ mod tests {
 
         // A real grow still works after the no-ops (the early-out must not
         // have corrupted the frontier bookkeeping).
-        assert!(pool.grow_rows(1025), "grow past the frontier succeeds");
-        assert_eq!(pool.committed_rows(), 2048, "doubling: 64 KiB -> 128 KiB");
+        assert!(pool.grow_rows(first_rows + 1), "grow past the frontier succeeds");
+        assert_eq!(pool.committed_rows(), doubled_rows, "doubling: the data frontier x2");
 
         // Ceiling arm: false, ZERO state change.
         let before = pool.committed_rows();
@@ -3888,32 +4130,39 @@ mod tests {
         assert_eq!(pool.data_committed, 0, "Z1 at construction");
     }
 
-    /// Phase 22 — THE GROW1-ZST growth gate: two successive
-    /// `grow_rows_zst` invocations that EACH reach `vm.commit`, with strict
-    /// tick-frontier growth (Z4), request coverage (Z5), `data_committed ==
-    /// 0` throughout (Z1), and stable base pointers across both commits.
+    /// Phase 22 — THE GROW1-ZST growth gate: successive `grow_rows_zst`
+    /// invocations that EACH reach `vm.commit`, with strict tick-frontier
+    /// growth (Z4), request coverage (Z5), `data_committed == 0` throughout
+    /// (Z1), and stable base pointers across every commit.
     ///
-    /// Geometry: ticks are 4 B/row, so one granule (64 KiB) covers 16,384
-    /// rows. `grow(1)` commits the first granule; `grow(20_000)` drives the
-    /// request past that frontier (20,000 × 4 B > 64 KiB) — the second call
-    /// MUST commit again (doubling: 64 KiB → 128 KiB).
+    /// Geometry (packing plan S2 re-derivation; x86_64 numbers in brackets):
+    /// ticks are 4 B/row and the tick frontier is measured from the absolute
+    /// page floor, so `grow(1)` commits one tick page, `(COMMIT_PAGE - σ) / 4`
+    /// rows [4096 B, 448 rows at σ = 2304; was one granule, 16 384 rows]. The
+    /// second call asks for one row past it: the DOUBLING arm [8192 B, 1472
+    /// rows]. The third asks for 20 000 rows: the REQUEST-DOMINANT arm
+    /// [`align_up_page(σ + 80 000)` = 86 016 B, 20 928 rows; the granule
+    /// version's second call, 20 000, doubled to 128 KiB = 32 768 rows].
     #[test]
     fn zst_pool_growth_two_successive_commits() {
-        use crate::ecs::constants::COMMIT_GRANULE as G;
+        use crate::ecs::constants::{COMMIT_PAGE as P, pool_base_stagger};
 
         let mut pool = make_zst_pool(100_000);
         assert_eq!(pool.committed_rows(), 0, "D3: zero initial commit");
         assert_eq!(pool.ticks_committed, 0);
         assert_eq!(pool.data_committed, 0, "Z1 before any growth");
+        let sigma = pool_base_stagger(ZST_TAG_ID.0);
 
         let buffer_before = pool.buffer_ptr();
         let added_before = pool.added_ticks_ptr();
         let changed_before = pool.changed_ticks_ptr();
 
-        // First grow: 0 → one granule of ticks (first vm.commit pair).
+        // First grow: 0 → one tick page (first vm.commit pair).
         assert!(pool.grow_rows(1), "grow within the ceiling succeeds");
-        assert_eq!(pool.ticks_committed, G, "first commit = one tick granule");
-        assert_eq!(pool.committed_rows(), G / 4, "G/4 = 16,384 rows of 4 B ticks");
+        assert_eq!(pool.ticks_committed, P, "first commit = one tick page");
+        assert_eq!(pool.committed_rows(), (P - sigma) / 4, "(P - σ) / 4 rows of 4 B ticks");
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(pool.committed_rows(), 448);
         assert_eq!(pool.data_committed, 0, "Z1 after the first commit");
 
         // Idempotent no-op arm below the frontier: zero state change.
@@ -3925,16 +4174,29 @@ mod tests {
             "idempotent arm must not move the frontier"
         );
 
-        // Second grow: n = 20,000 > 16,384 — past the first commit step, so
-        // grow_rows_zst reaches vm.commit AGAIN (doubling to two granules).
-        assert!(pool.grow_rows(20_000), "second grow within the ceiling");
-        assert_eq!(pool.ticks_committed, 2 * G, "STRICT frontier growth: G → 2·G (Z4)");
-        assert_eq!(pool.committed_rows(), 2 * G / 4, "2G/4 = 32,768 rows");
-        assert!(pool.committed_rows() >= 20_000, "Z5: request covered");
+        // Second grow: one row past the frontier — grow_rows_zst reaches
+        // vm.commit AGAIN (the doubling arm: one tick page -> two).
+        let n2 = pool.committed_rows() + 1;
+        assert!(pool.grow_rows(n2), "second grow within the ceiling");
+        assert_eq!(pool.ticks_committed, 2 * P, "STRICT frontier growth: P → 2·P (Z4)");
+        assert_eq!(pool.committed_rows(), (2 * P - sigma) / 4, "(2P - σ) / 4 rows");
+        assert!(pool.committed_rows() >= n2, "Z5: request covered");
         assert_eq!(pool.data_committed, 0, "Z1 after the second commit");
+
+        // Third grow: n = 20,000 is past twice the frontier — the
+        // request-dominant arm (one event covers the whole request).
+        assert!(pool.grow_rows(20_000), "third grow within the ceiling");
+        let t3 = (sigma + 20_000 * 4).next_multiple_of(P);
+        assert_eq!(pool.ticks_committed, t3, "request-dominant: align_up_page(σ + 4n)");
+        assert_eq!(pool.committed_rows(), (t3 - sigma) / 4, "(t - σ) / 4 rows");
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!((pool.ticks_committed, pool.committed_rows()), (86_016, 20_928));
+        assert!(pool.committed_rows() >= 20_000, "Z5: request covered");
+        assert_eq!(pool.data_committed, 0, "Z1 after the third commit");
 
         // Base pointers never move across ZST growth (write-once contract).
         assert_eq!(pool.buffer_ptr(), buffer_before, "dangling data base stable");
+        assert_eq!(pool.added_ticks_ptr() as usize % P, sigma, "G5: the tick base carries σ");
         assert_eq!(pool.added_ticks_ptr(), added_before, "added tick base stable");
         assert_eq!(pool.changed_ticks_ptr(), changed_before, "changed tick base stable");
 
@@ -4114,5 +4376,799 @@ mod tests {
             "only the local probe dropped (==1); the Device pool's CPU drop_fn \
              ran 0 times (CR-C: Host len == 0)"
         );
+    }
+
+    // ====================================================================
+    // Packing plan S0 — the commit-floor oracle
+    // (`docs/ecs/POOL-SUBGRANULAR-PACKING-PLAN.md`, gates G1, G2, G3, G7).
+    //
+    // The `cfg` below is a recorded "not compiled here", never a pass (plan
+    // G2): on the fallback arm (Miri, wasm, 32-bit) `VmReservation::reserve`
+    // is an eager `alloc_zeroed` of the whole `os_len` and `commit` is a
+    // no-op, so no commit floor exists there to measure. The ladder
+    // bookkeeping itself is audited under Miri by `tests/miri_pool_growth.rs`
+    // and `tests/miri_phase22.rs`.
+    // ====================================================================
+    #[cfg(all(not(miri), any(windows, unix), target_pointer_width = "64"))]
+    mod commit_floor_tests {
+        //! Commit-floor oracle for `ComponentPool` (packing plan S0).
+        //!
+        //! * **G1** — the in-process model `ComponentPool::committed_bytes`,
+        //!   pinned by exact equality against the plan's closed form ("The
+        //!   floor, derived"), never by a bound.
+        //! * **G2** — anti-vacuity: one more grow moves the model by exactly one
+        //!   page, and an idempotent grow moves it by exactly zero.
+        //! * **G3** — OS truth: the bytes the kernel reports committed inside
+        //!   one pool's reservation (`VirtualQuery` on Windows,
+        //!   `/proc/self/maps` on Linux) equal the model after every growth
+        //!   event of every geometry in the plan's obligation-10 table, so the
+        //!   model cannot pass by restating the arithmetic it models.
+        //! * **G7** — the grow-event count of a one-row-at-a-time fill to 1 M
+        //!   rows, pinned exactly (an equality also catches a ladder widened
+        //!   to ×4, which a `<=` bound cannot).
+        //! * **G8** — every growth event of 178 pools (two request sequences
+        //!   for each of 89 `(stride, σ)` cases) against a test-local D2
+        //!   ladder derived from the plan's formulas, the model, and the OS.
+        //!
+        //! # Component ids
+        //!
+        //! One registry per process, one layout per slot: a fixed id that a
+        //! derive mint later lands on panics loudly in `register_new`, and a
+        //! fixed id another test pins to a different type panics in
+        //! `register_layout`. Every id below was checked against the lib test
+        //! binary's census of fixed ids (`register_layout` and `ComponentId(N)`
+        //! in `src/**`, bands 100-109, 150-159, 200-209, 220-229, 300-359,
+        //! 400-511 taken) and sits above the derive-mint range, which
+        //! `ecs_master`'s own fixed ids at 100..=102 already bound from above.
+        //! The stagger `σ = (id % 64) * 64` is what each id is chosen for:
+        //!
+        //! | ids | layout | σ | used by |
+        //! |---|---|---|---|
+        //! | 230..=293 | `Floor40`, 40 B | one id per residue, all 64 | G1 (233..=248, 240 untracked), G2, G3, G7 (256 σ 0, 281 σ 1600, 255 σ 4032) |
+        //! | 128 / 127 | `Floor1`, 1 B | 0 / 4032 | G1 tiny strides |
+        //! | 192 / 191 | `Floor2`, 2 B | 0 / 4032 | G1 tiny strides |
+        //! | 224, 226, 223, 228 | the `tests` fixtures (16 B, 64 B, 4 B, ZST) | 2048, 2176, 1984, 2304 | G3 rows 2-5 and the ZST tick-cap row; G8 |
+        //! | 129 | `Floor1` | 64 | G8 |
+        //! | 193, 190 | `F32Wrap`, 4 B | 64, 3968 | G8 |
+        //! | 222, 385, 189 | `OtherComponent`, 8 B | 1920, 64, 3904 | G8 |
+        //! | 449, 318 | `U64Pair`, 16 B | 64, 3968 | G8 |
+        //! | 382 | `Stride64`, 64 B | 3968 | G8 |
+        //! | 319, 188, 130 | `Floor256` | 4032, 3840, 128 | G8 |
+        //! | 383, 176, 384 | `Floor1K` | 4032, 3072, 0 | G8 |
+        //! | 447, 448, 162 | `Floor4K` | 4032, 0, 2176 | G8 |
+        //!
+        //! G8 cannot hold every stride at every id (critique W1: 512 slots, one
+        //! layout each), so it samples σ per stride: all 64 residues for
+        //! stride 40, and for the others the values that stride's arithmetic
+        //! turns on — both phases of the tick-driven strides 1 and 2; near-0
+        //! and near-4032 for the strides whose first data page never
+        //! overflows; and for 256, 1024 and 4096 a σ where `σ + stride`
+        //! crosses a page (4032, and 2176 at 4096), one where it fits exactly
+        //! (3840, 3072, 0), and one more (128, 0, 2176).
+        //!
+        //! A σ-independent assertion takes its expectation from the plan's
+        //! formula in `COMMIT_PAGE`; the x86_64 literal the plan quotes is
+        //! pinned beside it, so the number the documents cite is the number
+        //! this gate checks.
+
+        #[cfg(windows)]
+        use core::mem::MaybeUninit;
+        use core::ops::RangeInclusive;
+
+        use super::{
+            F32_WRAP_ID, F32Wrap, OtherComponent, Stride64, U64Pair, ZST_TAG_ID, ZstTag,
+            make_stride64_pool, make_u64_pool, make_zst_pool,
+        };
+        use crate::ecs::constants::{
+            COMMIT_GRANULE, COMMIT_PAGE, POOL_MAX_ROWS, POOL_MAX_SLAB, pool_base_stagger,
+            pool_reserve_rows,
+        };
+        use crate::ecs::core::component::component_registry;
+        use crate::ecs::identifiers::primitives::EntityId;
+        use crate::ecs::memory::component_pool::{ComponentPool, PoolBacking};
+        use crate::ecs::memory::vm::VmReservation;
+        use crate::ecs::memory::vm_column::VmColumn;
+
+        // Layout-only fixtures: registered for their size and never
+        // constructed, because the oracle grows pools with `grow_rows` and
+        // never writes a row.
+        #[allow(dead_code)]
+        #[repr(C)]
+        struct Floor40([u64; 5]);
+        #[allow(dead_code)]
+        #[repr(C)]
+        struct Floor1(u8);
+        #[allow(dead_code)]
+        #[repr(C)]
+        struct Floor2(u16);
+        #[allow(dead_code)]
+        #[repr(C)]
+        struct Floor256([u64; 32]);
+        #[allow(dead_code)]
+        #[repr(C)]
+        struct Floor1K([u64; 128]);
+        #[allow(dead_code)]
+        #[repr(C)]
+        struct Floor4K([u64; 512]);
+
+        /// One `Floor40` id per stagger residue.
+        const FLOOR40_BAND: RangeInclusive<usize> = 230..=293;
+        /// G1's sixteen σ != 0 columns (σ = 2624 ..= 3584).
+        const G1_IDS: RangeInclusive<usize> = 233..=248;
+        const SIGMA_0: usize = 256;
+        const SIGMA_1600: usize = 281;
+        const SIGMA_4032: usize = 255;
+        const UNTRACKED_40: usize = 240;
+        const STRIDE1_SIGMA_0: usize = 128;
+        const STRIDE1_SIGMA_4032: usize = 127;
+        const STRIDE2_SIGMA_0: usize = 192;
+        const STRIDE2_SIGMA_4032: usize = 191;
+
+        /// A default-sized pool (`with_default_sizes`: the 16-column fixture
+        /// must be default-sized, plan S0) for `T` registered at `id`.
+        fn default_pool<T: 'static>(id: usize) -> ComponentPool {
+            component_registry::register_layout::<T>(id);
+            ComponentPool::with_default_sizes(id)
+        }
+
+        fn floor40_pool(id: usize) -> ComponentPool {
+            assert!(FLOOR40_BAND.contains(&id), "Floor40 ids live in FLOOR40_BAND (id {id})");
+            default_pool::<Floor40>(id)
+        }
+
+        /// "The floor, derived" (packing plan): `(committed_rows,
+        /// committed bytes)` after the FIRST grow to one row, from `σ`, the
+        /// stride and the tracked flag alone. `stride == 0` is a tracked ZST
+        /// (two tick regions, no data), valid while `σ + 4 <= COMMIT_PAGE`.
+        fn closed_form_floor(sigma: usize, stride: usize, tracked: bool) -> (usize, usize) {
+            let p = COMMIT_PAGE;
+            if stride == 0 {
+                return ((p - sigma) / 4, 2 * p);
+            }
+            let data_pages = (sigma + stride).div_ceil(p);
+            let rows = (data_pages * p - sigma) / stride;
+            if !tracked {
+                return (rows, data_pages * p);
+            }
+            let tick_pages = (sigma + 4 * rows).div_ceil(p);
+            (rows, (data_pages + 2 * tick_pages) * p)
+        }
+
+        /// The SUM of the three frontiers — what the union model is not.
+        /// `sum - committed_bytes()` is the number of shared boundary pages.
+        fn frontier_sum(pool: &ComponentPool) -> usize {
+            let ticks = if pool.is_tracked() { pool.ticks_committed } else { 0 };
+            pool.data_committed + 2 * ticks
+        }
+
+        /// Walks `pool` up its commit ladder exactly as a one-row-at-a-time
+        /// `add` loop does — `add` grows only when `count == committed_rows`,
+        /// and then asks for `committed_rows + 1` — until the frontier covers
+        /// `target`, calling `after_each` after every growth event. Returns the
+        /// number of events.
+        fn climb(
+            pool: &mut ComponentPool,
+            target: usize,
+            mut after_each: impl FnMut(&ComponentPool, usize),
+        ) -> usize {
+            let mut events = 0;
+            while pool.committed_rows() < target {
+                let n = pool.committed_rows() + 1;
+                assert!(pool.grow_rows(n), "grow_rows({n}) below the ceiling must succeed");
+                events += 1;
+                after_each(pool, events);
+            }
+            events
+        }
+
+        fn host_vm(pool: &ComponentPool) -> &VmReservation {
+            match &pool.backing {
+                PoolBacking::Host(vm) => vm,
+                PoolBacking::Device(_) => unreachable!("commit-floor fixtures are host pools"),
+            }
+        }
+
+        /// Bytes the kernel reports committed inside `pool`'s reservation:
+        /// a `VirtualQuery` walk over `[base, base + os_len)` summing the
+        /// `MEM_COMMIT` regions, clipped to the reservation.
+        #[cfg(windows)]
+        fn os_committed_bytes(pool: &ComponentPool) -> usize {
+            use core::ffi::c_void;
+
+            /// `MEMORY_BASIC_INFORMATION` on Win64. Every field is declared so
+            /// the layout is the kernel's; the walk reads three of them.
+            #[allow(dead_code)]
+            #[repr(C)]
+            struct MemoryBasicInformation {
+                base_address: *mut c_void,
+                allocation_base: *mut c_void,
+                allocation_protect: u32,
+                partition_id: u16,
+                region_size: usize,
+                state: u32,
+                protect: u32,
+                kind: u32,
+            }
+            const _: () = assert!(size_of::<MemoryBasicInformation>() == 48);
+            const MEM_COMMIT: u32 = 0x1000;
+
+            // SAFETY: the signature matches kernel32's `VirtualQuery` on Win64
+            // exactly (LPCVOID -> *const c_void, PMEMORY_BASIC_INFORMATION ->
+            // *mut MemoryBasicInformation, SIZE_T -> usize); kernel32 is
+            // linked transitively by std.
+            unsafe extern "system" {
+                fn VirtualQuery(
+                    address: *const c_void,
+                    buffer: *mut MemoryBasicInformation,
+                    length: usize,
+                ) -> usize;
+            }
+
+            let vm = host_vm(pool);
+            let start = vm.base().as_ptr() as usize;
+            let end = start + vm.os_len();
+            let mut at = start;
+            let mut committed = 0;
+            while at < end {
+                let mut info = MaybeUninit::<MemoryBasicInformation>::uninit();
+                // SAFETY: `at` lies inside this pool's live reservation
+                // `[start, end)`; `info` is a writable buffer of exactly the
+                // length passed; the call only writes into that buffer.
+                let written = unsafe {
+                    VirtualQuery(
+                        at as *const c_void,
+                        info.as_mut_ptr(),
+                        size_of::<MemoryBasicInformation>(),
+                    )
+                };
+                assert_eq!(
+                    written,
+                    size_of::<MemoryBasicInformation>(),
+                    "VirtualQuery failed at {at:#x}"
+                );
+                // SAFETY: a return value equal to the buffer length means the
+                // kernel wrote every field of the struct.
+                let info = unsafe { info.assume_init() };
+                let region_end = (info.base_address as usize + info.region_size).min(end);
+                if info.state == MEM_COMMIT {
+                    committed += region_end - at;
+                }
+                at = region_end;
+            }
+            committed
+        }
+
+        /// Bytes mapped read/write inside `pool`'s reservation according to
+        /// `/proc/self/maps`: the `rw` extents clipped to `[base, base +
+        /// os_len)`. A monotone prefix of equal-protection `mprotect`s merges
+        /// into one VMA, and a VMA can merge across the reservation's edge
+        /// with an unrelated mapping, hence the clip.
+        #[cfg(target_os = "linux")]
+        fn os_committed_bytes(pool: &ComponentPool) -> usize {
+            let vm = host_vm(pool);
+            let start = vm.base().as_ptr() as usize;
+            let end = start + vm.os_len();
+            let maps = std::fs::read_to_string("/proc/self/maps")
+                .expect("/proc/self/maps is readable on Linux");
+            let mut committed = 0;
+            for line in maps.lines() {
+                let mut fields = line.split_whitespace();
+                let (Some(range), Some(perms)) = (fields.next(), fields.next()) else {
+                    continue;
+                };
+                let Some((lo, hi)) = range.split_once('-') else {
+                    continue;
+                };
+                let lo = usize::from_str_radix(lo, 16).expect("maps range start is hex");
+                let hi = usize::from_str_radix(hi, 16).expect("maps range end is hex");
+                let (lo, hi) = (lo.max(start), hi.min(end));
+                if lo < hi && perms.starts_with("rw") {
+                    committed += hi - lo;
+                }
+            }
+            committed
+        }
+
+        // The OS-truth arm exists on Windows and Linux only: the syscall arm
+        // of `vm.rs` is `unix`, but `/proc/self/maps` is Linux's, so on every
+        // other unix target the G3 tests below are not compiled — a recorded
+        // absence (this comment), never a vacuous green.
+        #[cfg(any(windows, target_os = "linux"))]
+        fn assert_os_truth(pool: &ComponentPool, what: &str) {
+            assert_eq!(
+                os_committed_bytes(pool),
+                pool.committed_bytes(),
+                "G3 OS truth vs the D7 model ({what}; committed_rows = {}, data_committed = {}, \
+                 ticks_committed = {})",
+                pool.committed_rows(),
+                pool.data_committed,
+                pool.ticks_committed
+            );
+        }
+
+        // ---- G1 -------------------------------------------------------------
+
+        /// G1 — sixteen default-sized 40 B tracked columns with σ != 0, one
+        /// row each: three pages per column (data, added, changed), 196 608 B
+        /// on x86_64. The granule ladder read 3 145 728 B here: 16 × 3 ×
+        /// 64 KiB of sub-region-relative frontiers.
+        #[test]
+        fn floor_of_sixteen_small_tracked_columns() {
+            let mut total = 0;
+            for id in G1_IDS {
+                assert_ne!(pool_base_stagger(id), 0, "G1 needs σ != 0 (id {id})");
+                let mut pool = floor40_pool(id);
+                assert!(pool.grow_rows(1));
+                total += pool.committed_bytes();
+            }
+            assert_eq!(total, 16 * 3 * COMMIT_PAGE, "G1: sixteen σ != 0 columns, one row each");
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(total, 196_608);
+        }
+
+        /// G1 — the floor is the same three pages at σ = 0 and at σ = 4032:
+        /// the page floor absorbs the stagger pad (plan D2, D4). Only the row
+        /// count differs: `(COMMIT_PAGE - σ) / 40`.
+        #[test]
+        fn floor_is_three_pages_at_both_stagger_extremes() {
+            for (id, sigma) in [(SIGMA_0, 0), (SIGMA_4032, 4032)] {
+                assert_eq!(pool_base_stagger(id), sigma);
+                let mut pool = floor40_pool(id);
+                assert!(pool.grow_rows(1));
+                assert_eq!(
+                    (pool.committed_rows(), pool.committed_bytes()),
+                    closed_form_floor(sigma, 40, true),
+                    "G1: σ = {sigma}"
+                );
+                assert_eq!(pool.committed_bytes(), 3 * COMMIT_PAGE, "G1: σ = {sigma}");
+            }
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(
+                [closed_form_floor(0, 40, true), closed_form_floor(4032, 40, true)],
+                [(102, 12_288), (1, 12_288)]
+            );
+        }
+
+        /// G1 — an untracked column (`ScratchColumn`'s backing) costs its data
+        /// page alone.
+        #[test]
+        fn floor_of_an_untracked_column_is_its_data_page() {
+            component_registry::register_layout::<Floor40>(UNTRACKED_40);
+            let mut pool = ComponentPool::new_untracked(UNTRACKED_40, pool_reserve_rows(40));
+            assert!(pool.grow_rows(1));
+            assert_eq!(
+                (pool.committed_rows(), pool.committed_bytes()),
+                closed_form_floor(pool_base_stagger(UNTRACKED_40), 40, false)
+            );
+            assert_eq!(pool.committed_bytes(), COMMIT_PAGE);
+        }
+
+        /// G1 — a tracked ZST (tag) column costs its two tick pages.
+        #[test]
+        fn floor_of_a_tracked_zst_column_is_two_tick_pages() {
+            let mut pool = default_pool::<ZstTag>(ZST_TAG_ID.0);
+            assert!(pool.grow_rows(1));
+            let sigma = pool_base_stagger(ZST_TAG_ID.0);
+            assert_eq!(
+                (pool.committed_rows(), pool.committed_bytes()),
+                closed_form_floor(sigma, 0, true)
+            );
+            assert_eq!(pool.committed_bytes(), 2 * COMMIT_PAGE);
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(pool.committed_rows(), 448, "(4096 - 2304) / 4");
+        }
+
+        /// G1 — a four-column 40 B table plus its `VmColumn<EntityId>`
+        /// (OPEN-QUESTIONS F2's unit): 4 × 3 pages + 1 page.
+        #[test]
+        fn floor_of_a_four_column_table_and_its_entity_column() {
+            let mut total = 0;
+            for id in G1_IDS.take(4) {
+                let mut pool = floor40_pool(id);
+                assert!(pool.grow_rows(1));
+                total += pool.committed_bytes();
+            }
+            let mut entity_ids: VmColumn<EntityId> =
+                VmColumn::new("commit_floor_tests.entity_ids", POOL_MAX_ROWS);
+            entity_ids.push(EntityId(0));
+            total += entity_ids.committed_elems() * size_of::<EntityId>();
+            assert_eq!(total, 13 * COMMIT_PAGE, "G1: 4 × 3 pages + one entity-id page");
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(total, 53_248);
+        }
+
+        /// G1 — 1 B and 2 B columns: the tick pages drive the floor (plan
+        /// D6), phase-dependent on σ, so the closed form pins them.
+        #[test]
+        fn tiny_stride_floors_are_driven_by_the_tick_pages() {
+            let cases = [
+                (STRIDE1_SIGMA_0, 1),
+                (STRIDE1_SIGMA_4032, 1),
+                (STRIDE2_SIGMA_0, 2),
+                (STRIDE2_SIGMA_4032, 2),
+            ];
+            let mut floors = [0usize; 4];
+            for (k, (id, stride)) in cases.into_iter().enumerate() {
+                let mut pool = if stride == 1 {
+                    default_pool::<Floor1>(id)
+                } else {
+                    default_pool::<Floor2>(id)
+                };
+                assert!(pool.grow_rows(1));
+                let expected = closed_form_floor(pool_base_stagger(id), stride, true);
+                assert_eq!(
+                    (pool.committed_rows(), pool.committed_bytes()),
+                    expected,
+                    "G1: stride {stride}, id {id}"
+                );
+                floors[k] = expected.1;
+            }
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(floors, [36_864, 20_480, 20_480, 20_480]);
+        }
+
+        // ---- G2 -------------------------------------------------------------
+
+        /// G2 (a) — a model stuck at a constant is red: the second rung of a
+        /// σ = 0 column moves the model by exactly one page (the data page
+        /// doubles; the tick pages already cover the new rows).
+        #[test]
+        fn one_more_grow_moves_the_model_by_exactly_one_page() {
+            let mut pool = floor40_pool(SIGMA_0);
+            assert!(pool.grow_rows(1));
+            let (rows, bytes) = (pool.committed_rows(), pool.committed_bytes());
+            assert!(pool.grow_rows(rows + 1));
+            assert_eq!(pool.committed_bytes() - bytes, COMMIT_PAGE, "G2(a): one more rung");
+            assert_eq!(pool.committed_rows(), 2 * COMMIT_PAGE / 40, "G2(a): σ = 0 rows");
+        }
+
+        /// G2 (b) — a model that double-counts is red: an idempotent grow at
+        /// or below the frontier moves nothing.
+        #[test]
+        fn idempotent_grow_below_the_frontier_moves_the_model_by_zero() {
+            let mut pool = floor40_pool(SIGMA_1600);
+            assert!(pool.grow_rows(1));
+            let state = |p: &ComponentPool| {
+                (p.committed_rows(), p.committed_bytes(), p.data_committed, p.ticks_committed)
+            };
+            let before = state(&pool);
+            for n in [0, 1, before.0] {
+                assert!(pool.grow_rows(n));
+                assert_eq!(state(&pool), before, "G2(b): grow_rows({n}) is a no-op");
+            }
+        }
+
+        // ---- G3 -------------------------------------------------------------
+
+        /// G3 — the floor of a σ != 0 column, as the kernel sees it. The
+        /// granule ladder's `align_down`/`align_up` pair committed two granules
+        /// per sub-region here (393 216 B against a 196 608 B model); only
+        /// this arm can see that overshoot.
+        #[cfg(any(windows, target_os = "linux"))]
+        #[test]
+        fn os_truth_equals_the_model_at_the_floor_with_nonzero_stagger() {
+            let mut pool = floor40_pool(SIGMA_1600);
+            assert!(pool.grow_rows(1));
+            assert_os_truth(&pool, "floor, σ = 1600");
+            assert_eq!(pool.committed_bytes(), 3 * COMMIT_PAGE);
+        }
+
+        /// G3 — the σ = 0 twin: page floors coincide with the sub-region
+        /// offsets, so no overshoot existed here even on the granule ladder.
+        #[cfg(any(windows, target_os = "linux"))]
+        #[test]
+        fn os_truth_equals_the_model_at_the_floor_with_zero_stagger() {
+            let mut pool = floor40_pool(SIGMA_0);
+            assert!(pool.grow_rows(1));
+            assert_os_truth(&pool, "floor, σ = 0");
+        }
+
+        /// G3 obligation-10 row 2 — `make_stride64_pool(4096)` (σ = 2176) to
+        /// full capacity: the data ladder reaches its cap `data_len + P` by
+        /// request, so the data interval shares the `added` floor page.
+        #[cfg(any(windows, target_os = "linux"))]
+        #[test]
+        fn os_truth_row2_stride64_to_full_capacity() {
+            let mut pool = make_stride64_pool(4096);
+            climb(&mut pool, 4096, |p, k| assert_os_truth(p, &format!("row 2, event {k}")));
+            assert_eq!(pool.committed_rows(), 4096);
+            assert_eq!(frontier_sum(&pool) - pool.committed_bytes(), COMMIT_PAGE, "row 2");
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!((pool.committed_bytes(), frontier_sum(&pool)), (303_104, 307_200));
+        }
+
+        /// G3 obligation-10 row 3 — `make_u64_pool(256)` (σ = 2048) to full
+        /// capacity: neither cap is reached, so the union is the sum.
+        #[cfg(any(windows, target_os = "linux"))]
+        #[test]
+        fn os_truth_row3_u64_to_full_capacity() {
+            let mut pool = make_u64_pool(256);
+            climb(&mut pool, 256, |p, k| assert_os_truth(p, &format!("row 3, event {k}")));
+            assert_eq!(pool.committed_rows(), 256);
+            assert_eq!(frontier_sum(&pool), pool.committed_bytes(), "row 3");
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(pool.committed_bytes(), 16_384);
+        }
+
+        /// G3 obligation-10 row 4 — `pool_byte_layout(3072, 64, 2176)` climbed
+        /// one rung at a time to `n = 2015`: the doubling from `2G` overshoots
+        /// onto the data cap `3G + P` BEFORE full capacity (route (ii)). The
+        /// climb is load-bearing: one `grow_rows(2015)` from empty lands at
+        /// 135 168 B, where union == sum, and would pass for the wrong reason.
+        #[cfg(any(windows, target_os = "linux"))]
+        #[test]
+        fn os_truth_row4_doubling_overshoots_onto_the_data_cap() {
+            let mut pool = make_stride64_pool(3072);
+            climb(&mut pool, 2015, |p, k| assert_os_truth(p, &format!("row 4, event {k}")));
+            assert_eq!(pool.committed_rows(), 3072, "row 4: the overshoot reaches the ceiling");
+            assert_eq!(
+                frontier_sum(&pool) - pool.committed_bytes(),
+                COMMIT_PAGE,
+                "row 4: the data/added boundary page must be shared (anti-vacuity)"
+            );
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!((pool.committed_bytes(), frontier_sum(&pool)), (229_376, 233_472));
+        }
+
+        /// G3 obligation-10 row 5 — `pool_byte_layout(16384, 4, 1984)` to full
+        /// capacity: both caps reached, two shared pages — the cheap twin of
+        /// row 1's both-caps case.
+        #[cfg(any(windows, target_os = "linux"))]
+        #[test]
+        fn os_truth_row5_both_caps_to_full_capacity() {
+            component_registry::register_layout::<F32Wrap>(F32_WRAP_ID.0);
+            let mut pool = ComponentPool::new(F32_WRAP_ID.0, 16_384);
+            climb(&mut pool, 16_384, |p, k| assert_os_truth(p, &format!("row 5, event {k}")));
+            assert_eq!(pool.committed_rows(), 16_384);
+            assert_eq!(frontier_sum(&pool) - pool.committed_bytes(), 2 * COMMIT_PAGE, "row 5");
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!((pool.committed_bytes(), frontier_sum(&pool)), (200_704, 208_896));
+        }
+
+        /// G3 — a tracked ZST pool (σ = 2304) driven to its tick cap
+        /// `align_up_page(σ + tick_len)`, the ZST form of obligation 3's error
+        /// class: the `added` interval shares the `changed` floor page.
+        #[cfg(any(windows, target_os = "linux"))]
+        #[test]
+        fn os_truth_zst_to_the_tick_cap() {
+            let mut pool = make_zst_pool(16_384);
+            climb(&mut pool, 16_384, |p, k| assert_os_truth(p, &format!("ZST, event {k}")));
+            assert_eq!(pool.committed_rows(), 16_384);
+            assert_eq!(frontier_sum(&pool) - pool.committed_bytes(), COMMIT_PAGE, "ZST tick cap");
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(pool.committed_bytes(), 135_168);
+        }
+
+        /// G3 obligation-10 row 1 — the default 40 B pool (σ = 1600) at its full
+        /// 2^24-row capacity in one request: both caps reached, two shared
+        /// pages. Ignored for its commit charge, not its time: ≈ 768 MiB of
+        /// process-wide Windows commit in a binary that runs other tests in
+        /// parallel. Row 5 gates the same both-caps shape on every run.
+        #[cfg(any(windows, target_os = "linux"))]
+        #[test]
+        #[ignore = "solo: commits ~768 MiB (a default 40 B pool at its full 2^24-row capacity), process-wide commit charge; run alone: `cargo test -p boyko-ecs --lib ecs::memory::component_pool::tests::commit_floor_tests::os_truth_row1_default_pool_at_full_capacity -- --ignored --exact --test-threads=1`"]
+        fn os_truth_row1_default_pool_at_full_capacity() {
+            let mut pool = floor40_pool(SIGMA_1600);
+            assert!(pool.grow_rows(POOL_MAX_ROWS));
+            assert_eq!(pool.committed_rows(), POOL_MAX_ROWS);
+            assert_os_truth(&pool, "row 1, full capacity");
+            assert_eq!(frontier_sum(&pool) - pool.committed_bytes(), 2 * COMMIT_PAGE, "row 1");
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(pool.committed_bytes(), 805_310_464);
+        }
+
+        // ---- G7 -------------------------------------------------------------
+
+        /// G7 — a one-row-at-a-time fill of a 40 B column to 1 M rows takes
+        /// exactly 15 growth events on the page ladder (11 on the granule
+        /// ladder), for σ = 0, 1600 and 4032 alike: `4e7 + σ < 2^26`. The
+        /// plan's bound is `<= log2(1M·40 / COMMIT_PAGE) + 2 == 16`; the pin is
+        /// the equality.
+        #[test]
+        fn grow_event_count_to_a_million_rows() {
+            for id in [SIGMA_0, SIGMA_1600, SIGMA_4032] {
+                let mut pool = floor40_pool(id);
+                let events = climb(&mut pool, 1_000_000, |_, _| {});
+                #[cfg(target_arch = "x86_64")]
+                assert_eq!(events, 15, "G7: σ = {}", pool_base_stagger(id));
+                assert!(events <= 16, "G7: the plan's bound (σ = {})", pool_base_stagger(id));
+            }
+        }
+
+        /// G7 — a batch request is ONE event whatever the quantum:
+        /// `pool_commit_step` is request-dominant.
+        #[test]
+        fn a_batch_request_is_one_event() {
+            let mut pool = floor40_pool(SIGMA_1600);
+            assert!(pool.grow_rows(1_000_000));
+            assert!(pool.committed_rows() >= 1_000_000, "G7: one request covers the batch");
+        }
+
+        // ---- G8 -------------------------------------------------------------
+
+        /// G8's `(id, stride)` sample beyond the stride-40 band (the module
+        /// header's table says what each σ is chosen for).
+        const G8_CASES: [(usize, usize); 25] = [
+            (128, 1),
+            (127, 1),
+            (129, 1),
+            (192, 2),
+            (191, 2),
+            (223, 4),
+            (193, 4),
+            (190, 4),
+            (222, 8),
+            (385, 8),
+            (189, 8),
+            (224, 16),
+            (449, 16),
+            (318, 16),
+            (226, 64),
+            (382, 64),
+            (319, 256),
+            (188, 256),
+            (130, 256),
+            (383, 1024),
+            (176, 1024),
+            (384, 1024),
+            (447, 4096),
+            (448, 4096),
+            (162, 4096),
+        ];
+
+        /// Every G8 pool's explicit row ceiling: `n` ranges over `1..=10_000`.
+        const G8_RESERVE: usize = 10_000;
+
+        fn register_stride(id: usize, stride: usize) {
+            match stride {
+                1 => component_registry::register_layout::<Floor1>(id),
+                2 => component_registry::register_layout::<Floor2>(id),
+                4 => component_registry::register_layout::<F32Wrap>(id),
+                8 => component_registry::register_layout::<OtherComponent>(id),
+                16 => component_registry::register_layout::<U64Pair>(id),
+                40 => component_registry::register_layout::<Floor40>(id),
+                64 => component_registry::register_layout::<Stride64>(id),
+                256 => component_registry::register_layout::<Floor256>(id),
+                1024 => component_registry::register_layout::<Floor1K>(id),
+                4096 => component_registry::register_layout::<Floor4K>(id),
+                _ => unreachable!("no G8 fixture of stride {stride}"),
+            }
+            assert_eq!(
+                component_registry::get_component_size(id),
+                Some(stride),
+                "G8 fixture at id {id}"
+            );
+        }
+
+        /// G8's oracle: the D2 ladder re-derived from `(σ, stride,
+        /// reserve_rows)` with the plan's formulas, independently of
+        /// `grow_rows`. Its doubling floor is `COMMIT_PAGE` itself, not
+        /// `POOL_MIN_SLAB`, so the recorded G2(c) mutation of that constant
+        /// cannot carry the oracle along with the code.
+        struct Ladder {
+            sigma: usize,
+            stride: usize,
+            reserve_rows: usize,
+            data_len: usize,
+            tick_len: usize,
+            data: usize,
+            ticks: usize,
+            rows: usize,
+        }
+
+        impl Ladder {
+            fn new(sigma: usize, stride: usize, reserve_rows: usize) -> Self {
+                Self {
+                    sigma,
+                    stride,
+                    reserve_rows,
+                    data_len: (reserve_rows * stride).next_multiple_of(COMMIT_GRANULE),
+                    tick_len: (reserve_rows * 4).next_multiple_of(COMMIT_GRANULE),
+                    data: 0,
+                    ticks: 0,
+                    rows: 0,
+                }
+            }
+
+            fn grow(&mut self, n: usize) {
+                if n > self.reserve_rows || n <= self.rows {
+                    return;
+                }
+                let page = COMMIT_PAGE;
+                let needed = (self.sigma + n * self.stride).next_multiple_of(page);
+                let step = self.data.clamp(page, POOL_MAX_SLAB).max(needed - self.data);
+                let data_cap = (self.sigma + self.data_len).next_multiple_of(page);
+                self.data = (self.data + step).min(data_cap);
+                self.rows = ((self.data - self.sigma) / self.stride).min(self.reserve_rows);
+                self.ticks = self.ticks.max((self.sigma + 4 * self.rows).next_multiple_of(page));
+            }
+
+            /// The union of the three intervals, computed as the sum minus the
+            /// two boundary overlaps (the data interval ends at most one page
+            /// past `data_len`, so it never reaches the `changed` floor) — a
+            /// different computation from `committed_bytes()`'s merge.
+            fn union_bytes(&self) -> usize {
+                let data_added = self.data.saturating_sub(self.data_len).min(self.ticks);
+                let added_changed = self.ticks.saturating_sub(self.tick_len);
+                self.data + 2 * self.ticks - data_added - added_changed
+            }
+        }
+
+        /// One G8 step: grow both the pool and the oracle to `n`, then hold
+        /// the pool to the oracle, to the model, and to the OS.
+        fn grow_and_check(pool: &mut ComponentPool, ladder: &mut Ladder, n: usize, what: &str) {
+            assert!(pool.grow_rows(n), "G8 {what}: grow_rows({n}) within the ceiling");
+            ladder.grow(n);
+            assert_eq!(
+                (pool.committed_rows(), pool.data_committed, pool.ticks_committed),
+                (ladder.rows, ladder.data, ladder.ticks),
+                "G8 {what}, n = {n}: (committed_rows, data_committed, ticks_committed) vs the \
+                 D2 ladder"
+            );
+            assert!(pool.committed_rows() >= n, "G8 {what}, n = {n}: the request is covered");
+            assert!(
+                pool.data_committed.is_multiple_of(COMMIT_PAGE)
+                    && pool.ticks_committed.is_multiple_of(COMMIT_PAGE),
+                "G8 {what}, n = {n}: frontier fields are page multiples"
+            );
+            assert_eq!(pool.committed_bytes(), ladder.union_bytes(), "G8 {what}, n = {n}: model");
+            let os_len = host_vm(pool).os_len();
+            assert!(
+                ladder.sigma + pool.committed_rows() * ladder.stride <= os_len,
+                "G8 {what}, n = {n}: row_ptr(rows - 1) + stride stays inside the reservation"
+            );
+            assert!(
+                ladder.data_len + ladder.tick_len + pool.ticks_committed <= os_len,
+                "G8 {what}, n = {n}: the changed-tick commit stays inside the reservation"
+            );
+            #[cfg(any(windows, target_os = "linux"))]
+            assert_os_truth(pool, &format!("G8 {what}, n = {n}"));
+        }
+
+        /// G8 — for every sampled `(stride, σ)`: one pool climbed one rung at
+        /// a time from the first row to its 10 000-row ceiling, and one fresh
+        /// pool driven by an ascending pseudo-random request sequence
+        /// (requests below the frontier included). After every request the
+        /// frontier fields equal the oracle's, `committed_rows >= n`, both
+        /// frontiers are page multiples, the model equals the oracle's union
+        /// and the OS, and nothing commits past `os_len`; at `n = 1` the model
+        /// equals the closed form of "The floor, derived".
+        #[test]
+        fn property_every_grow_matches_the_d2_ladder_and_the_os() {
+            let mut checked = 0;
+            for (id, stride) in FLOOR40_BAND.map(|id| (id, 40)).chain(G8_CASES) {
+                register_stride(id, stride);
+                let sigma = pool_base_stagger(id);
+                let what = format!("stride {stride}, σ {sigma} (id {id})");
+
+                let mut pool = ComponentPool::new(id, G8_RESERVE);
+                let mut ladder = Ladder::new(sigma, stride, G8_RESERVE);
+                grow_and_check(&mut pool, &mut ladder, 1, &what);
+                assert_eq!(
+                    (pool.committed_rows(), pool.committed_bytes()),
+                    closed_form_floor(sigma, stride, true),
+                    "G8 {what}: the floor's closed form at n = 1"
+                );
+                while pool.committed_rows() < G8_RESERVE {
+                    let n = pool.committed_rows() + 1;
+                    grow_and_check(&mut pool, &mut ladder, n, &what);
+                }
+
+                let mut pool = ComponentPool::new(id, G8_RESERVE);
+                let mut ladder = Ladder::new(sigma, stride, G8_RESERVE);
+                let mut state = ((id as u64) << 16) | stride as u64;
+                let mut n = 0;
+                while n < G8_RESERVE {
+                    // Knuth's MMIX LCG; the high bits pick the next increment.
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    n = (n + 1 + (state >> 33) as usize % 1_500).min(G8_RESERVE);
+                    grow_and_check(&mut pool, &mut ladder, n, &what);
+                }
+                checked += 2;
+            }
+            assert_eq!(checked, 2 * (64 + G8_CASES.len()), "G8: every sampled case ran");
+        }
     }
 }
