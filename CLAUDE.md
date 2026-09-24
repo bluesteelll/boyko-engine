@@ -210,10 +210,10 @@ The repair belongs in those two crates, not in the gate.
 The four commands above run **none** of the `#[ignore]`d tests.
 [tests/ignore_reasons_census.rs](tests/ignore_reasons_census.rs) prints what exists on every run
 (`cargo test -p boyko-engine --test ignore_reasons_census -- --nocapture`). Measured 2026-09-24 on
-the trunk at `79005dfd` (Phase B merged), it read:
+the trunk at the `u/phys-thinbox` merge (first parent `68437dfe`), it read:
 
 ```text
-[ignore census] 355 sites (191 plain, 164 cfg_attr) across 12 crates, 1821 .rs files walked, 0 waivers
+[ignore census] 355 sites (191 plain, 164 cfg_attr) across 12 crates, 1823 .rs files walked, 0 waivers
 [ignore classes] <none>=1, deferred=19, feature+gpu=1, feature+gpu-cap=3, feature+gpu-windowed+gpu-cap=4,
   feature+miri-slow=1, flaky=1, generator=7, gpu=29, gpu-cap=1, gpu-windowed=120, gpu-windowed+gpu-cap=1,
   miri-slow=130, miri-unsupported=27, slow=9, solo=1; scopes: miri-only=156, native=198, release-only=1;

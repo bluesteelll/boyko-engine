@@ -45,11 +45,14 @@
 //! * **The refresh (D5, D6).** A kept record is refreshed from the current poses
 //!   ([`refresh`]): each face point is carried with the incident body and its separation re-measured
 //!   against the reference face, a point that lifted off is dropped; an edge record re-evaluates its
-//!   edge axis exactly as the SAT would and takes today's edge contact on it.
-//! * **A miss (D7)** — no record, the shapes changed, the criterion failed, or the edge axis
-//!   degenerated — runs today's full collision, builds a new record from it and emits the REFRESH of
-//!   that record, never the raw collision. So a slow pair's output is a pure function of (record,
-//!   poses), which is lemma L9-L1: equal poses give equal output bits, whatever the history.
+//!   edge axis exactly as the SAT would and takes today's edge contact on it, and misses when its
+//!   edge claims more than the face allows (the box-box fallback's bound, the thinbox lane's R1).
+//! * **A miss (D7)** — no record, the shapes changed, the criterion failed, the edge axis
+//!   degenerated, or the edge claims more than the face allows — runs today's full collision,
+//!   builds a new record from it and emits the REFRESH of that record, never the raw collision. So
+//!   a slow pair's output is a pure function of (record, poses), which is lemma L9-L1: equal poses
+//!   give equal output bits, whatever the history. A full collision answered with the best face's
+//!   own contact (every edge axis past the face bound) is emitted as it is and never recorded.
 //!
 //! # The records survive a row-order flip (ruling W2)
 //!
@@ -502,6 +505,9 @@ pub(crate) enum Refreshed {
     Separated(u8),
     /// An edge record whose edge axis degenerated: the pair misses.
     Degenerate,
+    /// An edge record whose edge now claims more than the pair's best face allows (the box-box
+    /// fallback's bound): the pair misses, and the full collision answers.
+    Stale,
 }
 
 /// Refreshes the record `r` (in the current roles) on the boxes `(oa, ob)` of the pair `(a, b)`
@@ -514,7 +520,8 @@ pub(crate) enum Refreshed {
 ///   is dropped too). The anchors are `p_I = c_R + w` and `p_R = p_I − n·sep`, and the normal
 ///   runs A→B. For an original incident corner `sep` is its exact distance to the current
 ///   reference plane.
-/// * **Edge:** the edge axis re-evaluated as the SAT evaluates it, then today's edge contact.
+/// * **Edge:** the edge axis re-evaluated as the SAT evaluates it, then today's edge contact — or
+///   [`Refreshed::Stale`] when the edge claims more than the face allows.
 #[inline]
 pub(crate) fn refresh(r: &ReuseRecord, oa: &Obb, ob: &Obb, a: BodyIndex, b: BodyIndex) -> Refreshed {
     if r.is_edge() {
@@ -523,6 +530,7 @@ pub(crate) fn refresh(r: &ReuseRecord, oa: &Obb, ob: &Obb, a: BodyIndex, b: Body
             EdgeRefresh::Contact(m) => Refreshed::Contact(m),
             EdgeRefresh::Separated(axis) => Refreshed::Separated(axis),
             EdgeRefresh::Degenerate => Refreshed::Degenerate,
+            EdgeRefresh::Stale => Refreshed::Stale,
         };
     }
     Refreshed::Contact(refresh_face(r, oa, ob, a, b))
@@ -876,12 +884,19 @@ mod tests {
             };
             let oa = Obb::new(ba.position, ba.rotation, ha);
             let ob = Obb::new(bb.position, bb.rotation, hb);
-            if let BoxBoxOutcome::Contact(c) = box_box_classify(&oa, &ob, a, b, None) {
-                let g = PairGeom::new(&oa, &ob, ha.length(), hb.length(), tau);
-                let r = build(&c, &oa, &ob, ba.rotation, bb.rotation, &g, false);
-                if let Refreshed::Contact(m) = refresh(&r, &oa, &ob, a, b) {
-                    n += u64::from(manifold_words(&m) != manifold_words(&c.manifold));
-                }
+            let c = match box_box_classify(&oa, &ob, a, b, None) {
+                BoxBoxOutcome::Contact(c) => c,
+                // A best-face answer is never recorded, so no miss emits a refresh of it: it is
+                // not a witness here, by construction rather than by omission.
+                BoxBoxOutcome::BestFace(_)
+                | BoxBoxOutcome::Separated(_)
+                | BoxBoxOutcome::StillSeparated(_)
+                | BoxBoxOutcome::NoContact => continue,
+            };
+            let g = PairGeom::new(&oa, &ob, ha.length(), hb.length(), tau);
+            let r = build(&c, &oa, &ob, ba.rotation, bb.rotation, &g, false);
+            if let Refreshed::Contact(m) = refresh(&r, &oa, &ob, a, b) {
+                n += u64::from(manifold_words(&m) != manifold_words(&c.manifold));
             }
         }
         n
@@ -1202,8 +1217,14 @@ mod tests {
         let (oa0, ob0) = obbs(&case.pose0);
         let (oa1, ob1) = obbs(&case.pose1);
         let (ra, rb) = (case.ha.length(), case.hb.length());
-        let BoxBoxOutcome::Contact(c) = box_box_classify(&oa0, &ob0, A, B, None) else {
-            return Ok(());
+        let c = match box_box_classify(&oa0, &ob0, A, B, None) {
+            BoxBoxOutcome::Contact(c) => c,
+            // A best-face answer is a contact, but the narrowphase never records it
+            // (`BoxBoxOutcome::BestFace`), so there is no record to check.
+            BoxBoxOutcome::BestFace(_)
+            | BoxBoxOutcome::Separated(_)
+            | BoxBoxOutcome::StillSeparated(_)
+            | BoxBoxOutcome::NoContact => return Ok(()),
         };
         let g0 = PairGeom::new(&oa0, &ob0, ra, rb, case.tau);
         let record = build(&c, &oa0, &ob0, case.pose0[0].1, case.pose0[1].1, &g0, false);
@@ -1272,7 +1293,7 @@ mod tests {
         // (a): the refresh at poses 1 against the exact corner distances.
         let refreshed = match refresh(&record, &oa1, &ob1, A, B) {
             Refreshed::Contact(m) => Some(m),
-            Refreshed::Separated(_) | Refreshed::Degenerate => None,
+            Refreshed::Separated(_) | Refreshed::Degenerate | Refreshed::Stale => None,
         };
         if let Some(m) = &refreshed
             && !record.is_edge()
@@ -1316,8 +1337,11 @@ mod tests {
         // A full collision that switched feature measures its separations along another normal,
         // where the two depths do not compare (`SoundSeen::switched`).
         let full = match box_box_classify(&oa1, &ob1, A, B, Some(c.reference_axis)) {
-            BoxBoxOutcome::Contact(c1) => Some(c1),
-            _ => None,
+            // The best face's own contact is a contact the pair gets (`box_box_contact` answers it).
+            BoxBoxOutcome::Contact(c1) | BoxBoxOutcome::BestFace(c1) => Some(c1),
+            BoxBoxOutcome::Separated(_)
+            | BoxBoxOutcome::StillSeparated(_)
+            | BoxBoxOutcome::NoContact => None,
         };
         let same = full.as_ref().is_none_or(|c1| {
             contact_feature(&oa1, &ob1, c1) == contact_feature(&oa0, &ob0, &c)
@@ -1396,4 +1420,366 @@ mod tests {
         assert!(seen.partial > 0, "no face hit on a record that kept fewer than four points: {seen:?}");
     }
 
+    // ── T6: an edge record never refreshes past the face bound (the thinbox lane, R1) ─────────
+
+    #[cfg(not(miri))]
+    fn v3(b: [u32; 3]) -> Vec3 {
+        Vec3::new(
+            f32::from_bits(b[0]),
+            f32::from_bits(b[1]),
+            f32::from_bits(b[2]),
+        )
+    }
+
+    #[cfg(not(miri))]
+    fn q4(b: [u32; 4]) -> Quat {
+        Quat::new(
+            f32::from_bits(b[0]),
+            f32::from_bits(b[1]),
+            f32::from_bits(b[2]),
+            f32::from_bits(b[3]),
+        )
+    }
+
+    /// The minimum SAT depth of `(a, b)` over the 15 box-box axes (`D`, an upper bound on the
+    /// boxes' true penetration) and over the six face axes alone (`F`), in `f64` on their `f32`
+    /// frames.
+    #[cfg(not(miri))]
+    fn min_depths64(a: &Obb, b: &Obb) -> (f64, f64) {
+        let (aa, ba) = (a.axes.map(f64s), b.axes.map(f64s));
+        let d = sub64(f64s(b.center), f64s(a.center));
+        let cross = |x: [f64; 3], y: [f64; 3]| {
+            [
+                x[1] * y[2] - x[2] * y[1],
+                x[2] * y[0] - x[0] * y[2],
+                x[0] * y[1] - x[1] * y[0],
+            ]
+        };
+        let (mut m, mut faces) = (f64::INFINITY, f64::INFINITY);
+        for k in 0..15 {
+            if k == 6 {
+                faces = m;
+            }
+            let raw = if k < 3 {
+                aa[k]
+            } else if k < 6 {
+                ba[k - 3]
+            } else {
+                cross(aa[(k - 6) / 3], ba[(k - 6) % 3])
+            };
+            let l = dot64(raw, raw).sqrt();
+            if l > 1.0e-9 {
+                let n = raw.map(|x| x / l);
+                let ra: f64 = (0..3)
+                    .map(|i| f64::from(a.half[i]) * dot64(n, aa[i]).abs())
+                    .sum();
+                let rb: f64 = (0..3)
+                    .map(|i| f64::from(b.half[i]) * dot64(n, ba[i]).abs())
+                    .sum();
+                m = m.min(ra + rb - dot64(d, n).abs());
+            }
+        }
+        (m, faces)
+    }
+
+    /// The rev-1 architect's parallel-edge family (the thinbox lane's `family_pose`): a small box
+    /// or plate of half-extent `50/ratio` on the 50×1×50 floor, yawed `±psi`, tilted `theta`, at a
+    /// knife-edge gap (70 %) or up to 5 % of its thinnest extent deep, one in five at the rim, in
+    /// an axis-aligned or a rotated and offset world. Returns the floor's and the box's poses.
+    #[cfg(not(miri))]
+    fn family_pose(
+        rng: &mut Rng,
+        ratio: f32,
+        psi: f32,
+        theta: f32,
+        rot: bool,
+    ) -> ([(Vec3, Quat); 2], Vec3, Vec3) {
+        let hf = Vec3::new(50.0, 1.0, 50.0);
+        let h0 = 50.0 / ratio;
+        let hs = if rng.below(2) == 0 {
+            Vec3::new(h0, 0.8 * h0, 1.3 * h0)
+        } else {
+            Vec3::new(h0, 0.1 * h0, 1.3 * h0)
+        };
+        let sign = if rng.below(2) == 0 { 1.0 } else { -1.0 };
+        let yaw = about(Vec3::new(0.0, 1.0, 0.0), sign * psi);
+        let tdir = rng.range(0.0, core::f32::consts::TAU);
+        let qrel = about(Vec3::new(tdir.cos(), 0.0, tdir.sin()), theta).mul(yaw);
+        let (g, o) = if rot {
+            (
+                about(rng.direction(), rng.range(0.0, core::f32::consts::PI)).mul(about(
+                    rng.direction(),
+                    rng.range(0.0, core::f32::consts::PI),
+                )),
+                Vec3::new(
+                    rng.range(-30.0, 30.0),
+                    rng.range(-5.0, 5.0),
+                    rng.range(-30.0, 30.0),
+                ),
+            )
+        } else {
+            (
+                Quat::IDENTITY,
+                Vec3::new(
+                    rng.range(-30.0, 30.0),
+                    rng.range(0.0, 5.0),
+                    rng.range(-30.0, 30.0),
+                ),
+            )
+        };
+        let ax = RowFrame::axes_of(qrel);
+        let ext_y = hs.x * ax[0].y.abs() + hs.y * ax[1].y.abs() + hs.z * ax[2].y.abs();
+        let r_s = hs.length();
+        let reach = (50.0 - r_s).max(0.0);
+        let (mut x, mut z) = (rng.range(-1.0, 1.0) * reach, rng.range(-1.0, 1.0) * reach);
+        if rng.below(5) == 0 {
+            let edge = if rng.below(2) == 0 { 50.0 } else { -50.0 } + rng.range(-0.5, 0.5) * r_s;
+            if rng.below(2) == 0 {
+                x = edge;
+            } else {
+                z = edge;
+            }
+        }
+        let hmin_s = hs.x.min(hs.y).min(hs.z);
+        let gap = if rng.below(10) < 7 {
+            rng.range(-4.0e-6, 4.0e-6)
+        } else {
+            -rng.range(0.0, 0.05) * hmin_s
+        };
+        let local_c = Vec3::new(x, hf.y + ext_y + gap, z);
+        ([(o, g), (o + g.rotate(local_c), g.mul(qrel))], hf, hs)
+    }
+
+    /// What T6's drift population saw.
+    #[cfg(not(miri))]
+    #[derive(Default, Debug)]
+    struct DriftSeen {
+        /// Edge records built from a full collision.
+        records: u64,
+        /// Records the criterion kept after the rotation.
+        hits: u64,
+        /// Hits the face bound turned stale.
+        stale: u64,
+        /// Hits refreshed to a contact within the face bound (asserted).
+        bounded: u64,
+        /// The first few hits refreshed past the face bound (asserted empty).
+        past_face: Vec<String>,
+        /// Hits refreshed to a contact past `1.05·D + τ + ε_FP` (printed, not asserted: `D` may be
+        /// another edge axis shallower than the face the bound is taken from).
+        past_d: u64,
+        /// The largest `claim − max(F + τ, 1.05·F)` of a contact refresh.
+        worst_face_excess: f64,
+    }
+
+    /// The reuse distance of T6's records: L9's default.
+    #[cfg(not(miri))]
+    const T6_TAU: f32 = 1.0e-3;
+
+    /// One T6 drift case: the full collision of the poses `p0` builds an edge record (a face or a
+    /// best-face answer builds none here), the smaller body turns about its own centre by 0.99 of
+    /// the largest angle the criterion keeps, and a kept record's refresh must be stale or claim at
+    /// most the face bound `max(F + τ, 1.05·F)` plus rounding, `F` being the shallowest face axis.
+    ///
+    /// The rounding allowance is `1.05·SAT_EPS + ε_FP`: the kernel's bound is taken from the face
+    /// its tie rule picked, up to `SAT_EPS` (1e-5) deeper than the shallowest, and `ε_FP` covers the
+    /// `f32` evaluation of the axes and of the contact's separation.
+    #[cfg(not(miri))]
+    fn drift_case(seen: &mut DriftSeen, p0: [(Vec3, Quat); 2], ha: Vec3, hb: Vec3, rng: &mut Rng) {
+        let (oa0, ob0) = (
+            Obb::new(p0[0].0, p0[0].1, ha),
+            Obb::new(p0[1].0, p0[1].1, hb),
+        );
+        let c = match box_box_classify(&oa0, &ob0, A, B, None) {
+            BoxBoxOutcome::Contact(c) if c.reference_axis >= 6 => c,
+            // A face record, a best-face answer (never recorded), or no contact.
+            BoxBoxOutcome::Contact(_)
+            | BoxBoxOutcome::BestFace(_)
+            | BoxBoxOutcome::Separated(_)
+            | BoxBoxOutcome::StillSeparated(_)
+            | BoxBoxOutcome::NoContact => return,
+        };
+        let (ra, rb) = (ha.length(), hb.length());
+        let g0 = PairGeom::new(&oa0, &ob0, ra, rb, T6_TAU);
+        let record = build(&c, &oa0, &ob0, p0[0].1, p0[1].1, &g0, false);
+        seen.records += 1;
+        let te = g0.tau_eff;
+        let s_is_b = rb <= ra;
+        let angle = 2.0 * (0.99 * te / (8.0f32.sqrt() * (ra.min(rb) + te))).asin();
+        let turn = about(rng.direction(), angle);
+        let (qa1, qb1) = if s_is_b {
+            (p0[0].1, turn.mul(p0[1].1))
+        } else {
+            (turn.mul(p0[0].1), p0[1].1)
+        };
+        let (oa1, ob1) = (Obb::new(p0[0].0, qa1, ha), Obb::new(p0[1].0, qb1, hb));
+        let g1 = PairGeom::new(&oa1, &ob1, ra, rb, T6_TAU);
+        if !criterion(&record, &oa1, &ob1, qa1, qb1, &g1) {
+            return;
+        }
+        seen.hits += 1;
+        match refresh(&record, &oa1, &ob1, A, B) {
+            Refreshed::Stale => seen.stale += 1,
+            Refreshed::Contact(m) => {
+                let claim = deepest(Some(&m));
+                let (d, f) = min_depths64(&oa1, &ob1);
+                let h_min = [ha.x, ha.y, ha.z, hb.x, hb.y, hb.z]
+                    .map(f64::from)
+                    .into_iter()
+                    .fold(f64::INFINITY, f64::min);
+                let tau = 5.0e-3f64.min(0.1 * h_min);
+                let coord = max_abs(oa1.center).max(max_abs(ob1.center)) as f32;
+                let ulp = f64::from(f32::from_bits(coord.to_bits() + 1)) - f64::from(coord);
+                let eps = (8.0 * ulp).max(1.0e-5);
+                let face_bound = (f + tau).max(1.05 * f);
+                seen.worst_face_excess = seen.worst_face_excess.max(claim - face_bound);
+                if claim > face_bound + 1.05 * 1.0e-5 + eps {
+                    if seen.past_face.len() < 4 {
+                        seen.past_face.push(format!(
+                            "edge {} claims {claim:e} past the face bound {face_bound:e} (F {f:e}, \
+                             τ {tau:e}, ε_FP {eps:e})",
+                            c.reference_axis
+                        ));
+                    }
+                } else {
+                    seen.bounded += 1;
+                }
+                seen.past_d += u64::from(claim > 1.05 * d.max(0.0) + tau + eps);
+            }
+            Refreshed::Separated(_) | Refreshed::Degenerate => {}
+        }
+    }
+
+    /// T6: an edge record never refreshes past the face bound (the thinbox lane, `design_rev2.md`
+    /// §7.2-§7.4). A near-parallel edge axis swings by the rotation over its edges' cross-product
+    /// length, so a record the criterion keeps could claim centimetres to metres where the boxes
+    /// overlap by micrometres; R1 turns such a refresh `Stale`, a miss.
+    ///
+    /// **The fixed witness** is the generator drift witness of `r2_drift.log`: a 1.07 cm plate
+    /// (half-extents 0.567, 0.0107, 0.599) on a 25.1×0.39×27.9 slab, edge record on axis 12 at
+    /// τ = 1 mm (τ_eff 5.35e-4), the plate turned 4.53e-4 rad about its own centre. At P1 the
+    /// record's edge would claim 3.41e-2 m against a face bound of 1.27e-3 m (D 2.0e-4 m). Asserted:
+    /// at P0 the refresh is the full collision, bit for bit (R1's no-op on a record's own poses);
+    /// at P1 the criterion keeps the record and the refresh is `Stale`. Under `narrowphase-counts`
+    /// the census counts that one stale refresh exactly once.
+    ///
+    /// **The drift population** refreshes the parallel-edge family's edge records (ratios 1..1e4)
+    /// after the largest rotation the criterion keeps, and asserts every hit is stale or claims at
+    /// most the face bound — R1's own guarantee, the fallback's bound on a fresh collision. It
+    /// prints, and does not assert, the hits past `1.05·D + τ + ε_FP` with `D` the minimum over all
+    /// fifteen axes: a reused edge within the face bound can exceed that where another edge axis is
+    /// shallower than the face (at the probe's 200 poses per cell, some hits in 38 311 do; see the
+    /// lane's `impl/impl.md`, escalation E1).
+    ///
+    /// Mutation M-R1 (the bound removed from `refresh_edge`) turns the witness red: its refresh
+    /// becomes a contact claiming 3.41e-2 m. Deleting the census increment turns the census check
+    /// red.
+    #[test]
+    #[cfg(not(miri))]
+    fn an_edge_record_never_refreshes_past_the_face_bound() {
+        let (ca, qa, ha) = (
+            v3([0xc089_72c3, 0x4092_2ca4, 0xc078_6ed2]),
+            q4([0xbbb7_7ca3, 0xbe8c_865a, 0x3f32_4878, 0x3f29_bde7]),
+            v3([0x41c9_19f2, 0x3ec8_214e, 0x41de_f0ee]),
+        );
+        let (cb, qb, hb) = (
+            v3([0xc0d5_1c0f, 0x41ca_532b, 0x4010_ea62]),
+            q4([0xbf18_a144, 0x3ed7_9e66, 0x3eb8_4cb7, 0x3f14_bf37]),
+            v3([0x3f11_4e74, 0x3c2f_381e, 0x3f19_5d2e]),
+        );
+        let qb1 = q4([0xbf18_a163, 0x3ed7_8959, 0x3eb8_454d, 0x3f14_c903]);
+        let (oa0, ob0) = (Obb::new(ca, qa, ha), Obb::new(cb, qb, hb));
+        let c = match box_box_classify(&oa0, &ob0, A, B, None) {
+            BoxBoxOutcome::Contact(c) => c,
+            _ => panic!("construction: the witness's poses 0 are a contact"),
+        };
+        assert_eq!(
+            c.reference_axis, 12,
+            "construction: the witness's record is the edge on axis 12"
+        );
+        let (ra, rb) = (ha.length(), hb.length());
+        let g0 = PairGeom::new(&oa0, &ob0, ra, rb, T6_TAU);
+        let record = build(&c, &oa0, &ob0, qa, qb, &g0, false);
+        assert!(record.is_edge(), "construction: an edge record");
+        match refresh(&record, &oa0, &ob0, A, B) {
+            Refreshed::Contact(m) => assert_eq!(
+                manifold_words(&m),
+                manifold_words(&c.manifold),
+                "R1 must be a no-op on the record's own poses: the refresh is the full collision"
+            ),
+            _ => panic!(
+                "R1 must be a no-op on the record's own poses: the refresh must be a contact"
+            ),
+        }
+
+        let ob1 = Obb::new(cb, qb1, hb);
+        let g1 = PairGeom::new(&oa0, &ob1, ra, rb, T6_TAU);
+        assert!(
+            criterion(&record, &oa0, &ob1, qa, qb1, &g1),
+            "construction: the criterion keeps the record through the witness's rotation"
+        );
+        match refresh(&record, &oa0, &ob1, A, B) {
+            Refreshed::Stale => {}
+            Refreshed::Contact(m) => panic!(
+                "the witness's edge record refreshed to a contact claiming {:e} m where the boxes \
+                 overlap by at most {:e} m: a reused edge past the face bound",
+                deepest(Some(&m)),
+                min_depths64(&oa0, &ob1).0
+            ),
+            _ => panic!("the witness's edge record must refresh to Stale at P1"),
+        }
+        #[cfg(feature = "narrowphase-counts")]
+        {
+            use crate::narrowphase::box_box::fallback_census;
+            // The counters are process-wide, and other tests of this binary refresh records too:
+            // a reading is taken around this one refresh and repeated when another thread's count
+            // landed inside it (above one). Zero is the census missing this refresh, and a double
+            // count reads two on every attempt, so both fail.
+            let mut readings = Vec::new();
+            for _ in 0..8 {
+                let _ = fallback_census::take();
+                let _ = refresh(&record, &oa0, &ob1, A, B);
+                let n = fallback_census::take().refresh_stale;
+                readings.push(n);
+                assert_ne!(n, 0, "the census did not count the witness's stale refresh");
+                if n == 1 {
+                    break;
+                }
+            }
+            assert_eq!(
+                readings.last(),
+                Some(&1),
+                "the census never counted the witness's stale refresh exactly once: {readings:?}"
+            );
+        }
+
+        const RATIOS: [f32; 5] = [1.0, 10.0, 100.0, 1.0e3, 1.0e4];
+        const PSIS: [f32; 8] = [0.0, 1.0e-6, 1.0e-5, 1.0e-4, 3.0e-4, 1.0e-3, 1.0e-2, 0.3];
+        const THETAS: [f32; 7] = [0.0, 1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 0.1];
+        let mut seen = DriftSeen::default();
+        let mut rng = Rng::new(0xd41f_7000_0000_0001);
+        for &ratio in &RATIOS {
+            for &psi in &PSIS {
+                for &theta in &THETAS {
+                    for rot in [false, true] {
+                        for _ in 0..20 {
+                            let (p, hf, hs) = family_pose(&mut rng, ratio, psi, theta, rot);
+                            for _ in 0..4 {
+                                drift_case(&mut seen, p, hf, hs, &mut rng);
+                                drift_case(&mut seen, [p[1], p[0]], hs, hf, &mut rng);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!("T6 drift family: {seen:?}");
+        assert!(
+            seen.hits > 0 && seen.stale > 0 && seen.bounded > 0,
+            "the drift population must reach stale and bounded hits: {seen:?}"
+        );
+        assert!(
+            seen.past_face.is_empty(),
+            "an edge record refreshed past the face bound without turning stale: {seen:?}"
+        );
+    }
 }

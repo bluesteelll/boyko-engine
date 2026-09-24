@@ -335,6 +335,10 @@ fn default_world_pyramid_is_run_to_run_worker_count_and_scalar_identical() {
         "scalar oracle: 8w parallel_solve=true simd_solve=false".to_owned(),
         run(8, true, false),
     ));
+    // Before the value gates, so a moved pin is read beside the census that names or clears the
+    // face bound as its cause.
+    #[cfg(feature = "narrowphase-counts")]
+    fallback_census_epilogue();
 
     let mut diverged = Vec::new();
     for (label, r) in &arms {
@@ -362,5 +366,19 @@ fn default_world_pyramid_is_run_to_run_worker_count_and_scalar_identical() {
          still agrees with the reference, so this is a value change, not a determinism defect. In \
          a commit that claims bit identity it is a defect; only a value-changing lever re-pins, \
          under `PINNED_FINAL_HASH`'s rule"
+    );
+}
+
+/// The box-box fallback census of every run above (`narrowphase-counts` only; the `thinbox`
+/// lane, `design_rev2.md` §6.2 (iii)): printed, and asserted to hold no event that changes the
+/// kernel's output — no phantom answer, no capped hint. The fix changes a run only when one fires,
+/// so with both at zero a moved pin here is not its doing.
+#[cfg(feature = "narrowphase-counts")]
+fn fallback_census_epilogue() {
+    let s = boyko_physics::narrowphase::box_box::fallback_census::take();
+    println!("pyramid: box-box fallback census {s:?}");
+    assert!(
+        s.phantom == 0 && s.hint_capped == 0,
+        "pyramid: the box-box fallback's face bound fired: {s:?}"
     );
 }

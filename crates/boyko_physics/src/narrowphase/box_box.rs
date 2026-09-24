@@ -21,8 +21,9 @@
 //!    see [`clip_against_plane`] and
 //!    [`feature_face_clip`](super::feature_face_clip)).
 //! 3. **Edge-edge** (the contact axis is a cross product, per item 1, or the chosen
-//!    face realizes no patch and no best-face patch was built — see item 5): a single
-//!    contact at the closest points of the two contacting edges.
+//!    face realizes no patch, no best-face patch was built, and some edge axis claims no
+//!    more than the face allows — see item 5 and [`edge_depth_bound`]): a single contact
+//!    at the closest points of the two contacting edges.
 //! 4. **Deterministic ≤4-point reduction**: keep the deepest point plus the three
 //!    that maximize the contact-patch spread, ties broken by the lowest
 //!    [`ClipVertex::tie_ord`] (the pre-A7a ordinal, retained so the reduction's
@@ -33,13 +34,14 @@
 //!    on a near-parallel resting stack. Face↔face and edge↔edge holds are as
 //!    before; an edge hint never holds a pair whose chosen axis is a face (A7b). A
 //!    held face that realizes no patch yields to the best face's patch when item 1
-//!    already built it, as Box3D's full query does when a cached feature fails.
+//!    already built it, as Box3D's full query does when a cached feature fails. A pair
+//!    whose every edge axis claims more than its best face allows gets that face's own
+//!    contact ([`edge_fallback`]).
 //!
 //! Whether a pair has a manifold is a function of the two poses alone: past an
-//! overlapping SAT, every path ends in a face patch or an edge contact, except a
-//! reference face with a zero in-plane extent (no contact) — and "no edge axis at all",
-//! which two orthonormal frames never produce. The hint picks which contact, never
-//! whether there is one.
+//! overlapping SAT, every path ends in a face patch, a speculative face point, or an edge
+//! contact, except a reference face with a zero in-plane extent (no contact). The hint
+//! picks which contact, never whether there is one.
 //!
 //! # The exact fast path (L9a, `levers/L9-contact-reuse/02-DESIGN-REV1.md`)
 //!
@@ -66,9 +68,14 @@
 //! names the feature a contact was built on — the reference face `face_contact` picked, re-derived
 //! from the contact's axis and normal with the same [`most_aligned_face`], or the edge pair — and
 //! [`refresh_edge`] re-evaluates an edge record's axis exactly as [`sat`] evaluates its candidate
-//! of that index and builds today's edge contact on it.
+//! of that index and builds today's edge contact on it, or misses when that edge claims more than
+//! the face allows (the fallback's bound, [`edge_depth_bound`]). A fallback answer on the best
+//! face ([`BoxBoxOutcome::BestFace`]) is never recorded.
 //!
 //! ZERO `unsafe`, no heap allocation (fixed-size stack buffers), deterministic.
+
+#[cfg(feature = "narrowphase-counts")]
+use core::sync::atomic::Ordering::Relaxed;
 
 use crate::manifold::{BodyIndex, ContactPoint, Manifold};
 use crate::math::{Quat, Vec3};
@@ -105,7 +112,8 @@ const SAT_EPS: f32 = 1.0e-5;
 /// here only points with `separation <= 0` are kept. So a clip that degenerates to a
 /// segment — diagonal neighbours touching along an edge — is a 1-2 point face patch here
 /// and an edge contact in Box3D; and a touch whose clipped points all lie just above the
-/// reference face is an empty patch here (the edge fallback), where Box3D keeps a
+/// reference face is an empty patch here; the fallback keeps Box3D's speculative point when
+/// every edge axis claims more than the face allows ([`edge_fallback`]), where Box3D keeps a
 /// speculative face patch if the clip holds three or more vertices.
 ///
 /// **Why the patch and not the face axis's SAT depth.** Every clipped point at depth `s`
@@ -148,6 +156,31 @@ const SAT_EPS: f32 = 1.0e-5;
 /// slop by `b2_lengthUnitsPerMeter`, so if a length unit is ever introduced this constant
 /// joins it.
 const FACE_AXIS_PREFERENCE: f32 = 0.005;
+
+/// The fraction of the thinnest half-extent of either box by which a fallback edge contact may claim
+/// more penetration than the pair's best face axis ([`edge_depth_bound`]): a tenth, the scale L9's
+/// `TAU_EFF_FRACTION` keeps a reused contact's worst claim at.
+const EDGE_BOUND_THIN_FRACTION: f32 = 0.1;
+
+/// The deepest penetration an edge-edge contact of the pair may claim, from the SAT's best face-axis
+/// depth `face_depth` alone: that depth plus `min(FACE_AXIS_PREFERENCE, 0.1·h_min)`, or
+/// `HYSTERESIS_RATIO` times it, whichever is larger. Every edge contact the kernel emits is within it
+/// (the SAT's own edge and an edge hint held against it by construction, the fallback by its choice).
+///
+/// An edge contact claims at most its axis depth, so a bound on the axis is a bound on the claim. At
+/// a knife-edge touch the shallowest edge axis can be a near-duplicate of the face normal whose depth
+/// is the larger box's overhang times the angle between them — metres, where the face reads
+/// micrometres (`thinbox` lane, `design_rev2.md`); this is what refuses it.
+#[inline]
+fn edge_depth_bound(face_depth: f32, a: &Obb, b: &Obb) -> f32 {
+    let h_min = a
+        .half
+        .iter()
+        .chain(b.half.iter())
+        .fold(f32::INFINITY, |m, &h| m.min(h));
+    let slack = FACE_AXIS_PREFERENCE.min(EDGE_BOUND_THIN_FRACTION * h_min);
+    (face_depth + slack).max(face_depth * HYSTERESIS_RATIO)
+}
 
 /// Alignment-comparison slop for [`most_aligned_face`]: a later axis must beat the
 /// current best `|axis·dir|` by more than this to be picked, so a sub-epsilon FP
@@ -590,7 +623,7 @@ struct ScoredPoint {
     /// clipped vertex).
     pos: Vec3,
     /// Signed separation along the contact normal (negative = penetrating). Only
-    /// penetrating points are kept.
+    /// penetrating points are kept, except [`face_patch`]'s one speculative point.
     separation: f32,
     /// [`ClipVertex::tie_ord`] — the reduction's tie-break key, and nothing else.
     /// It is carried SEPARATELY from `feature_id` so that, for a given clipped
@@ -753,7 +786,7 @@ pub fn box_box_contact(
     let a = Obb::new(a_center, a_rotation, a_half);
     let b = Obb::new(b_center, b_rotation, b_half);
     match box_box_classify(&a, &b, body_a, body_b, last_axis) {
-        BoxBoxOutcome::Contact(c) => Some(c),
+        BoxBoxOutcome::Contact(c) | BoxBoxOutcome::BestFace(c) => Some(c),
         BoxBoxOutcome::Separated(_)
         | BoxBoxOutcome::StillSeparated(_)
         | BoxBoxOutcome::NoContact => None,
@@ -764,14 +797,20 @@ pub fn box_box_contact(
 pub(crate) enum BoxBoxOutcome {
     /// The boxes touch: the manifold and the SAT axis to persist for the hysteresis.
     Contact(BoxBoxContact),
+    /// The boxes touch, and every edge axis claims more than the best face allows: the best face's
+    /// own contact ([`edge_fallback`]), often one speculative point. A contact like any other to
+    /// the solver, but a reuse record is never built from it: a record refreshes a face point
+    /// only while it lies at or below the reference face, so a record of a speculative point would
+    /// refresh to no manifold on its own poses (`narrowphase/reuse.rs`).
+    BestFace(BoxBoxContact),
     /// The SAT separated the boxes on this canonical axis (`0..15`), the first negative one in
     /// canonical order.
     Separated(u8),
     /// The pair's carried separating axis (`0..15`) still separates the boxes, so the SAT did not
     /// run (L9a (ii), [`box_box_classify_carried`]).
     StillSeparated(u8),
-    /// No contact for any other reason: no face axis (a degenerate rotation), a degenerate
-    /// reference face, or a fallback with no edge axis.
+    /// No contact for any other reason: no face axis (a degenerate rotation) or a degenerate
+    /// reference face.
     NoContact,
 }
 
@@ -872,8 +911,8 @@ pub(crate) fn box_box_classify(
                     }
                     None => {
                         return match edge_fallback(a, b, &sat, body_a, body_b) {
-                            Some(c) => BoxBoxOutcome::Contact(c),
-                            None => BoxBoxOutcome::NoContact,
+                            Fallback::Edge(c) => BoxBoxOutcome::Contact(c),
+                            Fallback::BestFace(c) => BoxBoxOutcome::BestFace(c),
                         };
                     }
                 },
@@ -944,20 +983,35 @@ pub(crate) fn contact_feature(a: &Obb, b: &Obb, c: &BoxBoxContact) -> FeatureRef
 
 /// What [`refresh_edge`] found.
 pub(crate) enum EdgeRefresh {
-    /// The edge axis overlaps: today's edge contact on it.
+    /// The edge axis overlaps within the face bound: today's edge contact on it.
     Contact(Manifold),
     /// The edge axis separates the boxes, on this canonical axis (`6..15`).
     Separated(u8),
     /// The edge pair is parallel now: no axis.
     Degenerate,
+    /// The edge axis claims more than the pair's best face allows ([`edge_depth_bound`]): the
+    /// record is stale, and the pair misses (the thinbox lane's R1).
+    Stale,
 }
 
 /// Re-evaluates the edge axis `A.axes[ea] × B.axes[eb]` of the boxes `(a, b)` and, when it
-/// overlaps, builds today's edge contact on it (L9b D5, the refresh of an edge record).
+/// overlaps, builds today's edge contact on it (L9b D5, the refresh of an edge record) — unless
+/// the edge claims more than the face allows, which is [`EdgeRefresh::Stale`].
 ///
 /// The axis is built and evaluated exactly as [`sat`] builds and evaluates its candidate of the same
 /// index, so a negative depth is a negative SAT candidate — the pair is separated exactly — and on
 /// the poses the record was built on the contact is the full collision's, bit for bit.
+///
+/// **The face bound (R1, `design_rev2.md` §7.2).** A near-parallel edge axis swings by the
+/// rotation over the edges' cross-product length, so a record reused through a rotation L9's
+/// criterion keeps can claim metres where the boxes overlap by micrometres. The six face candidates
+/// are evaluated as [`sat`] evaluates them, in the same order, only to compute the fallback's bound
+/// [`edge_depth_bound`] of the shallowest; an edge deeper than it misses, and the full collision
+/// answers. No face's sign decides anything: only the edge's own axis decides `Separated`. On a
+/// record's own poses it cannot fire: a recorded edge is the SAT's own (shallower than the face),
+/// a hint held against an edge best (within 1.05 × the face) or a fallback edge (within the bound
+/// by the fallback's choice), and the same `eval_axis` calls give the same bits here — while the
+/// fallback's phantom answer is never recorded ([`BoxBoxOutcome::BestFace`]).
 #[inline]
 pub(crate) fn refresh_edge(
     a: &Obb,
@@ -976,6 +1030,22 @@ pub(crate) fn refresh_edge(
     };
     if cand.depth < 0.0 {
         return EdgeRefresh::Separated(index as u8);
+    }
+    let faces: [Option<AxisCandidate>; 6] = core::array::from_fn(|i| {
+        if i < 3 {
+            eval_axis(a, b, a.axes[i], SatClass::FaceA(i), i)
+        } else {
+            eval_axis(a, b, b.axes[i - 3], SatClass::FaceB(i - 3), i)
+        }
+    });
+    let stale = match shallowest(&faces) {
+        Some(face) => cand.depth > edge_depth_bound(face.depth, a, b),
+        None => true,
+    };
+    if stale {
+        #[cfg(feature = "narrowphase-counts")]
+        fallback_census::REFRESH_STALE.fetch_add(1, Relaxed);
+        return EdgeRefresh::Stale;
     }
     match edge_contact(a, b, &cand, ea, eb, body_a, body_b) {
         Some(m) => EdgeRefresh::Contact(m),
@@ -1001,9 +1071,10 @@ thread_local! {
     static HELD_FACE_YIELDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// The edge contact for a pair whose chosen face realizes no patch — the clip left nothing,
-/// or no clipped point lies below the reference face — when no best-face patch was built to
-/// yield to. Box3D takes the edge there ("face contact can be empty if it does not realize
+/// The contact for a pair whose chosen face realizes no patch — the clip left nothing, or no
+/// clipped point lies below the reference face — when no best-face patch was built to yield
+/// to: an edge contact within the face bound, else the best face's own contact (below). Box3D
+/// takes the edge there ("face contact can be empty if it does not realize
 /// the axis of minimum penetration"). Before S5 a chosen face that realized nothing gave no
 /// manifold, but on the pile most of these pairs still had one then: the pre-S5 rule held
 /// the edge hint that S5's class clause refuses a face-answered pair. Over steps 600-3000
@@ -1016,11 +1087,18 @@ thread_local! {
 /// intersect, so this runs for FP-thin touches — 12 567 of those 12 572 calls were a
 /// same-layer knife-edge pair whose best face realized nothing — and for a held face when
 /// the best face's patch was not built (the other 5; Box3D would build that patch there).
-/// The hint passes through, so edge↔edge hysteresis survives the fallback. Returns `None`
-/// only when no edge axis exists, which needs every edge pair parallel: two orthonormal
-/// frames never produce that, because each axis of one is parallel to at most one axis of
-/// the other. Every edge axis that exists overlaps, or the SAT would have reported the pair
-/// separated.
+///
+/// **Total, and bounded by the face** (`thinbox` lane, `design_rev2.md`). The edge is taken
+/// only while it claims no more than the best face allows, [`edge_depth_bound`] of
+/// `sat.face`. When every edge axis claims more — or none exists — the pair gets the best
+/// face's own contact instead ([`best_face_contact`]): at a knife-edge touch the shallowest
+/// edge axis can be a near-duplicate of the face normal whose depth is metres where the boxes
+/// overlap by micrometres. That decision reads `sat.face` and `sat.edge` alone, the SAT's own
+/// bests, computed before the hint is read, so it and its answer are functions of the two
+/// poses; the hint picks which edge, never whether there is a contact. The hint passes
+/// through, so edge↔edge hysteresis survives the fallback, but an edge hint is held only
+/// while its depth is within the bound. Every edge axis that exists overlaps, or the SAT
+/// would have reported the pair separated.
 #[cold]
 #[inline(never)]
 fn edge_fallback(
@@ -1029,27 +1107,223 @@ fn edge_fallback(
     sat: &SatResult,
     body_a: BodyIndex,
     body_b: BodyIndex,
-) -> Option<BoxBoxContact> {
+) -> Fallback {
     #[cfg(test)]
     FALLBACKS.with(|n| n.set(n.get() + 1));
-    let best = sat.edge?;
+    #[cfg(feature = "narrowphase-counts")]
+    fallback_census::CALLS.fetch_add(1, Relaxed);
+    // `sat.face` and `sat.edge` are the SAT's own bests, computed before the hint is read, so this
+    // decision — and the answer below it — are functions of the two poses alone.
+    let bound = edge_depth_bound(sat.face.depth, a, b);
+    let Some(best) = sat.edge.filter(|e| e.depth <= bound) else {
+        #[cfg(feature = "narrowphase-counts")]
+        fallback_census::PHANTOM.fetch_add(1, Relaxed);
+        return Fallback::BestFace(best_face_contact(a, b, &sat.face, body_a, body_b));
+    };
     let chosen = match sat.hint {
         Some(last)
             if last.is_edge()
                 && last.index != best.index
                 && best.depth >= last.depth / HYSTERESIS_RATIO =>
         {
-            last
+            // The hint picks among bounded candidates only: which contact, never how deep.
+            if last.depth <= bound {
+                last
+            } else {
+                #[cfg(feature = "narrowphase-counts")]
+                fallback_census::HINT_CAPPED.fetch_add(1, Relaxed);
+                best
+            }
         }
         _ => best,
     };
+    #[cfg(feature = "narrowphase-counts")]
+    fallback_census::note_accepted_excess(chosen.depth - sat.face.depth);
     let SatClass::Edge { a: ea, b: eb } = chosen.class else {
         unreachable!("invariant: the best edge and an edge hint are both edge-class axes")
     };
-    edge_contact(a, b, &chosen, ea, eb, body_a, body_b).map(|manifold| BoxBoxContact {
+    let manifold = edge_contact(a, b, &chosen, ea, eb, body_a, body_b)
+        .expect("invariant: edge_contact always builds its one point");
+    Fallback::Edge(BoxBoxContact {
         manifold,
         reference_axis: chosen.index,
     })
+}
+
+/// What [`edge_fallback`] answered: an edge contact within the face bound, or — every edge axis
+/// claiming more than the face allows — the best face's own contact.
+enum Fallback {
+    /// An edge contact whose axis depth is within [`edge_depth_bound`] of the best face.
+    Edge(BoxBoxContact),
+    /// The best face's own contact ([`best_face_contact`]).
+    BestFace(BoxBoxContact),
+}
+
+impl Fallback {
+    /// The contact, whichever the answer: the frozen `pre_l9` oracle's view, which has no outcome
+    /// to tell them apart ([`box_box_classify`] keeps them apart).
+    #[cfg(test)]
+    fn into_contact(self) -> BoxBoxContact {
+        match self {
+            Self::Edge(c) | Self::BestFace(c) => c,
+        }
+    }
+}
+
+/// The best face's own contact for a pair whose every edge axis claims more than that face allows:
+/// its patch, else its lowest clipped incident vertex as one speculative point, else — the clip
+/// empty — the incident face's deepest corner. Total, so the pair keeps a manifold.
+///
+/// The speculative point is Box3D's and Jolt's answer to an empty face clip (`design_rev2.md` §1):
+/// the incident face's deepest point along the face axis, clipped to the reference face, so it lies
+/// on both boxes. Its separation `s` is positive: the biased solve lets the boxes close at up to
+/// `bias_rate·s`, and the relaxation pass, which has no bias, resists any approach — so under a load
+/// the point supports as any contact does.
+#[cold]
+#[inline(never)]
+fn best_face_contact(
+    a: &Obb,
+    b: &Obb,
+    face: &AxisCandidate,
+    body_a: BodyIndex,
+    body_b: BodyIndex,
+) -> BoxBoxContact {
+    let manifold = match face_patch::<true>(a, b, face, body_a, body_b) {
+        Ok(m) => m,
+        Err(_) => {
+            #[cfg(feature = "narrowphase-counts")]
+            fallback_census::CORNER.fetch_add(1, Relaxed);
+            face_corner(a, b, face, body_a, body_b)
+        }
+    };
+    BoxBoxContact {
+        manifold,
+        reference_axis: face.index,
+    }
+}
+
+/// The backstop of [`best_face_contact`] when the face clip keeps nothing: one point at the
+/// incident face's vertex lowest along the reference normal, `face_contact`'s reference and
+/// incident choice, reference-face centre and separation expression, without the clip. Its
+/// reference anchor is the vertex's projection onto the reference plane, which may lie outside the
+/// reference face — the reason it is the last tier, not the first. It has never fired in a
+/// measured population; the `narrowphase-counts` census counts it (`CORNER`).
+#[cold]
+#[inline(never)]
+fn face_corner(
+    a: &Obb,
+    b: &Obb,
+    face: &AxisCandidate,
+    body_a: BodyIndex,
+    body_b: BodyIndex,
+) -> Manifold {
+    let a_is_reference = matches!(face.class, SatClass::FaceA(_));
+    let (reference, incident, dir) = if a_is_reference {
+        (a, b, face.axis)
+    } else {
+        (b, a, face.axis * -1.0)
+    };
+    let (ref_axis, ref_positive, ref_normal) = most_aligned_face(reference, dir);
+    let ref_face_idx = ref_axis * 2 + usize::from(ref_positive);
+    let (inc_axis, inc_positive, _) = most_aligned_face(incident, ref_normal * -1.0);
+    let ref_face = face_vertices(reference, ref_axis, ref_positive);
+    let ref_face_center = ref_face.iter().fold(Vec3::ZERO, |acc, &(p, _)| acc + p) * 0.25;
+    let inc_face = face_vertices(incident, inc_axis, inc_positive);
+    let (mut pos, mut idx) = inc_face[0];
+    let mut separation = (pos - ref_face_center).dot(ref_normal);
+    for &(p, i) in &inc_face[1..] {
+        let s = (p - ref_face_center).dot(ref_normal);
+        if s < separation {
+            pos = p;
+            idx = i;
+            separation = s;
+        }
+    }
+    let on_reference = pos - ref_normal * separation;
+    let (anchor_a, anchor_b) = if a_is_reference {
+        (on_reference, pos)
+    } else {
+        (pos, on_reference)
+    };
+    let mut manifold = Manifold::new(body_a, body_b);
+    manifold.normal = face.axis;
+    manifold.points[0] = ContactPoint {
+        anchor_a,
+        anchor_b,
+        separation,
+        feature_id: feature_face_face(ref_face_idx as u32, idx as u32),
+    };
+    manifold.count = 1;
+    manifold
+}
+
+/// Counts of [`edge_fallback`]'s decisions and of [`refresh_edge`]'s stale misses (`thinbox` lane,
+/// `design_rev2.md` §6.2, §8), under the
+/// non-default `narrowphase-counts` feature only; without it the module and every counting
+/// statement do not exist.
+///
+/// Relaxed atomics, not `thread_local!`, so the parallel narrowphase's workers count too. A count
+/// orders no other memory; a reader calls [`take`] after the counted work has joined its thread.
+#[cfg(feature = "narrowphase-counts")]
+pub mod fallback_census {
+    use core::sync::atomic::AtomicU32;
+    use core::sync::atomic::AtomicU64;
+    use core::sync::atomic::Ordering::Relaxed;
+
+    /// Calls of the fallback.
+    pub(super) static CALLS: AtomicU64 = AtomicU64::new(0);
+    /// Calls answered with the best face's own contact: every edge axis claimed more than the face
+    /// allows, or none existed (event E1).
+    pub(super) static PHANTOM: AtomicU64 = AtomicU64::new(0);
+    /// Edge hints the bound refused, the best edge taken instead (event E2).
+    pub(super) static HINT_CAPPED: AtomicU64 = AtomicU64::new(0);
+    /// Phantom answers whose face clip kept nothing, answered by the corner backstop.
+    pub(super) static CORNER: AtomicU64 = AtomicU64::new(0);
+    /// Edge-record refreshes the face bound turned stale ([`super::EdgeRefresh::Stale`]): a reused
+    /// edge that would claim more than the face allows. Each is a miss that re-runs the full
+    /// collision.
+    pub(super) static REFRESH_STALE: AtomicU64 = AtomicU64::new(0);
+    /// The largest `chosen.depth − face` of an accepted fallback edge, as `f32` bits.
+    static MAX_ACCEPTED_EXCESS_BITS: AtomicU32 = AtomicU32::new(0);
+
+    /// Records `chosen.depth − face` of an accepted fallback edge. Non-positive values (and −0.0,
+    /// whose bits would beat every positive float) store as +0.0; NaN stores nothing. Non-negative
+    /// `f32` bits order like the floats, so `fetch_max` on the bits is the float maximum.
+    pub(super) fn note_accepted_excess(x: f32) {
+        if x > 0.0 {
+            MAX_ACCEPTED_EXCESS_BITS.fetch_max(x.to_bits(), Relaxed);
+        }
+    }
+
+    /// One read of every counter.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Snapshot {
+        /// Calls of the fallback.
+        pub calls: u64,
+        /// Phantom answers (E1): the best face's own contact.
+        pub phantom: u64,
+        /// Edge hints the bound refused (E2).
+        pub hint_capped: u64,
+        /// Phantom answers from the empty-clip corner backstop.
+        pub corner: u64,
+        /// Edge-record refreshes the face bound turned stale (contact reuse only).
+        pub refresh_stale: u64,
+        /// The largest `chosen.depth − face` of an accepted fallback edge, `0.0` if none exceeded
+        /// the face.
+        pub max_accepted_excess: f32,
+    }
+
+    /// Reads every counter and resets it to zero.
+    pub fn take() -> Snapshot {
+        Snapshot {
+            calls: CALLS.swap(0, Relaxed),
+            phantom: PHANTOM.swap(0, Relaxed),
+            hint_capped: HINT_CAPPED.swap(0, Relaxed),
+            corner: CORNER.swap(0, Relaxed),
+            refresh_stale: REFRESH_STALE.swap(0, Relaxed),
+            max_accepted_excess: f32::from_bits(MAX_ACCEPTED_EXCESS_BITS.swap(0, Relaxed)),
+        }
+    }
 }
 
 /// The box-box result: the contact manifold plus the chosen SAT-axis index to
@@ -1075,8 +1349,26 @@ enum FaceMiss {
 }
 
 /// Builds a face-contact manifold via reference-face clip + reduction (P2 W4), on the
-/// face axis `sat` (class `FaceA` / `FaceB`).
+/// face axis `sat` (class `FaceA` / `FaceB`). Only points at or below the reference face are
+/// kept; a clip that keeps none is [`FaceMiss::Empty`].
+#[inline]
 fn face_contact(
+    a: &Obb,
+    b: &Obb,
+    sat: &AxisCandidate,
+    body_a: BodyIndex,
+    body_b: BodyIndex,
+) -> Result<Manifold, FaceMiss> {
+    face_patch::<false>(a, b, sat, body_a, body_b)
+}
+
+/// The body of [`face_contact`] (`SPECULATIVE = false`, the same instruction stream: the one added
+/// statement is behind a constant-false branch) and of [`best_face_contact`]'s first two tiers
+/// (`SPECULATIVE = true`): when no clipped vertex lies at or below the reference face, the one
+/// clipped vertex lowest along its normal is kept as a single point with a positive separation —
+/// Box3D's speculative point, the answer to an empty clip. An empty clip polygon is still
+/// [`FaceMiss::Empty`] either way.
+fn face_patch<const SPECULATIVE: bool>(
     a: &Obb,
     b: &Obb,
     sat: &AxisCandidate,
@@ -1194,7 +1486,28 @@ fn face_contact(
         }
     }
     if scored_len == 0 {
-        return Err(FaceMiss::Empty);
+        if !SPECULATIVE {
+            return Err(FaceMiss::Empty);
+        }
+        // Keep the one clipped vertex lowest along the reference normal, above the face (s > 0):
+        // the Box3D/Jolt answer to an empty clip (`design_rev2.md` §1). The clip loop returned on
+        // an empty polygon, so `src[..poly_len]` holds at least one vertex.
+        let mut lowest = src[0];
+        let mut lowest_sep = (lowest.pos - ref_face_center).dot(ref_normal);
+        for &cv in &src[1..poly_len] {
+            let s = (cv.pos - ref_face_center).dot(ref_normal);
+            if s < lowest_sep {
+                lowest = cv;
+                lowest_sep = s;
+            }
+        }
+        scored[0] = ScoredPoint {
+            pos: lowest.pos,
+            separation: lowest_sep,
+            tie_ord: lowest.tie_ord as usize,
+            feature_id: lowest.feature_id,
+        };
+        scored_len = 1;
     }
 
     let mut reduced = [ScoredPoint {
@@ -1440,7 +1753,11 @@ mod pre_l9 {
                     Ok(m) => (m, chosen.index),
                     Err(FaceMiss::Empty) => match built {
                         Some(m) => (m, sat.face.index),
-                        None => return edge_fallback(&a, &b, &sat, body_a, body_b),
+                        None => {
+                            return Some(
+                                edge_fallback(&a, &b, &sat, body_a, body_b).into_contact(),
+                            );
+                        }
                     },
                     Err(FaceMiss::Degenerate) => return None,
                 },
@@ -2724,8 +3041,8 @@ mod tests {
     ///
     /// **Existence is a function of the poses alone** (the review of S5, W1). After the SAT
     /// overlaps, S5 returns no contact only for a degenerate reference face (a zero in-plane
-    /// extent) or when no edge axis exists, which two orthonormal frames never produce; every
-    /// other path ends in a face patch or an edge contact. So a box pair with non-zero
+    /// extent); every other path ends in a face patch, a speculative face point or an edge
+    /// contact. So a box pair with non-zero
     /// extents has a manifold under every hint or under none — A4's Known behaviour 2 cannot
     /// occur for box pairs. Every pose asked with two or more hints is checked. Making the
     /// fallback run only when a hint is held (a cold pair whose best face realizes nothing
@@ -3088,7 +3405,9 @@ mod tests {
             let a = Obb::from_frame(p.ca, &frame_of(p.qa), p.ha);
             let b = Obb::from_frame(p.cb, &frame_of(p.qb), p.hb);
             match box_box_classify(&a, &b, A, B, p.hint) {
-                BoxBoxOutcome::Contact(c) => (Some(contact_words(&c)), None),
+                BoxBoxOutcome::Contact(c) | BoxBoxOutcome::BestFace(c) => {
+                    (Some(contact_words(&c)), None)
+                }
                 BoxBoxOutcome::Separated(axis) => (None, Some(axis)),
                 BoxBoxOutcome::StillSeparated(_) => {
                     panic!("box_box_classify reads no carried axis")
@@ -3300,7 +3619,9 @@ mod tests {
             let a = Obb::from_frame(p.ca, &frame_of(p.qa), p.ha);
             let b = Obb::from_frame(p.cb, &frame_of(p.qb), p.hb);
             match box_box_classify_carried(&a, &b, A, B, sep, || p.hint) {
-                BoxBoxOutcome::Contact(c) => (Some(contact_words(&c)), None, false),
+                BoxBoxOutcome::Contact(c) | BoxBoxOutcome::BestFace(c) => {
+                    (Some(contact_words(&c)), None, false)
+                }
                 BoxBoxOutcome::Separated(axis) => (None, Some(axis), false),
                 BoxBoxOutcome::StillSeparated(axis) => (None, Some(axis), true),
                 BoxBoxOutcome::NoContact => (None, None, false),
@@ -3524,6 +3845,227 @@ mod tests {
         assert!(
             w.raw_sign_flip_carried > 0,
             "no contact carried an axis whose raw depth is negative (the M-a5 witness)"
+        );
+    }
+
+    // ── T8: the fallback's bound (the thinbox lane, `design_rev2.md` §9) ─────────────────────
+
+    /// A pinned pose of T8 as `f32` bits: `(ca, qa, ha, cb, qb, hb)`.
+    type PoseBits = ([u32; 3], [u32; 4], [u32; 3], [u32; 3], [u32; 4], [u32; 3]);
+
+    /// T4's pinned witnesses (`tests/box_box_fallback_depth.rs`) and the seed's two poses: a1 (a
+    /// unit box yawed ~45° on the floor, where hint 8 is an edge held within 1.05 of the best edge
+    /// but past the bound — the hint cap's witness), a2, a3, c1, c2, and G-L9b-1's seed.
+    const T8_PINNED: [PoseBits; 7] = [
+        (
+            [0x0000_0000, 0xbf80_0000, 0x0000_0000],
+            [0x0000_0000, 0x0000_0000, 0x0000_0000, 0x3f80_0000],
+            [0x4248_0000, 0x3f80_0000, 0x4248_0000],
+            [0x416d_170c, 0x3f00_04bd, 0x40fb_d5f8],
+            [0xb766_f5de, 0x3ebf_3b65, 0x3850_03b2, 0x3f6d_792c],
+            [0x3f00_0000, 0x3f00_0000, 0x3f00_0000],
+        ),
+        (
+            [0x4141_3aa4, 0xbfb1_ffc0, 0xc17a_1a4c],
+            [0xbe0e_6e0e, 0x3e33_27af, 0x3e19_dea1, 0x3f76_8a70],
+            [0x4216_83c8, 0x3e80_f4f5, 0x421a_d0a6],
+            [0xc1bf_e92e, 0xc184_7d70, 0xc1e6_32e2],
+            [0x3de9_5ece, 0xbf65_2ded, 0x3e2e_877f, 0x3eca_9083],
+            [0x3f1d_282b, 0x3f5f_4fa8, 0x3f80_d440],
+        ),
+        (
+            [0x41d5_0bf6, 0x4094_ff22, 0x40ad_1020],
+            [0x3ed2_cd1e, 0x3f0c_7340, 0x3ebc_597e, 0x3f20_b8d7],
+            [0x4248_0000, 0x3f80_0000, 0x4248_0000],
+            [0xc185_dd8e, 0xc1d8_3368, 0x419b_9662],
+            [0x3ed2_cd16, 0x3f0c_733c, 0x3ebc_5989, 0x3f20_b8d9],
+            [0x3a03_126f, 0x3851_b718, 0x3a2a_64c3],
+        ),
+        (
+            [0xc1b9_5ad4, 0x3dcf_3600, 0xc0ab_65f0],
+            [0x3dfa_5950, 0x3ee0_512f, 0x3e8e_5187, 0x3f58_9867],
+            [0x4248_0000, 0x3f80_0000, 0x4248_0000],
+            [0xc29c_bae8, 0xc19d_c191, 0xc13c_27b8],
+            [0x3dfa_a22c, 0x3ee0_19ba, 0x3e8e_4983, 0x3f58_a6c0],
+            [0x3a03_126f, 0x3851_b718, 0x3a2a_64c3],
+        ),
+        (
+            [0xbfb5_6360, 0xc22a_8e4e, 0xc046_1170],
+            [0x3ec7_771c, 0xbf3f_0376, 0x3eeb_f264, 0x3e90_056c],
+            [0x3a03_126f, 0x3851_b718, 0x3a2a_64c3],
+            [0x41d8_c634, 0xbe5f_bd80, 0xc1dc_2520],
+            [0x3ec6_4874, 0xbf3e_a6ac, 0x3eec_f0f2, 0x3e91_edf4],
+            [0x4248_0000, 0x3f80_0000, 0x4248_0000],
+        ),
+        (
+            [0x4098_8db8, 0xc029_0f6f, 0xbfba_9ec0],
+            [0x3f0c_3907, 0x3f4d_9557, 0xbe1c_421f, 0x3e36_8f8d],
+            [0x4205_81cd, 0x3e55_47d4, 0x41c0_387b],
+            [0xc017_c8a8, 0x418d_81d3, 0x4094_a028],
+            [0x3e68_281c, 0x3ec7_ec10, 0xbf07_edcf, 0x3f37_925c],
+            [0x3b87_b37a, 0x3b44_e355, 0x3c67_4a94],
+        ),
+        (
+            [0x407c_4051, 0xc061_bdde, 0xbff1_0767],
+            [0x3f1f_c023, 0x3f3f_b98c, 0xbe3e_e285, 0x3dfa_7326],
+            [0x4205_81cd, 0x3e55_47d4, 0x41c0_387b],
+            [0x3fe1_aff9, 0x418d_694a, 0x409f_8713],
+            [0x3e81_4d3a, 0x3ecc_4676, 0xbf1b_de2e, 0x3f23_2f68],
+            [0x3b87_b37a, 0x3b44_e355, 0x3c67_4a94],
+        ),
+    ];
+
+    /// What T8 saw.
+    #[derive(Default, Debug)]
+    struct BoundCounts {
+        /// Overlapping `(pose, hint)` cells the fallback was asked.
+        cells: u64,
+        /// Its edge answers.
+        edges: u64,
+        /// Its edge answers on a held edge hint.
+        held: u64,
+        /// Its best-face answers.
+        best_face: u64,
+    }
+
+    /// Asks [`edge_fallback`] on the boxes `(a, b)` under `hint`, when the SAT overlaps, and checks
+    /// its answer against the bound: an edge is within [`edge_depth_bound`] of `sat.face`, and a
+    /// best-face answer is on `sat.face` and only when no edge axis is within it.
+    fn t8_cell(a: &Obb, b: &Obb, hint: Option<usize>, n: &mut BoundCounts) -> Result<(), String> {
+        let Ok(s) = sat(a, b, hint) else {
+            return Ok(());
+        };
+        n.cells += 1;
+        let bound = edge_depth_bound(s.face.depth, a, b);
+        match edge_fallback(a, b, &s, A, B) {
+            Fallback::Edge(c) => {
+                n.edges += 1;
+                let i = c.reference_axis;
+                let chosen = candidates_of(a, b)[i].ok_or_else(|| {
+                    format!("hint {hint:?}: the edge answer's axis {i} is degenerate")
+                })?;
+                n.held += u64::from(s.edge.is_some_and(|e| e.index != i));
+                if i < 6 || chosen.depth > bound {
+                    return Err(format!(
+                        "hint {hint:?}: the fallback's edge on axis {i} has depth {:e}, past the bound \
+                         {bound:e} (face {:e})",
+                        chosen.depth, s.face.depth
+                    ));
+                }
+            }
+            Fallback::BestFace(c) => {
+                n.best_face += 1;
+                if s.edge.is_some_and(|e| e.depth <= bound) || c.reference_axis != s.face.index {
+                    return Err(format!(
+                        "hint {hint:?}: a best-face answer on axis {} while the best edge {:?} is within \
+                         the bound {bound:e} of face {} ({:e})",
+                        c.reference_axis,
+                        s.edge.map(|e| (e.index, e.depth)),
+                        s.face.index,
+                        s.face.depth
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// T8: the fallback never emits an edge past its bound, and answers with the best face only
+    /// when every edge axis is past it — over T4's pinned witnesses and the seed (both A/B orders,
+    /// cold and every hint), then a thin/tilted family on the 50×1×50 floor (not under Miri). It
+    /// asks [`edge_fallback`] directly on every overlapping SAT, which is why it lives in the lib.
+    ///
+    /// Mutation M-Cap (the hint cap removed) turns it red on a1 under hint 8: the held edge is
+    /// 5.022e-3 deep against a bound of 5e-3.
+    #[test]
+    fn the_fallback_never_emits_an_edge_past_its_bound() {
+        let v = |b: [u32; 3]| {
+            Vec3::new(
+                f32::from_bits(b[0]),
+                f32::from_bits(b[1]),
+                f32::from_bits(b[2]),
+            )
+        };
+        let q = |b: [u32; 4]| {
+            Quat::new(
+                f32::from_bits(b[0]),
+                f32::from_bits(b[1]),
+                f32::from_bits(b[2]),
+                f32::from_bits(b[3]),
+            )
+        };
+        let mut n = BoundCounts::default();
+        let mut ask = |ca: Vec3, qa: Quat, ha: Vec3, cb: Vec3, qb: Quat, hb: Vec3, what: &str| {
+            let (a, b) = (Obb::new(ca, qa, ha), Obb::new(cb, qb, hb));
+            for (x, y, order) in [(&a, &b, "A/B"), (&b, &a, "B/A")] {
+                for hint in core::iter::once(None).chain((0..SAT_AXES).map(Some)) {
+                    if let Err(why) = t8_cell(x, y, hint, &mut n) {
+                        panic!("{what} ({order}): {why}");
+                    }
+                }
+            }
+        };
+        for (i, &(ca, qa, ha, cb, qb, hb)) in T8_PINNED.iter().enumerate() {
+            ask(
+                v(ca),
+                q(qa),
+                v(ha),
+                v(cb),
+                q(qb),
+                v(hb),
+                &format!("pinned pose {i}"),
+            );
+        }
+        if !cfg!(miri) {
+            let mut draw = Draw(0x7b8e_d0e5_0000_0008);
+            let floor = Vec3::new(50.0, 1.0, 50.0);
+            for ratio in [1.0e3f32, 1.0e4, 1.0e5] {
+                for psi in [0.0f32, 1.0e-5, 1.0e-3, 0.3] {
+                    for theta in [1.0e-5f32, 1.0e-3, 1.0e-1] {
+                        for _ in 0..12 {
+                            let h0 = 50.0 / ratio;
+                            let hs = if draw.below(2) == 0 {
+                                Vec3::new(h0, 0.8 * h0, 1.3 * h0)
+                            } else {
+                                Vec3::new(h0, 0.1 * h0, 1.3 * h0)
+                            };
+                            let tdir = draw.range(0.0, core::f32::consts::TAU);
+                            let qrel = about(Vec3::new(tdir.cos(), 0.0, tdir.sin()), theta)
+                                .mul(about(Vec3::new(0.0, 1.0, 0.0), psi));
+                            let g = if draw.below(2) == 0 {
+                                Quat::IDENTITY
+                            } else {
+                                draw.rotation()
+                            };
+                            let ax = RowFrame::axes_of(qrel);
+                            let ext_y =
+                                hs.x * ax[0].y.abs() + hs.y * ax[1].y.abs() + hs.z * ax[2].y.abs();
+                            let reach = 50.0 - hs.length();
+                            let gap = if draw.below(10) < 7 {
+                                draw.range(-4.0e-6, 4.0e-6)
+                            } else {
+                                -draw.range(0.0, 0.05) * hs.y
+                            };
+                            let o = Vec3::new(
+                                draw.range(-30.0, 30.0),
+                                draw.range(-5.0, 5.0),
+                                draw.range(-30.0, 30.0),
+                            );
+                            let local = Vec3::new(
+                                draw.range(-1.0, 1.0) * reach,
+                                floor.y + ext_y + gap,
+                                draw.range(-1.0, 1.0) * reach,
+                            );
+                            ask(o, g, floor, o + g.rotate(local), g.mul(qrel), hs, "family");
+                        }
+                    }
+                }
+            }
+        }
+        println!("T8: {n:?}");
+        assert!(
+            n.edges > 0 && n.held > 0 && n.best_face > 0,
+            "T8 must see edge answers, held edge hints and best-face answers: {n:?}"
         );
     }
 
