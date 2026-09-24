@@ -43,6 +43,28 @@ pub fn is_anon(raw: &str) -> bool {
     ANON_PREFIXES.iter().any(|p| raw.starts_with(p))
 }
 
+/// `text` with the value of every content-named constant masked: `__xmm@3b78…` → `__xmm@*`.
+///
+/// For DIAGNOSIS only (leg (2)'s "only content-named constants differ" hint). A normalised body
+/// keeps the values, because a changed constant is a changed program; but a 128-bit constant that
+/// holds a `TypeId` changes with the crates' metadata hashes, which hash the resolved dependency
+/// graph, so a move that is only this is worth telling apart before it is called a codegen move
+/// (B3 close, the trunk-merge lockfile finding).
+#[must_use]
+pub fn mask_content_named(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some((at, prefix)) = CONTENT_NAMED_PREFIXES.iter().filter_map(|p| rest.find(p).map(|i| (i, *p))).min() {
+        let value_at = at + prefix.len();
+        out.push_str(&rest[..value_at]);
+        out.push('*');
+        let tail = &rest[value_at..];
+        rest = tail.trim_start_matches(|c: char| c.is_ascii_hexdigit());
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Strips v0 disambiguators, a legacy hash, `.llvm.<N>`, and LLVM's local-name uniquifier from a
 /// demangled name.
 ///

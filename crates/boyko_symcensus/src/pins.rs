@@ -16,7 +16,10 @@
 //! **Check** re-locates each pinned name. A name with no defined code symbol is RED
 //! [`RedKind::SymbolAbsent`] — "absent", never "moved by 0" (P29: a missing symbol means
 //! somebody removed an attribute; critique W1). A body whose normalised text differs is "moved":
-//! RED unless the rung names it (attributed mode, 02 §2's table).
+//! RED unless the rung names it (attributed mode, 02 §2's table). A move whose bodies differ only
+//! in content-named constants still REDs, with [`CONSTANTS_ONLY_HINT`] under it, and the receipt
+//! records the sha256 of the `Cargo.lock` the objects were built under: a `TypeId` literal follows
+//! the resolved dependency graph, not this tree's code.
 //!
 //! **The frozen set is closed** (B3 review W1). A pin that is no longer in the committed data is
 //! never checked, so a deleted pin file, or a pin block cut out with its body, would otherwise read
@@ -58,6 +61,13 @@ pub const MAGIC: &str = "# ug15 leg2 pins v1";
 
 /// The profile leg (2) reads (probe (iv) found it reproducible).
 pub const PROFILE: &str = "release";
+
+/// The line a move's receipt carries when its bodies differ only in content-named constants
+/// ([`normalize::mask_content_named`]). The verdict stays RED: this names where to look first.
+/// MEASURED at the B3 trunk merge: four pins "moved" on a tree byte-identical to this branch's, and
+/// every differing line was a `__xmm@` TypeId literal that followed the worktree's own untracked
+/// `Cargo.lock` (another `syn`, `rustix`, …); swapping the lock turned the leg green.
+pub const CONSTANTS_ONLY_HINT: &str = "only content-named constants differ; TypeId literals among them follow the resolved dependency graph - compare Cargo.lock before calling it a codegen move";
 
 /// One pinned body (one distinct normalised body of one name in one subject).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -643,9 +653,45 @@ impl Objects for BuiltObjects<'_> {
 /// Every subject the candidate list names is built, including one with no pin file (all of its
 /// pairs recorded absent). `subjects` narrows the builds, and with them the object half: a
 /// subject that is not built has its dispositions read but not re-verified.
+///
+/// The receipt records the sha256 of the workspace `Cargo.lock` the objects are built under, read
+/// before the first build and again after the last: TypeId literals in a pinned body follow the
+/// resolved dependency graph, so a move is only attributable against a known lock.
 pub fn check(ctx: &Ctx, llvm: &Llvm, rename: &RenameList, named: &[(String, String)], subjects: &[Subject]) -> Result<String> {
-    let out = crate::probes::header(ctx, llvm, "leg (2) check");
-    check_with(&ctx.root, &BuiltObjects { ctx, llvm }, rename, named, subjects, out)
+    let mut out = crate::probes::header(ctx, llvm, "leg (2) check");
+    let lock = ctx.root.join("Cargo.lock");
+    let before = lock_sha(&lock)?;
+    let _ = writeln!(out, "Cargo.lock   sha256 {} ({})", before.as_deref().unwrap_or("absent"), lock.display());
+    let verdict = check_with(&ctx.root, &BuiltObjects { ctx, llvm }, rename, named, subjects, out);
+    let after = lock_sha(&lock)?;
+    if after == before {
+        return verdict;
+    }
+    let note = format!("\nCargo.lock changed during the builds (cargo re-resolved it): now sha256 {}; the objects were built under it\n", after.as_deref().unwrap_or("absent"));
+    match verdict {
+        Ok(text) => Ok(text + &note),
+        Err(mut red) => {
+            red.detail.push_str(&note);
+            Err(red)
+        }
+    }
+}
+
+/// The sha256 of the lock file at `p`, `None` when there is none.
+fn lock_sha(p: &Path) -> Result<Option<String>> {
+    if p.is_file() { sha256::file_hex(p).map(Some) } else { Ok(None) }
+}
+
+/// `true` when two differing sets of bodies of one name stop differing once every content-named
+/// constant's value is masked: the same instructions at the same offsets, the same sizes and copy
+/// counts, and only constant names changed ([`CONSTANTS_ONLY_HINT`]).
+fn only_content_named_differ(old: &[Pin], fresh: &[Pin]) -> bool {
+    let masked = |pins: &[Pin]| {
+        let mut v: Vec<(String, u64, usize)> = pins.iter().map(|p| (normalize::mask_content_named(&p.body), p.size, p.copies)).collect();
+        v.sort();
+        v
+    };
+    masked(old) == masked(fresh)
 }
 
 /// [`check`]'s whole decision over the committed data under `root`, with the objects supplied by
@@ -741,14 +787,17 @@ pub fn check_with<O: Objects>(
                 a.values().flatten().map(|(h, z, k)| format!("{}:{z}B×{k}", &h[..12])).collect::<Vec<_>>(),
                 b.values().flatten().map(|(h, z, k)| format!("{}:{z}B×{k}", &h[..12])).collect::<Vec<_>>()
             );
+            let hint = if only_content_named_differ(&old_mapped, &fresh) { format!("  hint: {CONSTANTS_ONLY_HINT}\n") } else { String::new() };
             let why = named.iter().find(|(k, _)| *k == cand || *k == name || *k == *old_name);
             match why {
                 Some((_, r)) => {
                     let _ = writeln!(out, "MOVED (named: {r}) {line}");
+                    out.push_str(&hint);
                     named_moved.push(line);
                 }
                 None => {
                     let _ = writeln!(out, "MOVED {line}");
+                    out.push_str(&hint);
                     for f in &fresh {
                         let _ = writeln!(out, "---- fresh body {} ({} B):\n{}", &f.sha256[..16], f.size, f.body);
                     }

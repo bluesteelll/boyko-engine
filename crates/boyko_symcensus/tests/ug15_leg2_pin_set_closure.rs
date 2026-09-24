@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use boyko_symcensus::candidates::{CANDIDATES, Rule};
 use boyko_symcensus::llvm::Sym;
-use boyko_symcensus::normalize::{RenameList, norm_name};
+use boyko_symcensus::normalize::{CONTENT_NAMED_PREFIXES, RenameList, norm_name};
 use boyko_symcensus::objbuild::{SUBJECTS, Subject};
 use boyko_symcensus::pins::{self, Objects, Pin, PinFile};
 use boyko_symcensus::red::{RedKind, Result};
@@ -190,6 +190,53 @@ fn edit_row(d: &mut Data, k: &Key, f: impl FnOnce(Vec<String>) -> Option<Vec<Str
     d.frozen = Some(out);
 }
 
+/// The body of the first block with key `k` (the text after its header line).
+fn block_body(d: &Data, k: &Key) -> String {
+    let t = d.pins.iter().find(|(s, _)| *s == k.0).and_then(|(_, t)| t.as_ref()).expect("the pin file is present");
+    let (_, bl) = split_blocks(t);
+    let b = bl.iter().find(|b| header_key(b) == *k).expect("the block exists");
+    b[header_line(b).len()..].to_owned()
+}
+
+/// Rewrites the body of `k`'s block through `f`, with its header sha and its frozen row's sha
+/// following: the data stays self-consistent (green at the read), and only the object can tell.
+fn rebody(d: &mut Data, k: &Key, f: impl FnOnce(&str) -> String) {
+    let mut new_sha = String::new();
+    edit_block(d, k, |h, b| {
+        let nb = f(&b);
+        assert_ne!(nb, b, "test setup: the rebody edit changes the body");
+        new_sha = body_sha(&nb);
+        (h.replace(&format!("sha256={}", k.3), &format!("sha256={new_sha}")), nb)
+    });
+    edit_row(d, k, |mut r| {
+        r[5] = new_sha;
+        Some(r)
+    });
+}
+
+/// The first content-named constant in `body`, prefix and value (`__xmm@3b78…`).
+fn first_constant(body: &str) -> Option<String> {
+    let (at, prefix) = CONTENT_NAMED_PREFIXES.iter().filter_map(|p| body.find(p).map(|i| (i, *p))).min()?;
+    let value: String = body[at + prefix.len()..].chars().take_while(char::is_ascii_hexdigit).collect();
+    (!value.is_empty()).then(|| format!("{prefix}{value}"))
+}
+
+/// `tok` with the first digit of its value changed.
+fn flip_value(tok: &str) -> String {
+    let at = tok.find('@').expect("a content-named constant") + 1;
+    let first = if tok[at..].starts_with('0') { '1' } else { '0' };
+    format!("{}{first}{}", &tok[..at], &tok[at + 1..])
+}
+
+/// `body` with the mnemonic of the first instruction line holding `tok` renamed, `tok` untouched.
+fn edit_mnemonic_of_line_with(body: &str, tok: &str) -> String {
+    let at = body.find(tok).expect("the constant is in the body");
+    let start = body[..at].rfind('\n').map_or(0, |i| i + 1);
+    let colon = start + body[start..at].find(": ").expect("an instruction line `<offset>: <text>`") + 2;
+    let end = colon + body[colon..].find(' ').expect("a mnemonic followed by its operands");
+    format!("{}_ug15{}", &body[..end], &body[end..])
+}
+
 fn append(t: &mut Option<String>, line: &str) {
     let s = t.get_or_insert_with(String::new);
     let e = eol(s);
@@ -311,6 +358,17 @@ enum Expect {
     ObjectRed(usize, &'static str),
     /// RED with this kind at the object, naming this text.
     Verdict(RedKind, String),
+    /// RED [mismatch] at the object with a MOVED line naming this row, and the constants-only hint
+    /// on the next line or not.
+    Moved(String, bool),
+}
+
+/// Whether the MOVED line naming `row` is followed by the constants-only hint; `None` when no
+/// MOVED line names it.
+fn hinted(det: &str, row: &str) -> Option<bool> {
+    let mut lines = det.lines();
+    lines.find(|l| l.starts_with("MOVED ") && l.contains(row))?;
+    Some(lines.next() == Some(format!("  hint: {}", pins::CONSTANTS_ONLY_HINT).as_str()))
 }
 
 struct Runner {
@@ -338,6 +396,7 @@ impl Runner {
             (Expect::RedNaming(k, needle), Out::Red(j, det)) => asked == 0 && k == j && det.contains(needle.as_str()),
             (Expect::ObjectRed(n, needle), Out::Red(RedKind::PinSet, det)) => asked > 0 && checked(det, *n) && det.contains(needle),
             (Expect::Verdict(k, needle), Out::Red(j, det)) => asked > 0 && k == j && det.contains(needle.as_str()),
+            (Expect::Moved(row, hint), Out::Red(RedKind::Mismatch, det)) => asked > 0 && hinted(det, row) == Some(*hint),
             _ => false,
         };
         let got = out.show(asked);
@@ -457,12 +516,27 @@ fn every_single_edit_of_the_committed_pin_data() {
         });
         r.run("M2", &format!("body + header sha edited: {}", short(k)), &d, &objects, &Expect::Red(RedKind::PinSet));
         // M3. Body, header sha and frozen sha edited together: green at the read by design (the
-        // data is self-consistent); the body comparison against the object calls it MOVED.
+        // data is self-consistent); the body comparison against the object calls it MOVED, and a
+        // line added is not a constant, so there is no constants-only hint.
         edit_row(&mut d, k, |mut f| {
             f[5] = new_sha;
             Some(f)
         });
-        r.run("M3", &format!("body + header + frozen sha edited: {}", short(k)), &d, &objects, &Expect::Verdict(RedKind::Mismatch, format!("MOVED {} {} `{}`", k.0, k.1, k.2)));
+        let row = format!("{} {} `{}`", k.0, k.1, k.2);
+        r.run("M3", &format!("body + header + frozen sha edited: {}", short(k)), &d, &objects, &Expect::Moved(row.clone(), false));
+        // X. Only a content-named constant's value differs (the trunk-merge lockfile finding: a
+        // TypeId literal under another Cargo.lock): still MOVED, with the hint.
+        let body = block_body(&base, k);
+        if let Some(tok) = first_constant(&body) {
+            let mut d = base.clone();
+            rebody(&mut d, k, |b| b.replace(&tok, &flip_value(&tok)));
+            r.run("X", &format!("constant {} changed: {}", &tok[..tok.len().min(12)], short(k)), &d, &objects, &Expect::Moved(row.clone(), true));
+            // X2. The instruction on that constant's line edited, the constant untouched: the
+            // differing line is not a constant, so no hint.
+            let mut d = base.clone();
+            rebody(&mut d, k, |b| edit_mnemonic_of_line_with(b, &tok));
+            r.run("X2", &format!("instruction edited beside constant {}: {}", &tok[..tok.len().min(12)], short(k)), &d, &objects, &Expect::Moved(row, false));
+        }
     }
 
     // Y. A pinned name gone from the object (an attribute removed, P29): absent, never "moved by 0".
