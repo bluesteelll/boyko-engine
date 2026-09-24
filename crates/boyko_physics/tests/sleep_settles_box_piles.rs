@@ -214,6 +214,8 @@ use boyko_physics::BodyIndex;
 use boyko_physics::components::{Collider, ColliderShape, RigidBody, RigidBodyMass, Simulated};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::narrowphase::box_box::box_box_contact;
+#[cfg(feature = "narrowphase-counts")]
+use boyko_physics::narrowphase::box_box::fallback_census;
 use boyko_physics::narrowphase::{feature_face_clip, feature_face_face};
 use boyko_physics::plugin::add_physics_colored_solve;
 use boyko_physics::resources::{
@@ -1711,6 +1713,13 @@ fn a_quarter_overlap_face_contact_has_distinct_feature_ids() {
 /// 0.10017 m under that mutation (msvc release, 2026-09-18), while A7-R2 still froze and
 /// stayed green. The mutation leaves no best-face patch built, so the held-face yield is
 /// unreachable under it and the reading holds for the kernel as committed.
+///
+/// **The fallback census** (the `thinbox` lane, `design_rev2.md` §6.2 (ii)): under the
+/// non-default `narrowphase-counts` feature the run also reads the box-box fallback's census over
+/// the settle (steps 0-600) and over the window (600-3000), and asserts the face bound never fired
+/// in either — no phantom answer, no capped hint, no corner — with the fallback exercised in the
+/// window. The fix changes a run's output only when one of those fires, so this is what says a
+/// moved D_max was not the fix. Run it alone (`--exact`): the counters are process-wide.
 #[test]
 #[cfg_attr(
     any(miri, debug_assertions),
@@ -1727,9 +1736,13 @@ fn a_resting_jolt_pyramid_does_not_creep_with_sleeping_off() {
             1240,
             "construction: Jolt's pyramid holds 1240 boxes"
         );
+        #[cfg(feature = "narrowphase-counts")]
+        let _ = fallback_census::take();
         for _ in 0..CREEP_FROM {
             h.step();
         }
+        #[cfg(feature = "narrowphase-counts")]
+        let settle_census = fallback_census::take();
         let from = h.centres(&pile);
 
         // The window's premise: `CREEP_FROM`'s doc says the vertical settle is over by now,
@@ -1756,6 +1769,8 @@ fn a_resting_jolt_pyramid_does_not_creep_with_sleeping_off() {
         for _ in CREEP_FROM..CREEP_TO {
             h.step();
         }
+        #[cfg(feature = "narrowphase-counts")]
+        a7_r1_fallback_census(settle_census, fallback_census::take());
         let to = h.centres(&pile);
         let mut layer_max = vec![0.0f32; JOLT];
         let mut top_sum = (0.0f64, 0.0f64, 0usize);
@@ -1811,6 +1826,32 @@ fn a_resting_jolt_pyramid_does_not_creep_with_sleeping_off() {
             h.world.resource::<PhysicsConfig>().contact_reuse
         );
     });
+}
+
+/// A7-R1's fallback census over the settle and the window (`narrowphase-counts` only): printed,
+/// with the margin of the face bound's 5 mm over the largest accepted edge excess (τ is
+/// `min(5 mm, 0.1·h_min)` and the pile's boxes are 1 m half-extents), and asserted to hold no event
+/// that changes the kernel's output. Pre-registered for the window (`design_rev2.md` §6.2 (ii)):
+/// `calls` 12 572, `phantom` 0, `hint_capped` 0, `max_accepted_excess` ≤ 2e-4.
+#[cfg(feature = "narrowphase-counts")]
+fn a7_r1_fallback_census(settle: fallback_census::Snapshot, window: fallback_census::Snapshot) {
+    const TAU: f32 = 5.0e-3;
+    for (phase, s) in [("settle 0-600", settle), ("window 600-3000", window)] {
+        println!(
+            "A7-R1 fallback census, {phase}: {s:?}; margin τ / max_accepted_excess = {}",
+            TAU / s.max_accepted_excess
+        );
+        assert!(
+            s.phantom == 0 && s.hint_capped == 0 && s.corner == 0,
+            "A7-R1: the box-box fallback's face bound fired during the {phase}: {s:?}. That \
+             changes the kernel's output on this pile; the pinned D_max no longer measures the \
+             unchanged kernel"
+        );
+    }
+    assert!(
+        window.calls > 0,
+        "A7-R1: the fallback never ran in the window: {window:?}"
+    );
 }
 
 /// A7-R2: Jolt's height-15 pyramid (1240 boxes) freezes and holds; its contact-change wake

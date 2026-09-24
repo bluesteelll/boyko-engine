@@ -205,6 +205,11 @@
 //!   `full`, `full_contacts`, `records_built`, `non_box`, `pairs` — and `h`, the share of the
 //!   touching box pairs served from a record, `reused / (reused + full_contacts)`. A counter, not a
 //!   time, so it is a result on a shared machine.
+//! * `fallback_census` (a runner built with `--features narrowphase-counts`; `null` otherwise): the
+//!   box-box edge fallback's census over the whole run (`narrowphase::box_box::fallback_census`,
+//!   the `thinbox` lane) — `calls`, `phantom`, `hint_capped`, `corner`, `max_accepted_excess`. The
+//!   face bound changes a row's poses only when `phantom` or `hint_capped` is above zero, so a
+//!   moved `--expect-pose` row with both at zero was not moved by it.
 //! * exit code: 0 ok; 2 bad flags; 3 void (anti-vacuity, frozen-by, disarmed ring traffic,
 //!   dropped samples, a reuse-on row with no reuse over steps [100, 500)); 4 `--expect-pose`
 //!   mismatch; 101 panic.
@@ -1331,6 +1336,27 @@ fn json_f64(x: f64) -> String {
     if x.is_finite() { format!("{x}") } else { "null".to_owned() }
 }
 
+/// The box-box fallback census of the whole run as a JSON object (module docs, "Output"): read and
+/// reset once, after the last step.
+#[cfg(feature = "narrowphase-counts")]
+fn fallback_census_json() -> String {
+    let c = boyko_physics::narrowphase::box_box::fallback_census::take();
+    format!(
+        "{{\"calls\":{},\"phantom\":{},\"hint_capped\":{},\"corner\":{},\"max_accepted_excess\":{}}}",
+        c.calls,
+        c.phantom,
+        c.hint_capped,
+        c.corner,
+        json_f64(f64::from(c.max_accepted_excess)),
+    )
+}
+
+/// Without `narrowphase-counts` there is no census: `null`.
+#[cfg(not(feature = "narrowphase-counts"))]
+fn fallback_census_json() -> String {
+    "null".to_owned()
+}
+
 // ── The run ───────────────────────────────────────────────────────────────────
 
 fn main() -> ExitCode {
@@ -1716,6 +1742,7 @@ fn run(args: &Args) -> ExitCode {
         bp.locator_resets,
         bp.members,
     );
+    let census_json = fallback_census_json();
 
     println!(
         "jolt_parity_pyramid: scene {} gap {} friction {} bodies {} workers {} solver {:?} cfg {:?} \
@@ -1756,7 +1783,8 @@ fn run(args: &Args) -> ExitCode {
          \"void_steps\":{void_steps},\"first_void\":{},\"drops_total\":{},\
          \"disarmed_ring_traffic\":{},\"ticks_per_ns\":{},\"waves_total\":{waves_total},\
          \"first_frozen_step\":{},\"frozen_by\":{},\"awake_max_from_frozen_by\":{},\
-         \"broadphase_tree\":{bp_json},\"pair_classes\":{classes_json},\
+         \"broadphase_tree\":{bp_json},\"fallback_census\":{census_json},\
+         \"pair_classes\":{classes_json},\
          \"threads\":{{\"pool_workers\":{},\"dispatcher\":1,\"solve_on_dispatcher_steps\":\
          {solve_on_dispatcher_steps},\"armed_steps\":{},\"dispatcher_lane_samples_max\":{disp_max}}}}}",
         json_str(RUNNER_ID),

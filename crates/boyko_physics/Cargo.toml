@@ -76,6 +76,15 @@ bench-alloc = ["dep:mimalloc"]
 # `tests/bp_query_counts.rs`: `cargo test -p boyko-physics --features bp-query-counts --test
 # bp_query_counts -- --nocapture`.
 bp-query-counts = []
+# The thin-box fix (the box-box edge fallback's face bound): counts of the fallback's decisions in
+# `narrowphase::box_box::fallback_census` - its calls, the phantom answers (every edge axis
+# claiming more than the best face allows), the edge hints the bound refused, the empty-clip
+# corner backstop, the largest accepted edge excess, and the edge-record refreshes the bound turned
+# stale. OFF by default and enabled by no crate in the workspace; with it off the counting
+# statements do not exist. Its consumers are `tests/narrowphase_census.rs` (the positive control),
+# the census epilogues of the pinned targets and the `jolt_parity_pyramid` runner's summary:
+# `cargo test -p boyko-physics --features narrowphase-counts --test narrowphase_census`.
+narrowphase-counts = []
 
 [dev-dependencies]
 # Rung L8a: `boyko_log::probe`'s record observers, for the `#[cfg(test)] mod` blocks that assert

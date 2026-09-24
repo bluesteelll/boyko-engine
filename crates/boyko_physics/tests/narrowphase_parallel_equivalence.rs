@@ -705,7 +705,27 @@ fn run_pyramid(workers: usize, parallel_np: bool, reuse: bool) -> (Vec<StepHashe
         });
     }
     let dispatches = world.resource::<Manifolds>().narrowphase_dispatches();
+    #[cfg(feature = "narrowphase-counts")]
+    fallback_census_epilogue(workers, parallel_np, reuse);
     (hashes, dispatches, reused)
+}
+
+/// The box-box fallback census of one pyramid run (`narrowphase-counts` only; the `thinbox` lane,
+/// `design_rev2.md` §6.2 (iii)): printed, and asserted to hold no event that changes the kernel's
+/// output — no phantom answer, no capped hint. It runs before the caller compares the run, so a
+/// broken bit identity is read beside the census that names or clears the face bound as its cause.
+/// The counters are process-wide; this test is `--ignored`, run on its own.
+#[cfg(feature = "narrowphase-counts")]
+fn fallback_census_epilogue(workers: usize, parallel_np: bool, reuse: bool) {
+    let s = boyko_physics::narrowphase::box_box::fallback_census::take();
+    println!(
+        "pyramid W={workers} parallel_narrowphase {parallel_np} contact_reuse {reuse}: box-box \
+         fallback census {s:?}"
+    );
+    assert!(
+        s.phantom == 0 && s.hint_capped == 0,
+        "pyramid W={workers}: the box-box fallback's face bound fired: {s:?}"
+    );
 }
 
 #[test]

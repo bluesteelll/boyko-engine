@@ -340,7 +340,24 @@ fn run_scene_hash_with(simd_solve: bool) -> u64 {
     for _ in 0..STEPS {
         schedule.run(&mut world);
     }
+    #[cfg(feature = "narrowphase-counts")]
+    fallback_census_epilogue();
     state_hash(&all_bodies(&mut world))
+}
+
+/// The box-box fallback census of the runs so far (`narrowphase-counts` only; the `thinbox` lane,
+/// `design_rev2.md` §6.2 (iii)): printed, and asserted to hold no event that changes the kernel's
+/// output — no phantom answer, no capped hint. It runs before the caller compares a hash, so a
+/// moved golden is read beside the census that names or clears the face bound as its cause. The
+/// counters are process-wide: a reading covers every run of this binary since the last one.
+#[cfg(feature = "narrowphase-counts")]
+fn fallback_census_epilogue() {
+    let s = boyko_physics::narrowphase::box_box::fallback_census::take();
+    println!("golden scene: box-box fallback census {s:?}");
+    assert!(
+        s.phantom == 0 && s.hint_capped == 0,
+        "golden scene: the box-box fallback's face bound fired: {s:?}"
+    );
 }
 
 // ── The gates ────────────────────────────────────────────────────────────────
