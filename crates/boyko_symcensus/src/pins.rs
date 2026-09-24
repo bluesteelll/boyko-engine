@@ -586,6 +586,55 @@ fn multiset(pins: &[Pin]) -> BTreeMap<String, BTreeSet<(String, u64, usize)>> {
     m
 }
 
+/// Where leg (2)'s objects come from. [`check`] builds each subject and reads its post-LTO
+/// object; the in-tree sweep (`tests/ug15_leg2_pin_set_closure.rs`) supplies a model object. Both
+/// run the one per-subject step, [`check_with`], so the sweep exercises the gate's own code rather
+/// than a copy of its loop (B3 close test T1: a copy stayed green when `check` stopped calling
+/// [`contradicted`]).
+pub trait Objects {
+    /// One subject's object.
+    type Object;
+
+    /// The object of `s`; [`check`] builds it now, under [`PROFILE`].
+    fn object(&self, s: Subject) -> Result<Self::Object>;
+
+    /// The object's defined symbol table.
+    fn defined<'o>(&self, o: &'o Self::Object) -> &'o [Sym];
+
+    /// The bodies of `name` in `o`, one pin per distinct normalised body. `syms` are the defined
+    /// code symbols of that name (every copy), as [`check_with`] located them in [`Objects::defined`].
+    fn bodies(&self, o: &Self::Object, subject: &str, cand: &str, name: &str, syms: &[&Sym]) -> Result<Vec<Pin>>;
+
+    /// Called once the subject's pins are compared: RED if `o` changed while it was read.
+    fn done(&self, o: &Self::Object) -> Result<()>;
+}
+
+/// The objects [`check`] reads: each subject built under [`PROFILE`] by this invocation.
+struct BuiltObjects<'a> {
+    ctx: &'a Ctx,
+    llvm: &'a Llvm,
+}
+
+impl Objects for BuiltObjects<'_> {
+    type Object = (Built, ObjView);
+
+    fn object(&self, s: Subject) -> Result<Self::Object> {
+        build_view(self.ctx, self.llvm, s)
+    }
+
+    fn defined<'o>(&self, o: &'o Self::Object) -> &'o [Sym] {
+        &o.1.syms.defined
+    }
+
+    fn bodies(&self, o: &Self::Object, subject: &str, cand: &str, name: &str, syms: &[&Sym]) -> Result<Vec<Pin>> {
+        pins_of(self.llvm, &o.1, subject, cand, name, syms, &RenameList::default())
+    }
+
+    fn done(&self, o: &Self::Object) -> Result<()> {
+        o.0.check_intact()
+    }
+}
+
 /// Leg (2) check against the committed pins, under an optional rename list (old → new) and
 /// named moves. Returns the receipt; RED on a committed pin set that is not the frozen one (read
 /// for every subject before anything is built), a disposition the built object contradicts
@@ -595,14 +644,35 @@ fn multiset(pins: &[Pin]) -> BTreeMap<String, BTreeSet<(String, u64, usize)>> {
 /// pairs recorded absent). `subjects` narrows the builds, and with them the object half: a
 /// subject that is not built has its dispositions read but not re-verified.
 pub fn check(ctx: &Ctx, llvm: &Llvm, rename: &RenameList, named: &[(String, String)], subjects: &[Subject]) -> Result<String> {
-    let mut out = crate::probes::header(ctx, llvm, "leg (2) check");
+    let out = crate::probes::header(ctx, llvm, "leg (2) check");
+    check_with(&ctx.root, &BuiltObjects { ctx, llvm }, rename, named, subjects, out)
+}
+
+/// [`check`]'s whole decision over the committed data under `root`, with the objects supplied by
+/// `objects`; `out` is the receipt so far, and the receipt is returned (or carried by the RED).
+///
+/// In order: every subject's pin file is read and proven the frozen one ([`read_pins`]), before
+/// any object is asked for; each subject of `subjects` that the candidate list names is then
+/// taken from `objects` — with no pin file too, when every pair of it is recorded absent — and
+/// its dispositions ([`contradicted`]), pinned names and bodies are checked against that object.
+/// The verdict is RED [`RedKind::EmptyCensus`] when no pin was checked, else RED
+/// [`RedKind::PinSet`] on a contradiction, else RED [`RedKind::SymbolAbsent`] on an absent pinned
+/// name, else RED [`RedKind::Mismatch`] on an unnamed move.
+pub fn check_with<O: Objects>(
+    root: &Path,
+    objects: &O,
+    rename: &RenameList,
+    named: &[(String, String)],
+    subjects: &[Subject],
+    mut out: String,
+) -> Result<String> {
     let _ = writeln!(out, "rename entries {}, named moves {}", rename.0.len(), named.len());
     // Every subject's file is verified against the frozen list, not only the ones built below:
     // the pin set is one committed dataset, and `--subjects` narrows the builds, not the data.
     let mut files: Vec<(Subject, PinFile)> = Vec::with_capacity(subjects.len());
     let mut verified = 0usize;
     for s in SUBJECTS {
-        let file = match read_pins(&ctx.root, s.key)? {
+        let file = match read_pins(root, s.key)? {
             Some(file) => {
                 verified += 1;
                 file
@@ -616,11 +686,11 @@ pub fn check(ctx: &Ctx, llvm: &Llvm, rename: &RenameList, named: &[(String, Stri
             files.push((s, file));
         }
     }
-    let recorded_absent = read_absent(&ctx.root)?;
+    let recorded_absent = read_absent(root)?;
     let _ = writeln!(
         out,
         "pin set: {} frozen pin(s); {verified} pin file(s) hold exactly their frozen rows; every candidate is frozen or recorded absent",
-        read_frozen(&ctx.root)?.len()
+        read_frozen(root)?.len()
     );
     let mut absent: Vec<String> = Vec::new();
     let mut moved: Vec<String> = Vec::new();
@@ -629,9 +699,10 @@ pub fn check(ctx: &Ctx, llvm: &Llvm, rename: &RenameList, named: &[(String, Stri
     let mut checked = 0usize;
     let mut reverified_absent = 0usize;
     for (s, file) in files {
-        let (built, view) = build_view(ctx, llvm, s)?;
+        let o = objects.object(s)?;
+        let defined = objects.defined(&o);
         reverified_absent += recorded_absent.iter().filter(|a| a.subject == s.key).count();
-        for f in contradicted(s.key, &view.syms.defined, &file, &recorded_absent, rename) {
+        for f in contradicted(s.key, defined, &file, &recorded_absent, rename) {
             let _ = writeln!(out, "CONTRADICTED {f}");
             contradictions.push(f);
         }
@@ -643,7 +714,7 @@ pub fn check(ctx: &Ctx, llvm: &Llvm, rename: &RenameList, named: &[(String, Stri
             checked += old_pins.len();
             let cand = old_pins[0].cand.clone();
             let name = rename.apply(old_name);
-            let syms = by_name(&view, &name);
+            let syms = by_name_in(defined, &name);
             if syms.is_empty() {
                 absent.push(format!("{} {} `{name}` (pinned as `{old_name}`)", s.key, cand));
                 let _ = writeln!(out, "{} {}: ABSENT {name}", s.key, cand);
@@ -657,7 +728,7 @@ pub fn check(ctx: &Ctx, llvm: &Llvm, rename: &RenameList, named: &[(String, Stri
                     Pin { name: name.clone(), sha256: sha256::bytes_hex(body.as_bytes()), body, ..p.clone() }
                 })
                 .collect();
-            let fresh = pins_of(llvm, &view, s.key, &cand, &name, &syms, &RenameList::default())?;
+            let fresh = objects.bodies(&o, s.key, &cand, &name, &syms)?;
             let (a, b) = (multiset(&old_mapped), multiset(&fresh));
             if a == b {
                 let _ = writeln!(out, "{} {}: identical {name}", s.key, cand);
@@ -685,7 +756,7 @@ pub fn check(ctx: &Ctx, llvm: &Llvm, rename: &RenameList, named: &[(String, Stri
                 }
             }
         }
-        built.check_intact()?;
+        objects.done(&o)?;
     }
     let _ = writeln!(out, "checked {checked} pin(s): {} absent, {} moved unnamed, {} moved named", absent.len(), moved.len(), named_moved.len());
     let _ = writeln!(out, "dispositions re-verified against the objects: {reverified_absent} recorded-absent pair(s); {} contradiction(s)", contradictions.len());

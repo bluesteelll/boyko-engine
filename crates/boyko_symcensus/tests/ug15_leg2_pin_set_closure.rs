@@ -1,27 +1,28 @@
-//! Leg (2)'s pin-set closure (B3 review W1, retest R1/R2/R5): every single edit of the committed
-//! pin data, run through the readers every leg uses, on scratch copies.
+//! Leg (2)'s pin-set closure (B3 review W1, retest R1/R2/R5, close T1): every single edit of the
+//! committed pin data, run through the gate's own decision, on scratch copies.
 //!
 //! Ported from the B3 retest's out-of-tree sweep. The committed data of THIS tree is only read; each
 //! case is written under `CARGO_TARGET_TMPDIR` and read back from there.
 //!
-//! Two halves of the gate are replicated, each exactly as `pins::check` runs it:
-//! - **the read** — `pins::read_pins` for every subject of `SUBJECTS`, before any build, RED on the
-//!   first error;
-//! - **the object** — `pins::contradicted` per subject, against a MODEL object whose defined code
-//!   symbols are the names the committed frozen list pins for that subject (what capture found),
-//!   plus whatever a case adds. It stands in for the post-LTO object the binary builds; the
-//!   binary's own end-to-end runs are the B3 receipts.
+//! Every case runs `pins::check_with`, the function `pins::check` itself calls, with a MODEL object
+//! in place of the build: per subject, its defined code symbols are the names the committed frozen
+//! list pins for it (what capture found), plus or minus whatever a case changes, and the bodies of
+//! a name are the committed ones (what capture read). So the read, the choice of the subjects whose
+//! objects are asked for (one with no pin file included), the contradictions, the per-name
+//! comparison and the order of the verdicts are the gate's code, not a replica — close test T1
+//! found that a replica of the loop stayed green when `check` stopped calling `contradicted`. The
+//! model stands in for the build and the disassembly only; the binary's own end-to-end runs are
+//! the B3 receipts.
 //!
-//! An edit that is consistent across the three files (family C: one name of a multi-name candidate
-//! cut from the pin file and the frozen list; family E: a pinned pair moved into the absent list)
-//! reads GREEN by construction — the data is self-consistent — and is RED at the object, which
-//! still defines the names the data no longer claims. Both halves are asserted, so a read that
-//! starts REDding them and an object check that stops are both failures here.
-//!
-//! What lies after the object check in the binary (the body comparison, MOVED / ABSENT, the
-//! `checked == 0` guard) is not replicated: family M3 and the vacuity probe Q record where that
-//! part takes over.
+//! A case is "red at the read" when it REDs before the gate asks for any object, and "red at the
+//! object" when it REDs after. An edit that is consistent across the three files (family C: one
+//! name of a multi-name candidate cut from the pin file and the frozen list; family E: a pinned
+//! pair moved into the absent list) reads GREEN by construction — the data is self-consistent — and
+//! is RED at the object, which still defines the names the data no longer claims. Both halves are
+//! asserted, so a read that starts REDding them and an object check that stops are both failures
+//! here.
 
+use std::cell::Cell;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,9 +30,9 @@ use std::path::{Path, PathBuf};
 use boyko_symcensus::candidates::{CANDIDATES, Rule};
 use boyko_symcensus::llvm::Sym;
 use boyko_symcensus::normalize::{RenameList, norm_name};
-use boyko_symcensus::objbuild::SUBJECTS;
-use boyko_symcensus::pins::{self, PinFile};
-use boyko_symcensus::red::RedKind;
+use boyko_symcensus::objbuild::{SUBJECTS, Subject};
+use boyko_symcensus::pins::{self, Objects, Pin, PinFile};
+use boyko_symcensus::red::{RedKind, Result};
 use boyko_symcensus::sha256;
 
 /// (subject, cand, name, sha256) of one frozen row or pin block.
@@ -221,6 +222,16 @@ fn model_objects(rows: &[Key]) -> Vec<(&'static str, Vec<Sym>)> {
         .collect()
 }
 
+/// The model objects with `name` removed from `subject`'s.
+fn without(objects: &[(&'static str, Vec<Sym>)], subject: &str, name: &str) -> Vec<(&'static str, Vec<Sym>)> {
+    let mut objs = objects.to_vec();
+    let obj = &mut objs.iter_mut().find(|(k, _)| *k == subject).expect("test setup: the subject's model object").1;
+    let before = obj.len();
+    obj.retain(|s| s.name != name);
+    assert_eq!(obj.len() + 1, before, "test setup: the model object of {subject} defines `{name}` once");
+    objs
+}
+
 /// A name the first rule of candidate `cand` locates, for adding to a model object.
 fn a_name_located_by(cand: &str) -> String {
     let c = CANDIDATES.iter().find(|c| c.id == cand).expect("test setup: a known candidate");
@@ -231,70 +242,81 @@ fn a_name_located_by(cand: &str) -> String {
     }
 }
 
+/// The objects the gate is given in place of the build (see the module doc).
+struct Model<'a> {
+    /// Per subject, its defined code symbols.
+    objects: &'a [(&'static str, Vec<Sym>)],
+    /// The committed bodies of every subject, as the tree's pin files hold them.
+    bodies: &'a [Pin],
+    /// How many objects the gate asked for; 0 means it decided at the read.
+    asked: Cell<usize>,
+}
+
+impl<'a> Objects for Model<'a> {
+    type Object = &'a [Sym];
+
+    fn object(&self, s: Subject) -> Result<&'a [Sym]> {
+        self.asked.set(self.asked.get() + 1);
+        Ok(self.objects.iter().find(|(k, _)| *k == s.key).map(|(_, v)| v.as_slice()).expect("test setup: every subject has a model object"))
+    }
+
+    fn defined<'o>(&self, o: &'o &'a [Sym]) -> &'o [Sym] {
+        o
+    }
+
+    fn bodies(&self, _o: &&'a [Sym], subject: &str, _cand: &str, name: &str, _syms: &[&Sym]) -> Result<Vec<Pin>> {
+        Ok(self.bodies.iter().filter(|p| p.subject == subject && p.name == name).cloned().collect())
+    }
+
+    fn done(&self, _o: &&'a [Sym]) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// What the gate decided on one case.
 #[derive(Debug)]
 enum Out {
-    Green(usize),
+    /// Green, with its receipt.
+    Green(String),
+    /// RED, with its kind and its message (the receipt so far, then the RED sentence).
     Red(RedKind, String),
 }
 
 impl Out {
-    fn show(&self) -> String {
+    fn show(&self, asked: usize) -> String {
+        let at = if asked == 0 { "the read".to_owned() } else { format!("the object ({asked} asked)") };
         match self {
-            Out::Green(m) => format!("GREEN {m} pin(s)"),
-            Out::Red(k, det) => format!("RED [{}] {}", k.label(), det.chars().take(160).collect::<String>()),
+            Out::Green(t) => format!("GREEN at {at}: {}", t.lines().find(|l| l.starts_with("checked ")).unwrap_or("")),
+            Out::Red(k, det) => format!("RED [{}] at {at}: {}", k.label(), det.lines().last().unwrap_or("").chars().take(160).collect::<String>()),
         }
     }
 }
 
-/// The read half: `read_pins` for every subject, as `check` runs it before any build.
-fn read_gate(root: &Path) -> Out {
-    let mut n = 0;
-    for s in SUBJECTS {
-        match pins::read_pins(root, s.key) {
-            Ok(Some(f)) => n += f.pins.len(),
-            Ok(None) => {}
-            Err(r) => return Out::Red(r.kind, r.detail),
-        }
-    }
-    Out::Green(n)
-}
-
-/// The object half: `contradicted` per subject against its model object, as `check` runs it after
-/// each build (every subject the candidate list names; `PinFile::default()` for one with no file).
-fn object_gate(root: &Path, objects: &[(&'static str, Vec<Sym>)]) -> Out {
-    let absent = match pins::read_absent(root) {
-        Ok(a) => a,
-        Err(r) => return Out::Red(r.kind, r.detail),
-    };
-    let mut faults: Vec<String> = Vec::new();
-    for (subject, defined) in objects {
-        if !CANDIDATES.iter().any(|c| c.subjects.contains(subject)) {
-            continue;
-        }
-        let file = match pins::read_pins(root, subject) {
-            Ok(f) => f.unwrap_or_else(PinFile::default),
-            Err(r) => return Out::Red(r.kind, r.detail),
-        };
-        faults.extend(pins::contradicted(subject, defined, &file, &absent, &RenameList::default()));
-    }
-    if faults.is_empty() { Out::Green(0) } else { Out::Red(RedKind::PinSet, format!("{faults:?}")) }
+/// `true` when the receipt says the gate checked exactly `n` pins.
+fn checked(text: &str, n: usize) -> bool {
+    text.contains(&format!("\nchecked {n} pin(s):"))
 }
 
 #[derive(Clone, Debug)]
 enum Expect {
-    /// Both halves green; the read counts this many pins.
+    /// Green after checking this many pins against the objects.
     Green(usize),
-    /// The read REDs with this kind (the object half never runs: `check` stops first).
+    /// RED with this kind at the read: the gate asks for no object.
     Red(RedKind),
-    /// The read REDs with this kind, and its sentence names this text (R2: the diagnostic names
+    /// RED with this kind at the read, and its sentence names this text (R2: the diagnostic names
     /// the row it is about).
     RedNaming(RedKind, String),
-    /// The read is green with this many pins, and the object REDs [pin set] naming this text.
+    /// Green at the read, then RED [pin set] at the object after checking this many pins, naming
+    /// this text.
     ObjectRed(usize, &'static str),
+    /// RED with this kind at the object, naming this text.
+    Verdict(RedKind, String),
 }
 
 struct Runner {
     root: PathBuf,
+    /// The committed bodies the model returns.
+    bodies: Vec<Pin>,
     table: String,
     failures: Vec<String>,
     /// (family, cases, red at the read, red at the object)
@@ -304,21 +326,24 @@ struct Runner {
 impl Runner {
     fn run(&mut self, family: &str, name: &str, d: &Data, objects: &[(&'static str, Vec<Sym>)], want: &Expect) {
         d.write(&self.root);
-        let read = read_gate(&self.root);
-        let object = match read {
-            Out::Green(_) => Some(object_gate(&self.root, objects)),
-            Out::Red(..) => None,
+        let model = Model { objects, bodies: &self.bodies, asked: Cell::new(0) };
+        let out = match pins::check_with(&self.root, &model, &RenameList::default(), &[], &SUBJECTS, String::new()) {
+            Ok(t) => Out::Green(t),
+            Err(r) => Out::Red(r.kind, r.detail),
         };
-        let ok = match (want, &read, &object) {
-            (Expect::Green(n), Out::Green(m), Some(Out::Green(_))) => n == m,
-            (Expect::Red(k), Out::Red(j, _), None) => k == j,
-            (Expect::RedNaming(k, needle), Out::Red(j, det), None) => k == j && det.contains(needle.as_str()),
-            (Expect::ObjectRed(n, needle), Out::Green(m), Some(Out::Red(RedKind::PinSet, det))) => n == m && det.contains(needle),
+        let asked = model.asked.get();
+        let ok = match (want, &out) {
+            (Expect::Green(n), Out::Green(t)) => asked > 0 && checked(t, *n),
+            (Expect::Red(k), Out::Red(j, _)) => asked == 0 && k == j,
+            (Expect::RedNaming(k, needle), Out::Red(j, det)) => asked == 0 && k == j && det.contains(needle.as_str()),
+            (Expect::ObjectRed(n, needle), Out::Red(RedKind::PinSet, det)) => asked > 0 && checked(det, *n) && det.contains(needle),
+            (Expect::Verdict(k, needle), Out::Red(j, det)) => asked > 0 && k == j && det.contains(needle.as_str()),
             _ => false,
         };
-        let got = format!("read {}; object {}", read.show(), object.as_ref().map_or_else(|| "not reached".to_owned(), Out::show));
+        let got = out.show(asked);
         let want_s = format!("{want:?}");
-        let _ = writeln!(self.table, "{} {family:<3} {name:<80} want {want_s:<40} got {got}", if ok { "ok  " } else { "FAIL" });
+        let want_s: String = want_s.chars().take(60).collect();
+        let _ = writeln!(self.table, "{} {family:<3} {name:<80} want {want_s:<60} got {got}", if ok { "ok  " } else { "FAIL" });
         if !ok {
             self.failures.push(format!("{family} {name}: want {want:?}, got {got}"));
         }
@@ -331,8 +356,9 @@ impl Runner {
         };
         let e = &mut self.per_family[i];
         e.1 += 1;
-        e.2 += usize::from(matches!(read, Out::Red(..)));
-        e.3 += usize::from(matches!(object, Some(Out::Red(..))));
+        let red = matches!(out, Out::Red(..));
+        e.2 += usize::from(red && asked == 0);
+        e.3 += usize::from(red && asked > 0);
     }
 }
 
@@ -357,9 +383,17 @@ fn every_single_edit_of_the_committed_pin_data() {
     let n_pairs: usize = CANDIDATES.iter().map(|c| c.subjects.len()).sum();
     assert_eq!(pairs.len() + absent.len(), n_pairs, "frozen pairs + absent pairs = every candidate x subject pair");
     let objects = model_objects(&rows);
+    let bodies: Vec<Pin> = base
+        .pins
+        .iter()
+        .filter_map(|(_, t)| t.as_deref())
+        .flat_map(|t| PinFile::parse(t).expect("test setup: the committed pin files parse").pins)
+        .collect();
+    assert_eq!(bodies.len(), FROZEN_ROWS, "the committed pin files hold one block per frozen row");
 
     let mut r = Runner {
         root: PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ug15_leg2_pin_set_closure").join("case"),
+        bodies,
         table: String::new(),
         failures: Vec::new(),
         per_family: Vec::new(),
@@ -422,14 +456,45 @@ fn every_single_edit_of_the_committed_pin_data() {
             (h.replace(&format!("sha256={}", k.3), &format!("sha256={new_sha}")), nb)
         });
         r.run("M2", &format!("body + header sha edited: {}", short(k)), &d, &objects, &Expect::Red(RedKind::PinSet));
-        // M3. Body, header sha and frozen sha edited together: green here by design; the build's
-        // body comparison calls it MOVED.
+        // M3. Body, header sha and frozen sha edited together: green at the read by design (the
+        // data is self-consistent); the body comparison against the object calls it MOVED.
         edit_row(&mut d, k, |mut f| {
             f[5] = new_sha;
             Some(f)
         });
-        r.run("M3", &format!("body + header + frozen sha edited: {}", short(k)), &d, &objects, &Expect::Green(FROZEN_ROWS));
+        r.run("M3", &format!("body + header + frozen sha edited: {}", short(k)), &d, &objects, &Expect::Verdict(RedKind::Mismatch, format!("MOVED {} {} `{}`", k.0, k.1, k.2)));
     }
+
+    // Y. A pinned name gone from the object (an attribute removed, P29): absent, never "moved by 0".
+    let mut names: Vec<(String, String, String)> = rows.iter().map(|k| (k.0.clone(), k.1.clone(), k.2.clone())).collect();
+    names.sort();
+    names.dedup();
+    for (s, c, n) in &names {
+        let objs = without(&objects, s, n);
+        r.run("Y", &format!("pinned name gone from the object: {s}/{c} {}", n.chars().take(40).collect::<String>()), &base, &objs, &Expect::Verdict(RedKind::SymbolAbsent, format!("{s} {c}: ABSENT {n}")));
+    }
+
+    // V. The order of the verdicts past the read: a contradiction before an absent name, an absent
+    // name before a move. (An empty census before a contradiction is Q, below.)
+    let (s0, c0, n0) = &names[0];
+    let (ac, asub) = &absent[0];
+    let mut objs = without(&objects, s0, n0);
+    let obj = &mut objs.iter_mut().find(|(k, _)| k == asub).expect("the subject's model object").1;
+    obj.push(code(obj.len(), &a_name_located_by(ac)));
+    r.run("V", &format!("{s0}/{c0} gone AND {ac}/{asub} present: the contradiction wins"), &base, &objs, &Expect::Verdict(RedKind::PinSet, "recorded absent, but present".to_owned()));
+    let k1 = rows.iter().find(|k| k.2 != *n0).expect("a second pinned name");
+    let mut d = base.clone();
+    let mut new_sha = String::new();
+    edit_block(&mut d, k1, |h, b| {
+        let nb = format!("{b}; ug15 sweep\n");
+        new_sha = body_sha(&nb);
+        (h.replace(&format!("sha256={}", k1.3), &format!("sha256={new_sha}")), nb)
+    });
+    edit_row(&mut d, k1, |mut f| {
+        f[5] = new_sha;
+        Some(f)
+    });
+    r.run("V", &format!("{s0}/{c0} gone AND {} moved: the absent name wins", short(k1)), &d, &without(&objects, s0, n0), &Expect::Verdict(RedKind::SymbolAbsent, format!("ABSENT {n0}")));
 
     for (c, s) in &absent {
         // D. An absent row removed.
@@ -580,8 +645,8 @@ fn every_single_edit_of_the_committed_pin_data() {
     r.run("O", "block order and frozen row order reversed", &d, &objects, &Expect::Green(FROZEN_ROWS));
 
     // Q. Vacuity: frozen header-only, all pin files gone, every pinned pair forged absent. The
-    // read is green with 0 pins (the binary's `checked == 0` guard is the one that sees that);
-    // the object half contradicts every forged claim.
+    // read is green with 0 pins; every subject is still asked for (none has a pin file), and the
+    // `checked == 0` guard REDs before the contradictions do, which its receipt still carries.
     let mut d = base.clone();
     d.frozen = Some(ft.split_inclusive('\n').filter(|l| !is_row(l)).collect());
     for (_, t) in &mut d.pins {
@@ -590,7 +655,7 @@ fn every_single_edit_of_the_committed_pin_data() {
     for (c, s) in &pairs {
         append(&mut d.absent, &format!("{c}\t{s}\tforged by the ug15 sweep (vacuity probe)"));
     }
-    r.run("Q", "vacuity: frozen header-only, no pin file, every pair absent", &d, &objects, &Expect::ObjectRed(0, "recorded absent, but present"));
+    r.run("Q", "vacuity: frozen header-only, no pin file, every pair absent", &d, &objects, &Expect::Verdict(RedKind::EmptyCensus, "CONTRADICTED recorded absent, but present".to_owned()));
     // R. Frozen header-only and no pin file, absent list untouched.
     let mut d = base.clone();
     d.frozen = Some(ft.split_inclusive('\n').filter(|l| !is_row(l)).collect());
