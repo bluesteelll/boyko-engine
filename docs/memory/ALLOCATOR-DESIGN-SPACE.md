@@ -1,8 +1,8 @@
-# Allocator design space - rev 1, its first critique, and rev 2 — current: ~~rev 2.5~~ rev 2.6 (2026-09-23)
+# Allocator design space - rev 1, its first critique, and rev 2 — current: ~~rev 2.5~~ ~~rev 2.6 (2026-09-23)~~ rev 2.7 (2026-09-24), with its closure (P58)
 
 Date: 2026-09-10 (Parts I-II), 2026-09-16 (Part III). Trees: **ecsnative** = `D:/wt/ecsnative` (`feat/ecs-native-storage` @ `ad0ebea4`), **merge** = `D:/wt/merge` (`merge/ke16-into-render` @ `d2c8c646`), **joltab** = `D:/wt/joltab` (`merge/ke16-into-ecsnative` @ `d552be05`, the tree Part III reads), **main** = `D:/claude/BoykoEngine` (read-only). Companion: [ALLOCATOR-RESEARCH.md](ALLOCATOR-RESEARCH.md) (the four lens reports this design is built on).
 
-> ⚠ **STATUS (2026-09-23, rev 2.6): critique pass 7 (AP7) reviewed rev 2.5 and returned CHANGES_REQUESTED with 0 Critical, 2 Important and 5 Optional remarks. [Rev 2.6](#rev-26-2026-09-23), now the last Part, resolves both Important remarks and adopts all five Optional ones (P52–P55); the pass-7 log precedes it. No owner ruling is needed. One item stays open for the plan, not for this file: a mechanism for the modding-crate `#[used]`/ctor ban (P53.3). C1's prerequisite, "AP7 has closed rev 2.5" (plan 02 §2), is the orchestrator's to declare.** *Rev 2.5's status, superseded:* ~~**STATUS (2026-09-23): rev 2.5 is written — step DOC-1 of the unified system plan — and awaits critique pass 7 (AP7), whose scope is the rev-2.5 delta and the pass-6 dispositions only; C1 waits for AP7.**~~ [Rev 2.5](#rev-25-2026-09-23) is ~~the last Part of this file~~ the Part before the pass-7 log. It moves the Heap class (with `HeapDyn`), `TableSet` and `DropColumn` to revival forms (P46), re-points §7 to the plan's file 05 (P47), keeps the thread context out of `boyko_memory` (P48), strikes `HeapRef::alloc_cold` from P29 (P49), gives every pass-6 remark a disposition (P50) and fixes pass 6's stale passages in place (P51). Its in-place markers begin `⚠ Rev 2.5`, and no line above it moved. *Superseded status:* ~~**STATUS (2026-09-17): closed at rev 2.4 by orchestrator ruling.** Critique pass 6 found no~~
+> ⚠ **STATUS (2026-09-24, rev 2.7 closure): critique pass 9 (AP9), a closure pass on rev 2.7, returned CHANGES_REQUESTED with 0 Critical and 4 Important remarks (W1–W4) and two questions. [The rev-2.7 closure](#rev-27-closure-2026-09-24-p58-which-answers-critique-pass-9), now the last Part, resolves all four and answers both questions (P58); the pass-9 log precedes it. No owner ruling is needed. AP9 held only the first modding-crate rung, never C1. Open for the plan, not for this file: adopting P56 with P58's changes as the ban's mechanism, at that rung. P58's plan side is applied in the same step.** *Rev 2.7's status, superseded:* ~~**STATUS (2026-09-24, rev 2.7): critique pass 8 (AP8), a closure pass on rev 2.6, returned CHANGES_REQUESTED with 0 Critical, 1 Important (N-W1) and 3 Optional remarks (O1–O3). It found every AP7 remark and answer resolved, and C1's prerequisite met. [Rev 2.7](#rev-27-2026-09-24), now the last Part, resolves N-W1 and adopts O1–O3 (P56, P57); the pass-8 log precedes it. No owner ruling is needed. N-W1 held only the first modding-crate rung, never C1. Open for the plan, not for this file: adopting P56's candidate mechanism for the modding-crate ban on runtime-invoked code, at that rung, and applying the same-line plan patches that P57 proposes. Declaring C1's prerequisite met is the orchestrator's.**~~ *Rev 2.6's status, superseded:* ~~**STATUS (2026-09-23, rev 2.6): critique pass 7 (AP7) reviewed rev 2.5 and returned CHANGES_REQUESTED with 0 Critical, 2 Important and 5 Optional remarks. [Rev 2.6](#rev-26-2026-09-23), now the last Part, resolves both Important remarks and adopts all five Optional ones (P52–P55); the pass-7 log precedes it. No owner ruling is needed. One item stays open for the plan, not for this file: a mechanism for the modding-crate `#[used]`/ctor ban (P53.3). C1's prerequisite, "AP7 has closed rev 2.5" (plan 02 §2), is the orchestrator's to declare.**~~ *Rev 2.5's status, superseded:* ~~**STATUS (2026-09-23): rev 2.5 is written — step DOC-1 of the unified system plan — and awaits critique pass 7 (AP7), whose scope is the rev-2.5 delta and the pass-6 dispositions only; C1 waits for AP7.**~~ [Rev 2.5](#rev-25-2026-09-23) is ~~the last Part of this file~~ the Part before the pass-7 log. It moves the Heap class (with `HeapDyn`), `TableSet` and `DropColumn` to revival forms (P46), re-points §7 to the plan's file 05 (P47), keeps the thread context out of `boyko_memory` (P48), strikes `HeapRef::alloc_cold` from P29 (P49), gives every pass-6 remark a disposition (P50) and fixes pass 6's stale passages in place (P51). Its in-place markers begin `⚠ Rev 2.5`, and no line above it moved. *Superseded status:* ~~**STATUS (2026-09-17): closed at rev 2.4 by orchestrator ruling.** Critique pass 6 found no~~
 > ~~Critical remark; its five Important remarks (W1-W5) are recorded as OPEN at the end of this file and~~
 > ~~are resolved in the rungs that implement the affected items.~~ The unified system plan
 > (`docs/unification/UNIFIED-SYSTEM-PLAN-*.md`) is the binding reading of this design: its rulings
@@ -1213,7 +1213,7 @@ Rev 1's 4 GiB + 16 GiB is cut to 1 GiB + 1 GiB: `InlandStore` already reserves 1
 | K-MOD-6 ⚠ *Rev 2.5 (P47): kept as MS-09 (05 §4)* | dynamic drop glue | the `drop_fn` a pool already stores: `pub type DropFn = unsafe fn(*mut u8)` (`component_registry/mod.rs:83`) in `pub drop_fn: Option<DropFn>` (`:117`) — the Bevy `Option<unsafe fn(OwningPtr)>` shape `[S blob_array.rs]`, already in-tree. A mod supplies an `extern "C"` thunk | none |
 | K-MOD-7 ⚠ *Rev 2.5 (P47, P51): kept per 05 §4; its gate is UG-15 leg (1) plus a `raw` import census* | what is NOT exposed | ~~`boyko_memory::raw::{reserve, commit, base}`~~ `boyko_memory::raw::{reserve, commit_at}` ⚠ *Rev 2.6 (P54/O4): KC-01's names*, ~~`FrameArena`,~~ `ChunkArena`/~~`ChunkCache`~~ `SlotChunks`, `ScopeBlock`. A mod gets ~~`Heap`/`HeapVec`/~~columns and nothing that could commit pages or reach the pool's scope memory | enforced by O6's allowlist gate |
 | K-MOD-8 ⚠ *Rev 2.5 (P47): kept (05 §4)* | registry | the mod registry is a **`Resource` inserted by `boyko_modding`** at first load (Principle 0: it is ECS data, not a side store). **No kernel field, no enum variant, no `Option<ModRegistry>` anywhere in `EcsMaster`** | none — an un-inserted resource slot is an index that is never read; `size_of::<EcsMaster>()` is unchanged, and G6 asserts it |
-| K-MOD-9 ⚠ *Rev 2.5 (P47): kept = UG-15 leg (1) (05 §4)* | ABI | every `#[no_mangle] extern "C"` thunk lives in `boyko_modding`; the kernel exports no C symbol | none — no symbol exists to export |
+| K-MOD-9 ⚠ *Rev 2.5 (P47): kept = UG-15 leg (1) (05 §4)* ⚠ *Rev 2.7 (P56.2, AP8 N-W1): its thunks are called by a mod or by the host after `main`, so they are outside the modding-crate ban on runtime-invoked code; the kernel's leg-(1) allowlist stays empty* | ABI | every `#[no_mangle] extern "C"` thunk lives in `boyko_modding`; the kernel exports no C symbol | none — no symbol exists to export |
 
 **Why a mod gets its own `Heap` rather than the world's.** Three reasons, all performance or soundness: (i) HV-3's single-writer invariant would otherwise be shared with untrusted code; (ii) a mod's free-list corruption would be a kernel corruption; (iii) unload becomes `O(1)` and leak-bounded instead of a walk. Cost to the engine: zero, because no `Heap` is constructed when no mod is loaded. **Overturn gate:** if a scene loads > 64 mods and the per-mod 4 KiB header pages show up in the resident profile, mods share one `Heap` partitioned by class range. ⚠ *Rev 2.5 (P47): withdrawn with K-MOD-3 — under load-only (U-10) reason (iii) is void, and reasons (i) and (ii) apply to any engine structure a mod writes (05 §4).*
 
@@ -1906,7 +1906,7 @@ The critic's mechanism is exact: a crate outside the binary's dependency closure
 > | (d) **no startup work** | the census (G2) setup+steady numbers of the modding-absent build pinned as **absolute constants** from the parent commit | construct anything at boot in the off arm → red |
 > | (e) **the seam cannot grow silently** (NEW) ⚠ *Rev 2.5 (P47): superseded by P33/33.2 and P38.3; now UG-15 leg (5)* | G1's `syn` scanner (P6 — the parse already happens) asserts that the set of kernel items carrying `#[doc(hidden)] pub` + the `mod-seam` marker attribute equals the named list K-MOD-1..K-MOD-10, **exactly** (an extra entry is red, a missing entry is red) | add a tenth erased entry point without a ledger row → red |
 > | (a) no exported symbol | **unchanged**, with its tool decided in 18.2 | add a `#[no_mangle] pub extern "C" fn` to `boyko_ecs` → red |
-> | (f) **cargo feature unification / graph leakage** (the two-arm build, RELABELLED) ⚠ *Rev 2.5 (P47): = UG-15 leg (6), its only role* | the two-arm build is KEPT — crate-present-but-unused vs crate-absent — and its true job is written down: it catches a mod crate that enables a feature of a shared dependency, or that pulls the kernel into a different codegen unit set. It **cannot** see a seam the kernel carries in both arms, and the table says so where a reader will look | enable a non-default feature of a shared dep from `boyko_modding` → red |
+> | (f) **cargo feature unification / graph leakage** (the two-arm build, RELABELLED) ⚠ *Rev 2.5 (P47): = UG-15 leg (6), its only role* | the two-arm build is KEPT — crate-present-but-unused vs crate-absent — and its true job is written down: it catches a mod crate that enables a feature of a shared dependency, or that pulls the kernel into a different codegen unit set. It **cannot** see a seam the kernel carries in both arms, and the table says so where a reader will look | enable a non-default feature of a shared dep from `boyko_modding` → red ⚠ *Rev 2.7 (P57, AP8 O2): proposed as UG-15 leg (6)'s red control (xiii) in 03 §6. It goes through a normal, host-matching dependency that `boyko_demo` shares, and the `cargo tree -e features` clause is the one that must go red. `boyko_modding` reads as each of the three modding crates (`05:60`)* ⚠ *Rev 2.7 closure (P58.5, AP9 W3): leg (6)'s feature clause is a per-package difference between the arms, and (xiii) goes red on that difference, not on the tree naming the modding crate* |
 >
 > **Re-bless discipline, borrowed verbatim from G2.** A pin moves only with a written reason in the same commit. Two legitimate reasons exist and are named: a toolchain bump (all rows re-derived at once, with the version in the header — the tree already lives with this, `rust-toolchain.toml:24-25`) and a deliberate kernel change unrelated to the seam. "It moved and I widened it" is the failure the G2 header already forbids and this file repeats the sentence.
 >
@@ -3865,7 +3865,7 @@ Accepted. The gap is real: G6 pins symbols, `size_of`s, startup numbers and the 
 ## Open questions for pass 6
 
 1. **§7's rung is now blocked on another lane's merge** (P38/38.4). That is the correct dependency — the alternative is the duplicate this round deleted — but it is a schedule fact the owner may want to rule on, because it makes the modding rung's start date the reflect lane's merge date.
-2. **G6(f)'s delta pin assumes arm A's unused dependency is actually dropped by the linker.** If it is not — e.g. a future `boyko_modding` gains a `#[used]` static or a `ctor` — the gate goes red for a *correct* reason and the design owes a ruling on whether such a construct is allowed in the modding crate at all. I judge it should be forbidden, but the gate will find out first.
+2. **G6(f)'s delta pin assumes arm A's unused dependency is actually dropped by the linker.** If it is not — e.g. a future `boyko_modding` gains a `#[used]` static or a `ctor` — the gate goes red for a *correct* reason and the design owes a ruling on whether such a construct is allowed in the modding crate at all. I judge it should be forbidden, but the gate will find out first. ⚠ *Rev 2.7 (P56.1, AP8 N-W1): the ruling asked for here is scoped to runtime-invoked code, meaning an entry in a runtime-walked table or the `DllMain` entry name. A `#[used]` static outside those tables, such as MS-15's `.boykom$m` registration static, is not forbidden.* ⚠ *Rev 2.7 closure (P58.1, AP9 W2): R2 is not one name. It is the entry mechanism, meaning the image entry symbols and the runtime's user hooks in table E.*
 3. **The `g17` observer asymmetry is now a documented mod-visible limit** (P38/38.1). It is filed and RED-by-design in the lane. If the lane repairs it before §7's rung, the inherited-limit paragraph must be deleted rather than left standing — the same stale-passage class W3 keeps finding, flagged in advance.
 
 **Files read for this patch** (all read-only). Documents in `D:/claude/BoykoEngine`: `docs/memory/ALLOCATOR-DESIGN-SPACE.md`, `docs/memory/RUNTIME-DATA-LEDGER.md`. Code in `D:/wt/joltab`: `crates/boyko_ecs/src/ecs/core/component/component_registry/{mod.rs, tags.rs}`, `crates/boyko_ecs/src/ecs/core/component/scratch/scratch_column.rs`, `crates/boyko_ecs/src/ecs/core/asset/backing.rs`, `crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs`, `crates/boyko_ecs/src/ecs/memory/component_pool.rs`, `crates/boyko_physics/src/scratch_ids.rs`, plus workspace-wide counts of `register_layout::<` and `try_register_dynamic(`. Code in `D:/wt/reflect`: `crates/boyko_ecs/src/ecs/core/ecs_master/seam_by_id.rs`, `crates/boyko_ecs/src/ecs/core/component/component_registry/{tags.rs, required.rs}`.
@@ -4440,7 +4440,7 @@ These items stay. Only the name of a primitive that P46 moves is re-pointed.
   - Its gate is UG-15 leg (1) plus a `raw` import census.
   - Under option A, `register_hooks_by_id` and the typed hooks builder join the list (pass-6 W4; 05 §5, row AP6-W4).
 - **K-MOD-8** (the registry is a `Resource` in the modding crate): **kept** (05 §4).
-- **K-MOD-9** (no C symbol in the kernel): **kept = UG-15 leg (1).** Now: 05 §4; 03 §6 leg (1).
+- **K-MOD-9** (no C symbol in the kernel): **kept = UG-15 leg (1).** Now: 05 §4; 03 §6 leg (1). ⚠ *Rev 2.7 (P56.2, AP8 N-W1): these thunks are called by a mod or by the host after `main`, never by the loader or the C runtime, so the modding-crate ban on runtime-invoked code does not touch them.*
   - Leg (1) is a `syn` census of export and retention attributes, non-Rust-ABI function definitions and global assembly.
   - It is never re-blessed, and its owner-held allowlist is empty.
 - **K-MOD-10** (`EcsMaster::remove_component_type`; P21, P26): **removed.** It is deleted by U-10: mods are load-only, and kernel registries are write-once. Now: 05 §4, row K-MOD-10; 00 U-10.
@@ -4500,7 +4500,7 @@ UG-15 leg (7) answers the row; its own two-arm mechanism does not. The row stays
 - P38.5's cost row says class A is "dropped at link, now **measured** by G6(f)'s `.text` delta" (`:3618`). That row now reads (g), and the measurement is leg (7)'s.
 - Under S-1 (05 §1 (b)), the class-A items are generic over `ModSeam` and have **no object code** without an implementor. So the claim no longer rests on the linker at all, and legs (7) and (7b) are its proof.
 
-**Pass 6's answer to the architect's question 2** (`:4153`): forbid `#[used]` statics and ctors in the modding crate, enforced by a `syn` check. ~~Leg (6)'s own control in 03 §6 carries it ("a `#[used]` static in a modding crate", run from the first modding crate on).~~ ⚠ *Rev 2.6 (P53, AP7 W2): withdrawn. Under this Part's own arm A (declared, never referenced; `:4483`) that static never reaches the binary, so the control cannot go red, and no `syn` check reads modding-crate source. The ban is a rule without a gate; P53.3 hands a candidate mechanism to the plan (03 §6).*
+**Pass 6's answer to the architect's question 2** (`:4153`): forbid `#[used]` statics and ctors in the modding crate, enforced by a `syn` check. ~~Leg (6)'s own control in 03 §6 carries it ("a `#[used]` static in a modding crate", run from the first modding crate on).~~ ⚠ *Rev 2.6 (P53, AP7 W2): withdrawn. Under this Part's own arm A (declared, never referenced; `:4483`) that static never reaches the binary, so the control cannot go red, and no `syn` check reads modding-crate source. The ban is a rule without a gate; P53.3 hands a candidate mechanism to the plan (03 §6).* ⚠ *Rev 2.7 (P56.1, AP8 N-W1): the ruling is scoped to its stated harm, runtime-invoked code. A `#[used]` static outside a runtime-walked table, such as MS-15's `.boykom$m` static, is not in it. The candidate mechanism is restated in P56.3–P56.5.*
 
 ---
 
@@ -4994,19 +4994,19 @@ P44's row defines both arms (`:3830`): "arm A declares `boyko_modding` as a depe
 
 ### 53.3 The ban has no mechanism today; a candidate is handed to the plan
 
-Pass 6's recommended ruling stands as a **rule without a gate**.
-- It matters only in the configuration of 53.2's force-linked bullet: a game that links a modding crate runs that crate's constructors before `main`, even with no mod loaded.
+Pass 6's recommended ruling stands as a **rule without a gate**. ⚠ *Rev 2.7 (P56.1, AP8 N-W1): restated by its harm as a ban on runtime-invoked code, and reconciled with MS-15 and K-MOD-9 (P56.2). It stays without a gate until the plan adopts P56's candidate (P56.6).*
+- It matters only in the configuration of 53.2's force-linked bullet: a game that links a modding crate runs that crate's constructors before `main`, even with no mod loaded. ⚠ *Rev 2.7 (P56.1): too narrow. It matters in every binary that links a modding crate: the modding game under C (`boyko_mod_registry`) and under A and A′ (`boyko_mod_host`), and every mod image (`boyko_mod_api`, at load).*
 - Nothing in 03 §6 observes that today.
-- Leg (6)'s control in `03:184` is marked in place as unable to fire, so that no tester runs it as a gate.
+- Leg (6)'s control in `03:184` is marked in place as unable to fire, so that no tester runs it as a gate. ⚠ *Rev 2.7 (P57, AP8 O2): a control that can fire is proposed for leg (6): (xiii), row (f)'s feature canary (`:1909`).*
 
 **Candidate mechanism.** It is open for the plan (03 §6). This file does not adopt it, because the ban is a modding-crate rule and its gate belongs to UG-15.
 - **(a) Source.**
-  - Extend UG-15 leg (1)'s `syn` walk to the three modding crates (`boyko_mod_host`, `boyko_mod_api`, `boyko_mod_registry`; 05 §4), with an empty allowlist.
+  - Extend UG-15 leg (1)'s `syn` walk to the three modding crates (`boyko_mod_host`, `boyko_mod_api`, `boyko_mod_registry`; 05 §4), with an empty allowlist. ⚠ *Rev 2.7 (P56.3, AP8 N-W1): an empty allowlist is red by construction against 05's sanctioned forms (MS-15, MS-01, option A's probe, K-MOD-9's thunks). Superseded by P56.3: a modding allowlist keyed by the forms F-1 to F-4, with N-1 to N-3 non-admissible, and a walk that also reads macro bodies and `cfg_attr` lists.*
   - Leg (1) already counts `used` and `link_section` attributes (`03:169`), so a `#[used]` static written in a modding crate is red.
-  - **Red control:** a `#[used]` static in a modding crate → leg (1) red.
+  - **Red control:** a `#[used]` static in a modding crate → leg (1) red. ⚠ *Rev 2.7 (P56.5): it cannot discriminate, because MS-15's own static is a `#[used]` static. It is replaced by the pair (a-r)/(a-g), which differ only in the section literal.*
 - **(b) Objects.**
   - Extend leg (7b)'s rlib object census (`03:181`) to the modding crates' object members.
-  - It is red on any section whose name begins `.init_array`, `.ctors`, `.CRT$XC` or `.CRT$XI`. Those are the sections that hold a load-time constructor on ELF and on Windows.
+  - It is red on any section whose name begins `.init_array`, `.ctors`, `.CRT$XC` or `.CRT$XI`. Those are the sections that hold a load-time constructor on ELF and on Windows. ⚠ *Rev 2.7 (P56.4, AP8 O1): incomplete. It omits the `.CRT$XL*` TLS callbacks and ELF `.preinit_array`. Superseded by P56.4's family, which takes the whole `.CRT$` prefix and every ELF initialization and termination table.*
   - (a) alone cannot see a constructor written through a third-party macro, because leg (1) walks unexpanded source. The `ctor` crate's `#[ctor]` expands to `#[used]` plus `#[link_section = ".init_array"]` on Linux and `".CRT$XCU"` on Windows `[D ctor crate docs]`.
   - **Red control:** `#[ctor]` on a function in a modding crate, in the control branch only → (b) red while (a) stays green. This proves (b) is not redundant with (a).
 - **When.** Both run from the first modding crate on, which is when leg (6) stops being N/A (UG-15's status cell, `03:24`).
@@ -5075,4 +5075,846 @@ Each fix is a marker on the line it corrects. None changes a mechanism or a gate
 - `[D rustc lint unused_extern_crates]` and `[D Cargo Book, "Feature unification"]`: as in rev 2.5.
 - `[D ctor crate docs]` <https://docs.rs/ctor/latest/ctor/>: `#[ctor]` is implemented as a `#[used]` static with `link_section = ".init_array"` on Linux, `".CRT$XCU"` on Windows (GNU and MSVC) and `"__DATA,__mod_init_func"` on Apple targets. The crate states that it "explicitly subverts" Rust's rule that nothing happens before `main`.
 
-Status: rev 2.6 (2026-09-23). AP7's W1 and W2 are resolved and O1–O5 are adopted; no owner ruling is needed. One item is open for the plan, not for this file: the mechanism of the modding-crate `#[used]`/ctor ban (P53.3). C1's prerequisite, "AP7 has closed rev 2.5" (02 §2), is the orchestrator's to declare, either by ruling (as for pass 6) or after a re-review scoped to this Part.
+Status: rev 2.6 (2026-09-23). AP7's W1 and W2 are resolved and O1–O5 are adopted; no owner ruling is needed. One item is open for the plan, not for this file: the mechanism of the modding-crate `#[used]`/ctor ban (P53.3). C1's prerequisite, "AP7 has closed rev 2.5" (02 §2), is the orchestrator's to declare, either by ruling (as for pass 6) or after a re-review scoped to this Part. ⚠ *Rev 2.7: critique pass 8 (AP8) reviewed this Part; the pass-8 log and rev 2.7 follow. The open item named here is restated by P56.*
+
+## Critique pass 8 log (AP8, 2026-09-24)
+
+Verdict: CHANGES_REQUESTED, with 0 Critical, 1 Important and 3 Optional remarks. AP8 was a closure pass. The critic checked AP7's seven remarks and four answers against rev 2.6, and read rev 2.6's own new text for new defects. Every AP7 remark and answer is RESOLVED, and AP8 finds C1's prerequisite ("AP7 has closed rev 2.5", 02 §2) met. Its one Important remark concerns text that rev 2.6 added in P53.3. Under 02 §1 rule 8 (`02:23-25`, "A reopened item holds only the rungs that rest on it") it holds only the first modding-crate rung (Stage 3), not C1. The critic read this file on `c1e9f1db`, where it is byte-identical to `4db26681`. Each remark's disposition is listed first; the review follows verbatim. Rev 2.7, the next Part, is the architect's response. ⚠ *Every disposition below points into rev 2.7.*
+
+- [IMPORTANT N-W1] P53.3's ban (`:4997`) and its candidate (a) (`:5003-5006`, leg (1) over the three modding crates with an empty allowlist) contradict the plan's own modding exports:
+  - MS-15's `#[used] #[unsafe(no_mangle)] #[unsafe(link_section = ".boykom$m")]` statics, the `.boykom$a`/`$z` sentinels and the `extern "C"` wrappers;
+  - option A's `no_mangle` probe;
+  - MS-01's `extern "C"` entry;
+  - K-MOD-9's C thunks.
+
+  Adopted as written, (a) is red by construction at the first modding crate, and its red control cannot discriminate. → *Rev 2.7 (P56): the ban is restated by its harm: runtime-invoked code, meaning an entry in a table that the OS loader or the C runtime walks, or the `DllMain` entry name. It is reconciled with MS-15, K-MOD-9 and every sanctioned export (P56.2). Candidate (a) is restated with a form-keyed allowlist and non-admissible forms (P56.3). Its controls are the pair (a-r)/(a-g), which differ only in the section literal (P56.5). Resolved in this file; adopting the mechanism stays the plan's, at the first modding-crate rung (P56.6).*
+- [OPTIONAL O1] (b)'s section list (`:5009`) omits the `.CRT$XL*` TLS callbacks and ELF `.preinit_array`. → *Rev 2.7 (P56.4): the list becomes one family that (a) and (b) share. Both omissions are added, the `.CRT$` prefix is taken whole, and each member is cited. Marker at `:5009`.*
+- [OPTIONAL O2] Leg (6) has no red control since `03:184` struck its only one. → *Rev 2.7 (P57): row (f)'s canary (`:1909`) is proposed to the plan as leg (6)'s red control (xiii), in the form that the feature resolver guarantees red. Marker at `:1909`.*
+- [OPTIONAL O3] G5's per-target form (`:337`) has no pointer at its gate row, `03:16` (UG-07). → *Rev 2.7 (P57): proposed to the plan as a same-line pointer at `03:16`. `:337` is unchanged.*
+- [RELEASE] AP8 finds that C1 may be cut, and holds only the first modding-crate rung on N-W1. → *Recorded. Declaring C1's prerequisite met is the orchestrator's (02 §2).*
+
+VERDICT: CHANGES_REQUESTED; CRITICAL=0; IMPORTANT=1
+
+**C1 may be cut.** All 7 AP7 remarks and the 4 answers are resolved, so C1's prerequisite ("AP7 has closed rev 2.5", 02:119) is met. C1's own design item is also confirmed closed:
+- §2.0 / KC-01 (`:4529`) matches 01:78 and 02:119.
+- G5 lands at F2, not C1 (`:337`).
+
+The one new Important remark (N-W1 below) is about text rev 2.6 added in P53.3. It does not concern C1. Under 02:23-25 ("A reopened item holds only the rungs that rest on it") it holds only the first modding-crate rung (Stage 3).
+
+## AP7 remarks
+
+Lines are in `D:/wt/docs/docs/memory/ALLOCATOR-DESIGN-SPACE.md` unless prefixed with a plan file number.
+
+| AP7 remark | Status | Resolving lines |
+|---|---|---|
+| W1 | RESOLVED | `:1904`: rev 2.1's four-symbol list is struck. The marker names P29's set as struck by P49 (`grow_rows`, `commit_subregion`, `run_check_ticks_scan`, `ScopeBlock::grow`) and gives the reasons for `Schedule::run`, `ComponentPool::new` and `alloc_cold`. This matches `:2615-2625` and `:4582-4589`. The rule "A missing symbol is RED" is kept. Rationale is in P52 (`:4934-4960`). |
+| W2 | RESOLVED | All three parts of "What is needed" are done:<br>• "Carried" claim withdrawn: `:4503` is struck, with the P53.1 argument at `:4969-4978`.<br>• Arm A defined: declared-only, per P53.2 (`:4980-4993`) and P44 (`:3830`). The same line is corrected in 03:177.<br>• Ban has no mechanism, and this is stated: P53.3 (`:4995-5000`); the control is struck and marked non-gating at 03:184; recorded as OPEN in 00:154. |
+| O1 | RESOLVED | `:3169` (P34 site 10 marker, pointing to `:1182`, `:1873` and `:1877`) |
+| O2 | RESOLVED | `:3832`, `:3662`, `:4593`, `:4600`. The remaining unmarked "five" hits are logs, change logs or removed passages (`:3044` is P32.5, which P38 removed at `:3559-3561`). |
+| O3 | RESOLVED | `:3743`, `:4355`. Consistent with 01:103 (KC-16), 01:105 (KC-18) and 02:127. |
+| O4 | RESOLVED | `:4529` (C1 = KC-01, D-M1 = KC-03) and `:1214` (`raw::{reserve, commit_at}`). Consistent with 01:78, 01:80, 02:119 and 02:127. |
+| O5 | RESOLVED | `:3672-3675`. Each marker matches 02:300-307: own binary, pin `P = next_id+32`, `Ok(j)` with `j != k+1`, `registry_mint_exhaustion.rs` not ignored, out-of-bounds panic on `LAYOUTS[512]`. |
+| Answers 1–4 | RESOLVED (recorded) | P55 (`:5034-5041`); G5 stated per target at `:337` (the cfg matches `vm.rs:39-40`); `:4736` marked as answered. |
+| Plan rows | Consistent | 02:91, 02:96, 02:119 (prerequisite unchanged); 00:154; 02:139 (leg (6) is N/A until a modding crate exists). The count "nine red, three green" at 03:24 is unaffected, because the struck control was never numbered. |
+
+## New remarks (introduced by rev 2.6)
+
+### 🟡 N-W1. P53.3's ban, and its candidate (a), contradict the plan's own modding exports
+
+**Where:**
+- `:4997`: the ban "stands as a rule without a gate".
+- `:5003-5006`: candidate (a), "leg (1)'s `syn` walk over the three modding crates, with an empty allowlist".
+- 03:184 and 00:154 record the ban as standing.
+
+**Problem:**
+- Leg (1) counts `no_mangle`, `link_section`, `used` and non-Rust-ABI fn definitions (03:169).
+- The plan puts exactly these attributes in the modding crates:
+  - **Option C, a live option** (05:119-125): 05 MS-15 (05:171) is built from `#[used] #[unsafe(no_mangle)] #[unsafe(link_section = ".boykom$m")]` statics. It also uses `.boykom$a`/`$z` sentinels and `extern "C"` wrappers in `boyko_mod_registry` (`MODDING-DESIGN-SPACE.md:1116`, `:1127-1128`, `:1137-1138`, `:1831`).
+  - **Option A:** a `#[unsafe(no_mangle)] extern "C"` probe in `boyko_mod_api` (`MODDING:1828`).
+  - **MS-01:** `extern "C"` → `boyko_mod_host` (05:156).
+  - **K-MOD-9, kept:** all C thunks live in the modding crate (`:1216`, `:4443`, 05:226).
+- P53.3's own statement of harm (`:4998`) is code that runs before `main`. A `.boykom$m` data static is not that kind of code.
+
+**Consequence:**
+- If option C is chosen at Stage 3, the recorded ban forbids MS-15's registry mechanism.
+- If the plan adopts candidate (a) as written, leg (1) is red at the first modding crate under A and under C. Its red control ("a `#[used]` static → leg (1) red") then cannot discriminate.
+- This is the P29/P49 "red by construction" class. The usual repair for that class is an allowlist entry, or the gate gets dropped.
+
+**Confidence:** CONFIRMED from the text.
+
+**Holds:** only the first modding-crate rung, not C1.
+
+**What is needed:**
+- Scope the ban to its stated harm (pre-`main` code).
+- Reconcile it explicitly with MS-15 and K-MOD-9.
+- Restate candidate (a) so it is not red on 05's sanctioned exports.
+
+### 🟢 O1. Candidate (b)'s section list is incomplete
+
+**Where:** `:5009`, which says "Those are the sections that hold a load-time constructor on ELF and on Windows".
+
+**Problem:** The list omits:
+- `.CRT$XL*` TLS callbacks, which the Windows loader calls with `DLL_PROCESS_ATTACH` before the exe's entry point;
+- ELF `.preinit_array`.
+
+**Consequence:** If (b) is adopted as written, a macro-emitted `.CRT$XLB` callback in a modding crate runs before `main`, and both (a) and (b) stay green.
+
+**Confidence:** CONFIRMED, from external sources.
+
+### 🟢 O2. Leg (6) now has no red control
+
+**Where:** 03:184 strikes leg (6)'s only control, while 03:24 still has leg (6) gating from the first modding crate.
+
+**Problem:** The allocator's own row (f) (`:1909`) has a canary that can fire: "enable a non-default feature of a shared dep from the modding crate → red". Feature unification applies to a crate that is declared but never referenced. 03 §6 never adopted this canary.
+
+**Consequence:** Leg (6) would gate with no red-first proof.
+
+**Confidence:** CONFIRMED for the text; PLAUSIBLE for the harm.
+
+### 🟢 O3. G5's per-target form has no pointer at its gate row
+
+**Where:** 03:16 (UG-07, "`boyko_memory`, `boyko_utils` | compile"), which is the row F2 reads.
+
+**Problem:** The per-target form of G5 (P55, `:337`) is not referenced there.
+
+**Consequence:** Low, and the failure is loud: an unconditional `#![no_std]` without the cfg-gated `extern crate alloc` breaks the Miri compile. Nothing fails silently.
+
+## Positive
+- The no-line-move convention holds. The 7 new rev-2.6 lines inside `:1-4158` (`:3169`, `:3662`, `:3672`-`:3675`, `:3832`) are exactly the ones the marker index adds.
+- P53.2 picks P44's own definition of arm A and fixes 03 to match it, instead of inventing a second build.
+- P52 names the pinned set by pointer to P29 and P49 rather than by a count.
+
+Sources:
+- [cocomelonc: TLS callbacks before main](https://cocomelonc.github.io/malware/2026/09/05/malware-tricks-66.html)
+- [lallous' lab: C/C++ TLS callbacks in Visual Studio](https://lallouslab.net/2017/05/30/using-cc-tls-callbacks-in-visual-studio-with-your-32-or-64bits-programs/)
+- [SANS ISC: DLLs & TLS Callbacks](https://isc.sans.edu/diary/32580)
+
+Status: rev 2.6 reviewed by critique pass 8 (AP8): CHANGES_REQUESTED, 0 Critical, 1 Important. Rev 2.7 follows and resolves it.
+
+---
+
+# Rev 2.7 (2026-09-24)
+
+# Allocator design — Rev 2.7 (patch against Rev 2.6): closes critique pass 8
+
+**Scope.** Rev 2.7 answers critique pass 8 (AP8; the log above): its Important remark N-W1 and its three Optional remarks O1–O3. It adds no allocator mechanism and changes no gate that this file owns. Two patches:
+- **P56:** AP8 N-W1, and O1's section list. The modding-crate ban is restated by its harm and reconciled with the plan's sanctioned modding exports. Its candidate mechanism is restated so that it is not red by construction and its controls discriminate.
+- **P57:** AP8 O1–O3. O2 and O3 go to the plan as proposed same-line patches.
+
+**Trees.**
+- **Documents:** this file, on `u/doc-3-4` @ `4db26681` (the `integ/unified` trunk). This file and the plan files are byte-identical to `c1e9f1db`, where AP8 read them, so every line number AP8 cites holds here.
+- **Code:** read-only, on the same tree:
+  - `crates/boyko_ecs/src/ecs/memory/vm.rs:39-40`;
+  - the root `Cargo.toml:168-171`;
+  - a search of every `.rs` file under `crates/` for `link_section`, `#[used]`, `.CRT$` and `init_array`, which finds 0 hits.
+- No cargo command, build or test was run.
+
+**Convention.** Unchanged from rev 2.5 and rev 2.6:
+- each superseded passage is marked where it stands, with a suffix that begins `⚠ Rev 2.7`;
+- no sentence is deleted;
+- no line before this Part moved.
+
+The marker index at the end of this Part lists every line it touched. **This Part does not edit the plan.** The plan-side changes are proposed in P57, as same-line patches for the plan's own step to apply.
+
+---
+
+## P56 — AP8 N-W1: the modding-crate ban, scoped to its harm and reconciled with the plan's modding exports
+
+**Where.**
+- P53.3 (`:4995-5016`): the rule (`:4997-4998`), candidate (a) (`:5003-5006`) and candidate (b)'s section list (`:5009`);
+- P47.4's record of pass 6's ruling (`:4503`), and where that ruling came from, rev 2.4's open question 2 (`:3868`);
+- K-MOD-9 (`:1216`, `:4443`);
+- plan 03 §6's controls row (`03:184`) and 00 §5 (`00:154`), which record the ban as standing.
+
+**The defect** (AP8 N-W1).
+- P53.3 carried pass 6's ruling as written: forbid `#[used]` statics and constructors in the modding crates.
+- The plan's own modding design puts exactly the attributes that leg (1) counts into those crates:
+  - **Option C's MS-15 registry** (`05:171`), all in `boyko_mod_registry` (`MODDING-DESIGN-SPACE.md:1116`, `:1127-1128`, `:1137-1138`, `:1831`):
+    - one `#[used] #[unsafe(no_mangle)] #[unsafe(link_section = ".boykom$m")]` static per mod;
+    - the `.boykom$a` and `.boykom$z` sentinels;
+    - the `extern "C"` wrappers.
+  - **Option A's** `#[unsafe(no_mangle)] extern "C"` counter probe, in `boyko_mod_api` (`MODDING:1828`).
+  - **MS-01's** `extern "C"` entry, in `boyko_mod_host` (`05:156`; `MODDING:1827`).
+  - **K-MOD-9's C thunks**, which that rule itself places in the modding crate (`:1216`, `:4443`; `05:226`).
+- Read literally, the rule therefore forbids MS-15's mechanism.
+- Candidate (a), with an empty allowlist, is red at the first modding crate under A and under C.
+- Its red control ("a `#[used]` static → red") goes red on MS-15's own static as well, so it cannot discriminate. That is the P29/P49 "red by construction" class.
+- The rule's own statement of harm (`:4998`) is code that runs before `main`. A `.boykom$m` static is data.
+
+### 56.1 The rule, restated by its harm
+
+**Ruled: runtime-invoked code is forbidden in the three modding crates** (`boyko_mod_host`, `boyko_mod_api` and `boyko_mod_registry`; `05:60`). Runtime-invoked code is code that the OS loader or the C runtime calls on an image's behalf, without a call from the program's own code. There are two routes, and the rule names both:
+- **(R1) A runtime-walked table.** An entry in a section that the loader or the C runtime walks and calls. These are the constructor and initializer tables, the TLS-callback table and the matching termination tables; 56.4 lists them.
+- **(R2) The DLL entry name.** A function exported as `DllMain`. Microsoft documents it as the DLL entry point: when a process or thread starts or terminates, "it calls the entry-point function for each loaded DLL" `[D Win32: DllMain]`. The system also calls it on `LoadLibrary` and `FreeLibrary`. ⚠ *Rev 2.7 closure (P58.1, AP9 W2): superseded. R2 is the image entry and the runtime's user hooks, table E; `DllMain` is its second hop.*
+
+**The moment.** The rule's load-bearing case is the one that pass 6 and P53.3 named: code that runs before `main` (`:4998`). R1's TLS callbacks also run at every thread attach and detach, and the termination tables run at exit. The rule covers all of them, for three reasons:
+- They share the mechanism: the program never calls them.
+- They share the harm: they are work that a modding build does with no mod loaded.
+- No sanctioned modding form uses any of them (56.2), so the wider statement costs no allowlist entry.
+
+**What the rule does not cover.**
+- **A `#[used]` static outside the runtime-walked tables.** `used` "forces the compiler to keep a static item in the output object file" `[D Rust Reference: attributes]`, and that runs nothing. Retained data is priced by P2 and measured (MD:M-C0b, for MS-15), not banned.
+- **An exported function that a mod or the host calls explicitly, after `main`.** K-MOD-9's thunks are this case (56.2).
+- **A mod's own code.** The mod crate belongs to the mod author. Its initializers are the loader's concern (`MODDING-DESIGN-SPACE.md:566-572`, where the canary is read without executing mod code), not this rule's.
+
+**Where the harm lands.** P53.3 said that the rule matters "only in the configuration of 53.2's force-linked bullet" (`:4998`). That is too narrow, and it is marked in place. The rule applies in three places:
+- **Under C:** `boyko_mod_registry` is a real dependency of the modding game binary, which links it whether or not any mod is installed (`05:125`, `:171`). Its boot walk is MS-05's C slot (`05:161`).
+- **Under A and A′:** the loader lives in `boyko_mod_host` (`05:124`, `:126`; MS-05, `05:161`), which is linked into the modding executable.
+- **In every mod image:** `boyko_mod_api` is linked there, so any code it registers through R1 or R2 runs at each mod's load, before the loader's canary check. `MODDING-DESIGN-SPACE.md:566-567` states the failure: "Loading a `cdylib` runs `ctor` code before any call".
+
+In each case the code runs in P2's configuration, which is either modding built in with no mod loaded, or a mod loaded but not yet validated. Nothing in the program called that code. The non-modding game links none of the three crates, so it is unaffected either way (05 §3.1; P53.2).
+
+### 56.2 Reconciliation with MS-15, K-MOD-9 and the other sanctioned exports
+
+Every form the plan sanctions in a modding crate either runs nothing or is called explicitly after `main`. None of them is in R1 or R2.
+
+| Form | Crate | What it is | Sanctioned by | Who calls it, and when | Under the rule |
+|---|---|---|---|---|---|
+| **F-1** `.boykom` statics | `boyko_mod_registry`; the `$m` template also in `boyko_mod_api` if MS-02a's registration macro lands there (`05:157`) | the `.boykom$a` and `.boykom$z` sentinels, and the per-mod `.boykom$m` registration static (`#[used] #[unsafe(no_mangle)] #[unsafe(link_section = ".boykom$m")]`) that the SDK's registration macro emits | MS-15 (`05:171`); `MODDING-DESIGN-SPACE.md:1116`, `:1127-1128`, `:1831` | nobody, because they are data. The host's boot walk (MS-05, `05:161`) reads the table between the sentinels and asserts the collected count (`MODDING:1129-1130`, `:1247-1249`). The program calls that walk after `main` | outside the rule. `.boykom` is not a runtime-walked table (56.4). The walk costs 16 B and a zero-iteration loop, which is P2's cost, measured by MD:M-C0b (`05:125`) |
+| **F-2** export set | `boyko_mod_registry` | `#[unsafe(no_mangle)] pub extern "C"` wrappers | route 3b (`MODDING:1136-1139`, `:1831`) | mod code, after `main` | outside |
+| **F-3** mod-image entries | `boyko_mod_api` | option A's `#[unsafe(no_mangle)] extern "C"` counter probe; the trampoline; the mod entry and the build canary | `MODDING:1828`, `:1832-1833`; `05:124`, `:126` | the host's loader, after it loads the image (MS-05). The canary is read as data, without executing mod code (`MODDING:568-571`) | outside, **except** under the name `DllMain` (R2) ⚠ *Rev 2.7 closure (P58.1): outside; its names begin with `boyko_mod_`, and N-2 refuses every name in E* |
+| **F-4** host entries | `boyko_mod_host` | MS-01's `extern "C"` descriptor entry; item 6's system-registration wrapper | MS-01 (`05:156`; `MODDING:1827`); `MODDING:1833` | a mod image, after `main` | outside |
+| **K-MOD-9** | the modding crates | "every `#[no_mangle] extern "C"` thunk lives in `boyko_modding`; the kernel exports no C symbol" (`:1216`; `05:226`) | K-MOD-9, kept = UG-15 leg (1) | F-2 to F-4 are its thunks | outside. The rule and K-MOD-9 agree: the thunks sit where K-MOD-9 puts them, and the kernel's leg-(1) allowlist stays empty (`03:169`) |
+
+**MS-15 is the case AP8 names.**
+- Its static carries all three attributes that the old reading banned.
+- It is still not runtime-invoked code, because no loader or C runtime walks `.boykom$m`.
+- The linker merges the `$` groups of a section in alphabetical order. The MSVC documentation describes this for `.CRT` `[D MSVC: CRT initialization]`, and `MODDING:1116-1118` measured it for `.boykom` on windows-gnu. The only code that reads the merged `.boykom` table is the host's own boot walk.
+- MS-15 was admitted for C on other grounds: the installer controls the relink, and the boot-time count assertion turns a stripped table into a loud failure (`MODDING:1111-1130`). The rule adds nothing against it.
+
+### 56.3 Candidate (a), restated: the source census over the modding crates
+
+This supersedes P53.3's (a) (`:5003-5006`), which is marked in place. It is still a candidate for the plan (UG-15, 03 §6); 56.6 says who decides.
+
+**Scope.** The three modding crates, each from the rung that creates it. ⚠ *Rev 2.7 closure (P58.4, AP9 W4): plus the SDK's proc-macro crate, if any SDK macro is procedural.*
+
+**What is read.** Leg (1)'s `syn` walk (`03:169`): every item, including nested items and impl items. The modding crates need two additions.
+- **Macro bodies.** The SDK's registration macro emits MS-15's per-mod static, so in the modding crate that static exists only as tokens inside a macro body. The walk therefore also runs leg (1)'s (M-a) token matcher (`03:169`) over every `macro_rules!` body and every `quote!`/`quote_spanned!` body in the three crates. Without it, two things would be invisible: a macro template that emits `link_section = ".CRT$XCU"` into every mod, and F-1's own `.boykom$m` template. ⚠ *Rev 2.7 closure (P58.4, AP9 W4): the `quote!` clause cannot apply in these three crates, because a proc-macro crate exports only procedural macros. A procedural SDK macro's crate is scanned with (M-a) and (M-b), and the expansion fixture (b-x) reads what every template emits.*
+- **`cfg_attr` lists.** A counted attribute can be written inside `cfg_attr(predicate, …)`. The Reference's grammar makes each listed item an `Attr`, and `Attr` includes the `unsafe ( SimplePath AttrInput? )` form. `cfg_attr` may also nest `[D Rust Reference: conditional compilation, cfg_attr; attributes]`. So the constructor form `#[cfg_attr(target_os = "linux", unsafe(link_section = ".init_array"))]` is valid. The walk reads every attribute in a `cfg_attr` list, at any depth, as if its predicate held.
+
+**Counted.** Leg (1)'s set (`03:169`):
+- the attributes `no_mangle`, `export_name`, `link_section`, `used` and `linkage`;
+- fn definitions with a non-`"Rust"` ABI;
+- `global_asm!`, `naked_asm!` and `#[naked]`.
+
+**Pass condition.** The counted set equals the modding allowlist, and no allowlist entry is non-admissible. ⚠ *Rev 2.7 closure (P58.2, AP9 W1): read as the reason model of 58.2 (U, S, and N-1 to N-4 per item and per entry).*
+
+**The modding allowlist.**
+- It is a file of its own in the gate crate, separate from the kernel's allowlist, which stays empty (`03:169`).
+- Each entry names the crate, the file, the item or macro, and **the form** that sanctions it (F-1 to F-4, 56.2). So the allowlist is keyed by the sanctioned forms, and each entry justifies itself by pointing at one.
+- An entry whose item does not have its form's shape is red. The shape is the crate, the construct, the attribute set, and the section literal or ABI.
+- It is edited only in an owner-signed commit, like leg (1)'s.
+
+**Non-admissible.** The validator is red on any entry that admits one of these, whatever its stated reason: ⚠ *Rev 2.7 closure (P58.2, AP9 W1): and each is also reported on the counted item itself, whether or not an entry admits it.*
+- **(N-1)** a `link_section` whose value is in the runtime-invoked family (56.4), or whose value is not a string literal. `AttrInput` allows `= Expression` `[D Rust Reference: attributes]`, so a computed value is refused rather than evaluated;
+- **(N-2)** a `no_mangle` fn, or an `export_name` value, named `DllMain` (R2); ⚠ *Rev 2.7 closure (P58.1, AP9 W2): superseded. N-2 covers every name in table E, and any exported name that cannot be decided from source. (N-4, build scripts and native links, is added in P58.6.)*
+- **(N-3)** `global_asm!`, `naked_asm!` or `#[naked]`. Assembly text can place code in any section, and N-1's literal check cannot read it there. No sanctioned form uses them, so admitting one needs a new form and its own ruling.
+
+**What (a) cannot see.** An attribute emitted by a third-party macro. The walk reads the modding crates' own source, not the expansions of their dependencies' macros. That is (b)'s job (56.4). ⚠ *Rev 2.7 closure (P58.3, P58.7, AP9 W2): (b) now also runs a defined-symbol census against table E, and 58.7 restates what is left.*
+
+**Anti-vacuity.** The walk reports how many items and macro bodies it read in each crate. Zero for a crate that exists is RED. ⚠ *Rev 2.7 closure (P58.4): counted per modding crate, including the SDK's proc-macro crate if it exists.*
+
+**Why this is not red by construction.**
+- Each sanctioned form is one entry shape, admitted once per item by an owner-signed entry.
+- N-1 to N-3 refuse the forms the rule forbids, no matter who signs. ⚠ *Rev 2.7 closure (P58): N-1 to N-4, with N-2 over table E; the admitted names carry the `boyko_mod_` prefix.*
+- So the discrimination rests on the section literal and the entry name. It does not rest on the attribute set, which MS-15 shares with a constructor.
+
+### 56.4 Candidate (b), restated: the object-section census, and the family (O1)
+
+This supersedes P53.3's (b) section list (`:5009`), which is marked in place. The mechanism is unchanged: leg (7b)'s census of rlib object members (`03:181`), extended to the modding crates and to section names.
+
+**The runtime-invoked family.** One `const` table in the gate crate. (a)'s N-1 and (b) both read it, so the two cannot drift apart. A section name is in the family if it begins with one of these prefixes or equals one of these exact names:
+
+| Name | Match | Format | Who walks or calls it, and when | Source |
+|---|---|---|---|---|
+| `.CRT$` | prefix | COFF (msvc and gnu) | The C runtime's tables:<br>• **Initializers.** The CRT's startup calls the pointers between `__xc_a` (in `.CRT$XCA`) and `__xc_z` (in `.CRT$XCZ`), where the compiler puts user initializers in `.CRT$XCU`. It then calls `main`.<br>• **TLS callbacks.** The loader calls the callbacks that follow `__xl_a` (in `.CRT$XLA`), for example in `.CRT$XLB`. It calls them with `DLL_PROCESS_ATTACH` before the entry point, and again at thread attach and detach | `[D MSVC: CRT initialization]`; `[S lallouslab: TLS callbacks]`; `[S SANS ISC: DLLs & TLS callbacks]` |
+| `.preinit_array` | prefix | ELF | The dynamic linker, in an executable only. It runs these after relocation and before any shared-object initializer; a shared object's copy is ignored | `[D gABI: dynamic linking]`; `[S MaskRay: .init, .ctors, .init_array]` |
+| `.init_array`, `.fini_array` | prefix | ELF | The dynamic linker, through `DT_INIT_ARRAY` and `DT_FINI_ARRAY`, at load and at exit. The prefix also matches priority forms such as `.init_array.00099` | `[D gABI]`; `[S MaskRay]` |
+| `.ctors`, `.dtors` | prefix | ELF (legacy GNU) | crtend's `.init` calls `__do_global_ctors_aux`, which calls the constructors in `.ctors`. crtbegin's `.fini` does the same for `.dtors` | `[S MaskRay]` |
+| `.init`, `.fini` | exact | ELF | the `DT_INIT` and `DT_FINI` code | `[S MaskRay]` |
+
+**What O1 found, and why the COFF row is a prefix.**
+- P53.3 listed `.CRT$XC` and `.CRT$XI` but missed `.CRT$XL*`, the TLS callbacks.
+- It listed `.init_array` and `.ctors` but missed `.preinit_array`.
+- Both are enumeration misses. So the COFF row now takes the whole `.CRT$` prefix:
+  - the `.CRT` section holds the C runtime's ordered tables `[D MSVC: CRT initialization]`;
+  - no sanctioned modding form places anything in it (56.2), so matching the whole prefix costs nothing and needs no list of groups.
+- The ELF rows cover every initialization and termination mechanism that gABI defines (`DT_INIT`, `DT_FINI`, `DT_INIT_ARRAY`, `DT_FINI_ARRAY` and `DT_PREINIT_ARRAY`), plus GNU's legacy `.ctors` and `.dtors`.
+- Apple's `__DATA,__mod_init_func` `[D ctor crate docs]` is out of scope, because the target platforms are Windows and Linux (CLAUDE.md, "Target platform").
+
+**(b) itself.**
+- **What is read.** The section headers of every object member of each modding crate's rlib. They are read with `llvm-objdump --section-headers`, which will "display summaries of the headers for each section" `[D LLVM: llvm-objdump]`; it is from the same LLVM tool family that leg (7b) uses. Metadata members (`lib.rmeta`) are skipped, as in leg (7b).
+- **Which build.** `[profile.seam-census]` (`03:180`):
+  - the host-side crates (`boyko_mod_host` and `boyko_mod_registry`) are read as built for leg (6)'s arm A, with the features the game sees;
+  - `boyko_mod_api`, which the host never links (`MODDING:1828`), is built on its own with `-p`.
+- **Red:** any section whose name is in the family.
+- **Anti-vacuity.** The number of members read in each crate is reported, and zero is RED. A member that lists no section is RED.
+- **Objects, not the linked image.** Every linked image already carries entries in the family that the runtime owns:
+  - the MSVC CRT defines `__xc_a` in `.CRT$XCA` and `__xc_z` in `.CRT$XCZ` `[D MSVC: CRT initialization]`;
+  - on `linux-gnu`, std puts its argument-capture hook in `.init_array.00099` (`ARGV_INIT_ARRAY`, `#[used] #[unsafe(link_section = ".init_array.00099")]`) `[D Rust std source: sys/args/unix.rs]`.
+
+  A census of the linked image would therefore be red on every build, which is the P29/P49 class again. The object census sees only what the modding crates themselves emit.
+- **Conservative.** (b) reads objects, so it is red whether or not the linker would have kept the entry.
+- **Out of scope: instrumented builds** (sanitizers, coverage, `-C profile-generate`). Instrumentation may add module constructors that the source did not write. So (b) runs only on `[profile.seam-census]`, which has no instrumentation.
+
+### 56.5 The controls
+
+Each red control must be red in its own branch, and each names what must go red. The gate reports every reason for a red, and a red control passes only if its own reason is among them. ⚠ *Rev 2.7 closure (P58.2, AP9 W1): superseded. A red control passes only if its reported reason set equals its expected set.*
+
+AP8 asked for a control "that goes red on a real pre-main constructor and green on MS-15's static". That control is the pair (a-r)/(a-g), which differ only in the section literal. ⚠ *Rev 2.7 closure (P58.2, AP9 W1): as written they differed in three things (the literal, `no_mangle` and an entry). The rebuilt pair differs in the literal alone.*
+
+| Control | Branch content | Expected | What it proves |
+|---|---|---|---|
+| **(a-r)** red | In `boyko_mod_registry`: a `#[used] #[unsafe(link_section = ".CRT$XCU")]` static holding a fn pointer. This is a real pre-main constructor: the CRT calls `.CRT$XCU` entries before `main` `[D MSVC: CRT initialization]` | (a) red, with N-1 among the reasons | (a) sees a constructor written in the crate ⚠ *Rev 2.7 closure (P58.2): superseded; N-1 was unreachable without an entry* |
+| **(a-g)** green | In the same crate: the same static shape and the same attributes, plus `#[unsafe(no_mangle)]`, with the literal `.boykom$m`, allowlisted as F-1 | (a) green | The verdict keys on the section, not on the attribute set that MS-15 shares with a constructor. Together with (a-r), this is AP8's discriminating control ⚠ *Rev 2.7 closure (P58.2): superseded; a `$m` item is red on F-1's shape* |
+| **(a-c)** red | a `#[used]` static carrying `#[cfg_attr(all(), unsafe(link_section = ".init_array"))]` | (a) red, by N-1 | `cfg_attr` lists are read (56.3) ⚠ *Rev 2.7 closure (P58.2): superseded; `#[used]` was counted on its own, so the control could not see its mutation* |
+| **(a-v)** red | one allowlist entry that admits `.CRT$XLB`, and one that admits a `no_mangle` fn named `DllMain` | the validator red, on each | N-1 and N-2 cannot be signed away ⚠ *Rev 2.7 closure (P58.2): extended to table E, the name pattern and N-4* |
+| **(b-r)** red | the `ctor` crate's constructor attribute on a fn in the modding crate. It expands to a `#[used]` static in `.init_array` on Linux and `.CRT$XCU` on Windows `[D ctor crate docs]` | (b) red, while (a) stays green | (b) sees what (a) cannot (unchanged from P53.3) |
+| **(b-g)** green | the F-1 `.boykom$m` static, compiled | (b) green | `.boykom` is not in the family |
+| **(u)** unit test | the family matcher over a table of names.<br>• **Red:** `.CRT$XCU`, `.CRT$XIC`, `.CRT$XLB`, `.CRT$XLC`, `.preinit_array`, `.init_array`, `.init_array.00099`, `.fini_array`, `.ctors`, `.ctors.65535`, `.dtors`, `.init`, `.fini`.<br>• **Green:** `.boykom$a`, `.boykom$m`, `.boykom$z`, `.text`, `.rdata`, `.data`, `.bss`, `.tls$`, `.tbss` | as listed | the family is this table, and every member O1 named is in it ⚠ *Rev 2.7 closure (P58.2): extended with table E's matcher* |
+
+**Under option A** there is no `boyko_mod_registry` and no `.boykom` static to act as the green twin. (a-r) runs in `boyko_mod_host` instead. Its green twin is MS-01's `extern "C"` entry (F-4), which shows that the allowlist admits a sanctioned export while N-1 refuses the constructor. ⚠ *Rev 2.7 closure (P58.2): superseded. MS-01's entry is not a twin that differs in one variable; under option A the pair (a-n)/(a-n′) carries the discrimination.*
+
+**When.**
+- From the rung that creates the first modding crate, which is also when leg (6) stops being N/A (`03:24`).
+- From then on, on every commit that edits a modding crate or the gate.
+- The family table and (u) land with the gate.
+
+### 56.6 What stays open, and who decides
+
+- **Adoption is the plan's.** (a) and (b) remain a candidate for UG-15 (03 §6), as in P53.3. This file does not adopt a gate for a modding-crate rule.
+- **Which rung decides.** AP8 holds only the first modding-crate rung (Stage 3) on N-W1 (`02:23-25`). Before it cuts, that rung either adopts (a) and (b) with 56.5's controls, or records a refusal with its reason. C1 is not held.
+- **Until then** the rule stands without a gate, as P53.3 said. The difference is that it is now a rule that MS-15 and K-MOD-9 satisfy.
+- **Plan text.** P57 proposes new text for `03:184` and `00:154`, so that the plan records the scoped rule instead of "the `#[used]`/ctor ban".
+- **Found in passing, not an AP8 item.** Leg (1)'s kernel scope has the same `cfg_attr` gap that 56.3 closes for the modding crates. `03:169` counts an attribute "written plainly or inside Rust 2024's `unsafe(...)`", so `#[cfg_attr(all(), unsafe(no_mangle))]` on a kernel fn is not counted, although the Reference makes it valid (56.3). P57 hands it to the plan as a separate, optional patch group with its own red control (xiv). It touches B3's leg-(1) walker, so whether it lands in B3 or in a later gate edit is the orchestrator's call.
+
+**Cost.** None at runtime, as P53.3 said.
+- (a) adds three crates, and their macro bodies, to an existing walk.
+- (b) adds three crates' object members to an existing census, and reads one more column (section names) with an LLVM tool that leg (7b) already uses.
+- The shared family table and its unit test are new, and small.
+
+## P57 — AP8 O1–O3
+
+| AP8 | Where | Disposition |
+|---|---|---|
+| O1 | `:5009` | Adopted in P56.4. `.CRT$XL*` (the TLS callbacks) and `.preinit_array` join the family, the COFF row becomes the whole `.CRT$` prefix, and control (u) pins every member. Marker at `:5009`. |
+| O2 | `:1909`; plan `03:184`, `03:24` | Adopted. Row (f)'s canary is proposed to the plan as UG-15 leg (6)'s red control **(xiii)**, in the form below. Marker at `:1909`, and at P53.3's `:5000`. |
+| O3 | `:337`; plan `03:16` | Adopted, as a pointer on the plan's gate row. `:337` is unchanged. |
+
+**O2: why the canary is guaranteed to fire, and the form that guarantees it.**
+- **The resolver.** The root manifest is a package with `edition = "2024"` and no `resolver` key (`Cargo.toml:168-171` @ `4db26681`). Edition 2024 defaults to resolver "3", whose one change from "2" is the default for `resolver.incompatible-rust-versions` `[D Cargo Book: resolver]`.
+- **What that implies.** Resolver 2's feature rules apply `[D Cargo Book: features]`:
+  - build-dependencies and proc-macros do not share features with normal dependencies;
+  - dev-dependencies activate features only for targets that need them;
+  - features on platform-specific dependencies for targets not being built are ignored.
+- **The form.** The modding crate enables a non-default feature of a **normal, host-matching** dependency that `boyko_demo` also depends on. This is done in the control branch only.
+- **Why it fires.** Arm A only declares the modding crate, but that still puts it in the graph. Cargo "will use the union of all features enabled on that dependency" `[D Cargo Book, "Feature unification"]`, and `cargo tree -e features` shows each feature "showing which package enabled it" `[D Cargo Book: features]`. So the tree names the modding crate, and leg (6)'s "shows no modding feature" clause (`03:179`) goes red. ⚠ *Rev 2.7 closure (P58.5, AP9 W3): superseded. Every `feature "default"` edge also names the modding crate, so this criterion is met by the unmodified tree. (xiii) goes red on the per-package difference between the arms.*
+- **Which clause the control names.** Leg (6)'s size clause goes red only if the feature changes code that the game links. So the control names the `cargo tree` clause as the one that must go red. ⚠ *Rev 2.7 closure (P58.5): the control names the package and the feature whose line differs between the arms.*
+- **When.** From the rung that creates the first modding crate (`03:24`).
+- **Which crate.** Row (f) names `boyko_modding`, the single crate that existed before 05 split it into three (`05:60`). The control applies to each of them.
+
+**O3.** `03:16` (UG-07) reads "`boyko_memory`, `boyko_utils` | compile". P57 adds G5's per-target form (`:337`, P55) there as a pointer:
+- `#![no_std]` on every target;
+- `extern crate alloc` only under the fallback `cfg(any(miri, not(any(windows, unix))))` of `vm.rs` (`crates/boyko_ecs/src/ecs/memory/vm.rs:39-40` @ `4db26681`). C1 moves that file to `boyko_memory` (`02:119`);
+- the compile check runs on the windows and unix targets.
+
+AP8 rates the consequence as low and loud: an unconditional `#![no_std]` without the gated `extern crate alloc` breaks the Miri compile.
+
+**Proposed plan patches** (same-line and dated; this Part does not apply them):
+- `03:184`:
+  - control (xiii) is inserted after (xi);
+  - a dated marker scopes the ban and points to P56;
+  - the "when the controls run" sentence gains (xiii).
+- `03:24`: the red-control count, "nine" → "ten", with (xiii) added.
+- `03:16`: UG-07's per-target pointer.
+- `00:154`: the open item is restated as the ban on runtime-invoked code, and AP8's outcome is recorded.
+- `02:91` and `02:96`: AP8's outcome is recorded in the document-step status and in the AP7 row.
+- **Optional group, beyond AP8** (56.6): `03:169` reads `cfg_attr` lists in leg (1)'s kernel scope, and `03:184` gains red control (xiv), `#[cfg_attr(all(), unsafe(no_mangle))]` on a private fn in `boyko_threadpool` → leg (1). With it, `03:24`'s count becomes eleven.
+
+## Change log (rev 2.6 → rev 2.7)
+
+| Row | Disposition | Where |
+|---|---|---|
+| AP8 N-W1 | The ban is restated by its harm: runtime-invoked code, through a runtime-walked table (R1) or the `DllMain` name (R2). It is reconciled with MS-15 (F-1), the export set (F-2), the mod-image entries (F-3), the host entries (F-4) and K-MOD-9. Candidate (a) is restated with a form-keyed modding allowlist, N-1 to N-3, macro bodies and `cfg_attr` lists. Candidate (b) is restated with the shared family. The controls are (a-r)/(a-g), (a-c), (a-v), (b-r)/(b-g) and (u). Adoption stays the plan's, at the first modding-crate rung | P56; `:1216`, `:3868`, `:4443`, `:4503`, `:4997`, `:4998`, `:5004`, `:5006` |
+| AP8 O1 | The family is completed: the whole `.CRT$` prefix, `.preinit_array`, and the termination tables | P56.4, P57; `:5009` |
+| AP8 O2 | Row (f)'s canary is proposed as leg (6)'s control (xiii), through a normal, host-matching shared dependency | P57; `:1909`, `:5000`; plan `03:184`, `03:24` (proposed) |
+| AP8 O3 | UG-07 gets a pointer to G5's per-target form | P57; plan `03:16` (proposed) |
+| AP8 release | C1 may be cut. N-W1 holds only the first modding-crate rung | log; status |
+| Unchanged | Every mechanism and gate of rev 2.6, including P52, P53.1, P53.2, P53.4, P54 and P55 | — |
+
+## Marker index (every in-place change of rev 2.7; no line number moved)
+
+| Patch | Lines (this file) |
+|---|---|
+| Header | `:1` (title), `:5` (status: the rev-2.7 status, with rev 2.6's struck) |
+| P56 | `:1216`, `:3868`, `:4443`, `:4503`, `:4997`, `:4998`, `:5004`, `:5006`, `:5009` |
+| P57 | `:1909`, `:5000` |
+| Rev 2.6's closing status | `:5078` |
+
+**Outside this file:** nothing is edited. P57 proposes same-line plan patches for `03:16`, `03:24`, `03:184`, `00:154`, `02:91` and `02:96`.
+
+**Files read for this patch** (read-only, except this file). All are in `D:/wt/docs` @ `4db26681`:
+- this file;
+- `docs/unification/UNIFIED-SYSTEM-PLAN-00-OVERVIEW.md` (`:154`);
+- `-01-KERNEL-CONTRACT.md` (`:78`);
+- `-02-ORDER-OF-WORK.md` (`:23-25`, `:91`, `:96`, `:119`);
+- `-03-GATES.md` (`:16`, `:24-25`, `:165-184`);
+- `-05-MODDING-READINESS.md` (`:49`, `:60`, `:119-127`, `:156-158`, `:161`, `:171`, `:220-228`);
+- `docs/modding/MODDING-DESIGN-SPACE.md` (`:562-572`, `:1100-1145`, `:1242-1250`, `:1827-1833`);
+- `crates/boyko_ecs/src/ecs/memory/vm.rs` (`:20-41`) and `Cargo.toml` (`:1-24`, `:160-175`).
+
+**External sources (read 2026-09-24):**
+- `[D Win32: DllMain]` <https://learn.microsoft.com/en-us/windows/win32/dlls/dllmain>. `DllMain` is the optional DLL entry point, and "DllMain is a placeholder for the library-defined function name". The system calls it at process and thread start and termination, and on `LoadLibrary` and `FreeLibrary`, with the reasons `DLL_PROCESS_ATTACH`, `DLL_THREAD_ATTACH`, `DLL_THREAD_DETACH` and `DLL_PROCESS_DETACH`.
+- `[D MSVC: CRT initialization]` <https://learn.microsoft.com/en-us/cpp/c-runtime-library/crt-initialization>:
+  - the CRT's startup code "calls global initializers, and then calls the user-provided `main` function";
+  - the compiler puts dynamic initializers in `.CRT$XCU`;
+  - the CRT defines `__xc_a` in `.CRT$XCA` and `__xc_z` in `.CRT$XCZ`;
+  - the linker combines the `.CRT` subsections into one section and orders them alphabetically.
+- `[S lallouslab: TLS callbacks]` <https://lallouslab.net/2017/05/30/using-cc-tls-callbacks-in-visual-studio-with-your-32-or-64bits-programs/>:
+  - TLS callbacks execute before `main`;
+  - the CRT defines `__xl_a` in `.CRT$XLA`, and user callbacks go in a later group such as `.CRT$XLB`;
+  - it lists the four reason values.
+- `[S SANS ISC: DLLs & TLS callbacks]` <https://isc.sans.edu/diary/32580>. TLS callbacks run "before the program's normal entry point is reached", and in its DLL example the callback runs before `DllMain`. This source and lallouslab are the two that AP8 cited.
+- `[D gABI: dynamic linking]` <https://gabi.xinuos.com/elf/08-dynamic.html>:
+  - "The `DT_PREINIT_ARRAY` table is processed only in an executable file";
+  - a shared object's copy is ignored;
+  - pre-initialization functions run after relocation and before any shared-object initialization functions;
+  - it also defines `DT_INIT`, `DT_FINI`, `DT_INIT_ARRAY` and `DT_FINI_ARRAY`.
+- `[S MaskRay: .init, .ctors, .init_array]` <https://maskray.me/blog/2021-11-07-init-ctors-init-array>:
+  - `DT_INIT` and `DT_FINI` come from `_init` and `_fini`;
+  - crtend's `.init` calls `__do_global_ctors_aux`, which calls the constructors in `.ctors`, and crtbegin's `.fini` does the same for `.dtors`;
+  - `.preinit_array` is the only mechanism that runs before all DSO initializers.
+- `[D Rust std source: sys/args/unix.rs]` <https://doc.rust-lang.org/src/std/sys/args/unix.rs.html>. `ARGV_INIT_ARRAY` sits under `cfg(all(target_os = "linux", target_env = "gnu"))`, with `#[used]` and `#[unsafe(link_section = ".init_array.00099")]`. The source comment says glibc passes `argc`, `argv` and `envp` to `.init_array` functions. *Checked and not cited:* std's Windows thread-local guard. Its current source (`library/std/src/sys/thread_local/guard/windows.rs`) no longer shows a `.CRT$XLB` static, so this Part makes no claim about std on Windows.
+- `[D Rust Reference: attributes]` <https://doc.rust-lang.org/reference/attributes.html>:
+  - `Attr → SimplePath AttrInput? | unsafe ( SimplePath AttrInput? )`;
+  - `AttrInput → DelimTokenTree | = Expression`;
+  - the unsafe attributes are `export_name`, `link_section`, `naked` and `no_mangle`;
+  - `used` "forces the compiler to keep a static item in the output object file".
+- `[D Rust Reference: conditional compilation, cfg_attr]` <https://doc.rust-lang.org/reference/conditional-compilation.html>:
+  - `CfgAttrs → Attr ( , Attr )* ,?`;
+  - when the predicate holds, `cfg_attr` "expands out to the attributes listed after the predicate";
+  - a `cfg_attr` may expand to another `cfg_attr`.
+- `[D LLVM: llvm-objdump]` <https://llvm.org/docs/CommandGuide/llvm-objdump.html>. `-h, --headers, --section-headers`: "Display summaries of the headers for each section."
+- `[D Cargo Book: features]` <https://doc.rust-lang.org/cargo/reference/features.html>:
+  - resolver 2 does not unify features in three cases: build-dependencies and proc-macros, dev-dependencies, and platform-specific dependencies for targets not being built;
+  - `cargo tree -e features` shows each feature "showing which package enabled it".
+- `[D Cargo Book: resolver]` <https://doc.rust-lang.org/cargo/reference/resolver.html>:
+  - resolver "3" is the `edition = "2024"` default, and it changes the `resolver.incompatible-rust-versions` default from `allow` to `fallback`;
+  - "only the value in the top-level package will be used".
+- `[D Cargo Book, "Feature unification"]` and `[D ctor crate docs]`: as in rev 2.5 and rev 2.6.
+
+Status: rev 2.7 (2026-09-24). AP8's N-W1 is resolved and O1–O3 are adopted; no owner ruling is needed. Two items are open for the plan, not for this file: adopting P56's candidate mechanism for the modding-crate ban on runtime-invoked code, at the first modding-crate rung (AP8 holds that rung on it), and applying P57's proposed same-line patches. AP8 found C1's prerequisite met; declaring it is the orchestrator's. ⚠ *Rev 2.7 closure: superseded by the status at the end of P58.*
+
+---
+
+## Critique pass 9 log (AP9, 2026-09-24)
+
+Verdict: CHANGES_REQUESTED, with 0 Critical, 4 Important and no Optional remarks, plus two open questions. AP9 was a closure pass scoped to rev 2.7's delta.
+- It found O1 and O3 resolved.
+- It found N-W1 partly resolved and O2's criterion defective.
+- It holds the same rung as AP8, and only that one: the first modding-crate rung (Stage 3). C1 is not held, and AP8's release of C1 stands.
+
+Every remark was checked against the text before acting. All four stand, and none could be refuted.
+
+- **[IMPORTANT W1]** (a-r) and (a-c) cannot produce their stated red reason, because N-1 was defined only on allowlist entries (`:5308`) and neither branch adds an entry. The pair (a-r)/(a-g) differs in three things, not one (`:5364` against `:5369`). (a-c)'s `#[used]` is counted on its own, so it cannot see the mutation it exists to catch.
+  → *Rev 2.7 closure (P58.2):*
+  - N-1 to N-4 are reported per item as well as per entry, so each control's reason is reachable.
+  - A red control passes only when its reported reasons **equal** its expected set.
+  - F-1's shape is stated (it answers question 2).
+  - The pair is rebuilt so that it differs in the section literal alone.
+  - A second pair, (a-n)/(a-n′), shows that N-1 keys on the literal under either option.
+  - (a-c) now has no counted attribute outside `cfg_attr`.
+- **[IMPORTANT W2]** R2 named only `DllMain`, but the loader enters an image through the CRT's entry symbol (`_DllMainCRTStartup` by default). F-3's shape did not constrain the name, and (b) read section names only.
+  → *Rev 2.7 closure (P58.1, P58.3):*
+  - R2 is restated by mechanism: the image entry and the runtime's user hooks, listed in a closed table E.
+  - Every name an F-1 to F-4 entry admits must begin with `boyko_mod_`, so no name in E can be admitted.
+  - N-2 refuses every name in E and every exported name that cannot be decided from source.
+  - (b) gains a defined-symbol census against E.
+- **[IMPORTANT W3]** Leg (6)'s "`cargo tree -e features` shows no modding feature" is met by arm A's unmodified tree (`feature "default"` nodes), or else cannot see (xiii).
+  → *Rev 2.7 closure (P58.5):*
+  - The clause is restated as a per-package difference: every package in both arms has the same enabled-feature set, read with `cargo tree --format "{p} {f}"`.
+  - (xiii) is stated against that clause, and the baseline stays green.
+  - Plan patch A3 is applied in that form, and `03:179` gets the clause.
+- **[IMPORTANT W4]** A procedural SDK macro cannot live in any of the three crates, because a proc-macro crate "must only export procedural macros". So the `quote!` scan at `:5292` can never apply, and a fourth crate would escape both legs.
+  → *Rev 2.7 closure (P58.4):*
+  - A procedural SDK macro's crate joins the modding crates of the rule. It is never `boyko_macros`.
+  - (a) runs leg (1)'s (M-a) and (M-b) over it.
+  - A new leg, (b-x), runs (b)'s section and symbol censuses over a fixture mod crate that invokes every exported SDK macro, with an anti-vacuity check against the exported set.
+  - Plan `05:60` gets a pointer.
+- **[QUESTION 1]** Build scripts and native libraries.
+  → *Rev 2.7 closure (P58.6):* in scope. They are closed by N-4: no build script, no `links` key and no `#[link]` attribute in a modding crate. Control (a-b) covers it.
+- **[QUESTION 2]** Which F-1 shape (a-g)'s item matches.
+  → *Rev 2.7 closure (P58.2):* none. A `.boykom$m` static written as an item fits neither F-1 shape, so rev 2.7's (a-g) would have been red on shape. The rebuilt pair lives in the registration template, which F-1b admits.
+- **[HOLD]** Only the first modding-crate rung. → *Recorded. That rung adopts P56 with P58, or records a refusal (P56.6).*
+
+AP9's review follows verbatim.
+
+VERDICT: CHANGES_REQUESTED; CRITICAL=0; IMPORTANT=4
+
+# Architecture review: allocator design rev 2.7 (closure pass AP9, scope = rev 2.7's delta)
+
+Line numbers without a prefix are in `D:/wt/docs/docs/memory/ALLOCATOR-DESIGN-SPACE.md` on `u/doc-3-4` @ `4db26681`. Plan patches are cited from `C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/doc34/doc4.md`. I could not run `git diff` because I have no shell. Instead I read the whole appended Part (`:5192-5506`) and spot-checked the same-line markers at `:1216`, `:1909`, `:3868`, `:4443`, `:4503` and `:4997-5009`. Each is its old text with a suffix added.
+
+## Verdict
+[ ] APPROVED
+[X] CHANGES REQUESTED
+
+**What is held.** The same rung as under AP8: only the first modding-crate rung (Stage 3). C1 is not held, and AP8's release of C1 still stands.
+
+## Status of AP8's remarks
+
+| AP8 | Status | Why |
+|---|---|---|
+| N-W1 | **Partly resolved** | Done:<br>• The ban is scoped to its harm (56.1).<br>• It is reconciled with MS-15 and K-MOD-9 (56.2, `:1216`, `:4443`).<br>• Candidate (a) is no longer red by construction (56.3).<br>Still open:<br>• The discriminating control AP8 asked for does not discriminate as written (W1).<br>• R2 misses the DLL entry symbol itself (W2).<br>• The macro-template coverage misses procedural macros (W4). |
+| O1 | ✅ Resolved | The whole `.CRT$` prefix is covered, `.preinit_array` is added, the family table is shared by (a) and (b), and (u) pins every member (`:5326-5343`, `:5374`). |
+| O2 | **Adopted, but the criterion is defective** | See W3. |
+| O3 | ✅ Resolved | `vm.rs:39-40` re-read on this tree and it matches. Patch A1 is correct. |
+
+## Remarks
+
+### 🟡 Important
+
+#### W1. The (a-r)/(a-g) pair and (a-c) cannot produce their stated red reason, and (a-c) cannot detect the mutation it exists to catch
+**Where:** `:5300`, `:5308-5309`, `:5362`, `:5364`, `:5368-5370`.
+
+**Problem:**
+- N-1 is defined as a check on allowlist **entries**: "The validator is red on any entry that admits one of these" (`:5308`).
+- (a-r)'s branch adds the `.CRT$XCU` static but no allowlist entry. Yet its expected result is "(a) red, **with N-1 among the reasons**", and `:5362` says a control passes only if its own reason is among the reported ones.
+  - With no entry in the branch, N-1 is never reported. The only red reason is "counted item not in the allowlist" (`:5300`), which a `.boykom$m` static without an entry would also trigger.
+- `:5364` says the pair "differ only in the section literal". `:5369` contradicts it: (a-g) also adds `#[unsafe(no_mangle)]` and an F-1 entry. So the pair differs in three things, and the claim in its "what it proves" column (the verdict keys on the section) is not established.
+- (a-c) is `#[used]` plus `cfg_attr(…, link_section = ".init_array")`. `#[used]` is counted on its own (`:5296`).
+  - **Mutant:** delete the walker's `cfg_attr` reading. The static is still red as "unlisted", so a red-only check stays green on the mutant.
+  - **Reason-checked:** N-1 is unreachable without an entry, so the control fails on both the correct walker and the mutant.
+
+**Consequence:** At the first modding-crate rung, (a-r) and (a-c) either fail on a correct gate, or pass while proving nothing. That is AP8's own requirement ("red on a real constructor, green on MS-15's static") left unmet, and the repository's recorded "gate that could not see its mutation" class. Proposed control (xiv) (`doc4.md:230`) does not have this defect: `cfg_attr` carries its only counted attribute.
+
+**Confidence:** CONFIRMED from the text: `:5308` against `:5368`, and `:5364` against `:5369`.
+
+**What is needed:**
+- Specify each red control's branch so that its named reason can be reached and it differs from its green twin in exactly one variable. For example, (a-r) carries the same F-1 entry and the same attributes as (a-g), and changes only the literal.
+- Give (a-c) a subject whose only counted attribute sits inside `cfg_attr`.
+- State the expected set of reasons, not just one member of it.
+
+#### W2. R2 names `DllMain`, but the default DLL entry symbol is `_DllMainCRTStartup`, and no leg sees R2 routes emitted by a third-party macro
+**Where:**
+- `:5248`: R2 is "the DLL entry name".
+- `:5310`: N-2 covers only `DllMain`.
+- `:5319` ("no matter who signs") and `:5371` ("cannot be signed away").
+- `:5275`: F-3's shape does not include the symbol name.
+- `:5313`: "That is (b)'s job".
+- The `:3868` marker and plan patch A4 (`doc4.md:144`) carry the same list into the plan.
+
+**Problem:**
+- Microsoft's `/ENTRY` page says the linker's default DLL entry is `_DllMainCRTStartup`, which "calls `DllMain` if it exists". The executable defaults are `mainCRTStartup`, `wmainCRTStartup`, `WinMainCRTStartup` and `wWinMainCRTStartup`. So the entry the loader actually calls is the CRT symbol, and `DllMain` is a second hop.
+- Under 56.3, a `#[unsafe(no_mangle)] extern "system" fn _DllMainCRTStartup` in `boyko_mod_api` has F-3's shape (crate, fn, `no_mangle`, non-Rust ABI). N-1 to N-3 do not refuse it, so a signature admits it.
+- (b) reads section names only (`:5346-5350`), so it cannot see any R2 route. A third-party attribute macro that emits `DllMain` is visible to neither leg.
+
+**Consequence:** Under option A on MSVC, an owner-signed F-3 entry for `_DllMainCRTStartup` passes the validator, contrary to `:5319`. If the linker resolves the entry from the rlib before `msvcrt.lib` (rlibs come earlier on the link line), that code runs at every mod's `LoadLibrary`, before the canary check. That is exactly the harm quoted from `MODDING:566-567`.
+
+**Confidence:**
+- CONFIRMED: the rule text omits the entry symbol (MS Learn `/ENTRY`).
+- PLAUSIBLE: the link silently resolves to the rlib's symbol. A duplicate-symbol LNK2005 is also possible, and that failure would be loud. On windows-gnu, `dllcrt2.o` is a plain object, so a clash there is a loud duplicate.
+
+**What is needed:**
+- Define R2 by mechanism (the image entry the loader calls, plus the CRT's user hook), not by one name.
+- Make the name refusal unsignable for that whole set, or key F-2 to F-4 entries to a closed name pattern, so that a name-routed hook cannot pass by matching a shape.
+- Give R2 an object-level check, as R1 has in (b). Leg (7b) already runs `llvm-nm --defined-only` over rlib members.
+
+#### W3. Leg (6)'s red criterion as written in (xiii) is also met by arm A's baseline
+**Where:**
+- `:5411`: "So the tree names the modding crate, and leg (6)'s … clause goes red."
+- Plan patch A3 (`doc4.md:130`): "…through its `cargo tree -e features` clause, which names the modding crate as the enabler".
+- `03:179`: "shows no modding feature".
+
+**Problem:**
+- `cargo tree -e features` prints a `feature "default"` node under every package that depends on a crate with default features. Cargo's documentation shows `cfg-if feature "default"` under `log`.
+- `boyko_ecs` declares `default = []` (`crates/boyko_ecs/Cargo.toml:53-54`). Every modding crate depends on `boyko_ecs`, because `ModSeam`'s implementors live there (`05:59-60`).
+- So arm A's unmodified tree already shows a modding crate "as the enabler" of `boyko_ecs feature "default"`.
+- Under the other natural reading ("no feature *of* a modding crate"), (xiii) does not fire, because the feature it enables belongs to the shared dependency.
+- Only a per-package **difference** between arms A and B (the resolved feature set of each package both arms contain) keeps the baseline green and turns (xiii) red. Neither `:5411` nor A3 states that difference.
+
+**Consequence:** At the first modding-crate rung, where leg (6) stops being N/A (`03:24`), an implementation written to A3's wording is red on the unmodified tree. That is the red-by-construction class AP8 graded 🟡 for N-W1. The failure is loud, but it blocks the rung until the clause is redesigned.
+
+**Confidence:**
+- CONFIRMED: the criterion is met by the baseline (Cargo docs; `Cargo.toml:54`).
+- PLAUSIBLE: the modding manifests keep default features. That is Cargo's default, and they are not written yet.
+
+**What is needed:** State leg (6)'s feature clause as the per-package difference between the two arms. Then state (xiii) against that clause, with the baseline required to stay green, and patch A3 to match.
+
+#### W4. The `quote!` part of 56.3's macro-body scan can never apply inside the three crates, so a procedural SDK macro escapes both legs
+**Where:**
+- `:5292`: M-a runs "over every `macro_rules!` body and every `quote!`/`quote_spanned!` body **in the three crates**". The same line claims this is what makes a template that emits `.CRT$XCU` into every mod visible.
+- The scope at `:5289` and the anti-vacuity check at `:5315`.
+- 05 names the SDK's registration macro (MS-02a, `05:157`; MS-04, `05:160`) and the trampoline macro (`MODDING:395`, `:1792`) as living in `boyko_mod_api` or `boyko_mod_registry`.
+
+**Problem:**
+- The Rust Reference (linkage) says `proc-macro` crates "must only export procedural macros". Each of the three crates exports non-macro items: the sentinels, wrappers, the probe and entries (56.2). None of them can be a proc-macro crate.
+- So a procedural registration or trampoline macro can live only in one of two places:
+  - **A fourth crate.** Neither (a) nor (b) reads it. (b) reads only the three crates' objects, and the template's output lands in the mod's crate. (a)'s anti-vacuity stays green because it counts per crate of the three.
+  - **`boyko_macros`.** Leg (1)'s kernel scope reads it with an empty allowlist (`03:169`), so F-1's template is red by construction. That is the N-W1 class again.
+
+**Consequence:** If the SDK's macros are procedural (the natural form for an attribute that wraps a mod system, or a derive that carries `stable_name`), a template that emits `.CRT$XCU` into every mod image goes through both legs green (silent). The alternative placement is red by construction (loud).
+
+**Confidence:**
+- CONFIRMED: the `quote!` clause cannot apply in the three crates (Rust Reference).
+- PLAUSIBLE: the SDK macros will be procedural. Their form is undecided until Stage 3.
+
+**What is needed:** Either scope (a) and the form-keyed allowlist to whatever crate holds the SDK's macros, and name that crate beside `05:60`'s three, or state that the SDK's templates must be `macro_rules!`.
+
+## Positive
+- The rule is stated by **mechanism**: a table the runtime walks, or an entry name. It is not stated by attribute. 56.2's table gives a caller and a call time for every sanctioned form. That is the right repair for N-W1.
+- The `.CRT$` prefix is matched whole instead of enumerated, and one family table is shared by (a)'s N-1 and (b). Together these remove the drift that O1 caught.
+- The argument for reading objects rather than the linked image holds: the MSVC CRT's `__xc_a`/`__xc_z` and std's `.init_array.00099` are in every image. This avoids the P29/P49 class. I also confirmed the "checked, not cited" claim: std's current Windows TLS guard has no `.CRT$XL*` static.
+- N-1 refuses a `link_section` value that is not a literal. That closes the `concat!` route and the forwarded-metavariable route in `macro_rules!` templates.
+- "A member that lists no section is RED" catches rlib members that hold only bitcode.
+- Group B's (xiv) is correctly built as a discriminating control, which is the model for fixing W1.
+- O2's resolver facts are verified: `Cargo.toml:168-171` has edition 2024 and there is no `resolver` key anywhere.
+
+## Open questions for the architect
+1. **Build scripts and native libraries.** A `build.rs` that links a C object with a constructor through `cargo:rustc-link-lib=static:-bundle=…` lands in neither (a), which reads Rust source, nor (b), which reads bundled rlib members. Is that route in scope or out of scope? `:5313` lists only third-party macros as what (a) cannot see.
+2. **Which F-1 shape (a-g)'s item matches.** Under C, `boyko_mod_registry` really holds the `$a`/`$z` sentinel items and the `$m` **template**. (a-g) instead puts a `$m` static item in that crate. Does F-1's shape check (`:5305`) admit that item, or does (a-g) go red on shape?
+
+Sources:
+- [MS Learn: /ENTRY (Entry-Point Symbol)](https://learn.microsoft.com/en-us/cpp/build/reference/entry-entry-point-symbol)
+- [Cargo Book: cargo tree](https://doc.rust-lang.org/cargo/commands/cargo-tree.html)
+- [Rust Reference: Linkage (proc-macro crate type)](https://doc.rust-lang.org/reference/linkage.html)
+- [Rust Reference: Procedural macros](https://doc.rust-lang.org/reference/procedural-macros.html)
+- [rust-lang/rust: library/std/src/sys/thread_local/guard/windows.rs](https://raw.githubusercontent.com/rust-lang/rust/master/library/std/src/sys/thread_local/guard/windows.rs)
+
+Status: rev 2.7 reviewed by critique pass 9 (AP9): CHANGES_REQUESTED, 0 Critical, 4 Important. The rev-2.7 closure (P58) follows and resolves them.
+
+---
+
+# Rev 2.7 closure (2026-09-24): P58, which answers critique pass 9
+
+**Scope.** P58 answers AP9: its four Important remarks, W1–W4, and its two questions. It adds no allocator mechanism, and it changes no gate this file owns. It restates P56's candidate mechanism for the modding-crate ban and P57's control (xiii).
+
+**Trees.** As in rev 2.7: this file on `u/doc-3-4` @ `4db26681`, with code read read-only on that tree. `crates/boyko_ecs/Cargo.toml:53-54` declares `default = []`. No cargo command, build or test was run.
+
+**Convention.** Unchanged:
+- every superseded passage is marked where it stands, with a suffix that begins `⚠ Rev 2.7 closure`;
+- no sentence is deleted;
+- no line before this Part moved.
+
+The marker index at the end lists every line touched. **The plan side is applied in the same Close step** as same-line plan patches, listed at the end. Rev 2.7 had only proposed its patches.
+
+---
+
+## P58 — AP9 W1–W4, and its two questions
+
+### 58.1 R2 by mechanism: the image entry and the runtime's user hooks (AP9 W2)
+
+This supersedes 56.1's R2 (`:5248`), N-2 (`:5310`), and F-3's "except under the name `DllMain`" (`:5275`). Each is marked in place.
+
+**The defect.**
+- The loader does not enter a DLL at `DllMain`. It enters at the image's entry point, which the linker takes from `/ENTRY` or from its default.
+- Microsoft's table of defaults `[D MSVC: /ENTRY]`:
+  - `mainCRTStartup` (or `wmainCRTStartup`) for a console application; it "calls `main` (or `wmain`)";
+  - `WinMainCRTStartup` (or `wWinMainCRTStartup`) for a Windows application; it calls `WinMain` (or `wWinMain`);
+  - `_DllMainCRTStartup` for a DLL; it "calls `DllMain` if it exists".
+- So `DllMain` is the second hop. A `no_mangle` definition of `_DllMainCRTStartup` in `boyko_mod_api` had F-3's shape, and no rule refused it.
+
+**R2, restated.** R2 is code that the OS loader or the C runtime enters **by symbol name** on an image's behalf, rather than through a table walk (R1): an image's entry-point symbol, and the user hooks that the runtime's entry calls. The names form one closed `const` table, **E**, in the gate crate, beside the family table (56.4). (a)'s N-2 and (b)'s symbol census (58.3) both read it. Names are matched exactly.
+
+| Name | Toolchain and role | Who enters it | Source |
+|---|---|---|---|
+| `_DllMainCRTStartup` | MSVC: the default DLL entry | the loader | `[D MSVC: /ENTRY]` |
+| `mainCRTStartup`, `wmainCRTStartup`, `WinMainCRTStartup`, `wWinMainCRTStartup` | MSVC: the default executable entries | the loader | `[D MSVC: /ENTRY]` |
+| `DllMain` | the DLL user hook, on MSVC and on MinGW-w64 | `_DllMainCRTStartup` | `[D MSVC: /ENTRY]`; `[S mingw-w64: crtdll.c]` |
+| `main`, `wmain`, `WinMain`, `wWinMain` | MSVC: the executable user hooks | the executable entries above | `[D MSVC: /ENTRY]` |
+| `DllMainCRTStartup`, `DllEntryPoint` | MinGW-w64 (windows-gnu): the DLL entry, and its second user hook | the loader enters `DllMainCRTStartup`. It calls `__DllMainCRTStartup`, which calls `DllEntryPoint` and `DllMain` | `[S mingw-w64: crtdll.c]` |
+| `_init`, `_fini` | ELF: the `DT_INIT`/`DT_FINI` functions. GNU ld sets `DT_INIT` to "the address of the function", and "By default, the linker uses `_init`" (`_fini` likewise) | the dynamic linker, at load and at unload | `[D GNU ld: Options, -init/-fini]`; `[S MaskRay]` |
+
+- **Why the ELF executable entry is not in the table.** A mod image is a shared object, and the dynamic linker enters a shared object only through `DT_INIT` and `DT_INIT_ARRAY` `[D gABI: dynamic linking]`: R2's `_init` above, and R1's family. The host executable's entry comes from the C runtime's startup object, not from a modding crate. ld takes it from `-e`, from the linker script, or from "a target-specific symbol" `[D GNU ld: Entry Point]`. The table lists names that a modding crate could define to be entered; `_start` is left out rather than cited without a source.
+- **The closed name pattern for sanctioned exports.** Every exported name that an F-1 to F-4 entry admits must begin with `boyko_mod_`, compared ASCII-case-insensitively. The exported name is decided from source:
+  - for a `no_mangle` item, its identifier;
+  - for an `export_name`, its value: a string literal, or a `concat!` whose first argument is a string literal. Since Rust 1.54, attributes may invoke function-like macros `[D Rust 1.54 release notes]`, so a template can spell a per-mod name as `concat!("boyko_mod_…", …)`.
+
+  An entry whose exported name does not match the pattern is red on shape (S). No name in E begins with `boyko_mod_`, so no entry can admit one, whoever signs. The only export the modding design names today, `boyko_mod_probe_counters` (`MODDING-DESIGN-SPACE.md:1828`), already matches.
+- **N-2, restated** (supersedes `:5310`). An item is non-admissible when its exported name can be decided and is in E. It is also non-admissible when its exported name **cannot** be decided from source, which covers:
+  - a `no_mangle` item whose identifier is a template metavariable;
+  - an `export_name` value that is neither a string literal nor such a `concat!`.
+
+  The second clause matches N-1's refusal of non-literal section values.
+- **F-3, restated** (supersedes `:5275`'s last cell). F-3 is outside the rule. Its names begin with `boyko_mod_`, and N-2 refuses every name in E.
+
+### 58.2 The reason model, F-1's shape, and controls that discriminate (AP9 W1, question 2)
+
+This supersedes `:5300`'s pass condition (it becomes the reason model below), `:5308` ("The validator is red on any entry …"), `:5362`, `:5364`, the rows (a-r), (a-g) and (a-c) at `:5368-5370`, and the option-A paragraph at `:5376`. Each is marked in place.
+
+**Reasons.** The walk reports every reason that applies. A red is the set of them.
+- **U:** a counted item has no allowlist entry.
+- **S(F-k):** an entry's item does not have its form's shape.
+- **N-1 to N-4 (item):** a counted item has a non-admissible property, **whether or not any entry admits it**.
+- **N-1 to N-4 (entry):** an entry admits such an item. This is the validator's check, as in 56.3.
+
+The item-level report is the change. It makes N-1 reachable in a branch that adds no entry, which is AP9's first point.
+
+**Pass rule for red controls** (supersedes `:5362`). A red control passes only if the reason set the gate reports **equals** its expected set. "Contains its own reason" is not enough: a mutant that drops or adds a check changes the set, so the control catches it.
+
+**F-1's shape, stated** (answers question 2; refines 56.2's F-1 row):
+- **F-1a, the sentinels.** A `static` **item** in `boyko_mod_registry` with `#[used]`, whose `link_section` value is the literal `.boykom$a` or `.boykom$z`, and whose exported name, if any, matches 58.1's pattern.
+- **F-1b, the registration template.** A `static` written as **tokens inside a `macro_rules!` body**, in the crate that holds the SDK's registration macro (MS-02a, `05:157`). It carries `#[used]`, `#[unsafe(link_section = ".boykom$m")]`, and an exported name that matches 58.1's pattern.
+
+A `.boykom$m` static written as an **item** fits neither shape. So rev 2.7's (a-g), which put such an item in `boyko_mod_registry`, would have been red on S(F-1). The rebuilt pair below is in the template.
+
+**The controls** (supersede `:5368-5370` and `:5376`; (b-r), (b-g) and (a-v) stand, and (a-v) and (u) are extended below):
+
+| Control | Branch content | Expected reason set (exact) | What it proves |
+|---|---|---|---|
+| **(a-r)** red, option C | In the SDK's registration template (F-1b), change only the section literal `.boykom$m` to `.CRT$XCU`. The F-1 entry and every other token stay as they are | {N-1 (item), N-1 (entry), S(F-1b)} | The only difference from its green twin is the literal, and the verdict turns on it. The template is the path that would put a constructor into every mod image |
+| **(a-g)** green, option C | the unmodified tree, with the template and its F-1 entry | green | (a-r)'s twin. The pair is AP8's discriminating control, now differing in exactly one variable |
+| **(a-n)** red, both options | a new `#[used] #[unsafe(link_section = ".CRT$XCU")] static CTOR: fn() = ctor;`, with `fn ctor() {}` beside it and no entry, in `boyko_mod_registry` (option C) or `boyko_mod_host` (option A). `ctor` has the Rust ABI, which leg (1) does not count (`03:169`), so the static is the branch's only counted item | {U, N-1 (item)} | N-1 fires with no entry at all |
+| **(a-n′)** red, both options | the same item with the literal `.boykox` | {U} | Together with (a-n), N-1 keys on the literal, not on the attribute set that MS-15 shares with a constructor. Under option A, which has no `.boykom` template, this pair carries the discrimination |
+| **(a-c)** red | `#[cfg_attr(all(), used)] #[cfg_attr(all(), cfg_attr(all(), unsafe(link_section = ".init_array")))] static X: fn() = ctor;`, with a Rust-ABI `ctor` beside it and no counted attribute outside `cfg_attr` | {U, N-1 (item)} | `cfg_attr` lists are read, at depth. A walker that skips `cfg_attr` counts nothing, so the control fails. A walker that reads depth 1 only reports {U}, so the control fails too |
+| **(a-v)** red, extended | allowlist entries that admit: `.CRT$XLB`; `DllMain`; `_DllMainCRTStartup`; `DllMainCRTStartup`; a name without the `boyko_mod_` prefix; an `export_name` built by a macro that is not `concat!`; a `build.rs` | the validator is red on each, with N-1; N-2; N-2; N-2; S; N-2; N-4 respectively | no non-admissible form can be signed in |
+| **(a-b)** red | a `build.rs` in `boyko_mod_api` that prints `cargo::rustc-link-lib=static:-bundle=stub` | {N-4 (item)} | 58.6's route is refused at source |
+| **(b-s)** red | a `#[unsafe(no_mangle)] extern "system" fn _DllMainCRTStartup` in `boyko_mod_api`, with no entry | (a): {U, N-2 (item)}; (b): red on the symbol census | R2 is seen at source and in the object (58.3) |
+
+**When.** Unchanged (56.5): from the rung that creates the first modding crate, then on every commit that edits a modding crate or the gate. E's table and its unit test land with the gate.
+
+**(u), extended.** The unit test also runs the E matcher:
+- **Red:** every name in E.
+- **Green:** `boyko_mod_probe_counters`, `main_loop` and `DllMainHelper`. These show the match is exact, not by prefix.
+
+### 58.3 R2 in the objects: the defined-symbol census (AP9 W2)
+
+This supersedes `:5313`'s "That is (b)'s job" for R2, which (b) could not do. It is marked in place.
+- **What (b) reads now.** The same rlib object members, from the same build and profile (56.4), read a second time with `llvm-nm --defined-only --extern-only`. The two flags print "only symbols defined in this file" and "only symbols whose definitions are external; that is, accessible from other files" `[D LLVM: llvm-nm]`.
+- **Red:** any such symbol whose name is in E.
+- **Anti-vacuity:** as 56.4. The member count is reported, and zero is RED.
+- **What it sees that (a) cannot.** An R2 name that a third-party macro emits into a modding crate. Leg (7b) already runs `llvm-nm --defined-only` over rlib members (`03:181`), so the tool is already in the gate.
+
+### 58.4 SDK macros that are procedural: the fourth crate, and the expansion fixture (AP9 W4)
+
+This supersedes `:5289` (the scope), `:5292` (the claim that the `quote!` scan in the three crates makes a `.CRT$XCU` template visible) and `:5315` (anti-vacuity per crate of the three). Each is marked in place.
+
+**The fact.** The Reference says a `proc-macro` crate "must only export procedural macros" `[D Rust Reference: linkage]`. Each of `05:60`'s three crates exports other items (56.2), so none of them can hold a procedural macro.
+
+**The rule.**
+- The modding crates of the rule are `05:60`'s three, **plus** the SDK's proc-macro crate if Stage 3 makes any SDK macro procedural. That could be the registration macro (MS-02a), the trampoline, or a derive carrying `stable_name`.
+- That crate is named at the rung that creates it; this file uses `boyko_mod_macros` as a placeholder.
+- It is never `boyko_macros`. That is the kernel's proc-macro crate, whose leg-(1) allowlist stays empty (`03:169`). Putting F-1's template there would make it red by construction.
+
+**What reads it.**
+- **(a)**, over the SDK's proc-macro crate, with leg (1)'s two macro mechanisms exactly as `03:169` runs them for `boyko_macros`:
+  - (M-a), the token scan of `quote!`/`quote_spanned!` bodies;
+  - (M-b), the expanded corpus: each entry point's `proc_macro2` twin is fed a fixture corpus, and its output is walked.
+
+  (M-b) is what sees computed emission, such as an attribute built with `format_ident!`. The modding allowlist and N-1 to N-4 apply to what both mechanisms report.
+- **(b-x), the expansion fixture.**
+  - An in-repo fixture mod crate in the gate's test tree invokes every macro the SDK exports, with the fixture inputs. That means every `#[macro_export] macro_rules!` and every `#[proc_macro]`, `#[proc_macro_attribute]` and `#[proc_macro_derive]`.
+  - (b)'s section census (56.4) and symbol census (58.3) read the fixture crate's object members.
+  - **Anti-vacuity:** the set of exported SDK macros, as (a)'s walk collects it, must be a subset of the macros the fixture invokes. An exported macro with no invocation is RED.
+  - This reads, by mechanism, what the templates emit, whatever form they take. That is what `:5292` claimed and could not deliver for a procedural macro.
+- **Anti-vacuity of (a)** (supersedes `:5315`): items and macro bodies are counted per modding crate, the fourth one included. Zero for a crate that exists is RED.
+
+**Why not "templates must be `macro_rules!`"** (AP9's alternative).
+- It would decide an SDK design question that is open until Stage 3 (MS-02a, MS-04; `05:157`, `:160`).
+- Even a declarative template's output is only fully known once expanded with its inputs.
+- (b-x) covers both forms by mechanism, at the cost of building one fixture crate in the gate. There is no runtime cost.
+
+### 58.5 Leg (6)'s feature clause, as a per-package difference (AP9 W3)
+
+This supersedes P57's "Why it fires" (`:5411`) and "Which clause the control names" (`:5412`), and the canary marker's "the `cargo tree -e features` clause is the one that must go red" (`:1909`). Each is marked in place. It restates the plan's clause at `03:179`.
+
+**The defect, confirmed.**
+- `cargo tree -e features` prints a `feature "default"` node wherever a dependency is used with its default features. The Cargo Book's own example shows `cfg-if feature "default"` under `log` `[D Cargo Book: cargo tree]`.
+- `boyko_ecs` declares `default = []` (`crates/boyko_ecs/Cargo.toml:53-54` @ `4db26681`), and every modding crate depends on it (`05:59-60`).
+- So arm A's unmodified tree already shows a modding crate enabling `boyko_ecs feature "default"`.
+- The two readings of "shows no modding feature" both fail:
+  - read as "no feature that a modding crate enables", the clause is red on the unmodified tree;
+  - read as "no feature *of* a modding crate", it cannot see (xiii).
+
+**The clause, restated.**
+- In each arm, run `cargo tree -p boyko_demo -e normal,build --prefix none --no-dedupe --format "{p} {f}"` for the host target. `{f}` prints the "Comma-separated list of package features that are enabled" `[D Cargo Book: cargo tree]`.
+- **Pass:** for every package that appears in both arms' output, its set of lines is identical across the arms. A package may appear more than once under resolver 2, once for the target and once for a build context.
+- **Excluded:** packages that appear only in arm A, meaning the modding crates and dependencies only they pull. They are not linked (P47.4, `:4483`), and the size clause covers them.
+- **`boyko_demo`'s own line is compared too.** The arms differ by a manifest edge, not by a feature (P44, `:3830`), so it must be equal.
+- **Why the baseline stays green.** A modding crate that uses a shared dependency with the same features the game already enables adds nothing to that package's set.
+- **The cost of the rule, stated.** A modding crate that asks for a shared dependency's default features where the game turns them off changes that package's set, even when `default` expands to nothing. That is a real difference in the game's resolved graph, so the red is correct and loud. The modding manifests match the game's `default-features` choice on shared dependencies.
+- **Unchanged:** the leg is reported as N/A until a modding crate exists (`03:179`).
+
+**(xiii), stated against the clause.**
+- In the control branch, the modding crate enables a non-default feature of a normal, host-matching dependency that `boyko_demo` also depends on.
+- Expected: leg (6) red, **because that package's line in arm A differs from arm B's by exactly that feature**. The control names the package and the feature, and passes only on that difference.
+- The size clause also goes red only if the feature changes code that the game links. That is unchanged from P57.
+
+### 58.6 Build scripts and native libraries (AP9 question 1)
+
+**In scope.** The route is real:
+- `cargo::rustc-link-lib` passes `-l` to the package's library target `[D Cargo Book: build scripts]`;
+- with `-bundle`, "object files from it are included only during linking of the final binary" `[D rustc book: linking modifiers]`.
+
+So a native object with a constructor reaches the image with nothing in the crate's Rust source for (a) and nothing in its rlib for (b). With `+bundle`, the default, the native objects are rlib members, and (b)'s census of every member would see them.
+
+**Closed by N-4 (non-admissible, new).** No modding crate has any of:
+- a build script (a `build.rs` at the crate root, or a `package.build` key);
+- a `package.links` key;
+- a `#[link(…)]` attribute.
+
+(a) reads each modding crate's manifest and root for them. No sanctioned form (56.2) needs native code or a build script, so N-4 costs no allowlist entry. Admitting one needs a new form and its own ruling, as for N-3. Control: (a-b).
+
+### 58.7 What (a) and (b) cannot see, restated
+
+This supersedes `:5313`. Nothing is left that the rule's harm can reach through a modding crate:
+- A third-party macro's R1 emission is seen by (b)'s section census; its R2 emission by (b)'s symbol census (58.3).
+- An SDK template's emission, in either form, is seen by (a)'s mechanisms and by (b-x) (58.4).
+- A native object is refused by N-4 (58.6).
+- Instrumented builds stay out of scope (56.4).
+- A mod's own code stays outside the rule (56.1).
+
+### 58.8 What stays open, and who decides
+
+Unchanged from 56.6, restated with P58:
+- (a) and (b), now with (b-x), N-4 and table E, remain a candidate for UG-15 (03 §6).
+- The first modding-crate rung adopts them with P58's controls, or records a refusal with its reason, before it cuts. AP9 holds only that rung, and C1 is not held.
+- Group B, the kernel-scope `cfg_attr` gap (56.6), is applied to the plan in this step. It lands at the first commit that edits leg (1)'s walker after the patch reaches the trunk. It adds no requirement to B3's merge.
+
+**Cost.** None at runtime.
+- (a) gains one crate if the SDK has a procedural macro, and a manifest read.
+- (b) reads one more column (defined external symbols) from the members it already reads, plus one fixture crate's members.
+- Table E and its unit test are small.
+
+## Change log (rev 2.7 → rev 2.7 closure)
+
+| Row | Disposition | Where |
+|---|---|---|
+| AP9 W1 | Reasons are reported per item and per entry. A red control passes on an **exact** reason set. F-1 is split into F-1a (sentinel items) and F-1b (the registration template). New controls: (a-r)/(a-g) differ only in the literal; (a-n)/(a-n′) work under both options; (a-c) has no counted attribute outside `cfg_attr` | P58.2; `:5300`, `:5308`, `:5362`, `:5364`, `:5368`, `:5369`, `:5370`, `:5376` |
+| AP9 W2 | R2 by mechanism, through table E (the entry symbols and the user hooks). Admitted names carry the `boyko_mod_` prefix. N-2 covers E and any name that cannot be decided. (b) gains the defined-symbol census. New control (b-s); (a-v) and (u) are extended | P58.1, P58.3; `:3868`, `:5248`, `:5275`, `:5310`, `:5313`, `:5319`, `:5371`, `:5374` |
+| AP9 W3 | Leg (6)'s feature clause is a per-package difference between the arms (`cargo tree --format "{p} {f}"`). (xiii) is stated against it, and the baseline stays green | P58.5; `:1909`, `:5411`, `:5412`; plan `03:179`, `03:184` |
+| AP9 W4 | A procedural SDK macro's crate joins the modding crates, and is never `boyko_macros`. (a) runs (M-a) and (M-b) over it. The expansion fixture (b-x) has its own anti-vacuity | P58.4; `:5289`, `:5292`, `:5315`; plan `05:60` |
+| AP9 question 1 | N-4: no build script, `links` key or `#[link]` in a modding crate. Control (a-b) | P58.6 |
+| AP9 question 2 | F-1's shape is stated. A `$m` item is red on shape, and the pair is rebuilt in the template | P58.2 |
+| Unchanged | R1 and the family table (56.4); (b-r), (b-g); every allocator mechanism and gate | — |
+
+## Marker index (the closure's in-place changes; no line number moved)
+
+| Patch | Lines (this file) |
+|---|---|
+| Header | `:1` (title), `:5` (status: the closure's status first, with rev 2.7's struck) |
+| P58 | `:1909`, `:3868`, `:5248`, `:5275`, `:5289`, `:5292`, `:5300`, `:5308`, `:5310`, `:5313`, `:5315`, `:5319`, `:5362`, `:5364`, `:5368`, `:5369`, `:5370`, `:5371`, `:5374`, `:5376`, `:5411`, `:5412` |
+| Rev 2.7's closing status | `:5506` |
+
+**Outside this file** (same-line plan patches, applied in this Close step): `03:24`, `03:169`, `03:179`, `03:184`, `00:154`, `02:91`, `02:96` and `05:60`.
+
+**External sources (read 2026-09-24):**
+- `[D MSVC: /ENTRY]` <https://learn.microsoft.com/en-us/cpp/build/reference/entry-entry-point-symbol>. Its table of defaults: `mainCRTStartup` (or `wmainCRTStartup`), which "calls `main` (or `wmain`)"; `WinMainCRTStartup` (or `wWinMainCRTStartup`), which calls `WinMain` (or `wWinMain`); and `_DllMainCRTStartup`, which "calls `DllMain` if it exists". Also: "The functions `main`, `WinMain`, and `DllMain` are the three forms of the user-defined entry point."
+- `[S mingw-w64: crtdll.c]` <https://raw.githubusercontent.com/mirror/mingw-w64/master/mingw-w64-crt/crt/crtdll.c>. It declares `DllMain` and `DllEntryPoint`, and defines `WINBOOL WINAPI DllMainCRTStartup (HANDLE hDllHandle, DWORD dwReason, LPVOID lpreserved)`, which returns `__DllMainCRTStartup (…)`. That function calls `DllEntryPoint (…)` and `DllMain(…)`.
+- `[D GNU ld: Options, -init/-fini]` <https://sourceware.org/binutils/docs/ld/Options.html>. `-init=name`: "call NAME when the executable or shared object is loaded, by setting DT_INIT to the address of the function. By default, the linker uses `_init` as the function to call." `-fini` is the same, with `DT_FINI` and `_fini`.
+- `[D GNU ld: Entry Point]` <https://sourceware.org/binutils/docs/ld/Entry-Point.html>. The entry comes from `-e`, from `ENTRY(symbol)`, or from "the value of a target-specific symbol, if it is defined; For many targets this is `start`, but PE- and BeOS-based systems for example check a list of possible entry symbols".
+- `[D LLVM: llvm-nm]` <https://llvm.org/docs/CommandGuide/llvm-nm.html>. `--defined-only`: "Print only symbols defined in this file." `--extern-only`: "Print only symbols whose definitions are external; that is, accessible from other files."
+- `[D Rust 1.54 release notes]` <https://blog.rust-lang.org/2021/07/29/Rust-1.54.0/>. "Rust 1.54 supports invoking function-like macros inside attributes", for example `#![doc = include_str!("README.md")]`.
+- `[D Rust Reference: linkage]` <https://doc.rust-lang.org/reference/linkage.html>. "Crates compiled with this crate type must only export procedural macros."
+- `[D Cargo Book: cargo tree]` <https://doc.rust-lang.org/cargo/commands/cargo-tree.html>:
+  - the `-e features` example shows `cfg-if feature "default"` under `log`;
+  - `--format`'s `{f}` is the "Comma-separated list of package features that are enabled";
+  - `--prefix none` shows "a flat list";
+  - `--no-dedupe` repeats duplicates.
+- `[D Cargo Book: build scripts]` <https://doc.rust-lang.org/cargo/reference/build-scripts.html>:
+  - "The `-l` flag is only passed to the library target of the package";
+  - the `links` key declares "that the package links with the given native library".
+- `[D rustc book: linking modifiers]` <https://doc.rust-lang.org/rustc/command-line-arguments.html>. "When building a rlib `-bundle` means that the native static library is registered as a dependency of that rlib 'by name', and object files from it are included only during linking of the final binary". "The default for this modifier is `+bundle`."
+- `[D gABI: dynamic linking]`, `[S MaskRay]` and the rest: as in rev 2.7.
+
+Status: rev 2.7 with its closure (P58), 2026-09-24. AP9's W1–W4 are resolved and both questions are answered; no owner ruling is needed. One item is open for the plan, not for this file: adopting P56 with P58's changes as the modding-crate ban's mechanism, at the first modding-crate rung, which AP9 holds on it and which adopts it or records a refusal. P58's plan side is applied in the same step. C1 is not held (AP8, AP9).
