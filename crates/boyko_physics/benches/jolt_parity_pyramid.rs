@@ -207,9 +207,10 @@
 //!   time, so it is a result on a shared machine.
 //! * `fallback_census` (a runner built with `--features narrowphase-counts`; `null` otherwise): the
 //!   box-box edge fallback's census over the whole run (`narrowphase::box_box::fallback_census`,
-//!   the `thinbox` lane) — `calls`, `phantom`, `hint_capped`, `corner`, `max_accepted_excess`. The
-//!   face bound changes a row's poses only when `phantom` or `hint_capped` is above zero, so a
-//!   moved `--expect-pose` row with both at zero was not moved by it.
+//!   the `thinbox` lane) — `calls`, `phantom`, `hint_capped`, `corner`, `refresh_stale`,
+//!   `max_accepted_excess`. The face bound changes a row's poses only when `phantom`,
+//!   `hint_capped` or (contact reuse on) `refresh_stale` is above zero, so a moved `--expect-pose`
+//!   row with all three at zero was not moved by it.
 //! * exit code: 0 ok; 2 bad flags; 3 void (anti-vacuity, frozen-by, disarmed ring traffic,
 //!   dropped samples, a reuse-on row with no reuse over steps [100, 500)); 4 `--expect-pose`
 //!   mismatch; 101 panic.
@@ -1342,11 +1343,13 @@ fn json_f64(x: f64) -> String {
 fn fallback_census_json() -> String {
     let c = boyko_physics::narrowphase::box_box::fallback_census::take();
     format!(
-        "{{\"calls\":{},\"phantom\":{},\"hint_capped\":{},\"corner\":{},\"max_accepted_excess\":{}}}",
+        "{{\"calls\":{},\"phantom\":{},\"hint_capped\":{},\"corner\":{},\"refresh_stale\":{},\
+         \"max_accepted_excess\":{}}}",
         c.calls,
         c.phantom,
         c.hint_capped,
         c.corner,
+        c.refresh_stale,
         json_f64(f64::from(c.max_accepted_excess)),
     )
 }
