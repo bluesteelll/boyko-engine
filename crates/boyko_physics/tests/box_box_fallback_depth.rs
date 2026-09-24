@@ -1154,6 +1154,23 @@ fn bounded(
 /// T1) and the generator's worst over-claim on the unfixed kernel (3.64 m).
 const FIXED_SEEDS: [u64; 2] = [0x531f_f99f_772d_936c, 0x65ff_5fe6_7f34_e65e];
 
+/// T5's third fixed case: a box of half-extents 4–6.5 mm on the 50×1×50 floor (a rotated world,
+/// the family's ratio 1e4) whose every edge
+/// axis claims more than the face allows and whose best face's clip keeps one vertex just above
+/// the floor. The fix answers with that clipped vertex; an unclipped corner answer (mutation
+/// M-Spec, the speculative tier removed) puts the floor's anchor 4.8 mm outside the floor, which
+/// I2-own reds here before any drawn case. Found by T5's own family population under M-Spec (50
+/// calls red there; `impl/mut_M-Spec_probe.log`).
+const OVERHANG: Pinned = Pinned {
+    name: "the M-Spec overhang witness",
+    ac: [0xc061_3440, 0xbf8e_3eba, 0xc1c4_8127],
+    aq: [0x3ed3_0de2, 0x3f55_9c67, 0x3e83_2967, 0xbe85_b5a0],
+    ah: [0x4248_0000, 0x3f80_0000, 0x4248_0000],
+    bc: [0x41cd_4cfc, 0xc209_f80a, 0xc246_854a],
+    bq: [0x3ed3_1a82, 0x3f55_9522, 0x3e83_6144, 0xbe85_9947],
+    bh: [0x3ba3_d70a, 0x3b83_126f, 0x3bd4_fdf3],
+};
+
 /// T5: every box-box manifold is bounded, and its anchors lie on the boxes.
 ///
 /// * **I1-abs** (the theorem): claim ≤ 1.05·D + 5 mm + ε_FP, on every call. Every emitted manifold
@@ -1168,8 +1185,8 @@ const FIXED_SEEDS: [u64; 2] = [0x531f_f99f_772d_936c, 0x65ff_5fe6_7f34_e65e];
 ///   fallback can keep witnesses on edges that do not touch (rev 1 §7's follow-up), so for edge
 ///   contacts the count and the worst offset are printed, not asserted.
 ///
-/// Population: the fixed cases first (G-L9b-1's two seeds, both poses, both A/B orders, every
-/// hint; then a pose on which an unclipped corner answer would overhang), then the parallel-edge
+/// Population: the fixed cases first (G-L9b-1's two seeds, both poses, and [`OVERHANG`], a pose on
+/// which an unclipped corner answer would overhang; both A/B orders, every hint), then the parallel-edge
 /// family (6 ratios × 8 yaws × 7 tilts × 2 worlds × 50) and `sound_case` over 4 096 generator
 /// seeds (both poses), each in both A/B orders, cold and under one random hint.
 #[test]
@@ -1182,6 +1199,7 @@ fn every_box_box_manifold_is_bounded() {
             fixed.push((format!("seed {s:#x} pose {k}"), case.pose(k)));
         }
     }
+    fixed.push((OVERHANG.name.to_owned(), OVERHANG.pose()));
     for (name, p) in &fixed {
         for q in [*p, p.swapped()] {
             for hint in core::iter::once(None).chain((0..15).map(Some)) {
