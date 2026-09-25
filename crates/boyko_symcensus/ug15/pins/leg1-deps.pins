@@ -24,6 +24,7 @@ boyko_macros	boyko-symcensus	dev	lib
 boyko_macros	proc-macro2	normal	lib
 boyko_macros	quote	normal	lib
 boyko_macros	syn	normal	lib
+boyko_memory	libc	normal	lib
 boyko_threadpool	boyko-diag	normal	lib
 boyko_threadpool	boyko-log	dev	lib
 boyko_threadpool	boyko-log	normal	lib
