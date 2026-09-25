@@ -1600,6 +1600,9 @@ fn run(args: &Args) -> ExitCode {
     let mut first_frozen_step: Option<usize> = None;
     // L10 C3b: the held set's witness (untimed): steps with a held row, and the most rows held.
     let (mut held_steps, mut held_rows_max) = (0u64, 0u32);
+    // L10 C3c: the tree seam's witness (untimed): steps with a withheld pair, the most pairs
+    // withheld, and the first step with every dynamic row held.
+    let (mut withheld_steps, mut withheld_max, mut first_all_held) = (0u64, 0u32, None::<usize>);
     // L9: the pair classes, per step. Read on every row whose EFFECTIVE config has reuse on, since
     // the void probe after the run reads them there whether or not the row named the flag, and on
     // every row that names `--contact-reuse` (the summary's `pair_classes`). A reuse-off row that
@@ -1649,9 +1652,15 @@ fn run(args: &Args) -> ExitCode {
         }
         rows.push(StepRow { wall_ns: wall.as_nanos() as u64, manifolds, pairs, top_y, awake });
         if let Some(sets) = rig.world.try_resource::<SleepSets>() {
-            let held = sets.stats().held_rows;
+            let stats = sets.stats();
+            let held = stats.held_rows;
             held_steps += u64::from(held > 0);
             held_rows_max = held_rows_max.max(held);
+            withheld_steps += u64::from(stats.withheld_pairs > 0);
+            withheld_max = withheld_max.max(stats.withheld_pairs);
+            if first_all_held.is_none() && held as usize == rig.boxes.len() {
+                first_all_held = Some(step + 1);
+            }
         }
         if read_classes {
             classes.push(rig.world.resource::<Manifolds>().pair_classes());
@@ -1907,6 +1916,12 @@ fn run(args: &Args) -> ExitCode {
             sets.step_mode(),
             sets.stats(),
             sets.rule_counts()
+        );
+        println!(
+            "tree seam (L10 C3c): {withheld_steps} steps with a withheld pair, at most \
+             {withheld_max} withheld, every dynamic row held from step {first_all_held:?}, \
+             sleepers at the end {}",
+            rig.world.resource::<BroadphaseTree>().sleeper_members()
         );
     }
     if let Some(why) = &first_void {

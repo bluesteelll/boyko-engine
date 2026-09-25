@@ -508,7 +508,7 @@ impl BoxAxisCache {
     /// and `p_logical` the step's LOGICAL pair count, which sizes the table (L10 design 04 A3,
     /// T3): the stream plus the pairs L10's tree seam withholds. The table must be sized for
     /// every key Off would insert, so its grow and clear decisions, and so its lookups, equal
-    /// Off's. They are equal until L10 C3c withholds pairs.
+    /// Off's. With nothing withheld the two counts are equal.
     ///
     /// The pre-read is required on a step whose rows changed: when rows shift up by one,
     /// pair `(a, b)` reads key `(a − 1, b − 1)`, which an earlier pair in `(min, max)`

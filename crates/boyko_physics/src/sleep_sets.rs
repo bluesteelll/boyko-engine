@@ -25,12 +25,18 @@
 //! * then, with a mode other than `Sets` and a live store, the **D-H flush**: every record is
 //!   restored, the rows are classified `RESTORED`/`SENSOR` only, and — with the mode `Off` — the
 //!   restored warm records are drained into the solver by the broadphase itself, never by the
-//!   solve (ruling, open question 2);
+//!   solve (ruling, open question 2); otherwise `SLEEPER` on the members of every record the
+//!   prologue kept (design 04 T1);
+//! * the kind arm: on a step with a sleeper the tree broadphase reads [`HeldHint`] (T1, T2) and
+//!   withholds the pairs of its sleeper set from the stream (T3; `broadphase_tree`, "The sleeper
+//!   set"); on any other step it reads no hint, and its sleeper set dissolves;
 //! * the epilogue, `Sets` only: **A2.1** D3 (an Identity step whose axis table clears restores
 //!   every island keeping a box-box manifold), **A2.2** the D2 scan (a held or candidate row's
 //!   stream pair to a row that does not rest restores or refuses its island; a sensor pair marks
 //!   `SENSOR_NBR`), **A2.5a** the restores (tombstone, `RESTORED`, the two restore sources, the
-//!   `order` filter), **A2.4** the move-ins (M1–M4, B5′), the `order` merge, and `HELD`.
+//!   `order` filter), **A2.4** the move-ins (M1–M4, B5′), the `order` merge, and `HELD`; then
+//!   **A2.3**, the tree's release of the restored rows (T4), which moves their withheld pairs
+//!   into the stream before the narrowphase.
 //!
 //! The narrowphase then skips a non-sensor pair with a `HELD` endpoint and computes a non-sensor
 //! pair with a `RESTORED` endpoint from the restore pair source through L9's own join
@@ -42,6 +48,7 @@ use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
 use boyko_macros::Resource;
 use boyko_sdf_math::{MAX_SDF_EDITS, SdfEdit};
 
+use crate::broadphase_tree::SleepHint;
 use crate::components::ColliderShape;
 use crate::held_store::{HeldIsland, HeldStore, HeldView, KeptManifold, KeptPair, NONE, RestoreSort};
 use crate::manifold::{BodyIndex, Manifold, SDF_SENTINEL};
@@ -74,7 +81,7 @@ pub(crate) struct RowCls {
     /// The row's flags: [`RESTING`](Self::RESTING), [`HELD`](Self::HELD),
     /// [`PRE_HELD`](Self::PRE_HELD), [`CAND`](Self::CAND), [`SENSOR`](Self::SENSOR),
     /// [`LATCHED`](Self::LATCHED), [`RESTORED`](Self::RESTORED),
-    /// [`SENSOR_NBR`](Self::SENSOR_NBR).
+    /// [`SENSOR_NBR`](Self::SENSOR_NBR), [`SLEEPER`](Self::SLEEPER).
     pub(crate) flags: u32,
 }
 
@@ -104,6 +111,11 @@ impl RowCls {
     /// The row is a held or candidate row with a sensor pair in the stream (design 08 D-F):
     /// its frames are filled even while it is held.
     pub(crate) const SENSOR_NBR: u32 = 1 << 7;
+    /// The row is a member of a held record the prologue did not mark for restore (design 04
+    /// T1, ruling W1 of rev 2.1): the tree broadphase may hold it in its sleeper set this step
+    /// ([`HeldHint`]). A record the prologue restores is out of the hint, so its pairs are found
+    /// by this step's queries, never withheld.
+    pub(crate) const SLEEPER: u32 = 1 << 8;
     /// No island: the value of [`island`](Self::island) for a row that has none.
     pub(crate) const NO_ISLAND: u32 = u32::MAX;
 
@@ -136,11 +148,49 @@ pub(crate) enum Route {
 }
 
 /// Whether `(a, b)` is a sensor pair from its two rows' flags: THE one sensor predicate of
-/// L10 (design 08 D-G). The route, the kept unit and its anchors, the D2 scan and the frame
-/// fill all call it, so a sensor pair is computed every step whatever its endpoints are.
+/// L10 (design 08 D-G). The route, the kept unit and its anchors, the D2 scan, the frame fill
+/// and the tree's hint all call it, so a sensor pair is computed every step whatever its
+/// endpoints are.
 #[inline]
 pub(crate) fn sensor_pair(fa: u32, fb: u32) -> bool {
     (fa | fb) & RowCls::SENSOR != 0
+}
+
+/// The tree broadphase's sleep hint on a `Sets` step with at least one sleeper (design 04 T1,
+/// T2; ruling W1 of rev 2.1), read from the classification the prologue wrote for this gather:
+/// * `frozen(r)` — [`RowCls::SLEEPER`]: the row's held record survives the prologue;
+/// * `anchor_ok(r)` — [`RowCls::RESTING`] and no sensor: only such a row may be a member of the
+///   tree's static or sleeper set, so every pair the tree withholds has two resting, non-sensor
+///   endpoints (Invariant V), and a sensor pair is computed every step.
+///
+/// A `Sets` step with no sleeper reads the tree's `NoHint` instead ([`StepPlan::sleepers`]): the
+/// sleeper set dissolves either way, so nothing is withheld and Invariant V has no pair to hold
+/// for, while `anchor_ok` would evict every static on a flush step, where nothing rests.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HeldHint<'a> {
+    /// The step's per-row classification, indexed by current row.
+    cls: &'a [RowCls],
+}
+
+impl<'a> HeldHint<'a> {
+    /// The hint over `cls`, the classification the prologue wrote for the current gather.
+    #[inline]
+    pub(crate) fn new(cls: &'a [RowCls]) -> Self {
+        Self { cls }
+    }
+}
+
+impl SleepHint for HeldHint<'_> {
+    #[inline]
+    fn frozen(&self, r: usize) -> bool {
+        self.cls[r].flags & RowCls::SLEEPER != 0
+    }
+
+    #[inline]
+    fn anchor_ok(&self, r: usize) -> bool {
+        let f = self.cls[r].flags;
+        f & RowCls::RESTING != 0 && !sensor_pair(f, 0)
+    }
 }
 
 /// How the narrowphase treats candidate pair `(a, b)` this step (design 08 D1′): one predicate
@@ -553,6 +603,9 @@ pub(crate) struct Epilogue<'a> {
 pub(crate) struct StepPlan {
     /// Whether the epilogue runs (the step mode is `Sets`).
     pub(crate) sets: bool,
+    /// Whether some row is a [`RowCls::SLEEPER`] this step: only then does the tree read
+    /// [`HeldHint`] (design 04 T1, T2), whose sleeper set is otherwise empty.
+    pub(crate) sleepers: bool,
     /// Whether the step classifies as Identity against L10's cursor.
     identity: bool,
     /// Whether rows may rest this step (no flush).
@@ -565,7 +618,14 @@ pub(crate) struct StepPlan {
 
 impl StepPlan {
     /// The plan of a step the sleep-skip does not run.
-    const OFF: Self = Self { sets: false, identity: false, resting_ok: false, scan: false, rows_step: false };
+    const OFF: Self = Self {
+        sets: false,
+        sleepers: false,
+        identity: false,
+        resting_ok: false,
+        scan: false,
+        rows_step: false,
+    };
 }
 
 /// `cand` flag: the island was refused this step.
@@ -942,7 +1002,69 @@ impl SleepSets {
             self.finish(held, p.rows);
             return StepPlan::OFF;
         }
-        StepPlan { sets: true, identity: c == 0, resting_ok, scan, rows_step }
+        // Design 04 T1 (ruling W1 of rev 2.1): the tree's hint is `PRE_HELD` less the records the
+        // prologue just marked for restore.
+        let sleepers = self.mark_sleepers(held.view());
+        StepPlan { sets: true, sleepers, identity: c == 0, resting_ok, scan, rows_step }
+    }
+
+    /// Design 04 T1 (ruling W1 of rev 2.1): [`RowCls::SLEEPER`] on every member of a live record
+    /// the prologue did not mark for restore — the rows the tree broadphase may hold in its
+    /// sleeper set this step. Such a member rests and is no sensor (D1, M1), so the hint's
+    /// `anchor_ok` holds for it too. Returns whether any row was marked.
+    fn mark_sleepers(&mut self, held: HeldView<'_>) -> bool {
+        let mut cls = self.row_cls.build_view();
+        let cls = cls.as_mut_slice();
+        let mut any = false;
+        for rec in held.records().iter().filter(|r| r.live() && r.flags & HeldIsland::RESTORE == 0) {
+            for &r in held.rows(rec.members_range()) {
+                let c = &mut cls[r as usize];
+                debug_assert!(
+                    c.flags & RowCls::RESTING != 0 && !sensor_pair(c.flags, 0),
+                    "invariant: a member of a surviving record rests and is no sensor (D1, M1)"
+                );
+                c.flags |= RowCls::SLEEPER;
+                any = true;
+            }
+        }
+        any
+    }
+
+    /// Records the tree seam's counts for the step (design 04 T3, T4): the pairs withheld after
+    /// the release, and the rows released.
+    #[inline]
+    pub(crate) fn note_tree(&mut self, withheld: usize, released: u32) {
+        self.stats.withheld_pairs = withheld as u32;
+        self.stats.released_rows = released;
+    }
+
+    /// Debug-only: Invariant V (design 04 D11; ruling W1 of rev 2.1) over the withheld pairs —
+    /// both endpoints rest and are no sensor, and one is a sleeper (`after_epilogue == false`,
+    /// right after the kind arm) or held (`true`, after the epilogue and the release).
+    ///
+    /// Also: no endpoint is a candidate. A withheld pair's endpoints are static-set members
+    /// (statics have no island, so never `CAND`) or sleepers (`SLEEPER` ⊂ `PRE_HELD`, and `CAND`
+    /// is written only on a row with no record). So the D2 scan's cross-pair listing (design 06
+    /// B3: a pair of a moving-in member and a held one) finds every such pair in the stream, and
+    /// never has to walk the withheld list.
+    pub(crate) fn debug_withheld(&self, withheld: &[(BodyIndex, BodyIndex)], after_epilogue: bool) {
+        if cfg!(debug_assertions) {
+            let cls = self.row_cls.as_read_slice();
+            let one = if after_epilogue { RowCls::HELD } else { RowCls::SLEEPER };
+            for &(a, b) in withheld {
+                let (fa, fb) = (cls[a.0 as usize].flags, cls[b.0 as usize].flags);
+                assert!(
+                    fa & fb & RowCls::RESTING != 0
+                        && !sensor_pair(fa, fb)
+                        && (fa | fb) & one != 0
+                        && (fa | fb) & RowCls::CAND == 0,
+                    "invariant V: withheld pair ({}, {}) has flags {fa:#x}, {fb:#x} ({})",
+                    a.0,
+                    b.0,
+                    if after_epilogue { "after the epilogue" } else { "after the kind arm" }
+                );
+            }
+        }
     }
 
     /// The broadphase epilogue on a `Sets` step (design 04 A2, 06 B3, 08 A3′): D3, the D2 scan,

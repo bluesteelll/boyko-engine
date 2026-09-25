@@ -19,21 +19,31 @@
 //! * the hysteresis table's lookup for every logical box pair (not its bytes);
 //! * the warm seed the next step would find for every point of every logical manifold
 //!   (`ColoredSoftStepSolver::for_each_warm_seed`: stream records ⊎ kept records);
-//! * the pair tags (`Manifolds::for_each_pair_tag`): a collided slot byte-equal to `Off`'s; a
-//!   held slot must carry the held-skip tag, and its kept copy must equal `Off`'s tag on every
-//!   bit but `HIT` and `SEPHIT` when `Off`'s tag carries kept state, and be absent otherwise
+//! * the pair tags (`Manifolds::for_each_pair_tag`, over the LOGICAL pairs): a collided slot
+//!   byte-equal to `Off`'s; a held slot — or a pair the tree withheld, which has no slot (L10
+//!   C3c) — must carry the held-skip tag, and its kept copy must equal `Off`'s tag on every bit
+//!   but `HIT` and `SEPHIT` when `Off`'s tag carries kept state, and be absent otherwise
 //!   (design 08 §7).
+//!
+//! On top of the compare, every tree step of either world is checked against the pair-set
+//! oracle (L10 C3c): a probe system between the broadphase and the narrowphase compares the
+//! logical pairs (the stream ⊎ the pairs the tree withholds) with `all_pairs_into` over the
+//! snapshot both read.
 //!
 //! # Scenes
 //!
 //! * the lane's sleeping-on fixture scenes (`docs/measurements/2026-09-23-l10-sleeping/`): the
 //!   rest pile (`R-S`, `R-on`: the default configuration) and the Jolt pile at a 0.5 gap (`J-Son`
 //!   / `J-A-on`: cfg-A; `J-D-on`: the default configuration), at W ∈ {1, 8};
-//! * S1, the rest pile, and S2, the Jolt pile, × {Tree (`NoHint` until C3c), Grid with the
-//!   parallel emit} × the parallel narrowphase × `contact_reuse` ∈ {on, off} × W ∈ {1, 8}; S1 also
-//!   on AllPairs, and at W ∈ {2, 4, 16} in release;
+//! * S1, the rest pile, and S2, the Jolt pile, × {Tree (its sleeper set withholds the held
+//!   pairs since L10 C3c), Grid with the parallel emit} × the parallel narrowphase ×
+//!   `contact_reuse` ∈ {on, off} × W ∈ {1, 8}; S1 also on AllPairs, and at W ∈ {2, 4, 16} in
+//!   release. On a Tree cell the `Sets` world must withhold pairs (a void otherwise), and at
+//!   W = 8 a step whose stream is empty must dispatch no narrowphase chunk though its logical
+//!   pairs would (design 06 N13, "Tree all-held dispatch = 0");
 //! * S3, the adversarial arms (each its own test, named for what it drives);
-//! * S4, a pile on an SDF floor with a mid-run field edit and a kernel toggle;
+//! * S4, a pile on an SDF floor with a mid-run field edit and a kernel toggle, on the default
+//!   configuration and on the Tree with its brute path off (the SDF pipeline's tree seam);
 //! * S5, a coupled soft body landing on a held pile (Grid forced).
 //!
 //! # Anti-vacuity
@@ -56,9 +66,10 @@ use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::schedule::{Schedule, ScheduleBuilder};
+use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_ecs::ecs::core::time::FixedTime;
 use boyko_ecs::ecs::identifiers::primitives::ArchetypeId;
-use boyko_macros::Component;
+use boyko_macros::{Component, Resource};
 use boyko_sdf_math::{SdfEdit, sdf_op};
 use boyko_threadpool::ThreadPoolBuilder;
 
@@ -68,7 +79,7 @@ use boyko_physics::components::{
 use boyko_physics::manifold::{BodyIndex, Manifold};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::{add_physics_sdf, add_physics_soft, add_physics_systems};
-use boyko_physics::broadphase_tree::BroadphaseTree;
+use boyko_physics::broadphase_tree::{BroadphaseTree, TreeDiag, all_pairs_into};
 use boyko_physics::resources::{
     BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
     PairTagProbe, PhysicsConfig, SdfNarrowphaseKernel, SleepSkip, SolverScratch,
@@ -416,6 +427,46 @@ impl Variant {
     }
 }
 
+/// The tree's pair-set oracle (L10 C3c, module docs): runs between the broadphase and the
+/// narrowphase, on the snapshot both read. A step of another kind is not compared: it withholds
+/// nothing, and the lockstep compare with `Off` covers its pair set.
+#[derive(Resource)]
+struct PairOracle {
+    /// All-pairs' set of the step, rebuilt in place.
+    oracle: ContactPairs,
+    /// Tree steps compared.
+    compared: u64,
+    /// Tree steps compared while the sleeper set held a row.
+    with_sleepers: u64,
+    /// Tree steps whose logical pairs differed from all-pairs'.
+    mismatches: u64,
+}
+
+impl Default for PairOracle {
+    fn default() -> Self {
+        Self { oracle: ContactPairs::with_capacity(0), compared: 0, with_sleepers: 0, mismatches: 0 }
+    }
+}
+
+// `clippy::needless_pass_by_value`: `Res` / `ResMut` are by-value `SystemParam`s.
+#[allow(clippy::needless_pass_by_value)]
+fn oracle_pairs(
+    scratch: Res<SolverScratch>,
+    cfg: Res<PhysicsConfig>,
+    tree: Res<BroadphaseTree>,
+    pairs: Res<ContactPairs>,
+    mut probe: ResMut<PairOracle>,
+) {
+    if cfg.broadphase != BroadphaseKind::Tree {
+        return;
+    }
+    let probe = &mut *probe;
+    all_pairs_into(scratch.bodies(), &mut probe.oracle);
+    probe.compared += 1;
+    probe.with_sleepers += u64::from(tree.sleeper_members() > 0);
+    probe.mismatches += u64::from(probe.oracle.pairs() != pairs.pairs());
+}
+
 /// One world of a lockstep pair.
 struct Rig {
     world: EcsMaster,
@@ -433,17 +484,25 @@ impl Rig {
         let arch = Archetypes::create(&mut world);
         let bodies = specs.iter().map(|s| spawn(&mut world, arch, s)).collect();
         let mut builder = ScheduleBuilder::new(ThreadPoolBuilder::new().num_threads(variant.workers).build());
-        match pipeline {
-            Pipeline::Default => {
-                add_physics_systems::<DefaultRigidSolver>(&mut builder, &mut world);
-            }
+        let keys = match pipeline {
+            Pipeline::Default => add_physics_systems::<DefaultRigidSolver>(&mut builder, &mut world),
             Pipeline::Sdf => {
-                add_physics_sdf::<DefaultRigidSolver>(&mut builder, &mut world);
+                let keys = add_physics_sdf::<DefaultRigidSolver>(&mut builder, &mut world);
                 *world.resource_mut::<SdfField>() = sdf_floor(0.0);
+                keys
             }
-            Pipeline::SoftCoupled => {
-                add_physics_soft::<DefaultRigidSolver>(&mut builder, &mut world, true);
-            }
+            Pipeline::SoftCoupled => add_physics_soft::<DefaultRigidSolver>(&mut builder, &mut world, true),
+        };
+        world.insert_resource(PairOracle::default());
+        {
+            // `PhysicsStageKeys` carries each stage's `SystemKey` inner index; the type is not
+            // nameable here but its field is public (the tree scenes' probe does the same).
+            let probe = builder.add_system(oracle_pairs);
+            let mut after = probe.key();
+            after.0 = keys.broadphase;
+            let mut before = probe.key();
+            before.0 = keys.narrowphase;
+            probe.after(after).before(before);
         }
         world.insert_resource(FixedTime::new(Duration::from_secs_f32(DT)));
         let schedule = builder.build(&mut world);
@@ -687,12 +746,29 @@ struct Evidence {
     held_rec: Vec<usize>,
     /// Per step: held pairs whose kept tag carries a separating axis (`SEP`).
     held_sep: Vec<usize>,
-    /// Per step: stream slots held this step whose occupant one step earlier was a computed box
-    /// pair on a pre-read (non-Identity) frame — which commits its axis, whatever its hint — with
-    /// an axis other than the held pair's. A held skip that left the slot's commit unwritten
-    /// would re-key the held pair with that stale axis (design 08 N27). Stream slot `k` is
-    /// logical position `k` until L10 C3c withholds pairs.
+    /// Per step: logical positions held this step whose occupant one step earlier was a
+    /// computed box pair on a pre-read (non-Identity) frame — which commits its axis, whatever
+    /// its hint — with an axis other than the held pair's. A held skip that left the slot's
+    /// commit unwritten would re-key the held pair with that stale axis (design 08 N27). The
+    /// position is the stream slot on every kind but the Tree, which withholds held pairs (L10
+    /// C3c); arm 10 runs off the Tree.
     stale_slots: Vec<usize>,
+    /// Per step: the `Sets` world's logical pairs, and of those the ones the tree withheld (L10
+    /// C3c, design 04 T3), from its pair-tag probes.
+    logical: Vec<usize>,
+    /// See [`logical`](Self::logical).
+    withheld: Vec<usize>,
+    /// Per step: the `Sets` world's narrowphase dispatches (`0` or `1`).
+    np_dispatches: Vec<u64>,
+    /// Per step: the `Sets` world's tree counters and its sleeper-set size.
+    tree: Vec<TreeDiag>,
+    /// See [`tree`](Self::tree).
+    sleepers: Vec<u64>,
+    /// The `Sets` world's tree steps the pair-set oracle compared, and of those the ones with a
+    /// live sleeper set ([`PairOracle`]).
+    oracle_compared: u64,
+    /// See [`oracle_compared`](Self::oracle_compared).
+    oracle_with_sleepers: u64,
     /// The per-rule counts at the end.
     rules: SleepRuleCounts,
 }
@@ -730,9 +806,23 @@ fn lockstep(
         script(step, &mut off);
         script(step, &mut sets);
         let pre_reads = sets.world.resource::<Manifolds>().box_axis_cache.prefetched_frames();
+        let dispatches = sets.world.resource::<Manifolds>().narrowphase_dispatches();
         off.step();
         sets.step();
         let pre_read = sets.world.resource::<Manifolds>().box_axis_cache.prefetched_frames() > pre_reads;
+        ev.np_dispatches.push(sets.world.resource::<Manifolds>().narrowphase_dispatches() - dispatches);
+        let tree = sets.world.resource::<BroadphaseTree>();
+        ev.tree.push(tree.diag());
+        ev.sleepers.push(tree.sleeper_members());
+        for (name, rig) in [("Off", &off), ("Sets", &sets)] {
+            let oracle = rig.world.resource::<PairOracle>();
+            assert_eq!(
+                oracle.mismatches, 0,
+                "{label} ({name}) step {step}: the tree's logical pairs differ from all-pairs'"
+            );
+        }
+        let oracle = sets.world.resource::<PairOracle>();
+        (ev.oracle_compared, ev.oracle_with_sleepers) = (oracle.compared, oracle.with_sleepers);
         let (o, s) = (observe(&mut off.world), observe(&mut sets.world));
         if let Some(why) = diff(&o, &s) {
             let st = sets.world.resource::<SleepSets>();
@@ -757,6 +847,8 @@ fn lockstep(
             _ => 0,
         });
         prev = Some((o.axes.clone(), s.tags.iter().map(|t| t.held).collect(), pre_read));
+        ev.logical.push(s.tags.len());
+        ev.withheld.push(s.tags.iter().filter(|t| t.withheld).count());
         ev.held_rec.push(held_with(TAG_REC));
         ev.held_sep.push(held_with(TAG_SEP));
         let st = sets.world.resource::<SleepSets>();
@@ -799,6 +891,48 @@ fn assert_all_held_when_frozen(label: &str, ev: &Evidence) {
         frozen.len()
     );
     println!("{label}: {} all-frozen steps, all held on {held}; rules {:?}", frozen.len(), ev.rules);
+}
+
+/// L10 C3c's anti-vacuity on a Tree cell (design 04 T3, 06 N13): the `Sets` world withheld pairs
+/// — its sleeper set was live — and the pair-set oracle compared its tree steps, those with a
+/// live sleeper set among them; and at W ≥ 2 every step whose stream was empty dispatched no
+/// narrowphase chunk, and at least one such step held two chunks' worth of logical pairs (so a
+/// chunk count read from the logical view would have dispatched there).
+fn assert_tree_withholds(label: &str, ev: &Evidence, workers: usize) {
+    let steps = (0..ev.steps).filter(|&k| ev.withheld[k] > 0).count();
+    let most = ev.withheld.iter().copied().max().unwrap_or(0);
+    assert!(steps > 0, "{label}: void: the tree withheld no pair");
+    assert!(
+        ev.oracle_compared == ev.steps as u64 && ev.oracle_with_sleepers > 0,
+        "{label}: void: the pair-set oracle compared {} of {} steps, {} with a live sleeper set",
+        ev.oracle_compared,
+        ev.steps,
+        ev.oracle_with_sleepers
+    );
+    let mut all_held = 0usize;
+    if workers >= 2 {
+        let two_chunks = 2 * boyko_physics::narrowphase::NP_MIN_PAIRS_PER_CHUNK;
+        for k in 0..ev.steps {
+            if ev.withheld[k] == ev.logical[k] {
+                assert_eq!(
+                    ev.np_dispatches[k], 0,
+                    "{label} step {k}: an empty stream dispatched the narrowphase ({} logical pairs)",
+                    ev.logical[k]
+                );
+                all_held += usize::from(ev.logical[k] >= two_chunks);
+            }
+        }
+        assert!(
+            all_held > 0,
+            "{label}: void: no step had an empty stream beside {two_chunks} logical pairs"
+        );
+    }
+    let last = ev.tree.last().copied().unwrap_or_default();
+    println!(
+        "{label}: withheld pairs on {steps} steps (at most {most}); empty-stream W≥2 steps {all_held}; \
+         sleepers at the end {}; tree {last:?}",
+        ev.sleepers.last().copied().unwrap_or(0)
+    );
 }
 
 // ── The fixture scenes ─────────────────────────────────────────────────────────────────────
@@ -863,6 +997,9 @@ fn s1_rest_pile_matrix() {
                 let variant = Variant::cell(kind, reuse, w);
                 let ev = lockstep(&label, Pipeline::Default, variant, &rest_pile(), matrix_steps(), &mut quiet);
                 assert_all_held_when_frozen(&label, &ev);
+                if kind == BroadphaseKind::Tree {
+                    assert_tree_withholds(&label, &ev, w);
+                }
             }
         }
     }
@@ -878,12 +1015,15 @@ fn s1_rest_pile_more_workers() {
             let variant = Variant::cell(kind, true, w);
             let ev = lockstep(&label, Pipeline::Default, variant, &rest_pile(), matrix_steps(), &mut quiet);
             assert_all_held_when_frozen(&label, &ev);
+            if kind == BroadphaseKind::Tree {
+                assert_tree_withholds(&label, &ev, w);
+            }
         }
     }
 }
 
-/// S1 on the Tree with `brute_max_rows = 0`: every step a tree-path step (the Tree runs `NoHint`
-/// until C3c, so its pair set is its own and the narrowphase skips the held pairs).
+/// S1 on the Tree with `brute_max_rows = 0`: every step a tree-path step, the design's second
+/// Tree arm beside the default one (L10 C3c: its sleeper set withholds the held pairs).
 #[test]
 fn s1_rest_pile_tree_path_every_step() {
     for w in [1, 8] {
@@ -891,6 +1031,7 @@ fn s1_rest_pile_tree_path_every_step() {
         let variant = Variant { brute_max_rows: Some(0), ..Variant::cell(BroadphaseKind::Tree, true, w) };
         let ev = lockstep(&label, Pipeline::Default, variant, &rest_pile(), matrix_steps(), &mut quiet);
         assert_all_held_when_frozen(&label, &ev);
+        assert_tree_withholds(&label, &ev, w);
     }
 }
 
@@ -905,6 +1046,9 @@ fn s2_jolt_pile_matrix() {
                 let variant = Variant::cell(kind, reuse, w);
                 let ev = lockstep(&label, Pipeline::Default, variant, &jolt_pile(), steps, &mut quiet);
                 assert_all_held_when_frozen(&label, &ev);
+                if kind == BroadphaseKind::Tree {
+                    assert_tree_withholds(&label, &ev, w);
+                }
             }
         }
     }
@@ -950,12 +1094,14 @@ fn assert_held_before_events(label: &str, ev: &Evidence) {
 
 /// The variants every arm runs on: the Tree with the brute path off at W = 1, the Grid with its
 /// parallel emit at W = 8, AllPairs at W = 1 — `contact_reuse` on — and the Tree again with
-/// `contact_reuse` off.
+/// `contact_reuse` off. The Grid's tree also has its brute path off: an arm that switches the
+/// Grid to the Tree (the toggles arm, T6) then runs the tree path, whose sleeper set the switch
+/// back must dissolve; no other arm runs the tree there.
 fn arm_variants() -> [Variant; 4] {
     let tree = Variant { brute_max_rows: Some(0), ..Variant::cell(BroadphaseKind::Tree, true, 1) };
     [
         tree,
-        Variant::cell(BroadphaseKind::Grid, true, 8),
+        Variant { brute_max_rows: Some(0), ..Variant::cell(BroadphaseKind::Grid, true, 8) },
         Variant::cell(BroadphaseKind::AllPairs, true, 1),
         Variant { reuse: Some(false), ..tree },
     ]
@@ -1078,7 +1224,15 @@ fn s3_wake_all_flushes() {
 }
 
 /// The mode transitions (design 04 D9, 08 D-H): sleeping on → off → on, then the `Sets` world's
-/// mode `Sets → Off → Sets`, each while islands are held (M19, N30, W4-M).
+/// mode `Sets → Off → Sets`, each while islands are held (M19, N30, W4-M); then a kind switch
+/// away from the tree and back (T6, M-T6).
+///
+/// On the Tree the sleeping toggle is also the tree design's toggle-off script (its ruling W2, as
+/// L10's T1 recasts it): the step that turns sleeping off dissolves the sleeper set — the hint is
+/// off without the sleep-skip — and while sleeping stays off no row is a candidate, no set is
+/// rebuilt and no member is evicted (the static set keeps its floor). A hint read regardless of
+/// the step's mode would see the stale classification and evict the floor. The kind switch
+/// dissolves the sleeper set and empties the withheld list on the first step of the other kind.
 #[test]
 fn s3_sleeping_and_mode_toggles() {
     arm(
@@ -1112,6 +1266,80 @@ fn s3_sleeping_and_mode_toggles() {
         &|label, ev| {
             assert_held_before_events(label, ev);
             assert!(ev.rules.dh_mode >= 2, "{label}: void: {} D-H flushes", ev.rules.dh_mode);
+            let switch_away = if label.contains("[Tree") {
+                // The toggle-off script: sleeping off on steps HELD_BY .. HELD_BY + 3.
+                assert!(ev.sleepers[HELD_BY - 1] > 0, "{label}: void: no sleeper before the toggle");
+                assert!(
+                    ev.sleepers[HELD_BY] == 0 && ev.withheld[HELD_BY] == 0,
+                    "{label}: the toggle-off step keeps {} sleepers, {} withheld pairs",
+                    ev.sleepers[HELD_BY],
+                    ev.withheld[HELD_BY]
+                );
+                let (a, b) = (ev.tree[HELD_BY], ev.tree[HELD_BY + 2]);
+                assert_eq!(
+                    (b.hint_candidates - a.hint_candidates, b.sleeper_rebuilds - a.sleeper_rebuilds, b.evictions - a.evictions),
+                    (0, 0, 0),
+                    "{label}: with sleeping off: Δcandidates, Δsleeper rebuilds, Δevictions"
+                );
+                assert!(ev.sleepers[HELD_BY + 1..HELD_BY + 3].iter().all(|&z| z == 0), "{label}: a sleeper while sleeping is off");
+                // The static set keeps its members across the toggle (|S| = members − |Z|).
+                let statics = |k: usize| ev.tree[k].members - ev.sleepers[k];
+                assert!(
+                    (HELD_BY..HELD_BY + 3).all(|k| statics(k) == statics(HELD_BY - 1)),
+                    "{label}: the static set changed across the toggle: {:?}",
+                    (HELD_BY - 1..HELD_BY + 3).map(statics).collect::<Vec<_>>()
+                );
+                Some(HELD_BY + 150)
+            } else if label.contains("[Grid") {
+                Some(HELD_BY + 160)
+            } else {
+                None
+            };
+            // T6: the first step of the other kind dissolves the sleeper set the tree held.
+            if let Some(k) = switch_away {
+                assert!(ev.sleepers[k - 1] > 0, "{label}: void: no sleeper before the kind switch at step {k}");
+                assert!(
+                    ev.sleepers[k] == 0 && ev.withheld[k] == 0,
+                    "{label}: the kind switch at step {k} keeps {} sleepers, {} withheld pairs",
+                    ev.sleepers[k],
+                    ev.withheld[k]
+                );
+            }
+        },
+    );
+}
+
+/// Design 04 T2 (M15; ruling W1 of rev 2.1's Invariant V): a static box standing beside a held
+/// ball, the two bounding spheres overlapping but the shapes 0.1 apart — a sphere–box pair with
+/// no kept state, so the box anchors nothing and D1a cannot see it — is turned 45° in place:
+/// position and radius unchanged, so the tree's bit compare keeps it, and only T2's `RESTING`
+/// term takes it out of the static set. Its pair with the ball then returns to the stream, where
+/// the D2 scan restores the ball (its partner does not rest), and the turned corner now reaches
+/// the ball, as under `Off`. With the term dropped, the pair stays withheld and the ball never
+/// learns of the corner.
+#[test]
+fn s3_static_turned_in_place_beside_a_held_ball() {
+    let mut specs = towers();
+    specs.push(Spec::ball(Vec3::new(12.0, 0.3, 0.0), 0.3));
+    let slab = specs.len();
+    // Half-extent 0.4 at x = 12.8: its face at 12.4, 0.1 clear of the ball (12.3); turned 45°
+    // about +Y its edge reaches 12.8 − 0.4·√2 ≈ 12.234, inside the ball.
+    specs.push(Spec::wall(Vec3::new(12.8, 0.4, 0.0), Vec3::new(0.4, 0.4, 0.4)));
+    arm(
+        "S3 static turned in place",
+        &specs,
+        ARM_STEPS,
+        &mut |step, rig: &mut Rig| {
+            if step == HELD_BY {
+                rig.body_mut(slab).rotation = yaw(std::f32::consts::FRAC_PI_4);
+            }
+        },
+        &|label, ev| {
+            assert_held_before_events(label, ev);
+            assert!(ev.rules.d2_scan >= 1, "{label}: void: the turned slab restored nothing");
+            if label.contains("[Tree") {
+                assert!(ev.withheld[HELD_BY - 1] > 0, "{label}: void: nothing withheld before the turn");
+            }
         },
     );
 }
@@ -1577,12 +1805,16 @@ fn s3_despawn_shifts_the_stream_under_held_slots() {
 
 /// S4 (design 04 D10; M18): a tower on an SDF floor, held; the field replaced wholesale with the
 /// floor 1 mm lower (the edit bits change; `gen` is no witness), which flushes; later the box
-/// kernel toggled, which flushes again.
+/// kernel toggled, which flushes again. On the default configuration and on the Tree with its
+/// brute path off, where the SDF pipeline's broadphase keeps the sleeper set (L10 C3c): the
+/// tower's two box–box pairs are withheld while it is held, and each flush dissolves the set.
 #[test]
 fn s4_sdf_pile_field_edit_and_kernel_toggle() {
     let specs = tower(3, 0.0, 0.0, 0.5);
-    for w in [1, 8] {
-        let label = format!("S4 SDF W{w}");
+    let tree = |w| Variant { brute_max_rows: Some(0), ..Variant::cell(BroadphaseKind::Tree, true, w) };
+    for (kind, variant) in [1, 8].into_iter().flat_map(|w| [("default", Variant::default_cfg(w)), ("Tree", tree(w))]) {
+        let w = variant.workers;
+        let label = format!("S4 SDF [{kind}] W{w}");
         let mut script = |step: usize, rig: &mut Rig| {
             if step == HELD_BY {
                 *rig.world.resource_mut::<SdfField>() = sdf_floor(-1.0e-3);
@@ -1595,7 +1827,7 @@ fn s4_sdf_pile_field_edit_and_kernel_toggle() {
                 };
             }
         };
-        let ev = lockstep(&label, Pipeline::Sdf, Variant::default_cfg(w), &specs, ARM_STEPS, &mut script);
+        let ev = lockstep(&label, Pipeline::Sdf, variant, &specs, ARM_STEPS, &mut script);
         println!("{label}: rules {:?}", ev.rules);
         if std::env::var_os("L10_ARM_TRACE").is_some() {
             for (k, st) in ev.stats.iter().enumerate().step_by(10) {
@@ -1604,6 +1836,23 @@ fn s4_sdf_pile_field_edit_and_kernel_toggle() {
         }
         assert!(ev.stats[HELD_BY - 1].held_rows == 3, "{label}: void: the tower was not held before the edit");
         assert!(ev.rules.d5_epoch >= 2, "{label}: void: {} epoch flushes", ev.rules.d5_epoch);
+        if kind == "Tree" {
+            // `workers = 1`: the empty-stream dispatch check needs two chunks' worth of logical
+            // pairs, which a three-box tower never has.
+            assert_tree_withholds(&label, &ev, 1);
+            assert!(
+                ev.sleepers[HELD_BY - 1] == 3 && ev.withheld[HELD_BY - 1] > 0,
+                "{label}: void: before the edit the sleeper set holds {} rows, {} pairs withheld",
+                ev.sleepers[HELD_BY - 1],
+                ev.withheld[HELD_BY - 1]
+            );
+            assert!(
+                ev.sleepers[HELD_BY] == 0 && ev.withheld[HELD_BY] == 0,
+                "{label}: the edit's flush keeps {} sleepers, {} withheld pairs",
+                ev.sleepers[HELD_BY],
+                ev.withheld[HELD_BY]
+            );
+        }
     }
 }
 

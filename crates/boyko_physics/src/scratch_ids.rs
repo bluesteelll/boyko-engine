@@ -752,11 +752,13 @@ pub(crate) fn register_row_identity_layouts() {
 //
 // `BroadphaseTree`'s eleven ids: the nine columns of commit C1 — two packed trees, the radix
 // ping-pong pair, the item list, two record buffers, the static pair list and the scratch
-// stream — and two reserved for commit C5, the sleeper tree and its pair list. The verify
-// sweeps a record buffer beside `BodyState` (slot 63) and, on a `Rows` step, `prev_row` (slot
-// 37); the assembly writes `ContactPairs` (slot 16, or 15 on the steps its two lists have
-// swapped roles, L9 C2) beside the stream and the records; commit C5's hint reads
-// `TOUCHED_AWAKE` (in the solver cohort, slots 38..=63). The cohort sits directly below the
+// stream — and the two of commit C5 (built as L10 C3c), the sleeper tree and its pair list,
+// which `ContactPairs` owns as its `withheld` list (L10 design 04 T3). The verify sweeps a
+// record buffer beside `BodyState` (slot 63) and, on a `Rows` step, `prev_row` (slot 37); the
+// assembly writes `ContactPairs` (slot 16, or 15 on the steps its two lists have swapped roles,
+// L9 C2) beside the stream and the records. The design's C5 hint read `TOUCHED_AWAKE` (in the
+// solver cohort, slots 38..=63); L10's T1 made the hint read `SleepSets::row_cls` instead, whose
+// own placement clears this cohort (`ROW_CLS_FAMILIES`). The cohort sits directly below the
 // row-identity cohort, ids 416..=406, slots 32..=22, so every one of those co-swept families is
 // clear of it — each is asserted below. (Every id here moved up by 18 when L11 C2 narrowed the
 // solver cohort from 44 ids to 26, and down by one when L9 C2 added the stage-2 row list; the
@@ -769,7 +771,7 @@ pub(crate) const TREE_COLUMN_COUNT: usize = 11;
 pub(crate) const TREE_ACTIVE: usize = 0;
 /// Tree column `k`: the static tree's nodes.
 pub(crate) const TREE_STATICS: usize = 1;
-/// Tree column `k`: the sleeper tree's nodes (commit C5; the id is reserved now).
+/// Tree column `k`: the sleeper tree's nodes (commit C5, built as L10 C3c).
 pub(crate) const TREE_SLEEPERS: usize = 2;
 /// Tree column `k`: radix ping-pong A, the diverted entries, the admission's additions.
 pub(crate) const TREE_SORT_A: usize = 3;
@@ -783,7 +785,8 @@ pub(crate) const TREE_REC0: usize = 6;
 pub(crate) const TREE_REC1: usize = 7;
 /// Tree column `k`: the static–static pair list.
 pub(crate) const TREE_SS: usize = 8;
-/// Tree column `k`: the sleeper pair list (commit C5; the id is reserved now).
+/// Tree column `k`: the sleeper pair list `SL`, owned by `ContactPairs` as its `withheld` list
+/// (L10 C3c, design 04 T3).
 pub(crate) const TREE_SL: usize = 9;
 /// Tree column `k`: the scratch stream (inverse map, segments, buckets).
 pub(crate) const TREE_AUX: usize = 10;
@@ -828,7 +831,9 @@ const _: () = assert!(
     "the tree's verify reads prev_row beside its records on a Rows step, and one of the cohort's slots is ROW_PREV's"
 );
 
-// The hint (C5): the awake mask beside the records.
+// The awake mask beside the records: the design's C5 hint read it. L10's T1 replaced that hint
+// (it reads `row_cls`, which `ROW_CLS_FAMILIES` clears of this cohort); the clearance stays
+// asserted.
 const _: () = assert!(
     !shares_stagger_slot(SCRATCH_ID_TOUCHED_AWAKE, SCRATCH_ID_TREE_TOP, SCRATCH_ID_TREE_BOTTOM),
     "the tree's verify reads the awake mask beside its records on a hint step, and one of the cohort's slots is TOUCHED_AWAKE's"
@@ -843,17 +848,19 @@ pub(crate) fn tree_column_id(k: usize) -> ComponentId {
 }
 
 /// Registers the element layout of every [`BroadphaseTree`] column, idempotently: three
-/// `Node8` columns, four `u64`, one `Item`, two `RowRec` and one `u32`. The two C5 ids are
-/// registered with the type they will hold, so the cohort's shape is fixed now.
+/// `Node8` columns, three `u64`, one `(BodyIndex, BodyIndex)` (the sleeper pair list, which
+/// `ContactPairs` holds as its withheld list; L10 C3c, design 04 T3), one `Item`, two `RowRec`
+/// and one `u32`.
 ///
 /// [`BroadphaseTree`]: crate::broadphase_tree::BroadphaseTree
 pub(crate) fn register_tree_column_layouts() {
     for k in [TREE_ACTIVE, TREE_STATICS, TREE_SLEEPERS] {
         register_layout::<Node8>(tree_column_id(k).get());
     }
-    for k in [TREE_SORT_A, TREE_SORT_B, TREE_SS, TREE_SL] {
+    for k in [TREE_SORT_A, TREE_SORT_B, TREE_SS] {
         register_layout::<u64>(tree_column_id(k).get());
     }
+    register_layout::<(BodyIndex, BodyIndex)>(tree_column_id(TREE_SL).get());
     register_layout::<Item>(tree_column_id(TREE_ITEMS).get());
     register_layout::<RowRec>(tree_column_id(TREE_REC0).get());
     register_layout::<RowRec>(tree_column_id(TREE_REC1).get());

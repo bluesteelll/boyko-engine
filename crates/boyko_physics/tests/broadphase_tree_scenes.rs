@@ -17,8 +17,10 @@
 //! | S16 (the 16-box tower) | the oracle and the pose bytes |
 //! | churn (`row_identity_churn`'s scene): 6 arms, settle [`CHURN_SETTLE`], then [`CHURN_STEPS`] churn steps | every arm: Δ`static_rebuilds` == 0 and Δ`evictions` == 0; non-stable arms Δ`translations` == 40, stable 0; `members == 1` on every step |
 //!
-//! The sleeping-on arms (J-Son, R-S, the churn arms with sleeping on) belong to commit C5 of
-//! the design, with the sleeper set.
+//! | J-Son, R-S (sleeping on, L10's `Sets`: the sleeper set, commit C5 built as L10 C3c) | the oracle over the LOGICAL pairs (the stream ⊎ the withheld pairs) and the pose bytes of a sleeping-on AllPairs twin on every step; `static_rebuilds == 1` from step 2; translations, wide and excluded rows and locator resets 0; A — the first step with every dynamic row held — exists and is ≤ 300 (a void is red; debug's 10-layer rest pile ≤ 600, [`R_S_ROW`]); after A, Δ`sleeper_rebuilds` ≤ 1 and Δ`evictions` == 0; the total `sleeper_rebuilds` pinned; at the end every box is a sleeper and every pair withheld. Then the toggle-off script: sleeping off with no row change dissolves the sleeper set on that step, and on the steps after it Δ`hint_candidates`, Δ`sleeper_rebuilds` and Δ`evictions` are 0 and the floor stays in S. |
+//!
+//! The sleeping-on churn arms of the design's G2 table are not built here: L10's plan for C3c
+//! names the J-Son and R-S rows (its T7) only.
 //!
 //! # Scene size per profile
 //!
@@ -246,9 +248,14 @@ fn serial_pool() -> Arc<ThreadPool> {
     ThreadPoolBuilder::new().num_threads(1).build()
 }
 
-/// Wires the colored schedule with the probe, `kind` as the broadphase; the Tree is forced
-/// onto its tree path.
+/// Wires the colored schedule with the probe, `kind` as the broadphase, sleeping off; the Tree
+/// is forced onto its tree path.
 fn wire(world: &mut EcsMaster, kind: BroadphaseKind) -> Schedule {
+    wire_sleeping(world, kind, false)
+}
+
+/// [`wire`] with sleeping `sleeping` (its default sleep-skip mode, `Sets`).
+fn wire_sleeping(world: &mut EcsMaster, kind: BroadphaseKind, sleeping: bool) -> Schedule {
     let mut builder = ScheduleBuilder::new(serial_pool());
     let keys = add_physics_colored_solve(&mut builder, world);
     world.insert_resource(Probe::default());
@@ -267,7 +274,7 @@ fn wire(world: &mut EcsMaster, kind: BroadphaseKind) -> Schedule {
         let cfg = world.resource_mut::<PhysicsConfig>();
         cfg.gravity = Vec3::new(0.0, -9.81, 0.0);
         cfg.dt = DT;
-        cfg.sleeping = false;
+        cfg.sleeping = sleeping;
         cfg.broadphase = kind;
     }
     world.resource_mut::<BroadphaseTree>().set_brute_max_rows(0);
@@ -275,9 +282,13 @@ fn wire(world: &mut EcsMaster, kind: BroadphaseKind) -> Schedule {
 }
 
 fn rig(scene: SceneKind, kind: BroadphaseKind) -> Rig {
+    rig_sleeping(scene, kind, false)
+}
+
+fn rig_sleeping(scene: SceneKind, kind: BroadphaseKind, sleeping: bool) -> Rig {
     let mut world = EcsMaster::new();
     let boxes = spawn_scene(&mut world, scene);
-    let physics = wire(&mut world, kind);
+    let physics = wire_sleeping(&mut world, kind, sleeping);
     Rig { world, physics, boxes }
 }
 
@@ -435,6 +446,126 @@ fn g2_jolt_pyramid_matches_all_pairs_with_one_static_rebuild() {
 #[test]
 fn g2_rest_pyramid_matches_all_pairs_with_one_static_rebuild() {
     assert_pyramid_bounds(SceneKind::Rest, PYRAMID_STEPS);
+}
+
+/// One sleeping-on row of G2 (L10 T7): its step count, its bound on A — the first step with
+/// every dynamic row held — and its pinned total `sleeper_rebuilds` (deterministic: the
+/// admissions and compactions of a scene with no row change).
+struct SleepingRow {
+    steps: usize,
+    a_max: usize,
+    sleeper_rebuilds: u64,
+}
+
+/// The release rows are the parity runner's J-Son and R-S piles (Jolt's 15 layers), with T7's
+/// bound A ≤ 300 (measured: A = 265 and 249). Debug's 10-layer piles are other scenes: its rest
+/// pile first holds every box at step 547 (measured), so its row bounds A at 600 and runs to
+/// 700; the Jolt pile holds by step 183 and keeps the design's bound.
+#[cfg(not(debug_assertions))]
+const J_SON_ROW: SleepingRow = SleepingRow { steps: 600, a_max: 300, sleeper_rebuilds: 1 };
+#[cfg(debug_assertions)]
+const J_SON_ROW: SleepingRow = SleepingRow { steps: 360, a_max: 300, sleeper_rebuilds: 1 };
+/// See [`J_SON_ROW`].
+#[cfg(not(debug_assertions))]
+const R_S_ROW: SleepingRow = SleepingRow { steps: 600, a_max: 300, sleeper_rebuilds: 1 };
+#[cfg(debug_assertions)]
+const R_S_ROW: SleepingRow = SleepingRow { steps: 700, a_max: 600, sleeper_rebuilds: 1 };
+
+/// Steps of the toggle-off script after the run.
+const TOGGLE_OFF_STEPS: usize = 6;
+
+/// The sleeping-on rows of G2 (design C5 as L10 C3c builds it; L10 T7): see the module docs.
+fn assert_sleeping_pyramid(scene: SceneKind, row: &SleepingRow) {
+    use boyko_physics::sleep_sets::SleepSets;
+    let mut tree = rig_sleeping(scene, BroadphaseKind::Tree, true);
+    let mut all = rig_sleeping(scene, BroadphaseKind::AllPairs, true);
+    let label = format!("{}-sleeping", scene.name());
+    let dynamic = tree.boxes.len() as u32;
+    let (mut wt, mut wa) = (Witness::START, Witness::START);
+    let mut first_all_held: Option<(usize, TreeDiag)> = None;
+    let mut withheld_steps = 0usize;
+    for step in 0..row.steps {
+        tree.step();
+        all.step();
+        let d = tree.diag();
+        let (p_steps, mism, first) = tree.probe();
+        assert_eq!(p_steps, step as u64 + 1, "{label}: the probe runs once per step");
+        assert_eq!(mism, 0, "{label} step {step}: the logical pairs differ from all-pairs' (first at {first:?})");
+        assert!(tree.pose_bits() == all.pose_bits(), "{label} step {step}: pose bytes differ from the AllPairs twin's");
+        wt.fold(&tree);
+        wa.fold(&all);
+        assert_eq!(d.static_rebuilds, u64::from(step >= 2), "{label} step {step}: the floor is admitted at step 2, once");
+        assert_eq!(
+            (d.translations, d.wide_rows, d.excluded_rows, d.locator_resets),
+            (0, 0, 0, 0),
+            "{label} step {step}: no row change, no Wide or Excluded row, no Reset"
+        );
+        let stats = tree.world.resource::<SleepSets>().stats();
+        withheld_steps += usize::from(stats.withheld_pairs > 0);
+        if first_all_held.is_none() && stats.held_rows == dynamic {
+            first_all_held = Some((step, d));
+        }
+    }
+    let (a, at_a) = first_all_held.unwrap_or_else(|| panic!("{label}: void: no step held every dynamic row"));
+    assert!(a <= row.a_max, "{label}: A = {a}: the pile was not all held by step {}", row.a_max);
+    let end = tree.diag();
+    assert!(end.sleeper_rebuilds - at_a.sleeper_rebuilds <= 1, "{label}: {} sleeper rebuilds after A", end.sleeper_rebuilds - at_a.sleeper_rebuilds);
+    assert_eq!(end.evictions, at_a.evictions, "{label}: an eviction after A");
+    let sleepers = tree.world.resource::<BroadphaseTree>().sleeper_members();
+    let stats = tree.world.resource::<SleepSets>().stats();
+    let logical = tree.pairs();
+    assert_eq!(sleepers, u64::from(dynamic), "{label}: every box is a sleeper at the end");
+    assert_eq!(stats.withheld_pairs as usize, logical, "{label}: every pair is withheld at the end (the stream is empty)");
+    println!(
+        "{label}: A = {a}; withheld on {withheld_steps} of {} steps; {logical} pairs withheld at the end; \
+         tree at A {at_a:?}; at the end {end:?}",
+        row.steps
+    );
+    assert_eq!(end.sleeper_rebuilds, row.sleeper_rebuilds, "{label}: the pinned sleeper rebuilds");
+
+    // The toggle-off script (the tree design's ruling W2, as L10's T1 recasts it): sleeping off,
+    // no row change.
+    for rig in [&mut tree, &mut all] {
+        rig.world.resource_mut::<PhysicsConfig>().sleeping = false;
+    }
+    let mut at_toggle = TreeDiag::default();
+    for k in 0..TOGGLE_OFF_STEPS {
+        tree.step();
+        all.step();
+        let (_, mism, first) = tree.probe();
+        assert_eq!(mism, 0, "{label} toggle-off step {k}: the oracle differs (first at {first:?})");
+        assert!(tree.pose_bits() == all.pose_bits(), "{label} toggle-off step {k}: pose bytes");
+        wt.fold(&tree);
+        wa.fold(&all);
+        let d = tree.diag();
+        let sleepers = tree.world.resource::<BroadphaseTree>().sleeper_members();
+        assert_eq!(sleepers, 0, "{label} toggle-off step {k}: the sleeper set dissolves with sleeping off");
+        assert_eq!(d.members, 1, "{label} toggle-off step {k}: the floor stays in S");
+        if k == 0 {
+            at_toggle = d;
+        }
+    }
+    let d = tree.diag();
+    assert_eq!(
+        (
+            d.hint_candidates - at_toggle.hint_candidates,
+            d.sleeper_rebuilds - at_toggle.sleeper_rebuilds,
+            d.evictions - at_toggle.evictions
+        ),
+        (0, 0, 0),
+        "{label}: with sleeping off, Δcandidates, Δsleeper rebuilds, Δevictions after the toggle step"
+    );
+    report_witness(&label, row.steps + TOGGLE_OFF_STEPS, wt, wa);
+}
+
+#[test]
+fn g2_jolt_pyramid_sleeping_on_withholds_the_held_pile() {
+    assert_sleeping_pyramid(SceneKind::Jolt, &J_SON_ROW);
+}
+
+#[test]
+fn g2_rest_pyramid_sleeping_on_withholds_the_held_pile() {
+    assert_sleeping_pyramid(SceneKind::Rest, &R_S_ROW);
 }
 
 #[test]

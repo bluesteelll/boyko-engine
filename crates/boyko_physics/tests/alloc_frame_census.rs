@@ -2240,14 +2240,26 @@ fn spawn_towers(world: &mut EcsMaster, levels: usize, x0: f32, z0: f32) -> [Vec3
 /// Expected: S1b's frame, no heap acquisition added.
 /// RED-first: `Vec::with_capacity(1)` in the restore-source build, the move-in's capture and the
 /// cross-pair copy.
-fn s8_sleep_skip_transitions(rows: &mut Vec<Row>) {
+///
+/// With `tree` (S8-tree, L10 C3c) the same window runs on the tree broadphase with its brute path
+/// off, so every transition also drives the tree's sleeper set: sleeper admissions after the
+/// move-ins, releases on the D2 steps, the Rows steps' translation of the withheld list, a static
+/// admitted and vanishing with the spawned slab, and the flushes dissolving the set. RED-first:
+/// `Vec::with_capacity(1)` in the tree's release and in its sleeper admission.
+fn s8_sleep_skip_transitions(rows: &mut Vec<Row>, tree: bool) {
+    use boyko_physics::broadphase_tree::BroadphaseTree;
     use boyko_physics::plugin::add_physics_sdf;
+    use boyko_physics::resources::{BroadphaseKind, BroadphaseSelectMode};
     use boyko_physics::sdf_query::SdfField;
     use boyko_physics::sleep_sets::SleepSets;
     use boyko_physics::solver::DefaultRigidSolver;
     use boyko_sdf_math::{SdfEdit, sdf_op};
 
-    let label = "S8 — sleep-skip transitions, SDF pipeline, sleeping ON (Sets), serial";
+    let label = if tree {
+        "S8-tree — sleep-skip transitions, SDF pipeline, sleeping ON (Sets), serial, Tree"
+    } else {
+        "S8 — sleep-skip transitions, SDF pipeline, sleeping ON (Sets), serial"
+    };
     let mut samples: Vec<Snap> = Vec::with_capacity(TOTAL_FRAMES);
     let setup_before = Snap::now();
     let mut world = EcsMaster::new();
@@ -2271,6 +2283,13 @@ fn s8_sleep_skip_transitions(rows: &mut Vec<Row>) {
         cfg.parallel_broadphase = false;
         cfg.parallel_narrowphase = false;
         cfg.sleeping = true;
+        if tree {
+            cfg.broadphase_select = BroadphaseSelectMode::Manual;
+            cfg.broadphase = BroadphaseKind::Tree;
+        }
+    }
+    if tree {
+        world.resource_mut::<BroadphaseTree>().set_brute_max_rows(0);
     }
     let mut schedule = builder.build(&mut world);
     // Settle until every tower is held, then take the transitions' first shapes (a spawn, a
@@ -2288,9 +2307,11 @@ fn s8_sleep_skip_transitions(rows: &mut Vec<Row>) {
     let setup = Snap::now().since(setup_before);
 
     let rules_before = world.resource::<SleepSets>().rule_counts();
+    let tree_before = world.resource::<BroadphaseTree>().diag();
     let mut frame = 0usize;
     let mut extra: Option<Entity> = None;
     let (mut restored_frames, mut moved_frames, mut rows_frames) = (0usize, 0usize, 0usize);
+    let (mut released_frames, mut withheld_frames) = (0usize, 0usize);
     drive(
         || {
             frame += 1;
@@ -2335,6 +2356,8 @@ fn s8_sleep_skip_transitions(rows: &mut Vec<Row>) {
                 let st = world.resource::<SleepSets>().stats();
                 restored_frames += usize::from(st.restored > 0);
                 moved_frames += usize::from(st.moved_in > 0);
+                released_frames += usize::from(st.released_rows > 0);
+                withheld_frames += usize::from(st.withheld_pairs > 0);
             }
         },
         &mut samples,
@@ -2350,10 +2373,26 @@ fn s8_sleep_skip_transitions(rows: &mut Vec<Row>) {
     );
     assert!(
         restored_frames > 0 && moved_frames > 0 && d2 > 0 && d5 > 0 && d6 > 0 && dh > 0 && cross > 2,
-        "S8: ANTI-VACUITY FAILED — restores on {restored_frames} steady frames, move-ins on \
+        "{label}: ANTI-VACUITY FAILED — restores on {restored_frames} steady frames, move-ins on \
          {moved_frames}, D2 {d2}, D5 {d5}, D6 {d6}, D-H {dh}, cross copies {cross}: a transition \
          the arm prices did not run"
     );
+    // The tree seam's transitions (L10 C3c): the diag is cumulative, so the window's share is a
+    // difference; the warm-up's own admissions and releases are outside it.
+    let tree_after = world.resource::<BroadphaseTree>().diag();
+    let (z_rebuilds, s_rebuilds, translations) = (
+        tree_after.sleeper_rebuilds - tree_before.sleeper_rebuilds,
+        tree_after.static_rebuilds - tree_before.static_rebuilds,
+        tree_after.translations - tree_before.translations,
+    );
+    if tree {
+        assert!(
+            z_rebuilds > 0 && s_rebuilds > 0 && translations > 0 && released_frames > 0 && withheld_frames > 0,
+            "{label}: ANTI-VACUITY FAILED — sleeper-set rebuilds {z_rebuilds}, static-set rebuilds \
+             {s_rebuilds}, translations {translations}, releases on {released_frames} steady \
+             frames, pairs withheld on {withheld_frames}: a tree-seam transition did not run"
+        );
+    }
     rows.push(report(
         label,
         &format!(
@@ -2362,7 +2401,9 @@ fn s8_sleep_skip_transitions(rows: &mut Vec<Row>) {
              step on {rows_frames} frames, a ball every 40th frame, the third cube nudged twice, an SDF \
              field replacement, sleeping off/on, wake_all. Restores on {restored_frames} steady \
              frames, move-ins on {moved_frames}; D2 {d2}, D5 {d5}, D6 {d6}, D-H {dh}, cross copies \
-             {cross}."
+             {cross}. Tree seam: sleeper-set rebuilds {z_rebuilds}, static-set rebuilds \
+             {s_rebuilds}, translations {translations}, releases on {released_frames} frames, \
+             pairs withheld on {withheld_frames}."
         ),
         setup,
         &samples,
@@ -2376,7 +2417,9 @@ fn s8_sleep_skip_transitions(rows: &mut Vec<Row>) {
 /// steered by a velocity write every frame so they never rest, give the stream at least 256 pairs
 /// (one contact point each, so no colour reaches the solver's dispatch width) beside 16
 /// held towers of 3 cubes, and a ball knocks a tower every 5th frame, so restores are computed
-/// inside chunks. Phase B (inline, from frame 200): the sliders are despawned and the stream
+/// inside chunks. The held towers' pairs are skipped inside the chunks on the Grid; on the Tree
+/// its sleeper set withholds them from the stream (L10 C3c), and the released rows' pairs join
+/// the chunks on each knock. Phase B (inline, from frame 200): the sliders are despawned and the stream
 /// falls below 256 pairs. Pinned in L5 C4's structural form on every steady frame: the scene
 /// holds fewer than `MIN_PARALLEL_BODIES` bodies, so the Grid opens no emit scope, and every
 /// colour stays below the solver's dispatch width (asserted), so a frame opens exactly the
@@ -2441,7 +2484,7 @@ fn s8b_sleep_skip_parallel_narrowphase(rows: &mut Vec<Row>, kind: boyko_physics:
     let mut widest_log: Vec<u32> = Vec::with_capacity(TOTAL_FRAMES + 2);
     let np_before = world.resource::<Manifolds>().narrowphase_dispatches();
     let mut frame = 0usize;
-    let (mut chunk_restores, mut chunk_skips) = (0usize, 0usize);
+    let (mut chunk_restores, mut chunk_skips, mut chunk_withheld) = (0usize, 0usize, 0usize);
     let (mut np_a, mut np_b) = (0u64, 0u64);
     let mut last_np = np_before;
     drive(
@@ -2478,6 +2521,7 @@ fn s8b_sleep_skip_parallel_narrowphase(rows: &mut Vec<Row>, kind: boyko_physics:
                     np_a += u64::from(dispatched);
                     chunk_restores += usize::from(dispatched && st.restored_pairs > 0);
                     chunk_skips += usize::from(dispatched && st.held_skipped_pairs > 0);
+                    chunk_withheld += usize::from(dispatched && st.withheld_pairs > 0);
                 } else if frame > 200 {
                     np_b += u64::from(dispatched);
                 }
@@ -2500,18 +2544,27 @@ fn s8b_sleep_skip_parallel_narrowphase(rows: &mut Vec<Row>, kind: boyko_physics:
         assert_eq!(f.scope, 1 + np, "{label}: frame {j}: {} scope frames, the structure has 1 + {np} (and {passes} passes open none)", f.scope);
         assert_eq!(f.chunk, 1 + np, "{label}: frame {j}: {} chunks, one per scope frame", f.chunk);
     }
+    // The held pairs beside the dispatching chunks: skipped inside them on the Grid; on the Tree
+    // (L10 C3c) withheld from the stream by its sleeper set, so none reaches a chunk while the
+    // towers stay held (the Grid arm keeps the chunk's skip path covered).
+    let held_beside_chunks = if kind == boyko_physics::resources::BroadphaseKind::Tree {
+        chunk_withheld
+    } else {
+        chunk_skips
+    };
     assert!(
-        np_a > 0 && chunk_restores > 0 && chunk_skips > 0 && np_b == 0,
+        np_a > 0 && chunk_restores > 0 && held_beside_chunks > 0 && np_b == 0,
         "{label}: ANTI-VACUITY FAILED — phase A dispatched on {np_a} frames, restored inside chunks \
-         on {chunk_restores}, skipped held pairs inside chunks on {chunk_skips}; phase B dispatched on \
-         {np_b} (must be 0)"
+         on {chunk_restores}, skipped held pairs inside chunks on {chunk_skips}, pairs withheld \
+         beside them on {chunk_withheld}; phase B dispatched on {np_b} (must be 0)"
     );
     rows.push(report(
         label,
         &format!(
             "16 towers of 3 cubes held ({settle} settle steps) beside 80 steered sliders, 4 workers. \
              Phase A: {np_a} dispatching frames, restores inside chunks on {chunk_restores}, held \
-             skips inside chunks on {chunk_skips}. Phase B (sliders despawned): {np_b} dispatches."
+             skips inside chunks on {chunk_skips}, pairs withheld beside them on {chunk_withheld}. \
+             Phase B (sliders despawned): {np_b} dispatches."
         ),
         setup,
         &samples,
@@ -2859,7 +2912,7 @@ impl Pin {
 /// every colour scope fits its first block, so chunk 230 -> 134 and dispatch MAX 365 ->
 /// 269 on every frame of the long run; scope unmoved, and the debug pin unmoved because
 /// its long run reproduced every figure (header, "S1c after L11 C2").
-fn pins() -> [Pin; 16] {
+fn pins() -> [Pin; 17] {
     // An App frame: one install frame (a `ScopeShared` + one chunk) and at most
     // one injector block — the block arrives once per 63 dispatcher-side pushes,
     // so its per-frame max is 1 and it is already inside the measured 3.
@@ -2935,6 +2988,13 @@ fn pins() -> [Pin; 16] {
         Pin {
             other_per_frame: colored_other,
             ..app("S8 —", 1, 1)
+        },
+        // L10 C3c: S8's window on the tree broadphase — the sleeper set's admissions, releases,
+        // translations and dissolutions live in tree columns and `ContactPairs`' withheld
+        // column, so the tree seam acquires nothing either.
+        Pin {
+            other_per_frame: colored_other,
+            ..app("S8-tree", 1, 1)
         },
         // L10 C3b (design 08 §7, ruling W1): the install frame, plus the narrowphase's one
         // scope and one block on a dispatching frame (phase A) and none inline (phase B). The
@@ -3036,7 +3096,7 @@ fn pins() -> [Pin; 16] {
 /// failing, so one red run names all of them rather than the first.
 fn gate(rows: &[Row]) {
     let pins = pins();
-    let mut violations: Vec<String> = Vec::with_capacity(16);
+    let mut violations: Vec<String> = Vec::with_capacity(17);
     let mut covered = 0usize;
     say!(
         "\n══════════ GATE — pinned steady-state envelopes ({}) ══════════",
@@ -3186,7 +3246,7 @@ fn frame_allocation_census() {
     class_predicates_match_the_threadpool_receipt();
     worker_thread_allocations_are_counted();
 
-    let mut rows: Vec<Row> = Vec::with_capacity(16);
+    let mut rows: Vec<Row> = Vec::with_capacity(17);
     s0_executor_floor_per_system(&mut rows);
     s0b_executor_floor_with_fixed_substep(&mut rows);
     s2_spawn_despawn_churn_and_par_iter(&mut rows);
@@ -3195,7 +3255,8 @@ fn frame_allocation_census() {
     s1b_rigid_pile_colored_serial(&mut rows);
     s1c_rigid_pile_colored_parallel(&mut rows);
     s1d_rigid_pile_colored_serial_sleeping(&mut rows);
-    s8_sleep_skip_transitions(&mut rows);
+    s8_sleep_skip_transitions(&mut rows, false);
+    s8_sleep_skip_transitions(&mut rows, true);
     s8b_sleep_skip_parallel_narrowphase(&mut rows, boyko_physics::resources::BroadphaseKind::Tree);
     s8b_sleep_skip_parallel_narrowphase(&mut rows, boyko_physics::resources::BroadphaseKind::Grid);
 

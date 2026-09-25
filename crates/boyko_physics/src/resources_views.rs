@@ -8,9 +8,9 @@
 //! B1). A view is therefore the stream ⊎ the kept store, merged in the canonical order the
 //! sleep-skip off would emit — with no per-step copy: the merge happens on the read path.
 //!
-//! L10 C3b keeps held islands' manifolds (`held_store.rs`); the pair view stays the stream until
-//! L10 C3c withholds pairs from it. With nothing held, every view is its stream element for
-//! element.
+//! L10 C3b keeps held islands' manifolds (`held_store.rs`); L10 C3c's tree seam withholds held
+//! islands' pairs from the stream (design 04 T3), which the pair view merges back. With nothing
+//! held, every view is its stream element for element.
 //!
 //! A manifold view yields [`Manifold`] by value and implements no `Index`: a held manifold is
 //! rebuilt from its island's row table, and a reader that mixed a view position with a solver
@@ -30,49 +30,77 @@ use crate::solver::warm_records::ord;
 pub const HELD_BASE: u32 = 1 << 31;
 
 /// The logical candidate pairs of a step, `(min, max)`-sorted and strictly increasing
-/// ([`ContactPairs::pairs`](crate::resources::ContactPairs::pairs)).
+/// ([`ContactPairs::pairs`](crate::resources::ContactPairs::pairs)): the broadphase's stream
+/// merged with the pairs the tree broadphase withholds (L10 C3c, design 04 T3). The two are
+/// disjoint and each strictly sorted, so the merge is a two-pointer walk with no allocation.
 #[derive(Clone, Copy)]
 pub struct PairsView<'a> {
     /// The broadphase's stream.
     stream: &'a [(BodyIndex, BodyIndex)],
+    /// The pairs withheld from it.
+    withheld: &'a [(BodyIndex, BodyIndex)],
 }
 
 impl<'a> PairsView<'a> {
-    /// The view over `stream`, with nothing withheld.
+    /// The view over `stream` ⊎ `withheld`, both strictly sorted and disjoint.
     #[inline]
-    pub(crate) fn new(stream: &'a [(BodyIndex, BodyIndex)]) -> Self {
-        Self { stream }
+    pub(crate) fn new(
+        stream: &'a [(BodyIndex, BodyIndex)],
+        withheld: &'a [(BodyIndex, BodyIndex)],
+    ) -> Self {
+        Self { stream, withheld }
     }
 
     /// The number of logical pairs. O(1).
     #[inline]
     pub fn len(&self) -> usize {
-        self.stream.len()
+        self.stream.len() + self.withheld.len()
     }
 
     /// Whether the step has no candidate pair.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.stream.is_empty()
+        self.len() == 0
     }
 
     /// The pairs in `(min, max)` order.
     #[inline]
     pub fn iter(&self) -> PairsIter<'a> {
-        PairsIter { stream: self.stream.iter() }
+        PairsIter {
+            stream: self.stream,
+            withheld: self.withheld,
+            s: 0,
+            s_end: self.stream.len(),
+            w: 0,
+            w_end: self.withheld.len(),
+        }
     }
 
-    /// The `k`-th pair in `(min, max)` order, or `None` past the end.
+    /// The `k`-th pair in `(min, max)` order, or `None` past the end. O(log² n) with pairs
+    /// withheld (a binary search over the stream, each probe ranking a stream pair among the
+    /// withheld ones), O(1) without.
     #[inline]
     pub fn get(&self, k: usize) -> Option<&'a (BodyIndex, BodyIndex)> {
-        self.stream.get(k)
+        if self.withheld.is_empty() {
+            return self.stream.get(k);
+        }
+        if k >= self.len() {
+            return None;
+        }
+        let at = |s: usize| s + self.withheld.partition_point(|w| w < &self.stream[s]);
+        let s = partition_point(0, self.stream.len(), |s| at(s) < k);
+        if s < self.stream.len() && at(s) == k {
+            Some(&self.stream[s])
+        } else {
+            self.withheld.get(k - s)
+        }
     }
 
     /// Whether `pair` is a candidate pair of the step. O(log n): the view is strictly
     /// increasing (the broadphase's contract).
     #[inline]
     pub fn contains(&self, pair: &(BodyIndex, BodyIndex)) -> bool {
-        self.stream.binary_search(pair).is_ok()
+        self.stream.binary_search(pair).is_ok() || self.withheld.binary_search(pair).is_ok()
     }
 
     /// The pairs, copied into a `Vec` in `(min, max)` order: the in-crate tests' helper. The
@@ -80,7 +108,7 @@ impl<'a> PairsView<'a> {
     /// collects [`iter`](Self::iter).
     #[cfg(test)]
     pub(crate) fn to_vec(self) -> Vec<(BodyIndex, BodyIndex)> {
-        self.stream.to_vec()
+        self.iter().copied().collect()
     }
 }
 
@@ -154,11 +182,22 @@ impl<'a> IntoIterator for &PairsView<'a> {
     }
 }
 
-/// The iterator of a [`PairsView`], in `(min, max)` order.
+/// The iterator of a [`PairsView`], in `(min, max)` order: the stream's `[s, s_end)` merged with
+/// the withheld pairs' `[w, w_end)`, from both ends.
 #[derive(Clone, Debug)]
 pub struct PairsIter<'a> {
-    /// The stream's remaining pairs.
-    stream: core::slice::Iter<'a, (BodyIndex, BodyIndex)>,
+    /// The stream.
+    stream: &'a [(BodyIndex, BodyIndex)],
+    /// The withheld pairs.
+    withheld: &'a [(BodyIndex, BodyIndex)],
+    /// The stream's front cursor.
+    s: usize,
+    /// The stream's back cursor (one past).
+    s_end: usize,
+    /// The withheld pairs' front cursor.
+    w: usize,
+    /// The withheld pairs' back cursor (one past).
+    w_end: usize,
 }
 
 impl<'a> Iterator for PairsIter<'a> {
@@ -166,19 +205,40 @@ impl<'a> Iterator for PairsIter<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.stream.next()
+        let take_withheld = self.w < self.w_end
+            && (self.s == self.s_end || self.withheld[self.w] < self.stream[self.s]);
+        if take_withheld {
+            self.w += 1;
+            Some(&self.withheld[self.w - 1])
+        } else if self.s < self.s_end {
+            self.s += 1;
+            Some(&self.stream[self.s - 1])
+        } else {
+            None
+        }
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.stream.size_hint()
+        let n = (self.s_end - self.s) + (self.w_end - self.w);
+        (n, Some(n))
     }
 }
 
 impl DoubleEndedIterator for PairsIter<'_> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.stream.next_back()
+        let take_withheld = self.w < self.w_end
+            && (self.s == self.s_end || self.withheld[self.w_end - 1] > self.stream[self.s_end - 1]);
+        if take_withheld {
+            self.w_end -= 1;
+            Some(&self.withheld[self.w_end])
+        } else if self.s < self.s_end {
+            self.s_end -= 1;
+            Some(&self.stream[self.s_end])
+        } else {
+            None
+        }
     }
 }
 
@@ -475,3 +535,88 @@ impl DoubleEndedIterator for IslandIter<'_> {
 impl ExactSizeIterator for IslandIter<'_> {}
 
 impl FusedIterator for IslandIter<'_> {}
+
+#[cfg(test)]
+mod tests {
+    //! The logical pair view against a merged `Vec` (L10 C3c, design 04 T3): `len`, `iter`,
+    //! `next_back`, a walk that mixes both ends, `get` and `contains`, over a stream and a
+    //! withheld list that interleave.
+
+    use proptest::prelude::*;
+
+    use super::PairsView;
+    use crate::manifold::BodyIndex;
+
+    type Pair = (BodyIndex, BodyIndex);
+
+    /// The largest body count drawn: `12 · 11 / 2 = 66` pairs, one pick each.
+    const MAX_BODIES: u32 = 12;
+    /// One pick per pair of [`MAX_BODIES`] bodies.
+    const MAX_PAIRS: usize = 66;
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 256,
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
+
+        /// Every pair `(a, b)`, `a < b < n`, is absent, in the stream or withheld (`pick` 0, 1,
+        /// 2); the view must be the sorted union, from either end and by position.
+        #[test]
+        fn the_pair_view_is_the_merge_of_the_stream_and_the_withheld_pairs(
+            n in 2u32..=MAX_BODIES,
+            picks in prop::collection::vec(0u8..3, MAX_PAIRS),
+            ends in prop::collection::vec(any::<bool>(), MAX_PAIRS + 1),
+        ) {
+            let all = (0..n).flat_map(|a| (a + 1..n).map(move |b| (BodyIndex(a), BodyIndex(b))));
+            let (mut stream, mut withheld, mut want, mut absent) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for (pair, &pick) in all.zip(&picks) {
+                match pick {
+                    1 => stream.push(pair),
+                    2 => withheld.push(pair),
+                    _ => absent.push(pair),
+                }
+                if pick != 0 {
+                    want.push(pair);
+                }
+            }
+            let view = PairsView::new(&stream, &withheld);
+            prop_assert_eq!(view.len(), want.len());
+            prop_assert_eq!(view.is_empty(), want.is_empty());
+            prop_assert_eq!(view.iter().copied().collect::<Vec<Pair>>(), want.clone());
+            let mut back: Vec<Pair> = view.iter().rev().copied().collect();
+            back.reverse();
+            prop_assert_eq!(back, want.clone());
+
+            // Both ends at once: the two cursors of each list must meet, never cross.
+            let mut it = view.iter();
+            let (mut lo, mut hi) = (0usize, want.len());
+            for &front in &ends {
+                prop_assert_eq!(it.len(), hi - lo);
+                let got = if front { it.next() } else { it.next_back() }.copied();
+                if lo == hi {
+                    prop_assert_eq!(got, None);
+                    break;
+                }
+                let expected = if front {
+                    lo += 1;
+                    want[lo - 1]
+                } else {
+                    hi -= 1;
+                    want[hi]
+                };
+                prop_assert_eq!(got, Some(expected));
+            }
+
+            for (k, pair) in want.iter().enumerate() {
+                prop_assert_eq!(view.get(k), Some(pair), "get({})", k);
+            }
+            prop_assert_eq!(view.get(want.len()), None);
+            prop_assert!(want.iter().all(|p| view.contains(p)));
+            prop_assert!(!absent.iter().any(|p| view.contains(p)));
+            prop_assert_eq!(view.to_vec(), want);
+        }
+    }
+}

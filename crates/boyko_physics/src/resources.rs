@@ -33,6 +33,7 @@ use crate::scratch_ids::{
     sensor_overlaps_id, sleep_island_scratch_id, sleep_latch_id, sleep_latch_prev_id,
     touched_awake_id,
     touched_solver_id, vn_initial_id,
+    TREE_SL, register_tree_column_layouts, tree_column_id,
 };
 use crate::broadphase_tree::sphere_bound_feasible;
 use crate::systems::body_bounding_radius;
@@ -706,6 +707,11 @@ pub enum IntegrationMode {
 /// list it builds with the gather sequence it was built on. On a step whose rows moved,
 /// `rotate` also rebuilds the jumper bitset the carry's join reads (L10 C0 moved the build
 /// here from the narrowphase prologue, design 06 Δ9, so the broadphase can read it too).
+///
+/// With L10's sleep-skip on the tree broadphase, the pairs of held islands are not emitted
+/// into the list but kept beside it, withheld (L10 C3c, design 04 T3):
+/// [`pairs`](Self::pairs) is the LOGICAL set, the stream merged with them, and it equals
+/// what every broadphase kind emits with the sleep-skip off.
 #[derive(Resource)]
 pub struct ContactPairs {
     /// Candidate pairs in deterministic `(min, max)` order.
@@ -735,7 +741,17 @@ pub struct ContactPairs {
     jumper_bits: ScratchColumn<u64>,
     /// The gather sequence `jumper_bits` was built on, or `NO_SEQ` before the first build.
     jumper_seq: u64,
+    /// The pairs the tree broadphase withholds from the stream (L10 C3c, design 04 T3): its
+    /// sleeper pair list `SL`, the pairs with one endpoint in its sleeper set and the other in its
+    /// static or sleeper set — two resting, non-sensor rows, one held (Invariant V). Strictly
+    /// sorted, disjoint from `pairs`, never merged into it; persistent across steps and
+    /// maintained by the tree (translated on a `Rows` step, filtered, released). Empty after any
+    /// step on which the tree path did not run (T6). On the tree cohort's `SL` id.
+    withheld: ScratchColumn<(BodyIndex, BodyIndex)>,
 }
+
+/// A refill view over one of [`ContactPairs`]' pair lists.
+pub(crate) type PairListBuild<'a> = ScratchBuildView<'a, (BodyIndex, BodyIndex)>;
 
 impl Default for ContactPairs {
     /// Hand-written because the backing column needs its reserved [`ComponentId`],
@@ -752,6 +768,8 @@ impl ContactPairs {
         register_broadphase_column_layouts();
         // The jumper bitset's id is the narrowphase cohort's, where the join reads it.
         register_narrowphase_column_layouts();
+        // The withheld list's id is the tree cohort's `SL` (L10 C3c, design 04 T3).
+        register_tree_column_layouts();
         let reserve = capacity.max(scratch_reserve_rows(size_of::<(BodyIndex, BodyIndex)>()));
         Self {
             pairs: ScratchColumn::new(contact_pairs_id(), reserve),
@@ -765,6 +783,7 @@ impl ContactPairs {
                 scratch_reserve_rows(size_of::<u64>()),
             ),
             jumper_seq: NO_SEQ,
+            withheld: ScratchColumn::new(tree_column_id(TREE_SL), reserve),
         }
     }
 
@@ -831,13 +850,12 @@ impl ContactPairs {
 
     /// This step's LOGICAL candidate pairs, in the deterministic `(min, max)` order (L10 design
     /// 04 D6): the pairs the broadphase emitted into the stream, merged with the pairs L10's
-    /// tree seam withholds for held islands, so the view is the exact set every broadphase kind
-    /// emits with the sleep-skip off.
-    ///
-    /// Nothing is withheld before L10 C3c, so today the view is the stream element for element.
+    /// tree seam withholds for held islands (design 04 T3), so the view is the exact set every
+    /// broadphase kind emits with the sleep-skip off. No copy: the merge happens as the view is
+    /// read, and with nothing withheld the view is the stream element for element.
     #[inline]
     pub fn pairs(&self) -> PairsView<'_> {
-        PairsView::new(self.pairs.as_read_slice())
+        PairsView::new(self.pairs.as_read_slice(), self.withheld.as_read_slice())
     }
 
     /// The pairs the narrowphase collides this step: the broadphase's stream, `(min, max)`
@@ -848,12 +866,34 @@ impl ContactPairs {
         self.pairs.as_read_slice()
     }
 
+    /// The pairs the tree broadphase withholds from the stream (L10 C3c, design 04 T3), strictly
+    /// sorted: the logical view is [`pairs_stream`](Self::pairs_stream) ⊎ this.
+    #[inline]
+    pub(crate) fn withheld(&self) -> &[(BodyIndex, BodyIndex)] {
+        self.withheld.as_read_slice()
+    }
+
+    /// The refill view over the withheld list (the tree's maintenance of its `SL`).
+    #[inline]
+    pub(crate) fn withheld_build(&mut self) -> ScratchBuildView<'_, (BodyIndex, BodyIndex)> {
+        self.withheld.build_view()
+    }
+
+    /// The refill views over the stream and the withheld list at once (the tree's release, T4,
+    /// which moves pairs from the second into the first).
+    #[inline]
+    pub(crate) fn split_build(&mut self) -> (PairListBuild<'_>, PairListBuild<'_>) {
+        (self.pairs.build_view(), self.withheld.build_view())
+    }
+
     /// The single-threaded refill view over the pair list (clear + push).
     ///
     /// The production producer is `BroadphaseGrid::build` / `::build_parallel`,
     /// which take the whole resource; this is the surface for a driver that emits
     /// pairs itself — the all-pairs transcription in `benches/broadphase.rs`, whose
-    /// whole value is being container-identical to the shipped arm.
+    /// whole value is being container-identical to the shipped arm. It refills the stream
+    /// only: the withheld list is the tree broadphase's (a tree step's brute path and every other
+    /// kind's step empty it first, T6).
     #[inline]
     pub fn pairs_build(&mut self) -> ScratchBuildView<'_, (BodyIndex, BodyIndex)> {
         self.pairs.build_view()
@@ -2676,26 +2716,44 @@ impl Manifolds {
         c
     }
 
-    /// Diagnostic (L10's bit-identity gate, design 06 §7 and 08 §7): calls `f` with every
-    /// candidate pair the last narrowphase ran over — `pairs`' stream, in order — and the probe
-    /// of its tag. A pair the sleep-skip skipped carries the held-skip tag in its slot, and its
-    /// probe the copy the held store keeps of it, which is what the pair's state is claimed on;
-    /// a collided pair's probe is its own tag. O(pairs), plus two binary searches per skipped
-    /// pair.
+    /// Diagnostic (L10's bit-identity gate, design 06 §7 and 08 §7): calls `f` with every LOGICAL
+    /// candidate pair of the last step, in order — `pairs`' stream, which the last narrowphase
+    /// ran over, merged with the pairs the tree withheld (design 04 T3) — and the probe of its
+    /// tag. A pair the sleep-skip skipped carries the held-skip tag in its slot, and its probe
+    /// the copy the held store keeps of it, which is what the pair's state is claimed on; a
+    /// withheld pair has no slot, and its probe reads as a skipped one's; a collided pair's
+    /// probe is its own tag. O(pairs), plus two binary searches per held pair.
     pub fn for_each_pair_tag(&self, pairs: &ContactPairs, mut f: impl FnMut(PairTagProbe)) {
         let held = self.held.view();
-        for (&(a, b), &tag) in pairs.pairs_stream().iter().zip(self.pair_carry.tags()) {
-            let kept = if tag.is_held_skip() { held.kept_tag_of(a.0, b.0) } else { Some(tag) };
-            f(PairTagProbe {
+        let kept_probe = |a: BodyIndex, b: BodyIndex, slot: PairTag, withheld: bool| {
+            let is_held = slot.is_held_skip();
+            let kept = if is_held { held.kept_tag_of(a.0, b.0) } else { Some(slot) };
+            PairTagProbe {
                 a: a.0,
                 b: b.0,
-                slot: tag.bits(),
-                held: tag.is_held_skip(),
+                slot: slot.bits(),
+                held: is_held,
+                withheld,
                 invariant: kept.map(|t| t.bits() & PairTag::HIT_INVARIANT),
                 kept_class: kept.is_some_and(|t| {
                     !t.is_held_skip() && t.bits() & (PairTag::REC | PairTag::SEP | PairTag::PUSHED) != 0
                 }),
-            });
+            }
+        };
+        let tags = self.pair_carry.tags();
+        let stream = &pairs.pairs_stream()[..pairs.pairs_stream().len().min(tags.len())];
+        let withheld = pairs.withheld();
+        let (mut s, mut w) = (0usize, 0usize);
+        while s < stream.len() || w < withheld.len() {
+            if w < withheld.len() && (s == stream.len() || withheld[w] < stream[s]) {
+                let (a, b) = withheld[w];
+                f(kept_probe(a, b, PairTag::HELD_SKIP, true));
+                w += 1;
+            } else {
+                let (a, b) = stream[s];
+                f(kept_probe(a, b, tags[s], false));
+                s += 1;
+            }
         }
     }
 
@@ -2862,10 +2920,14 @@ pub struct PairTagProbe {
     pub a: u32,
     /// The pair's higher row.
     pub b: u32,
-    /// The slot's tag bits.
+    /// The slot's tag bits; the held-skip tag's for a withheld pair, which has no slot.
     pub slot: u16,
-    /// Whether the narrowphase skipped the pair for a held endpoint.
+    /// Whether the narrowphase did not collide the pair: skipped for a held endpoint, or
+    /// withheld by the tree broadphase.
     pub held: bool,
+    /// Whether the tree broadphase withheld the pair (L10 C3c, design 04 T3): it is in the
+    /// logical view, not in the stream.
+    pub withheld: bool,
     /// The tag's claimed bits — every bit but `HIT` and `SEPHIT` — of the slot's tag, or of the
     /// held store's copy for a held pair; `None` for a held pair the store keeps no copy of.
     pub invariant: Option<u16>,

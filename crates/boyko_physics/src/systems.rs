@@ -93,7 +93,8 @@ use crate::row_identity::{RowIdentity, RowKey};
 use crate::sdf_query::{SdfField, sample_sdf};
 use crate::narrowphase::dispatch::debug_assert_computed;
 use crate::sleep_sets::{
-    Epilogue, NpCounts, NpSets, Prologue, Route, SleepSets, mirror_held, np_route,
+    Epilogue, HeldHint, NpCounts, NpSets, Prologue, Route, RowCls, SleepSets, mirror_held,
+    np_route,
 };
 use crate::solver::colored::ColoredSoftStepSolver;
 use crate::solver::contact::{effective_inv_mass, is_dynamic_row};
@@ -331,9 +332,11 @@ pub fn physics_gather(
 ///   the same bits, one owner per pair, an integer-count assembly), so it is
 ///   bit-identical too; at or below [`BroadphaseTree::brute_max_rows`] rows it
 ///   runs [`all_pairs_into`](crate::broadphase_tree::all_pairs_into) instead.
-///   It reads the gather's row identity to carry its static set through row
+///   It reads the gather's row identity to carry its persistent sets through row
 ///   changes, and opens the four `phys_bp_*` profiling spans on every tree-path
-///   step.
+///   step. Under L10's sleep-skip ([`physics_broadphase_colored`]) it also keeps a
+///   sleeper set, whose pairs it withholds from the stream (L10 C3c); this system
+///   runs it without one.
 ///
 /// Before the arm runs, the previous step's list is kept as `pairs_prev` and the new list is
 /// stamped with this gather's sequence ([`ContactPairs::rotate`], L9 D9): the narrowphase's pair
@@ -356,7 +359,7 @@ pub fn physics_broadphase(
     // L9 D9: before the kind match, so every arm fills the swapped-in list. On a step whose
     // rows moved it also rebuilds the carry's jumper bitset (L10 C0, design 06 Δ9).
     pairs.rotate(&scratch.rows);
-    broadphase_arms(scratch.bodies(), &scratch.rows, &cfg, &mut grid, &mut tree, pairs);
+    broadphase_arms(scratch.bodies(), &scratch.rows, &cfg, &mut grid, &mut tree, pairs, None);
 }
 
 /// The colored pipeline's broadphase (L10 design 04 D15, A1/A2): [`physics_broadphase`]'s
@@ -441,9 +444,9 @@ struct BroadphaseStages<'a> {
 }
 
 /// The body of both colored broadphase systems: the rotation, L10's prologue (A1), the kind arm,
-/// L10's epilogue (A2), and — on a D-H flush with the mode `Off` — the drain of the restored
-/// warm records into the solver's read side (ruling open question 2: L10's own system, never the
-/// solve).
+/// L10's epilogue (A2) and the tree's release (A2.3, T4), and — on a D-H flush with the mode
+/// `Off` — the drain of the restored warm records into the solver's read side (ruling open
+/// question 2: L10's own system, never the solve).
 fn broadphase_sets(
     scratch: &SolverScratch,
     cfg: &PhysicsConfig,
@@ -471,10 +474,17 @@ fn broadphase_sets(
         };
         sets.prologue(&prologue, &mut manifolds.held)
     };
-    broadphase_arms(scratch.bodies(), &scratch.rows, cfg, grid, tree, pairs);
+    // L10 C3c (design 04 T1, T2): on a `Sets` step with a sleeper the tree reads the
+    // classification the prologue just wrote; on any other step it runs without a hint, which
+    // dissolves its sleeper set. A `Sets` step with no sleeper would dissolve it too, so nothing
+    // is withheld there, and T2's `anchor_ok` — which exists for the withheld pairs (Invariant V)
+    // — would only evict the static set on a flush step, where nothing rests.
+    let hint = (plan.sets && plan.sleepers).then(|| sets.row_cls());
+    broadphase_arms(scratch.bodies(), &scratch.rows, cfg, grid, tree, pairs, hint);
     if plan.sets {
-        // The LOGICAL pair count sizes the hysteresis table (design 04 A3): the stream until
-        // L10 C3c withholds pairs.
+        sets.debug_withheld(pairs.withheld(), false);
+        // The LOGICAL pair count sizes the hysteresis table (design 04 A3, T3): the stream plus
+        // the pairs the tree withholds, which the release below only moves between the two.
         let would_clear = manifolds.box_axis_cache.would_clear(pairs.pairs().len());
         let Manifolds { held, manifolds: stream_prev, pair_carry, .. } = manifolds;
         let epilogue = Epilogue {
@@ -488,6 +498,26 @@ fn broadphase_sets(
             would_clear,
         };
         sets.epilogue(&epilogue, plan, held);
+        // A2.3 (T4): the rows the epilogue restored leave the sleeper set now. Their withheld
+        // pairs are merged into the stream, where the narrowphase computes them from the restore
+        // source, or skips them when the partner is still held. The epilogue's D2 scan and D3
+        // decide those restores after the tree has withheld the pairs. The prologue's restores
+        // were never in the hint (T1), so the release, which reads `RESTORED` (set for both),
+        // finds only the epilogue's rows in Z.
+        // The epilogue reads the stream and the previous step's lists, never `withheld`: a
+        // withheld pair has two resting, non-sensor endpoints and no candidate
+        // (`debug_withheld`), so the D2 scan could neither restore on it nor list it as a cross
+        // pair (design 06 B3).
+        // The release runs only on a step that restored a record (T4), so a held pile's steady
+        // step never walks the sleeper set.
+        let released = if sets.stats().restored > 0 {
+            let cls = sets.row_cls();
+            tree.release(pairs, |r| cls[r as usize].flags & RowCls::RESTORED != 0)
+        } else {
+            0
+        };
+        sets.note_tree(pairs.withheld().len(), released);
+        sets.debug_withheld(pairs.withheld(), true);
     }
     if let Some(solver) = solver
         && let Some(restore) = sets.take_drain()
@@ -498,7 +528,8 @@ fn broadphase_sets(
 
 /// The broadphase's kind arms over the rotated list (the body of [`physics_broadphase`] after the
 /// rotation), shared by both pipelines' broadphase systems: the list's fill, its order assert and
-/// its counter.
+/// its counter. `hint` is L10's step classification on a `Sets` step with a sleeper (the tree's
+/// sleep hint, design 04 T1, T2), `None` on every other step.
 #[inline]
 fn broadphase_arms(
     bodies: &[BodyState],
@@ -507,7 +538,14 @@ fn broadphase_arms(
     grid: &mut BroadphaseGrid,
     tree: &mut BroadphaseTree,
     pairs: &mut ContactPairs,
+    hint: Option<&[RowCls]>,
 ) {
+    // L10 C3c (design 04 T6): the tree's withheld pairs exist only after a tree-path step. Any
+    // other kind emits every pair itself, so the tree's sleeper set dissolves first. O(1) while
+    // it is empty.
+    if cfg.broadphase != BroadphaseKind::Tree {
+        tree.clear_sleepers(pairs);
+    }
     match cfg.broadphase {
         // The shipped all-pairs loop, kept VERBATIM so the default path's asm is
         // byte-identical to before O2 (the 0%-gate). DO NOT refactor this arm.
@@ -546,18 +584,23 @@ fn broadphase_arms(
         }
         // The tree broadphase: the exact set, serial, on the calling thread. The row
         // identity is the gather's (`scratch.rows`), which the tree's verify uses to
-        // carry its static set through a row change.
-        BroadphaseKind::Tree => tree.step(bodies, rows, pairs),
+        // carry its persistent sets through a row change. With L10's hint it withholds the
+        // pairs of its sleeper set (design 04 T3).
+        BroadphaseKind::Tree => match hint {
+            Some(cls) => tree.step_hinted(bodies, rows, pairs, &HeldHint::new(cls)),
+            None => tree.step(bodies, rows, pairs),
+        },
     }
 
-    // Strict: the pairs are unique as well as sorted. The narrowphase's hysteresis
-    // table is keyed by pair, and the parallel narrowphase's hint argument (Lemma 1 in
-    // `narrowphase/axis_cache.rs`) needs every key to appear once per frame.
+    // Strict: the pairs are unique as well as sorted — over the LOGICAL view, the stream merged
+    // with the withheld pairs (design 04 T3), so the two are disjoint too. The narrowphase's
+    // hysteresis table is keyed by pair, and the parallel narrowphase's hint argument (Lemma 1
+    // in `narrowphase/axis_cache.rs`) needs every key to appear once per frame.
     debug_assert!(
-        pairs.pairs_stream().windows(2).all(|w| w[0] < w[1]),
+        pairs.pairs().iter().zip(pairs.pairs().iter().skip(1)).all(|(a, b)| a < b),
         "invariant: broadphase pairs must be emitted unique and in sorted (min, max) order"
     );
-    // The LOGICAL pair count (L10 design 04 runner O3): the stream until L10 C3c withholds.
+    // The LOGICAL pair count (L10 design 04 runner O3): the stream plus the withheld pairs.
     counter!(PHYS_BP_PAIRS, pairs.pairs().len() as u64);
 }
 
@@ -670,8 +713,8 @@ fn narrowphase_step<const SETS: bool>(
     // cleared (a single in-place table — this frame reads last frame's axes). When the
     // rows changed since the cache was last keyed, every box pair's previous axis is
     // pre-read through the row identity map first, before any write of this step
-    // (defect A, interim). The table is sized by the LOGICAL pair count (L10 design 04 A3),
-    // which is the stream's until L10 C3c withholds pairs.
+    // (defect A, interim). The table is sized by the LOGICAL pair count (L10 design 04 A3,
+    // T3): the stream plus the pairs the tree broadphase withholds for held islands.
     let keys = manifolds.box_axis_cache.begin_frame_synced(
         pairs,
         contact_pairs.pairs().len(),
