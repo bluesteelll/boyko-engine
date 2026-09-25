@@ -520,9 +520,10 @@ fn face_vertices(obb: &Obb, axis: usize, positive: bool) -> [(Vec3, usize); 4] {
 /// reference side plane", which is what a reader of a dumped id needs.
 const PLANE_EDGE_BASE: u8 = 8;
 
-/// The slots of [`face_patch`]'s clip buffers: the incident face's 4 corners plus at most one
-/// vertex per reference side plane, since [`clip_against_plane`] emits at most `len + 1` vertices
-/// whatever its distances read. Four passes from a quad: 5, 6, 7, 8.
+/// The slots of [`face_patch`]'s clip buffers, and of the penetrating subset it scores: the
+/// incident face's 4 corners plus at most one vertex per reference side plane, since
+/// [`clip_against_plane`] emits at most `len + 1` vertices whatever its distances read. Four
+/// passes from a quad: 5, 6, 7, 8.
 const CLIP_CAPACITY: usize = 8;
 
 /// A clipped contact vertex carried through Sutherland-Hodgman (P2 W4 / A7a).
@@ -1561,12 +1562,14 @@ fn face_patch<const SPECULATIVE: bool>(
 
     // Keep only vertices BELOW the reference face (penetrating), projecting each
     // onto the reference face for the contact anchor and computing its separation.
-    let mut scored: [ScoredPoint; 8] = [ScoredPoint {
+    // They are a subset of the clipped polygon, so the clip's own bound sizes this
+    // buffer: `scored_len ≤ poly_len ≤ CLIP_CAPACITY`.
+    let mut scored: [ScoredPoint; CLIP_CAPACITY] = [ScoredPoint {
         pos: Vec3::ZERO,
         separation: 0.0,
         tie_ord: 0,
         feature_id: 0,
-    }; 8];
+    }; CLIP_CAPACITY];
     let mut scored_len = 0usize;
     for &cv in &src[..poly_len] {
         let separation = (cv.pos - ref_face_center).dot(ref_normal);
