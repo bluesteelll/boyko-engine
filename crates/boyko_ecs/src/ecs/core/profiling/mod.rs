@@ -3,9 +3,9 @@
 //! # Why this lives inside `boyko_ecs`
 //!
 //! The same reason [`log`](crate::ecs::core::log) does: the durable store is backed by
-//! [`VmReservation`](crate::ecs::memory::vm::VmReservation), which is `pub(crate)` to this crate
-//! and must stay so — its soundness rests on invariants (`base` is write-once, the frontier is
-//! monotone, nothing is freed) a foreign crate could not be held to. Putting the store here is
+//! [`VmReservation`](crate::ecs::memory::vm::VmReservation), the engine's own reservation
+//! primitive (in `boyko_memory` since rung C1, whose public contract keeps it sound: a
+//! release-checked commit range, a write-once `base`, no decommit). Putting the store here is
 //! what makes it engine storage rather than a `Box<[u8]>` side-store, which Principle 0 forbids
 //! **even inside a `Resource`**.
 //!
