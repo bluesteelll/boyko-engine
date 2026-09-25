@@ -455,9 +455,11 @@ collide_box_pair(k):                           // pure in (bodies, frames, T0 hi
     4,352 long-run frames; the same binary with reuse off reads the L11 C2 long run digit for digit). It costs that
     pin power, measured by re-running the fan-out mutation: in release it reds only on the census window's 12
     eleven-colour frames, and in debug not at all (its window holds no nine-colour frame). Review round 1 (W1) closed
-    that with a reuse-off census arm, S1d, pinned at S1c's L11 C2 envelope (release 134..=134, dispatch 269; debug
-    98..=110, 221). The same mutation reds S1d on all 256 release frames and on the debug window's 12 nine-colour
-    frames. The census asserts that S1c's last step reuses records (5,098 in release) and S1d's reuses none.
+    that with a reuse-off census arm, S1e, pinned at S1c's L11 C2 envelope (release 134..=134, dispatch 269; debug
+    98..=110, 221). The same mutation reds S1e on all 256 release frames and on the debug window's 12 nine-colour
+    frames. The census asserts that S1c's last step reuses records (5,098 in release) and S1e's reuses none.
+    Review round 2 (W1) renamed the arm from S1d to S1e: S1d is L10's sleeping-on arm, and the gate gives each pin
+    exactly one row by label prefix, so the merged census would have panicked on two S1d rows.
   - Setups adapted: GOLDEN sets reuse off (its contract allows only that); G4 sets reuse off (with reuse on no layer-0
     mover's reference box swaps, because a flipped pair keeps its record, ruling W2; with reuse off mover 13 swaps
     as before); the class bench sets reuse off; `profiling_zone_counts` asserts `reused > 0` on some step instead of 0.
