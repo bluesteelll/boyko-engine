@@ -1757,6 +1757,114 @@ slots are used (49 by their re-run); 19 are dropped because both attempts were h
 Not in the tree: `test/`, the exported trees, the gate's per-process directories, the exes, `__pycache__/` and the
 duplicate pose files.
 
+### 15.5 Wave 2 — the W8 headline over four blocks, C3b's t_q and C2, the tree thresholds, G-TW's canary resolution — TIMED 2026-09-25
+
+**RESULT, 2026-09-25, window 7 wave 2** (the orchestrator's four rulings, quoted in the wave's `analysis.md`):
+- the W8 headline reads **0.87x Jolt at W8 on the default row, reproduced in three clean blocks, NOT claimed under
+  the window protocol**;
+- **C2 is not built**: the default row's t_q is claimed below its 0.235 ms letter in both blocks and pooled;
+- the tree thresholds: **`TREE_BRUTE_MAX_ROWS` = 144 and `AUTO_TREE_LO/HI` = 144 / 152**, by the recipe's rule (a code
+  change for the tree lane, not made by this record);
+- **G-TW's canary resolution is demonstrated** at 0.5 R = 3.77 % of the step, so window 7's canary under SE stands.
+
+**Protocol.** Window 7's (section 15), unchanged, plus two additions:
+- pinned launch-context lengths: the cwd and command-line length of each Q1 and Q2 row equal the earlier window's
+  (0 misses);
+- a priority skip and a STOP flag, neither of which fired.
+
+K = 6 per cell for Q1, Q2 and Q4; K = 3 for Q3 (the recipe's). Six blocks, in order: Q1C, Q2C, Q3, Q4, Q2D, Q1D.
+Q1's C and D join window 7's P1A-jolt (A) and P1B-jolt (B).
+
+**Where and when.** The owner's workstation, one launch at 06:07:48, timed 06:12:15-07:44:30 +03:00, complete
+(`WINDOW_DONE` exit 0). 11 waits: the first reached idle after 5 polls, every other in 3. No build or lane process
+was seen at any poll, receipt or process.
+
+**Binaries**, all run in place and re-checked by hash (`bin/SHA256SUMS`):
+- trk `93b2615b` `24d52719` and c4 `989ca0f0` `c4a75f82` (window 7's);
+- C3b's parent `6dd1f916` `228f3514` and tip `983480a9` `f93e5fec` (window 6's);
+- Jolt v5.6.0 `918fd2b7`;
+- one new instrument for Q3: `93b2615b` with only `G4_SIZES` changed (`variant/g4ref.diff`, the recipe's own
+  one-line remedy), `bpbench_g4ref_93b2615b.exe` `f96a9c11`, built from a `git archive` tree under the tracked lock
+  (`5f8de754…`, unchanged after the build).
+
+**Counts.** 259 records: 248 processes (10 warm-ups, 237 originals, 1 re-run) and 11 pass markers. All 237 slots are
+used (1 by its re-run), 0 are dropped and 0 passes voided. Every used process passes the validity checks.
+- Receipts: 260 distinct, median 1.12 %, max 16.88 %, 1 over 5 %.
+- The untimed gate: 27 processes, 0 failing; four 501-step red controls exit 4.
+- The analyst's reduction (its own script) reproduces the driver's in all 103 cells and 150 comparisons. The Q3 ratios
+  agree to the print precision of criterion's estimates, 6.2e-5.
+
+**Q1: the W8 headline.**
+- **The rule does not hold.** It needs a claim in A, B, C, D and pooled A-D. ours/Jolt at W8, [0,500), r/i/s:
+  - A 0.8355 n/Y/Y;
+  - **B 0.8721 Y/Y/Y**;
+  - **C 0.8697 n/Y/Y**;
+  - **D 0.8696 n/Y/n**;
+  - pooled A-D 0.8674 n/n/Y.
+- **The reading: B, C and D agree within 0.3 %.** Their cells agree within 0.8 % on every row: ours 2.188-2.199 ms,
+  Jolt 2.509-2.528.
+- Block A ran with an agent session and then the owner's browser active. Its browser pass reads a during-process
+  witness median of 2.28 %, against 0.59-0.69 % in every pass of B, C and D.
+- **What fails min-max:**
+  - A's load: its medians sit +12 % (ours) and +17 % (Jolt) above B's;
+  - in C, one Jolt process, 2.7015 ms (+7.0 %), with quiet receipts (0.86 / 1.61 %);
+  - in D, one process of ours, 3.1487 ms (+43.2 %). Its 5-s receipts pass (1.81 / 2.18 %), and its during-process
+    witness reads 14.25 % (`msedge.exe`). The protocol records that witness but does not gate it. The same process
+    also fails D's SE.
+- **W16 is near parity:** 0.977-0.981 in B, C and D, claimed nowhere under min-max.
+- **Per manifold** (each side's own count, ours 4,519.26, Jolt 8,489.0; [100,500)): **1.601x / 1.596x / 1.594x at W8**
+  (B / C / D) and 1.78-1.79x at W16.
+
+**Q2: C3b's t_q and C2.**
+- **C2 is NOT BUILT.** The letter's row (`c3b/design.md:231`, `:372`) is the default row armed, tip, W=1:
+  **t_q 0.2079 / 0.2078 / 0.2078 ms** (C / D / pooled), −11.5 % below 0.235, claimed under min-max and SE in each.
+  c_q is 167.6 ns per queried row.
+- **The cfg-A row (window 6's reading) is on the bar:** 0.2459 / 0.2486 / 0.2471, claimed above under SE only.
+  Recorded as context.
+- **Window 6's +11.96 % shift is neither a layout term nor a block term here:**
+  - padded against plain: +0.36 % pooled, n/n/n;
+  - D against C: +1.12 %, n/n/n.
+- **Between the windows, the cfg-A query moved on both kernels:** the parent reads 0.4938 against window 6 P3's
+  0.4044 (+22 %), and the tip +18 %. The kernel ratio holds (0.500 against 0.520), and the default row does not move
+  (0.2078 against window 7 P4's 0.2043).
+- The kernel ships again: tip/parent −48 to −50 % on every row, Y/Y/Y.
+
+**Q3: the tree thresholds** (recipe 1.4, `g4_g5_recipe.md:131-132`; 12 sizes 64-256 on both families, K = 3).
+- all_pairs/tree is monotone in both families: claimed below 1 through 128 (disparity: 136), not claimed at 144
+  (1.0076 uniform, 0.9929 disparity), claimed above 1 from 152 (1.0482 / 1.0340).
+- **LO = 144 and HI = 152 in both families, so `TREE_BRUTE_MAX_ROWS` = 144 and `AUTO_TREE_LO/HI` = 144 / 152.**
+  L2's procedure beside it gives 150 / 135 (log-log crossovers 142.6 / 145.4).
+- Window 4 (64 and 64 / 256 by the grid rule, 126 / 140 by L2) could not place the crossover. Its line "commit only
+  after the refinement run" (section 11) is answered here.
+- **The crossovers moved up** from window 4's 111 / 138, against `c3b/design.md:244`'s prediction. The same-binary
+  RowWalk bridge splits the move:
+  - LeafList is claimed slower than RowWalk at 64 (+40 % uniform, +6 % disparity), and claimed faster only at 128
+    and 256 in disparity and at 256 in uniform;
+  - on the same kernel, all_pairs/tree_rowwalk reads 11-18 % below window 4. That between-binary or between-window
+    term is untested.
+
+**Q4: G-TW's canary resolution** (c4, J-A, W=1, reuse on, unarmed; R = 7.542 %, G-TW's own bar in window 7).
+- The rungs at 0.5 / 1 / 1.5 / 2 R rise **+3.64 / +7.44 / +11.20 / +14.87 %** (rise/injected 1.01-1.05), against
+  min-max bars of 2.6-2.7 %. **All four are SEEN**, Y/Y/Y.
+- **The resolution is DEMONSTRATED: 0.5 R = 3.77 % of the step.**
+- It covers the W=1 J-A gate only. G-TW's W ≥ 2 bars are not re-measured.
+
+**Not claimed / not measured.**
+- The W8 headline under the window protocol.
+- The cause of C's 2.7015 ms Jolt process.
+- The cause of the cfg-A query's between-window term.
+- Why the same-kernel G4 ratio fell since window 4.
+- G-TW at W ≥ 2.
+- Q1 at W 1/2.
+
+**Receipts:** `docs/measurements/2026-09-25-physics-window7/wave2/`:
+- `README.md`: the protocol, the binaries and the instrument's diff, the pose table, the layout;
+- `analysis.md`: the analyst's reduction, verbatim; the README says how it is added if absent;
+- `plan.md`, `rows7b.json`, `run_window.sh`, `dryrun.txt`, `wait_log.txt`, `progress.txt`, `WINDOW_DONE`;
+- `bin/`, `logs/`, `variant/`, `gate/`;
+- `raw/`: one `pose.bin` per distinct pose;
+- `tools/`, `analyst/`.
+
 ---
 
 ## When an entry is done

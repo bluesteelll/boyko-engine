@@ -1,0 +1,32 @@
+== cells 05:33:37
+OK  cells/H-trk-tree_trk_W4                      exit 0 pose 0x32d5e235342b4143 expect match bp Tree reuse False canary_ns None wall 1.964s win 3.8869 
+OK  cells/H-trk-tree_trk_W8                      exit 0 pose 0x32d5e235342b4143 expect match bp Tree reuse False canary_ns None wall 2.519s win 4.9962 
+OK  cells/H-trk-tree_trk_W16                     exit 0 pose 0x32d5e235342b4143 expect match bp Tree reuse False canary_ns None wall 1.29s win 2.5474 
+OK  cells/H-trk-ap_trk_W4                        exit 0 pose 0x32d5e235342b4143 expect match bp AllPairs reuse False canary_ns None wall 2.422s win 4.8168 
+OK  cells/H-trk-ap_trk_W8                        exit 0 pose 0x32d5e235342b4143 expect match bp AllPairs reuse False canary_ns None wall 2.181s win 4.3338 
+OK  cells/H-trk-ap_trk_W16                       exit 0 pose 0x32d5e235342b4143 expect match bp AllPairs reuse False canary_ns None wall 2.207s win 4.3852 
+OK  cells/C3b-TA-armed_par_W1                    exit 0 pose 0x32d5e235342b4143 expect match bp Tree reuse None canary_ns None wall 9.141s win 18.1461 
+OK  cells/C3b-TA-armed_par_W8                    exit 0 pose 0x32d5e235342b4143 expect match bp Tree reuse None canary_ns None wall 2.598s win 5.0773 
+OK  cells/C3b-TA-armed_tip_W1                    exit 0 pose 0x32d5e235342b4143 expect match bp Tree reuse None canary_ns None wall 9.012s win 17.8829 
+OK  cells/C3b-TA-armed_tip_W8                    exit 0 pose 0x32d5e235342b4143 expect match bp Tree reuse None canary_ns None wall 2.404s win 4.698 
+OK  cells/C3b-TA-pad06_par_W1                    exit 0 pose 0x32d5e235342b4143 expect match bp Tree reuse None canary_ns None wall 9.111s win 18.0929 
+OK  cells/C3b-TA-pad06_tip_W1                    exit 0 pose 0x32d5e235342b4143 expect match bp Tree reuse None canary_ns None wall 11.302s win 22.4094 
+OK  cells/C3b-TD-armed_par_W1                    exit 0 pose 0x32d5e235342b4143 expect match bp Tree reuse None canary_ns None wall 3.557s win 7.0042 
+OK  cells/C3b-TD-armed_tip_W1                    exit 0 pose 0x32d5e235342b4143 expect match bp Tree reuse None canary_ns None wall 3.679s win 7.2463 
+OK  cells/L9-JA-on_c4_W1                         exit 0 pose 0x30c5438bc6ad9ffa expect match bp AllPairs reuse True canary_ns None wall 8.434s win 16.8248 
+OK  cells/L9-JC-r050_c4_W1                       exit 0 pose 0x30c5438bc6ad9ffa expect match bp AllPairs reuse True canary_ns 600617 wall 8.739s win 17.4383 
+OK  cells/L9-JC-r100_c4_W1                       exit 0 pose 0x30c5438bc6ad9ffa expect match bp AllPairs reuse True canary_ns 1184550 wall 8.953s win 17.8682 
+OK  cells/L9-JC-r150_c4_W1                       exit 0 pose 0x30c5438bc6ad9ffa expect match bp AllPairs reuse True canary_ns 1785167 wall 9.32s win 18.6014 
+OK  cells/L9-JC-r200_c4_W1                       exit 0 pose 0x30c5438bc6ad9ffa expect match bp AllPairs reuse True canary_ns 2369100 wall 9.559s win 19.0778 
+== jolt 05:35:25
+OK  cells/H-jolt56_j56_W4                        exit 0 pose None expect None bp None reuse None canary_ns None wall 1.966s win 3.6837 
+OK  cells/H-jolt56_j56_W8                        exit 0 pose None expect None bp None reuse None canary_ns None wall 1.405s win 2.7654 
+OK  cells/H-jolt56_j56_W16                       exit 0 pose None expect None bp None reuse None canary_ns None wall 1.25s win 2.452 
+== criterion 05:35:30
+OK  cells/G4-refine_g4r_W1                       exit 0 pose None expect None bp None reuse None canary_ns None wall 537.056s win None 
+== red 05:35:30
+OK  red/trk_H-trk-tree_501                       exit 4 pose 0x9336b30a06a7d8af expect mismatch: 64480 vs 64480 bytes, first differing body Some(0) bp Tree reuse False canary_ns None wall 3.117s win 6.1893 
+OK  red/par_C3b-TA-armed_501                     exit 4 pose 0x9336b30a06a7d8af expect mismatch: 64480 vs 64480 bytes, first differing body Some(0) bp Tree reuse None canary_ns None wall 8.804s win 17.5346 
+OK  red/tip_C3b-TA-armed_501                     exit 4 pose 0x9336b30a06a7d8af expect mismatch: 64480 vs 64480 bytes, first differing body Some(0) bp Tree reuse None canary_ns None wall 8.79s win 17.5196 
+OK  red/c4_L9-JA-on_501                          exit 4 pose 0xcf93d4ea9c3e0922 expect mismatch: 64480 vs 64480 bytes, first differing body Some(0) bp AllPairs reuse True canary_ns None wall 8.541s win 17.0096 
+== done 05:35:59: 27 processes, 0 failing: []

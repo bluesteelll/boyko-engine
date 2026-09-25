@@ -1,0 +1,493 @@
+Gnuplot not found, using plotters backend
+bp_g4_uniform/17: kernel LeafList rows 17 pairs 30 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 9 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/17: kernel RowWalk rows 17 pairs 30 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 9
+Benchmarking bp_g4_uniform/all_pairs/17
+Benchmarking bp_g4_uniform/all_pairs/17: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/17: Collecting 10 samples in estimated 1.0000 s (6.1M iterations)
+Benchmarking bp_g4_uniform/all_pairs/17: Analyzing
+Benchmarking bp_g4_uniform/tree/17
+Benchmarking bp_g4_uniform/tree/17: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/17: Collecting 10 samples in estimated 1.0000 s (266k iterations)
+Benchmarking bp_g4_uniform/tree/17: Analyzing
+bp_g4_uniform/24: kernel LeafList rows 24 pairs 46 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 9 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/24: kernel RowWalk rows 24 pairs 46 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 9
+Benchmarking bp_g4_uniform/all_pairs/24
+Benchmarking bp_g4_uniform/all_pairs/24: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/24: Collecting 10 samples in estimated 1.0000 s (3.1M iterations)
+Benchmarking bp_g4_uniform/all_pairs/24: Analyzing
+Benchmarking bp_g4_uniform/tree/24
+Benchmarking bp_g4_uniform/tree/24: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/24: Collecting 10 samples in estimated 1.0000 s (246k iterations)
+Benchmarking bp_g4_uniform/tree/24: Analyzing
+bp_g4_uniform/32: kernel LeafList rows 32 pairs 63 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 12 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/32: kernel RowWalk rows 32 pairs 63 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 12
+Benchmarking bp_g4_uniform/all_pairs/32
+Benchmarking bp_g4_uniform/all_pairs/32: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/32: Collecting 10 samples in estimated 1.0000 s (1.7M iterations)
+Benchmarking bp_g4_uniform/all_pairs/32: Analyzing
+Benchmarking bp_g4_uniform/tree/32
+Benchmarking bp_g4_uniform/tree/32: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/32: Collecting 10 samples in estimated 1.0000 s (229k iterations)
+Benchmarking bp_g4_uniform/tree/32: Analyzing
+bp_g4_uniform/40: kernel LeafList rows 40 pairs 81 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 15 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/40: kernel RowWalk rows 40 pairs 81 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 15
+Benchmarking bp_g4_uniform/all_pairs/40
+Benchmarking bp_g4_uniform/all_pairs/40: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/40: Collecting 10 samples in estimated 1.0000 s (1.1M iterations)
+Benchmarking bp_g4_uniform/all_pairs/40: Analyzing
+Benchmarking bp_g4_uniform/tree/40
+Benchmarking bp_g4_uniform/tree/40: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/40: Collecting 10 samples in estimated 1.0000 s (207k iterations)
+Benchmarking bp_g4_uniform/tree/40: Analyzing
+bp_g4_uniform/48: kernel LeafList rows 48 pairs 101 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 18 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/48: kernel RowWalk rows 48 pairs 101 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 18
+Benchmarking bp_g4_uniform/all_pairs/48
+Benchmarking bp_g4_uniform/all_pairs/48: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/48: Collecting 10 samples in estimated 1.0000 s (791k iterations)
+Benchmarking bp_g4_uniform/all_pairs/48: Analyzing
+Benchmarking bp_g4_uniform/tree/48
+Benchmarking bp_g4_uniform/tree/48: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/48: Collecting 10 samples in estimated 1.0000 s (185k iterations)
+Benchmarking bp_g4_uniform/tree/48: Analyzing
+bp_g4_uniform/56: kernel LeafList rows 56 pairs 119 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 21 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/56: kernel RowWalk rows 56 pairs 119 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 21
+Benchmarking bp_g4_uniform/all_pairs/56
+Benchmarking bp_g4_uniform/all_pairs/56: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/56: Collecting 10 samples in estimated 1.0000 s (555k iterations)
+Benchmarking bp_g4_uniform/all_pairs/56: Analyzing
+Benchmarking bp_g4_uniform/tree/56
+Benchmarking bp_g4_uniform/tree/56: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/56: Collecting 10 samples in estimated 1.0000 s (174k iterations)
+Benchmarking bp_g4_uniform/tree/56: Analyzing
+bp_g4_uniform/64: kernel LeafList rows 64 pairs 141 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 24 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/64: kernel RowWalk rows 64 pairs 141 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 24
+Benchmarking bp_g4_uniform/all_pairs/64
+Benchmarking bp_g4_uniform/all_pairs/64: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/64: Collecting 10 samples in estimated 1.0000 s (428k iterations)
+Benchmarking bp_g4_uniform/all_pairs/64: Analyzing
+Benchmarking bp_g4_uniform/tree/64
+Benchmarking bp_g4_uniform/tree/64: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/64: Collecting 10 samples in estimated 1.0000 s (159k iterations)
+Benchmarking bp_g4_uniform/tree/64: Analyzing
+bp_g4_uniform/72: kernel LeafList rows 72 pairs 147 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 27 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/72: kernel RowWalk rows 72 pairs 147 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 27
+Benchmarking bp_g4_uniform/all_pairs/72
+Benchmarking bp_g4_uniform/all_pairs/72: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/72: Collecting 10 samples in estimated 1.0000 s (344k iterations)
+Benchmarking bp_g4_uniform/all_pairs/72: Analyzing
+Benchmarking bp_g4_uniform/tree/72
+Benchmarking bp_g4_uniform/tree/72: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/72: Collecting 10 samples in estimated 1.0000 s (141k iterations)
+Benchmarking bp_g4_uniform/tree/72: Analyzing
+bp_g4_uniform/80: kernel LeafList rows 80 pairs 165 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 30 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/80: kernel RowWalk rows 80 pairs 165 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 30
+Benchmarking bp_g4_uniform/all_pairs/80
+Benchmarking bp_g4_uniform/all_pairs/80: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/80: Collecting 10 samples in estimated 1.0000 s (281k iterations)
+Benchmarking bp_g4_uniform/all_pairs/80: Analyzing
+Benchmarking bp_g4_uniform/tree/80
+Benchmarking bp_g4_uniform/tree/80: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/80: Collecting 10 samples in estimated 1.0000 s (129k iterations)
+Benchmarking bp_g4_uniform/tree/80: Analyzing
+bp_g4_uniform/88: kernel LeafList rows 88 pairs 187 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 33 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/88: kernel RowWalk rows 88 pairs 187 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 33
+Benchmarking bp_g4_uniform/all_pairs/88
+Benchmarking bp_g4_uniform/all_pairs/88: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/88: Collecting 10 samples in estimated 1.0000 s (230k iterations)
+Benchmarking bp_g4_uniform/all_pairs/88: Analyzing
+Benchmarking bp_g4_uniform/tree/88
+Benchmarking bp_g4_uniform/tree/88: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/88: Collecting 10 samples in estimated 1.0001 s (128k iterations)
+Benchmarking bp_g4_uniform/tree/88: Analyzing
+bp_g4_uniform/96: kernel LeafList rows 96 pairs 204 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 36 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/96: kernel RowWalk rows 96 pairs 204 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 36
+Benchmarking bp_g4_uniform/all_pairs/96
+Benchmarking bp_g4_uniform/all_pairs/96: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/96: Collecting 10 samples in estimated 1.0000 s (196k iterations)
+Benchmarking bp_g4_uniform/all_pairs/96: Analyzing
+Benchmarking bp_g4_uniform/tree/96
+Benchmarking bp_g4_uniform/tree/96: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/96: Collecting 10 samples in estimated 1.0001 s (119k iterations)
+Benchmarking bp_g4_uniform/tree/96: Analyzing
+bp_g4_uniform/104: kernel LeafList rows 104 pairs 223 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 39 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/104: kernel RowWalk rows 104 pairs 223 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 39
+Benchmarking bp_g4_uniform/all_pairs/104
+Benchmarking bp_g4_uniform/all_pairs/104: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/104: Collecting 10 samples in estimated 1.0000 s (163k iterations)
+Benchmarking bp_g4_uniform/all_pairs/104: Analyzing
+Benchmarking bp_g4_uniform/tree/104
+Benchmarking bp_g4_uniform/tree/104: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/104: Collecting 10 samples in estimated 1.0000 s (109k iterations)
+Benchmarking bp_g4_uniform/tree/104: Analyzing
+bp_g4_uniform/112: kernel LeafList rows 112 pairs 243 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 42 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/112: kernel RowWalk rows 112 pairs 243 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 42
+Benchmarking bp_g4_uniform/all_pairs/112
+Benchmarking bp_g4_uniform/all_pairs/112: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/112: Collecting 10 samples in estimated 1.0000 s (145k iterations)
+Benchmarking bp_g4_uniform/all_pairs/112: Analyzing
+Benchmarking bp_g4_uniform/tree/112
+Benchmarking bp_g4_uniform/tree/112: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/112: Collecting 10 samples in estimated 1.0000 s (104k iterations)
+Benchmarking bp_g4_uniform/tree/112: Analyzing
+bp_g4_uniform/120: kernel LeafList rows 120 pairs 262 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 45 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/120: kernel RowWalk rows 120 pairs 262 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 45
+Benchmarking bp_g4_uniform/all_pairs/120
+Benchmarking bp_g4_uniform/all_pairs/120: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/120: Collecting 10 samples in estimated 1.0000 s (127k iterations)
+Benchmarking bp_g4_uniform/all_pairs/120: Analyzing
+Benchmarking bp_g4_uniform/tree/120
+Benchmarking bp_g4_uniform/tree/120: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/120: Collecting 10 samples in estimated 1.0001 s (99k iterations)
+Benchmarking bp_g4_uniform/tree/120: Analyzing
+bp_g4_uniform/128: kernel LeafList rows 128 pairs 275 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 48 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/128: kernel RowWalk rows 128 pairs 275 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 48
+Benchmarking bp_g4_uniform/all_pairs/128
+Benchmarking bp_g4_uniform/all_pairs/128: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/128: Collecting 10 samples in estimated 1.0001 s (99k iterations)
+Benchmarking bp_g4_uniform/all_pairs/128: Analyzing
+Benchmarking bp_g4_uniform/tree/128
+Benchmarking bp_g4_uniform/tree/128: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/128: Collecting 10 samples in estimated 1.0000 s (90k iterations)
+Benchmarking bp_g4_uniform/tree/128: Analyzing
+bp_g4_uniform/144: kernel LeafList rows 144 pairs 315 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 54 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/144: kernel RowWalk rows 144 pairs 315 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 54
+Benchmarking bp_g4_uniform/all_pairs/144
+Benchmarking bp_g4_uniform/all_pairs/144: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/144: Collecting 10 samples in estimated 1.0000 s (80k iterations)
+Benchmarking bp_g4_uniform/all_pairs/144: Analyzing
+Benchmarking bp_g4_uniform/tree/144
+Benchmarking bp_g4_uniform/tree/144: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/144: Collecting 10 samples in estimated 1.0000 s (79k iterations)
+Benchmarking bp_g4_uniform/tree/144: Analyzing
+bp_g4_uniform/160: kernel LeafList rows 160 pairs 352 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 60 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/160: kernel RowWalk rows 160 pairs 352 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 60
+Benchmarking bp_g4_uniform/all_pairs/160
+Benchmarking bp_g4_uniform/all_pairs/160: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/160: Collecting 10 samples in estimated 1.0000 s (66k iterations)
+Benchmarking bp_g4_uniform/all_pairs/160: Analyzing
+Benchmarking bp_g4_uniform/tree/160
+Benchmarking bp_g4_uniform/tree/160: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/160: Collecting 10 samples in estimated 1.0001 s (74k iterations)
+Benchmarking bp_g4_uniform/tree/160: Analyzing
+bp_g4_uniform/176: kernel LeafList rows 176 pairs 393 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 66 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/176: kernel RowWalk rows 176 pairs 393 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 66
+Benchmarking bp_g4_uniform/all_pairs/176
+Benchmarking bp_g4_uniform/all_pairs/176: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/176: Collecting 10 samples in estimated 1.0001 s (55k iterations)
+Benchmarking bp_g4_uniform/all_pairs/176: Analyzing
+Benchmarking bp_g4_uniform/tree/176
+Benchmarking bp_g4_uniform/tree/176: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/176: Collecting 10 samples in estimated 1.0001 s (68k iterations)
+Benchmarking bp_g4_uniform/tree/176: Analyzing
+bp_g4_uniform/192: kernel LeafList rows 192 pairs 432 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 72 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/192: kernel RowWalk rows 192 pairs 432 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 72
+Benchmarking bp_g4_uniform/all_pairs/192
+Benchmarking bp_g4_uniform/all_pairs/192: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/192: Collecting 10 samples in estimated 1.0001 s (47k iterations)
+Benchmarking bp_g4_uniform/all_pairs/192: Analyzing
+Benchmarking bp_g4_uniform/tree/192
+Benchmarking bp_g4_uniform/tree/192: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/192: Collecting 10 samples in estimated 1.0001 s (63k iterations)
+Benchmarking bp_g4_uniform/tree/192: Analyzing
+bp_g4_uniform/208: kernel LeafList rows 208 pairs 473 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 78 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/208: kernel RowWalk rows 208 pairs 473 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 78
+Benchmarking bp_g4_uniform/all_pairs/208
+Benchmarking bp_g4_uniform/all_pairs/208: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/208: Collecting 10 samples in estimated 1.0000 s (41k iterations)
+Benchmarking bp_g4_uniform/all_pairs/208: Analyzing
+Benchmarking bp_g4_uniform/tree/208
+Benchmarking bp_g4_uniform/tree/208: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/208: Collecting 10 samples in estimated 1.0000 s (57k iterations)
+Benchmarking bp_g4_uniform/tree/208: Analyzing
+bp_g4_uniform/224: kernel LeafList rows 224 pairs 495 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 84 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/224: kernel RowWalk rows 224 pairs 495 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 84
+Benchmarking bp_g4_uniform/all_pairs/224
+Benchmarking bp_g4_uniform/all_pairs/224: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/224: Collecting 10 samples in estimated 1.0001 s (35k iterations)
+Benchmarking bp_g4_uniform/all_pairs/224: Analyzing
+Benchmarking bp_g4_uniform/tree/224
+Benchmarking bp_g4_uniform/tree/224: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/224: Collecting 10 samples in estimated 1.0000 s (53k iterations)
+Benchmarking bp_g4_uniform/tree/224: Analyzing
+bp_g4_uniform/240: kernel LeafList rows 240 pairs 533 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 90 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/240: kernel RowWalk rows 240 pairs 533 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 90
+Benchmarking bp_g4_uniform/all_pairs/240
+Benchmarking bp_g4_uniform/all_pairs/240: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/240: Collecting 10 samples in estimated 1.0002 s (30k iterations)
+Benchmarking bp_g4_uniform/all_pairs/240: Analyzing
+Benchmarking bp_g4_uniform/tree/240
+Benchmarking bp_g4_uniform/tree/240: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/240: Collecting 10 samples in estimated 1.0002 s (51k iterations)
+Benchmarking bp_g4_uniform/tree/240: Analyzing
+bp_g4_uniform/256: kernel LeafList rows 256 pairs 568 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 96 fallback_leaves 0 row_walk_leaves 0
+bp_g4_uniform/256: kernel RowWalk rows 256 pairs 568 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 96
+Benchmarking bp_g4_uniform/all_pairs/256
+Benchmarking bp_g4_uniform/all_pairs/256: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/all_pairs/256: Collecting 10 samples in estimated 1.0001 s (26k iterations)
+Benchmarking bp_g4_uniform/all_pairs/256: Analyzing
+Benchmarking bp_g4_uniform/tree/256
+Benchmarking bp_g4_uniform/tree/256: Warming up for 500.00 ms
+Benchmarking bp_g4_uniform/tree/256: Collecting 10 samples in estimated 1.0000 s (47k iterations)
+Benchmarking bp_g4_uniform/tree/256: Analyzing
+bp_g4_disparity/17: kernel LeafList rows 21 pairs 104 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 9 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/17: kernel RowWalk rows 21 pairs 104 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 9
+Benchmarking bp_g4_disparity/all_pairs/17
+Benchmarking bp_g4_disparity/all_pairs/17: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/17: Collecting 10 samples in estimated 1.0000 s (3.8M iterations)
+Benchmarking bp_g4_disparity/all_pairs/17: Analyzing
+Benchmarking bp_g4_disparity/tree/17
+Benchmarking bp_g4_disparity/tree/17: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/17: Collecting 10 samples in estimated 1.0000 s (238k iterations)
+Benchmarking bp_g4_disparity/tree/17: Analyzing
+bp_g4_disparity/24: kernel LeafList rows 28 pairs 148 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 12 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/24: kernel RowWalk rows 28 pairs 148 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 12
+Benchmarking bp_g4_disparity/all_pairs/24
+Benchmarking bp_g4_disparity/all_pairs/24: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/24: Collecting 10 samples in estimated 1.0000 s (2.0M iterations)
+Benchmarking bp_g4_disparity/all_pairs/24: Analyzing
+Benchmarking bp_g4_disparity/tree/24
+Benchmarking bp_g4_disparity/tree/24: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/24: Collecting 10 samples in estimated 1.0000 s (217k iterations)
+Benchmarking bp_g4_disparity/tree/24: Analyzing
+bp_g4_disparity/32: kernel LeafList rows 36 pairs 198 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 15 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/32: kernel RowWalk rows 36 pairs 198 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 15
+Benchmarking bp_g4_disparity/all_pairs/32
+Benchmarking bp_g4_disparity/all_pairs/32: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/32: Collecting 10 samples in estimated 1.0000 s (1.1M iterations)
+Benchmarking bp_g4_disparity/all_pairs/32: Analyzing
+Benchmarking bp_g4_disparity/tree/32
+Benchmarking bp_g4_disparity/tree/32: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/32: Collecting 10 samples in estimated 1.0001 s (196k iterations)
+Benchmarking bp_g4_disparity/tree/32: Analyzing
+bp_g4_disparity/40: kernel LeafList rows 44 pairs 248 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 18 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/40: kernel RowWalk rows 44 pairs 248 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 18
+Benchmarking bp_g4_disparity/all_pairs/40
+Benchmarking bp_g4_disparity/all_pairs/40: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/40: Collecting 10 samples in estimated 1.0000 s (792k iterations)
+Benchmarking bp_g4_disparity/all_pairs/40: Analyzing
+Benchmarking bp_g4_disparity/tree/40
+Benchmarking bp_g4_disparity/tree/40: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/40: Collecting 10 samples in estimated 1.0000 s (175k iterations)
+Benchmarking bp_g4_disparity/tree/40: Analyzing
+bp_g4_disparity/48: kernel LeafList rows 52 pairs 302 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 21 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/48: kernel RowWalk rows 52 pairs 302 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 21
+Benchmarking bp_g4_disparity/all_pairs/48
+Benchmarking bp_g4_disparity/all_pairs/48: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/48: Collecting 10 samples in estimated 1.0000 s (547k iterations)
+Benchmarking bp_g4_disparity/all_pairs/48: Analyzing
+Benchmarking bp_g4_disparity/tree/48
+Benchmarking bp_g4_disparity/tree/48: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/48: Collecting 10 samples in estimated 1.0000 s (163k iterations)
+Benchmarking bp_g4_disparity/tree/48: Analyzing
+bp_g4_disparity/56: kernel LeafList rows 60 pairs 352 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 24 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/56: kernel RowWalk rows 60 pairs 352 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 24
+Benchmarking bp_g4_disparity/all_pairs/56
+Benchmarking bp_g4_disparity/all_pairs/56: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/56: Collecting 10 samples in estimated 1.0000 s (416k iterations)
+Benchmarking bp_g4_disparity/all_pairs/56: Analyzing
+Benchmarking bp_g4_disparity/tree/56
+Benchmarking bp_g4_disparity/tree/56: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/56: Collecting 10 samples in estimated 1.0000 s (148k iterations)
+Benchmarking bp_g4_disparity/tree/56: Analyzing
+bp_g4_disparity/64: kernel LeafList rows 68 pairs 406 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 27 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/64: kernel RowWalk rows 68 pairs 406 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 27
+Benchmarking bp_g4_disparity/all_pairs/64
+Benchmarking bp_g4_disparity/all_pairs/64: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/64: Collecting 10 samples in estimated 1.0000 s (328k iterations)
+Benchmarking bp_g4_disparity/all_pairs/64: Analyzing
+Benchmarking bp_g4_disparity/tree/64
+Benchmarking bp_g4_disparity/tree/64: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/64: Collecting 10 samples in estimated 1.0000 s (132k iterations)
+Benchmarking bp_g4_disparity/tree/64: Analyzing
+bp_g4_disparity/72: kernel LeafList rows 76 pairs 455 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 30 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/72: kernel RowWalk rows 76 pairs 455 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 30
+Benchmarking bp_g4_disparity/all_pairs/72
+Benchmarking bp_g4_disparity/all_pairs/72: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/72: Collecting 10 samples in estimated 1.0000 s (261k iterations)
+Benchmarking bp_g4_disparity/all_pairs/72: Analyzing
+Benchmarking bp_g4_disparity/tree/72
+Benchmarking bp_g4_disparity/tree/72: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/72: Collecting 10 samples in estimated 1.0000 s (114k iterations)
+Benchmarking bp_g4_disparity/tree/72: Analyzing
+bp_g4_disparity/80: kernel LeafList rows 84 pairs 505 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 33 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/80: kernel RowWalk rows 84 pairs 505 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 33
+Benchmarking bp_g4_disparity/all_pairs/80
+Benchmarking bp_g4_disparity/all_pairs/80: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/80: Collecting 10 samples in estimated 1.0000 s (223k iterations)
+Benchmarking bp_g4_disparity/all_pairs/80: Analyzing
+Benchmarking bp_g4_disparity/tree/80
+Benchmarking bp_g4_disparity/tree/80: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/80: Collecting 10 samples in estimated 1.0000 s (105k iterations)
+Benchmarking bp_g4_disparity/tree/80: Analyzing
+bp_g4_disparity/88: kernel LeafList rows 92 pairs 559 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 36 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/88: kernel RowWalk rows 92 pairs 559 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 36
+Benchmarking bp_g4_disparity/all_pairs/88
+Benchmarking bp_g4_disparity/all_pairs/88: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/88: Collecting 10 samples in estimated 1.0000 s (188k iterations)
+Benchmarking bp_g4_disparity/all_pairs/88: Analyzing
+Benchmarking bp_g4_disparity/tree/88
+Benchmarking bp_g4_disparity/tree/88: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/88: Collecting 10 samples in estimated 1.0001 s (96k iterations)
+Benchmarking bp_g4_disparity/tree/88: Analyzing
+bp_g4_disparity/96: kernel LeafList rows 100 pairs 613 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 39 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/96: kernel RowWalk rows 100 pairs 613 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 39
+Benchmarking bp_g4_disparity/all_pairs/96
+Benchmarking bp_g4_disparity/all_pairs/96: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/96: Collecting 10 samples in estimated 1.0000 s (159k iterations)
+Benchmarking bp_g4_disparity/all_pairs/96: Analyzing
+Benchmarking bp_g4_disparity/tree/96
+Benchmarking bp_g4_disparity/tree/96: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/96: Collecting 10 samples in estimated 1.0000 s (89k iterations)
+Benchmarking bp_g4_disparity/tree/96: Analyzing
+bp_g4_disparity/104: kernel LeafList rows 108 pairs 664 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 42 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/104: kernel RowWalk rows 108 pairs 664 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 42
+Benchmarking bp_g4_disparity/all_pairs/104
+Benchmarking bp_g4_disparity/all_pairs/104: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/104: Collecting 10 samples in estimated 1.0000 s (138k iterations)
+Benchmarking bp_g4_disparity/all_pairs/104: Analyzing
+Benchmarking bp_g4_disparity/tree/104
+Benchmarking bp_g4_disparity/tree/104: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/104: Collecting 10 samples in estimated 1.0001 s (87k iterations)
+Benchmarking bp_g4_disparity/tree/104: Analyzing
+bp_g4_disparity/112: kernel LeafList rows 116 pairs 717 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 45 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/112: kernel RowWalk rows 116 pairs 717 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 45
+Benchmarking bp_g4_disparity/all_pairs/112
+Benchmarking bp_g4_disparity/all_pairs/112: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/112: Collecting 10 samples in estimated 1.0000 s (122k iterations)
+Benchmarking bp_g4_disparity/all_pairs/112: Analyzing
+Benchmarking bp_g4_disparity/tree/112
+Benchmarking bp_g4_disparity/tree/112: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/112: Collecting 10 samples in estimated 1.0001 s (81k iterations)
+Benchmarking bp_g4_disparity/tree/112: Analyzing
+bp_g4_disparity/120: kernel LeafList rows 124 pairs 772 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 48 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/120: kernel RowWalk rows 124 pairs 772 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 48
+Benchmarking bp_g4_disparity/all_pairs/120
+Benchmarking bp_g4_disparity/all_pairs/120: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/120: Collecting 10 samples in estimated 1.0000 s (107k iterations)
+Benchmarking bp_g4_disparity/all_pairs/120: Analyzing
+Benchmarking bp_g4_disparity/tree/120
+Benchmarking bp_g4_disparity/tree/120: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/120: Collecting 10 samples in estimated 1.0000 s (78k iterations)
+Benchmarking bp_g4_disparity/tree/120: Analyzing
+bp_g4_disparity/128: kernel LeafList rows 132 pairs 820 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 51 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/128: kernel RowWalk rows 132 pairs 820 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 51
+Benchmarking bp_g4_disparity/all_pairs/128
+Benchmarking bp_g4_disparity/all_pairs/128: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/128: Collecting 10 samples in estimated 1.0001 s (82k iterations)
+Benchmarking bp_g4_disparity/all_pairs/128: Analyzing
+Benchmarking bp_g4_disparity/tree/128
+Benchmarking bp_g4_disparity/tree/128: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/128: Collecting 10 samples in estimated 1.0001 s (76k iterations)
+Benchmarking bp_g4_disparity/tree/128: Analyzing
+bp_g4_disparity/144: kernel LeafList rows 148 pairs 930 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 57 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/144: kernel RowWalk rows 148 pairs 930 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 57
+Benchmarking bp_g4_disparity/all_pairs/144
+Benchmarking bp_g4_disparity/all_pairs/144: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/144: Collecting 10 samples in estimated 1.0001 s (68k iterations)
+Benchmarking bp_g4_disparity/all_pairs/144: Analyzing
+Benchmarking bp_g4_disparity/tree/144
+Benchmarking bp_g4_disparity/tree/144: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/144: Collecting 10 samples in estimated 1.0001 s (67k iterations)
+Benchmarking bp_g4_disparity/tree/144: Analyzing
+bp_g4_disparity/160: kernel LeafList rows 164 pairs 1033 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 63 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/160: kernel RowWalk rows 164 pairs 1033 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 63
+Benchmarking bp_g4_disparity/all_pairs/160
+Benchmarking bp_g4_disparity/all_pairs/160: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/160: Collecting 10 samples in estimated 1.0000 s (56k iterations)
+Benchmarking bp_g4_disparity/all_pairs/160: Analyzing
+Benchmarking bp_g4_disparity/tree/160
+Benchmarking bp_g4_disparity/tree/160: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/160: Collecting 10 samples in estimated 1.0001 s (60k iterations)
+Benchmarking bp_g4_disparity/tree/160: Analyzing
+bp_g4_disparity/176: kernel LeafList rows 180 pairs 1142 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 69 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/176: kernel RowWalk rows 180 pairs 1142 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 69
+Benchmarking bp_g4_disparity/all_pairs/176
+Benchmarking bp_g4_disparity/all_pairs/176: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/176: Collecting 10 samples in estimated 1.0001 s (48k iterations)
+Benchmarking bp_g4_disparity/all_pairs/176: Analyzing
+Benchmarking bp_g4_disparity/tree/176
+Benchmarking bp_g4_disparity/tree/176: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/176: Collecting 10 samples in estimated 1.0001 s (56k iterations)
+Benchmarking bp_g4_disparity/tree/176: Analyzing
+bp_g4_disparity/192: kernel LeafList rows 196 pairs 1246 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 75 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/192: kernel RowWalk rows 196 pairs 1246 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 75
+Benchmarking bp_g4_disparity/all_pairs/192
+Benchmarking bp_g4_disparity/all_pairs/192: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/192: Collecting 10 samples in estimated 1.0002 s (40k iterations)
+Benchmarking bp_g4_disparity/all_pairs/192: Analyzing
+Benchmarking bp_g4_disparity/tree/192
+Benchmarking bp_g4_disparity/tree/192: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/192: Collecting 10 samples in estimated 1.0002 s (47k iterations)
+Benchmarking bp_g4_disparity/tree/192: Analyzing
+bp_g4_disparity/208: kernel LeafList rows 212 pairs 1355 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 81 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/208: kernel RowWalk rows 212 pairs 1355 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 81
+Benchmarking bp_g4_disparity/all_pairs/208
+Benchmarking bp_g4_disparity/all_pairs/208: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/208: Collecting 10 samples in estimated 1.0002 s (35k iterations)
+Benchmarking bp_g4_disparity/all_pairs/208: Analyzing
+Benchmarking bp_g4_disparity/tree/208
+Benchmarking bp_g4_disparity/tree/208: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/208: Collecting 10 samples in estimated 1.0001 s (43k iterations)
+Benchmarking bp_g4_disparity/tree/208: Analyzing
+bp_g4_disparity/224: kernel LeafList rows 228 pairs 1458 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 87 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/224: kernel RowWalk rows 228 pairs 1458 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 87
+Benchmarking bp_g4_disparity/all_pairs/224
+Benchmarking bp_g4_disparity/all_pairs/224: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/224: Collecting 10 samples in estimated 1.0003 s (30k iterations)
+Benchmarking bp_g4_disparity/all_pairs/224: Analyzing
+Benchmarking bp_g4_disparity/tree/224
+Benchmarking bp_g4_disparity/tree/224: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/224: Collecting 10 samples in estimated 1.0000 s (44k iterations)
+Benchmarking bp_g4_disparity/tree/224: Analyzing
+bp_g4_disparity/240: kernel LeafList rows 244 pairs 1567 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 93 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/240: kernel RowWalk rows 244 pairs 1567 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 93
+Benchmarking bp_g4_disparity/all_pairs/240
+Benchmarking bp_g4_disparity/all_pairs/240: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/240: Collecting 10 samples in estimated 1.0002 s (27k iterations)
+Benchmarking bp_g4_disparity/all_pairs/240: Analyzing
+Benchmarking bp_g4_disparity/tree/240
+Benchmarking bp_g4_disparity/tree/240: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/240: Collecting 10 samples in estimated 1.0001 s (42k iterations)
+Benchmarking bp_g4_disparity/tree/240: Analyzing
+bp_g4_disparity/256: kernel LeafList rows 260 pairs 1670 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 99 fallback_leaves 0 row_walk_leaves 0
+bp_g4_disparity/256: kernel RowWalk rows 260 pairs 1670 tree members 0 static_rebuilds 0 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 99
+Benchmarking bp_g4_disparity/all_pairs/256
+Benchmarking bp_g4_disparity/all_pairs/256: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/all_pairs/256: Collecting 10 samples in estimated 1.0003 s (23k iterations)
+Benchmarking bp_g4_disparity/all_pairs/256: Analyzing
+Benchmarking bp_g4_disparity/tree/256
+Benchmarking bp_g4_disparity/tree/256: Warming up for 500.00 ms
+Benchmarking bp_g4_disparity/tree/256: Collecting 10 samples in estimated 1.0002 s (40k iterations)
+Benchmarking bp_g4_disparity/tree/256: Analyzing
+bp_g4_scene/1240: kernel LeafList rows 1241 pairs 9570 tree members 1 static_rebuilds 1 wide 0 excluded 0 leaf_list_leaves 465 fallback_leaves 2 row_walk_leaves 0
+bp_g4_scene/1240: kernel RowWalk rows 1241 pairs 9570 tree members 1 static_rebuilds 1 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 467
+bp_g4_scene/10000: kernel LeafList rows 10001 pairs 83559 tree members 1 static_rebuilds 1 wide 0 excluded 0 leaf_list_leaves 3673 fallback_leaves 79 row_walk_leaves 0
+bp_g4_scene/10000: kernel RowWalk rows 10001 pairs 83559 tree members 1 static_rebuilds 1 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 3752
+bp_g4_scene/100000: kernel LeafList rows 100001 pairs 840494 tree members 1 static_rebuilds 1 wide 0 excluded 0 leaf_list_leaves 36516 fallback_leaves 986 row_walk_leaves 0
+bp_g4_scene/100000: kernel RowWalk rows 100001 pairs 840494 tree members 1 static_rebuilds 1 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 37502
+bp_g4_scene/j100: kernel LeafList rows 1241 pairs 9564 tree members 1 static_rebuilds 1 wide 0 excluded 0 leaf_list_leaves 465 fallback_leaves 2 row_walk_leaves 0
+bp_g4_scene/j100: kernel RowWalk rows 1241 pairs 9564 tree members 1 static_rebuilds 1 wide 0 excluded 0 leaf_list_leaves 0 fallback_leaves 0 row_walk_leaves 467
+bp_g4_maintenance/stable/1240: timed step: evictions +0 translations +0 patches +0 static_rebuilds +0; members 1240; pairs 9464 (oracle ok)
+bp_g4_maintenance/admission_from_empty/1240: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 1240; pairs 9464 (oracle ok)
+bp_g4_maintenance/admission_of_64/1240: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 1304; pairs 9824 (oracle ok)
+bp_g4_maintenance/eviction_filter/1240: timed step: evictions +1 translations +0 patches +0 static_rebuilds +0; members 1239; pairs 9458 (oracle ok)
+bp_g4_maintenance/shift_translation/1240: timed step: evictions +0 translations +1 patches +0 static_rebuilds +0; members 1240; pairs 9464 (oracle ok)
+bp_g4_maintenance/compaction/1240: timed step: evictions +1 translations +0 patches +0 static_rebuilds +1; members 620; pairs 9464 (oracle ok)
+bp_g4_maintenance/high_jumper/1240: the mover (row 620) has 9 higher-row partners
+bp_g4_maintenance/high_jumper/1240: timed step: evictions +0 translations +1 patches +18 static_rebuilds +0; members 1240; pairs 9464 (oracle ok)
+bp_g4_maintenance/stable/10000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +0; members 10000; pairs 83149 (oracle ok)
+bp_g4_maintenance/admission_from_empty/10000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 10000; pairs 83149 (oracle ok)
+bp_g4_maintenance/admission_of_64/10000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 10064; pairs 83509 (oracle ok)
+bp_g4_maintenance/eviction_filter/10000: timed step: evictions +1 translations +0 patches +0 static_rebuilds +0; members 9999; pairs 83143 (oracle ok)
+bp_g4_maintenance/shift_translation/10000: timed step: evictions +0 translations +1 patches +0 static_rebuilds +0; members 10000; pairs 83149 (oracle ok)
+bp_g4_maintenance/compaction/10000: timed step: evictions +1 translations +0 patches +0 static_rebuilds +1; members 5000; pairs 83149 (oracle ok)
+bp_g4_maintenance/high_jumper/10000: the mover (row 5000) has 9 higher-row partners
+bp_g4_maintenance/high_jumper/10000: timed step: evictions +0 translations +1 patches +18 static_rebuilds +0; members 10000; pairs 83149 (oracle ok)
+bp_g4_maintenance/stable/100000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +0; members 100000; pairs 867834 (oracle ok)
+bp_g4_maintenance/admission_from_empty/100000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 100000; pairs 867834 (oracle ok)
+bp_g4_maintenance/admission_of_64/100000: timed step: evictions +0 translations +0 patches +0 static_rebuilds +1; members 100064; pairs 868194 (oracle ok)
+bp_g4_maintenance/eviction_filter/100000: timed step: evictions +1 translations +0 patches +0 static_rebuilds +0; members 99999; pairs 867828 (oracle ok)
+bp_g4_maintenance/shift_translation/100000: timed step: evictions +0 translations +1 patches +0 static_rebuilds +0; members 100000; pairs 867834 (oracle ok)
+bp_g4_maintenance/compaction/100000: timed step: evictions +1 translations +0 patches +0 static_rebuilds +1; members 50000; pairs 867834 (oracle ok)
+bp_g4_maintenance/high_jumper/100000: the mover (row 50000) has 9 higher-row partners
+bp_g4_maintenance/high_jumper/100000: timed step: evictions +0 translations +1 patches +18 static_rebuilds +0; members 100000; pairs 867834 (oracle ok)
