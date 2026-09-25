@@ -657,7 +657,7 @@ pub use upload::{
     upload_light_table, upload_pair_out_slot, upload_pair_ring, upload_particle_effects,
     upload_particle_emit_requests, upload_ray_shadow_ring, upload_sdf_edit_list,
     upload_shadow_denoise_ring, upload_taa_ring, upload_temporal_shadow_ring,
-    upload_vb_instance_rows,
+    upload_vb_instance_rows, zero_instance_materials,
 };
 // Lane fix/hwrt-shadow-ray-origin: the HOT per-frame tail of the HWRT `RayShadowUbo` (seed +
 // shadow-ray origin mode + the raster's jittered forward). Un-walled like `ResolvedRayShadow`

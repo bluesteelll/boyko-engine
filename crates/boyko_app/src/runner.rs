@@ -1783,15 +1783,37 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             }
 
             // 5b''. Asset-streaming plan F8: the gathered per-instance material-id lane —
-            //       gated on `any_non_default_material` (Principle 1: a default frame does
-            //       ZERO material-upload work).
-            if scratch.any_non_default_material() {
-                // SAFETY: `host.gpu.pm_instance_material_rings[s]` — same provenance
-                // contract as `instance_rings[s]` above (boot-minted or F8-grown in
-                // lockstep, live until teardown, the fenced slot `s == token.slot()`).
-                unsafe {
-                    upload_instance_materials(&token, &host.gpu.pm_instance_material_rings[s], scratch);
+            //       uploaded on an `any_non_default_material` frame only (Principle 1: a
+            //       default frame does ZERO material-upload work). Dynamic-materials DM1 (D-2):
+            //       VB and Forward read this ring every frame, so on the falling edge each slot
+            //       zero-fills the prefix it was written to, once (`material_gate`).
+            let pm_rows = scratch.material_ids.len() as u32;
+            match crate::material_gate::pm_ring_action(
+                scratch.any_non_default_material(),
+                &mut host.pm_ring_high_water[s],
+                pm_rows,
+            ) {
+                crate::material_gate::PmRingAction::Upload => {
+                    // SAFETY: `host.gpu.pm_instance_material_rings[s]` — same provenance
+                    // contract as `instance_rings[s]` above (boot-minted or F8-grown in
+                    // lockstep, live until teardown, the fenced slot `s == token.slot()`).
+                    unsafe {
+                        upload_instance_materials(&token, &host.gpu.pm_instance_material_rings[s], scratch);
+                    }
                 }
+                crate::material_gate::PmRingAction::Zero { rows } => {
+                    // SAFETY: the same ring slot and provenance contract as the upload arm;
+                    // `rows` is this slot's high-water, which only ever recorded lanes the
+                    // slot's (monotonically growing) capacity held.
+                    unsafe {
+                        boyko_render::zero_instance_materials(
+                            &token,
+                            &host.gpu.pm_instance_material_rings[s],
+                            rows,
+                        );
+                    }
+                }
+                crate::material_gate::PmRingAction::Idle => {}
             }
 
             // 5b'''. Textured-PBR T6c: the gathered per-instance TEXTURED material payload
@@ -3773,6 +3795,7 @@ unsafe fn destroy_host_gpu_chain(host: WindowHost, ctx: &VulkanContext) {
         light_uploaded_gen: _,
         last_ddgi_grid: _,
         particle_effects_uploaded_gen: _,
+        pm_ring_high_water: _,
         swapchain,
         surface,
         window,

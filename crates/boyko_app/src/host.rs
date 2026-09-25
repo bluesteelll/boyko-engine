@@ -153,6 +153,12 @@ pub(crate) struct WindowHost {
     /// [`crate::particle_gate::particle_effects_upload_due`]. Carried unconditionally (8 bytes on
     /// a disarmed run, never read there).
     pub(crate) particle_effects_uploaded_gen: [u64; FRAMES_IN_FLIGHT],
+    /// Dynamic-materials DM1 (live defect D-2): per in-flight slot, the high-water row count
+    /// written into that slot's `PerInstanceMaterial` ring since it was last all-zero — the
+    /// state of [`crate::material_gate::pm_ring_action`]. Seeded `0`: the boot rings are
+    /// zero-filled. Host state rather than a `World` resource because the frame loop may add
+    /// no `World` write (the G-LOOP census).
+    pub(crate) pm_ring_high_water: [u32; FRAMES_IN_FLIGHT],
     /// The swapchain + per-image views. Dropped after the explicit
     /// frame/gpu teardown (device idle by then).
     pub(crate) swapchain: Swapchain<'static>,
@@ -291,6 +297,7 @@ impl WindowHost {
             // Same `u64::MAX ≠ any real generation` seed, same reason: both slots upload the
             // baked particle effect table on their first frames.
             particle_effects_uploaded_gen: [u64::MAX; FRAMES_IN_FLIGHT],
+            pm_ring_high_water: [0; FRAMES_IN_FLIGHT],
             swapchain,
             surface,
             window,

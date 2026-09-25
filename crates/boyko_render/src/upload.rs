@@ -367,6 +367,54 @@ pub unsafe fn upload_instance_materials(
     }
 }
 
+/// Dynamic-materials DM1 (live defect D-2): zero-fills rows `[0, rows)` of ONE
+/// instance-material-SSBO ring slot — the falling edge of the `PerInstanceMaterial` upload rule
+/// (design F7), taken once per slot when the last non-default material leaves the scene.
+///
+/// [`upload_instance_materials`] runs only on a frame with a non-default material, but the VB
+/// classify and shading shaders and `forward_opaque.vs` read this ring every frame. Without the
+/// zero-fill, a default instance renumbered into a departed instance's index would keep that
+/// instance's material id. On such a frame every instance's id is 0, so zero is exact. The
+/// caller (the runner, through `material_gate::pm_ring_action`) passes the slot's high-water
+/// row count, the prefix any earlier upload into this slot can have written.
+///
+/// # Panics
+///
+/// Panics if `rows` exceeds the slot's capacity — a high-water record larger than the ring is a
+/// host bookkeeping bug, never a clamp.
+///
+/// # Safety
+///
+/// The same contract as [`upload_instance_materials`]: `ring_slot` is a LIVE host-visible
+/// buffer minted by `RhiDevice::create_buffer` (`HostVisibleCoherent`) whose `mapped` pointer
+/// targets at least `ring_slot.size` valid, persistently-mapped bytes, and it is the FENCED
+/// slot's buffer — `pm_instance_material_rings[token.slot()]`.
+#[cold]
+pub unsafe fn zero_instance_materials(token: &FrameWriteToken, ring_slot: &BoundBuffer, rows: u32) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    let bytes = rows as usize * PER_INSTANCE_MATERIAL_BYTES;
+    assert!(
+        bytes as u64 <= ring_slot.size,
+        "instance-material ring zero-fill overflow: {rows} rows ({bytes} bytes) exceed the \
+         {}-byte slot — the runner's high-water record outgrew the ring it describes",
+        ring_slot.size
+    );
+    let mapped = ring_slot
+        .mapped
+        .expect("invariant: the instance-material ring slot is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `ring_slot.size` valid mapped
+    // host-coherent bytes, and `bytes <= ring_slot.size` is hard-asserted above — the write is
+    // in-bounds. The borrowed `FrameWriteToken` + the slot-identity contract prove this slot's
+    // in-flight fence was waited THIS frame (its previous occupant finished reading the ring;
+    // the sibling frame binds the other slot) — race-free, lock-free. `PerInstanceMaterial` is
+    // plain-old-data, so all-zero bytes are a valid value (`id = 0`, the default material).
+    unsafe {
+        core::ptr::write_bytes(mapped.as_ptr(), 0, bytes);
+    }
+}
+
 /// Textured-PBR rung T6c: uploads the gathered per-instance
 /// [`MeshRenderScratch::material_tex`] lane (base_color + material id + five bindless
 /// texture slots + the metallic/roughness fallback scalars, a
