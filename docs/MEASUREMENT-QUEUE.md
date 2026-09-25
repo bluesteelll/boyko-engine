@@ -1567,6 +1567,198 @@ duplicate pose files are not in the tree.
 
 ---
 
+## 15. Physics — the Jolt headline in one window, L9 C4's timed gate, G9's last cells, and ours against Jolt stage by stage — TIMED 2026-09-25 (window 7)
+
+**RESULT, 2026-09-25, window 7:**
+- the Jolt headline does not hold under its two-block rule;
+- L9 C4's G-TW passes;
+- G9 on C3 stays closed;
+- the per-manifold gap against Jolt is the narrowphase at W=1 and our serial stages at W=8.
+
+**Protocol.** One window, complete after one stop, under the window-3 protocol block (the 2026-09-19 ruling, as
+section 14 states it):
+- a cell is the median over K separate processes of the process statistic; the spreads are min-max, IQR and the
+  median's SE; a difference is claimed iff |effect| > 2*hypot(spread_A, spread_B) under BOTH min-max and SE,
+  with IQR printed (r / i / s below);
+- 5-s receipts between processes, and a receipt > 5 % => re-run once at the end of the pass;
+- a 10-s receipt and three quiet 60-s polls before each pass, up to 30 polls;
+- a build or lane process at any point of a timed pass voids the pass;
+- P-none;
+- every runner process ran with `--expect-pose` against its row's fixture.
+
+**K = 6**: two passes x three rounds per block. Six blocks, in order: P1A-jolt, P2-L9GTW, P3-G9JA, P4-trkspans,
+P5-joltprof, P1B-jolt.
+
+**Where and when.** The owner's workstation (Ryzen 9 5900HS, 8C/16T, High performance), timed 01:09:37-01:29:50
+and 02:54:16-05:03:57 +03:00.
+
+**The stop.** The owner started a game at about 01:30.
+- The idle rule held P1A-jolt-p1 back for its 30 polls, and the driver stopped with exit 3
+  (`WINDOW_DONE.prev-1790293553`). `--resume` at 02:45:53 continued.
+- No process ran 01:29:50-02:54:06, and the game appears in no receipt.
+- **But P1A-jolt-p1 (02:55-03:12) and P2-L9GTW-p0 (03:14-04:00) ran with the owner's browser active,** which the
+  idle rule and the 5-s receipts let through. The used processes' during-process witness reads medians of
+  2.28 % / 1.90 %, against 0.54-0.66 % in every pass from 04:02 on.
+- P1A-jolt-p0 ran with an agent session active.
+- The cutoff was 10:00, then 10:30 (`raw/shell_log.txt`), not `plan.md`'s 04:15. Nothing was cut.
+
+**Build.** rustc 1.98.1 `x86_64-pc-windows-msvc`, no RUSTFLAGS, `CARGO_INCREMENTAL=0`, cargo `parity`.
+
+**Binaries** (sha256 prefixes, `bin/SHA256SUMS`):
+- the trunk `93b2615b` `24d52719` (reuse off by default);
+- `u/phys-l9-c4` `989ca0f0` `c4a75f82` (reuse on by default; `--contact-reuse` gives both arms).
+
+  Both were built from `git archive` trees under the lock both commits track (LF sha256 `5f8de754…`, not pruned).
+  Each build's `Compiling boyko-physics (path)` line names its tree.
+- window 5's `0ca312bd` `3993684b` and `cbd86a65` `9c7caff1`, copied byte-identical;
+- Jolt v5.6.0: P0's Distribution build `918fd2b7` (window 3's), run in place, and a profiled build of the same
+  source, `aa23db26` (`PROFILER_IN_DISTRIBUTION=ON`, P5 only).
+
+**Counts.** 542 records: 530 processes (12 warm-ups, 450 originals, 68 re-runs) and 12 pass markers. 431 of 450
+slots are used (49 by their re-run); 19 are dropped because both attempts were hot (15 in the loaded P1A block).
+
+**Validity.**
+- Every used runner process: exit 0, void 0, and `expect_pose: match` with the hash equal to its fixture. There are
+  five fixtures, all byte-identical to committed ones: J `0x32d5e235342b4143`; J with reuse `0x30c5438bc6ad9ffa`
+  for cfg a and default; R `0x87e561d20589d4a5`; R with reuse `0xc8bbe34cf6a8afc6`. Also: workers = W, msvc,
+  mask `0xffff`, TreeDiag as ruled, drops 0.
+- Every Jolt process: one stat line, threads = W, hash `0xb8522b4e3fc62cfe`, the patch banner, 500 frames.
+- The untimed gate: 112 processes, 0 failing. Four 501-step red controls exit 4. Jolt's `-receipt` gives 8,489.0
+  manifolds per frame over [100,500), equal to window 3's.
+- Receipts: 628; median 1.92 %, p90 5.68 %, max 21.98 %; 88 over 5 % (`browser.exe` 55, `claude.exe` 29). No
+  build or lane process at any.
+- The analyst's reduction reproduces the tester's in every cell (151) and every comparison (124).
+
+### 15.1 P1 — the Jolt headline, same window (trunk `93b2615b` against Jolt v5.6.0)
+
+- **The W8 headline does NOT HOLD.** The rule (window 6 FOLLOW-UP 15): claimed pooled AND in block A AND in
+  block B, in the same direction.
+  - The default row (`--cfg default --broadphase tree`, reuse off) against Jolt, [0,500): **A 0.8355 (n/Y/Y),
+    B 0.8721 (Y/Y/Y), pooled 0.8111 (n/n/Y)**. The block-B cells are 2.1878 [2.1850-2.2027] against
+    2.5085 [2.4711-2.5936] ms.
+  - The rule holds at no W for either of our rows (A / B / pooled):
+
+    | W | tree / Jolt | AllPairs / Jolt |
+    |---|---|---|
+    | 1 | 0.566 / 0.620 / 0.582 | 0.715 / 0.798 / 0.746 |
+    | 2 | 0.675 / 0.682 / 0.683 (both blocks claimed, pooled not) | 1.009 / 0.989 / 0.995 |
+    | 4 | 0.781 / 0.758 / 0.740 | 1.236 / 1.247 / 1.214 |
+    | 8 | 0.836 / 0.872 / 0.811 | 1.474 / 1.585 / 1.470 (both blocks claimed, pooled not) |
+    | 16 | 0.865 / 0.981 / 0.959 | 1.466 / 1.713 / 1.612 |
+
+- **Why it cannot decide.** Block A ran loaded and is slower on every row at every W (B vs A −5 to −24 %). A
+  pooled min-max range spans that shift, so the pooled cell cannot claim even where both blocks do. The rule as
+  ruled needs two quiet blocks.
+- **Per manifold** ([100,500), each side's own count: ours 4,519.2575, Jolt 8,489.0):
+  - **ours is 1.178x Jolt at W1 and 1.601x at W8 in block B**, and 1.28x / 1.40x / 1.79x at W 2/4/16;
+  - pooled reads 1.100x / 1.479x, but the pooled Jolt cell is inflated by block A (+8.8 % at W1);
+  - Jolt carries 1.878x our manifolds and 1.828x our points. Its count equals ours at frame 0 (4,495) and diverges
+    during the collapse.
+- **Scaling** T(1)/T(W), block B, at W 2/4/8/16: ours 1.52 / 2.15 / 2.72 / 2.52, Jolt 1.67 / 2.63 / 3.83 / 3.99.
+  Our tree row is slower at W16 than at W8.
+- Tree against AllPairs (block B): −22 to −45 %, claimed at every W.
+- Window term (context): Jolt in block B reads 0.976-1.020x window 3 at every W.
+
+### 15.2 L9 — G-TW on the C4 binary (P2)
+
+- **G-TW PASSES** (`levers/L9-contact-reuse/02-DESIGN-REV1.md:405-414`): one binary, `989ca0f0`,
+  `--contact-reuse off` against `on`.
+  - **Realized gain:** J-A, W=1, [100,500): 18.4127 -> 16.4753 ms, **Delta-T(1) = 1.937 ms (-10.52 %), claimed
+    under all three readings, 2.15x the 0.900 ms bar** (window 6's prediction: [1.499, 1.678] ms). The worst
+    pairing is +1.612. Window 6 read 1.845 ms on C3's switch.
+  - **No claimed regression at any W,** under either rule: J-A, J-D and R at W 1/2/4/8/16, over [0,500),
+    [600,1100) and the J [0,100) witness.
+    - Claimed faster: J-A W1 -9.25 %, R W1 -27.06 %.
+    - Every other point estimate is faster except R W8 (+0.62 %) and J-D W16 [0,100) (+2.12 %), neither claimed.
+  - **Resolution caveat:** pass 0 (the browser) widened the cells. The min-max bars at W >= 2 are 26-73 % (SE 5-15 %),
+    so the claim-free reading there is weak.
+    - Pass 1 alone (a diagnostic, K=3, quiet), at W 1/2/4/8/16, every row faster:
+      - J-A: -9.3 / -8.2 / -5.5 / -2.4 / -1.9 %;
+      - J-D: -20.5 / -15.7 / -10.1 / -6.0 / -6.3 %;
+      - R: -26.8 / -17.0 / -13.2 / -7.7 / -3.0 %.
+  - **The canary is seen under SE, not under the two-spread rule.**
+    - Injected 0.845 ms (5.07 %); its span reads 1.0003-1.0007x the injection. The step rise is +0.896 ms
+      (+5.38 %, 106 %), with bars 10.96 / 6.01 / 2.40 % (n/n/Y).
+    - The design's own form is the SE claim rule (`:407`), and window 6 accepted G9's parent canary the same way.
+    - Pass 0's load set the 4 % ranges. Pass 1 alone (0.16 / 0.18 %) sees the canary at 11x the bar.
+    - Under min-max no K would see a 5 % canary at this window's spreads, because the expected range grows with K.
+      A canary_frac of about 0.12 would be seen.
+  - **Poses:** every `on` row reads one hash across W 1-16 (J `0x30c5438bc6ad9ffa` on cfg a and default, R
+    `0xc8bbe34cf6a8afc6`), and every `off` row reads C0's.
+  - **Per contact** (armed J-A, [100,500)):
+    - np 2.6112 -> 0.7511 ms at W1 (-71.2 %, claimed): 0.168 us per manifold and 78.7 ns per pair with reuse on.
+      At W8, 0.4526 -> 0.1591.
+    - Manifolds 4,519.26 -> 4,467.66; reused 4,457.5 and full 46.7 pairs per step.
+    - Narrow colours rise 6.5x (+0.15 ms, claimed), a recorded side effect.
+- **So C4 can merge** under window 6's pin list (`levers/00-RULINGS.md`, the L9 block). The canary's SE form and
+  the W >= 2 resolution are the orchestrator's to weigh (window 7 `analysis.md` FOLLOW-UP 1).
+
+### 15.3 L11 — G9's J-A record (P3)
+
+- **Not claimed slower at any W.** J-A, tip `cbd86a65` against parent `0ca312bd`, K=6: +0.14 % (11.5423 ->
+  11.5580 ms, W2), +0.02 % (W4), -0.02 % (W16); n/n/n, bars 2.5-12.5 %.
+- Every G9 row now has a cell and none is claimed slower, so **G9 on C3 stays CLOSED** (the ruling of 2026-09-24).
+
+### 15.4 Ours against Jolt, stage by stage per manifold (P4, P5)
+
+- **Our spans** (the trunk's default row, armed, [100,500), reading A), in ms:
+
+  | W | bp | np | graph | setup | warm | colours | integrate group |
+  |---|---|---|---|---|---|---|---|
+  | 1 | 0.266 | 2.427 | 0.115 | 0.284 | 0.299 | 2.434 | 0.098 |
+  | 8 | 0.268 | 0.382 | 0.117 | 0.312 | 0.308 | 0.619 | 0.122 |
+
+  - **Five stages and gather/apply do not shrink from W1 to W8** (bp, graph, setup, warm, integrate: 0.80-0.99x).
+    Together they are 1.10 ms at W1 (18 %) and 1.17 ms at W8 (53 % of the step).
+- **Jolt's profile** (the profiled build). Its overhead is +36.1 % at W1 and +18.7 % at W8, so only shares are
+  read.
+  - About 65 % of the step is solve (velocity 54-58 %). About 27 % is one FindCollisions job: broadphase pairs
+    4-5 %, narrowphase 24-27 %.
+  - Its narrowphase runs on the body-pair cache. 8,488 of 8,489 manifolds per frame go through "Add Constraint
+    From Cached Manifold", which also builds the contact constraint, and the SAT runs once per frame.
+  - `SetupVelocityConstraints` (non-contact only) costs 0.5 us.
+- **Per manifold, block B.** Jolt is scaled uniformly to its unprofiled step; at W1 a per-sample overhead model
+  brackets it.
+  - **W1:** ours 1,318 against Jolt 1,119 ns (the step). The whole gap is the narrowphase: np 537 against 263-301,
+    and np + setup + warm 666 against 273-321. Our solve is 186-224 ns cheaper, and bp is at parity (59 against
+    57-72).
+  - **W8:** ours 482 against 301 ns. The gap is the five serial stages: bp +45, setup +69, warm +62, graph +24,
+    integrate +23 ns. np (+12) and solve (-60) are at or below Jolt.
+- **What C4 removes** (arithmetic: P4's np times the armed on/off ratio):
+  - at W1, np -380 ns per manifold (537 -> 156; np + setup + warm 287, inside Jolt's bracket), so the W1
+    per-manifold ratio goes from about **1.18x to 0.85x**;
+  - at W8, np -54 ns, so **1.60x -> about 1.44x**.
+- **After C4 the whole W8 gap is the serial stages.** Their owners (window 7 `analysis.md` § 6 and FOLLOW-UP 2-6):
+  - the tree lane's C2 (the parallel query, after F3);
+  - L11 C4 (D10's parallel fill: solve_build is 14 % of T(8), over its 5 % trigger);
+  - three with no lane yet: the warm apply (14 % of T(8) at W8), the graph build, and the integrate group.
+
+**Not claimed / not measured.**
+- The P1 headline under its rule (block A was loaded).
+- G-TW's "no regression" at W >= 2 as strong evidence.
+- The canary under the two-spread rule.
+- Any per-stage Jolt time (shares only).
+- The post-C4 per-manifold ratios. They are arithmetic: no binary had both the Tree default and C4.
+- Why Jolt's manifold count doubles during the collapse.
+
+**Receipts:** `docs/measurements/2026-09-25-physics-window7/`:
+- `README.md`: the protocol block, the stop and the resume, the binaries table with the `Compiling` lines and the
+  lock, the idle-rule summary, what was reused and why;
+- `analysis.md`: the analyst's reduction, verbatim (see `README.md`);
+- `plan.md`, `rows7.json`, `run_window.sh`, `dryrun.txt`, `wait_log.txt`, `progress.txt`, `WINDOW_DONE`,
+  `WINDOW_DONE.prev-1790293553`;
+- `bin/SHA256SUMS`, `bin/COMMIT.txt` (no exe committed);
+- `logs/`: the two runner builds and the profiled Jolt build;
+- `raw/`: `runs.jsonl`, the two manifests, `window_state.json`, `window_log.txt`, the 12 pass directories with the
+  P5 profile dumps, `reduction.json`, `tables.md`; one `pose.bin` per distinct pose, not one per process;
+- `gate/`: the gate log and JSON, the five fixtures, the Jolt receipt;
+- `tools/`, `analyst/`.
+
+Not in the tree: `test/`, the exported trees, the gate's per-process directories, the exes, `__pycache__/` and the
+duplicate pose files.
+
+---
+
 ## When an entry is done
 
 Strike it with the date and the receipt's location, rather than deleting it. An entry that was run

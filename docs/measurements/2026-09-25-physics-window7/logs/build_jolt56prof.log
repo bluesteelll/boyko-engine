@@ -1,0 +1,182 @@
+[2026-09-25 00:34:42] configure
+-- The CXX compiler identification is GNU 16.1.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Users/flint/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin/c++.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+Interprocedural optimizations are turned on
+-- Found Vulkan: C:/VulkanSDK/1.4.350.0/Lib/vulkan-1.lib (found version "1.4.350") found components: glslc glslangValidator
+-- Configuring done (3.9s)
+-- Generating done (0.3s)
+CMake Warning (unused-cli):
+  Manually-specified variables were not used by the project:
+
+    CMAKE_C_COMPILER
+
+
+-- Build files have been written to: D:/wt/_targets/win7-jolt56prof
+[2026-09-25 00:34:47] build
+[  0%] Building CXX object CMakeFiles/Jolt.dir/cmake_pch.hxx.gch
+[  0%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/AABBTree/AABBTreeBuilder.cpp.obj
+[  2%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Compute/ComputeSystem.cpp.obj
+[  2%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Core/Color.cpp.obj
+[  2%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Core/Factory.cpp.obj
+[  2%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Core/IssueReporting.cpp.obj
+[  2%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Core/JobSystemSingleThreaded.cpp.obj
+[  5%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Core/JobSystemThreadPool.cpp.obj
+[  5%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Core/JobSystemWithBarrier.cpp.obj
+[  5%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Core/LinearCurve.cpp.obj
+[  5%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Core/Memory.cpp.obj
+[  5%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Core/Profiler.cpp.obj
+[  7%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Core/RTTI.cpp.obj
+[  7%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Core/Semaphore.cpp.obj
+[  7%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Core/StringTools.cpp.obj
+[  7%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Core/TickCounter.cpp.obj
+[  7%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Geometry/ConvexHullBuilder2D.cpp.obj
+[ 10%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Geometry/ConvexHullBuilder.cpp.obj
+[ 10%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Geometry/Indexify.cpp.obj
+[ 10%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Geometry/OrientedBox.cpp.obj
+[ 10%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Math/Vec3.cpp.obj
+[ 12%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/ObjectStream/SerializableObject.cpp.obj
+[ 12%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Body/Body.cpp.obj
+[ 12%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Body/BodyCreationSettings.cpp.obj
+[ 12%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Body/BodyInterface.cpp.obj
+[ 12%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Body/BodyManager.cpp.obj
+[ 15%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Body/MassProperties.cpp.obj
+[ 15%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Body/MotionProperties.cpp.obj
+[ 15%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Character/Character.cpp.obj
+[ 15%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Character/CharacterBase.cpp.obj
+[ 15%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Character/CharacterVirtual.cpp.obj
+[ 17%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/BroadPhase/BroadPhase.cpp.obj
+[ 17%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/BroadPhase/BroadPhaseBruteForce.cpp.obj
+[ 17%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/BroadPhase/BroadPhaseQuadTree.cpp.obj
+[ 17%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/BroadPhase/QuadTree.cpp.obj
+[ 17%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/CastConvexVsTriangles.cpp.obj
+[ 20%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/CastSphereVsTriangles.cpp.obj
+[ 20%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/CollideConvexVsTriangles.cpp.obj
+[ 20%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/CollideSphereVsTriangles.cpp.obj
+[ 20%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/CollisionDispatch.cpp.obj
+[ 23%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/CollisionGroup.cpp.obj
+[ 23%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/EstimateCollisionResponse.cpp.obj
+[ 23%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/GroupFilter.cpp.obj
+[ 23%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/GroupFilterTable.cpp.obj
+[ 23%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/ManifoldBetweenTwoFaces.cpp.obj
+[ 25%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/NarrowPhaseQuery.cpp.obj
+[ 25%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/NarrowPhaseStats.cpp.obj
+[ 25%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/PhysicsMaterial.cpp.obj
+[ 25%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/PhysicsMaterialSimple.cpp.obj
+[ 25%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/BoxShape.cpp.obj
+[ 28%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/CapsuleShape.cpp.obj
+[ 28%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/CompoundShape.cpp.obj
+[ 28%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/ConvexHullShape.cpp.obj
+[ 28%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/ConvexShape.cpp.obj
+[ 28%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/CylinderShape.cpp.obj
+[ 30%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/DecoratedShape.cpp.obj
+[ 30%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/EmptyShape.cpp.obj
+[ 30%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/HeightFieldShape.cpp.obj
+[ 30%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/MeshShape.cpp.obj
+[ 30%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/MutableCompoundShape.cpp.obj
+[ 33%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.cpp.obj
+[ 33%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/PlaneShape.cpp.obj
+[ 33%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/RotatedTranslatedShape.cpp.obj
+[ 33%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/ScaledShape.cpp.obj
+[ 33%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/Shape.cpp.obj
+[ 35%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/SphereShape.cpp.obj
+[ 35%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/StaticCompoundShape.cpp.obj
+[ 35%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/TaperedCapsuleShape.cpp.obj
+[ 35%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/TaperedCylinderShape.cpp.obj
+[ 38%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/Shape/TriangleShape.cpp.obj
+[ 38%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Collision/TransformedShape.cpp.obj
+[ 38%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/ConeConstraint.cpp.obj
+[ 38%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/Constraint.cpp.obj
+[ 38%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/ConstraintManager.cpp.obj
+[ 41%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/ContactConstraintManager.cpp.obj
+[ 41%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/DistanceConstraint.cpp.obj
+[ 41%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/FixedConstraint.cpp.obj
+[ 41%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/GearConstraint.cpp.obj
+[ 41%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/HingeConstraint.cpp.obj
+[ 43%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/MotorSettings.cpp.obj
+[ 43%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/PathConstraint.cpp.obj
+[ 43%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/PathConstraintPath.cpp.obj
+[ 43%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/PathConstraintPathHermite.cpp.obj
+[ 43%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/PointConstraint.cpp.obj
+[ 46%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/PulleyConstraint.cpp.obj
+[ 46%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/RackAndPinionConstraint.cpp.obj
+[ 46%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/SixDOFConstraint.cpp.obj
+[ 46%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/SliderConstraint.cpp.obj
+[ 46%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/SpringSettings.cpp.obj
+[ 48%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/SwingTwistConstraint.cpp.obj
+[ 48%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Constraints/TwoBodyConstraint.cpp.obj
+[ 48%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/DeterminismLog.cpp.obj
+[ 48%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Hair/Hair.cpp.obj
+[ 51%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Hair/HairSettings.cpp.obj
+[ 51%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Hair/HairShaders.cpp.obj
+[ 51%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Hair/RegisterHair.cpp.obj
+[ 51%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/IslandBuilder.cpp.obj
+[ 51%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/LargeIslandSplitter.cpp.obj
+[ 53%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/PhysicsScene.cpp.obj
+[ 53%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/PhysicsSystem.cpp.obj
+[ 53%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/PhysicsUpdateContext.cpp.obj
+[ 53%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Ragdoll/Ragdoll.cpp.obj
+[ 53%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/SoftBody/SoftBodyCreationSettings.cpp.obj
+[ 56%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/SoftBody/SoftBodyMotionProperties.cpp.obj
+[ 56%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/SoftBody/SoftBodyShape.cpp.obj
+[ 56%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/SoftBody/SoftBodySharedSettings.cpp.obj
+[ 56%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/StateRecorderImpl.cpp.obj
+[ 56%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Vehicle/MotorcycleController.cpp.obj
+[ 58%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Vehicle/TrackedVehicleController.cpp.obj
+[ 58%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Vehicle/VehicleAntiRollBar.cpp.obj
+[ 58%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Vehicle/VehicleCollisionTester.cpp.obj
+[ 58%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Vehicle/VehicleConstraint.cpp.obj
+[ 58%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Vehicle/VehicleController.cpp.obj
+[ 61%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Vehicle/VehicleDifferential.cpp.obj
+[ 61%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Vehicle/VehicleEngine.cpp.obj
+[ 61%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Vehicle/VehicleTrack.cpp.obj
+[ 61%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Vehicle/VehicleTransmission.cpp.obj
+[ 64%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Vehicle/Wheel.cpp.obj
+[ 64%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Physics/Vehicle/WheeledVehicleController.cpp.obj
+[ 64%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/RegisterTypes.cpp.obj
+[ 64%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Renderer/DebugRenderer.cpp.obj
+[ 64%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Renderer/DebugRendererPlayback.cpp.obj
+[ 66%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Renderer/DebugRendererRecorder.cpp.obj
+[ 66%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Renderer/DebugRendererSimple.cpp.obj
+[ 66%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Skeleton/SkeletalAnimation.cpp.obj
+[ 66%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Skeleton/Skeleton.cpp.obj
+[ 66%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Skeleton/SkeletonMapper.cpp.obj
+[ 69%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Skeleton/SkeletonPose.cpp.obj
+[ 69%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/TriangleSplitter/TriangleSplitter.cpp.obj
+[ 69%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/TriangleSplitter/TriangleSplitterBinning.cpp.obj
+[ 69%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/TriangleSplitter/TriangleSplitterMean.cpp.obj
+[ 69%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/ObjectStream/ObjectStream.cpp.obj
+[ 71%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/ObjectStream/ObjectStreamBinaryIn.cpp.obj
+[ 71%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/ObjectStream/ObjectStreamBinaryOut.cpp.obj
+[ 71%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/ObjectStream/ObjectStreamIn.cpp.obj
+[ 71%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/ObjectStream/ObjectStreamOut.cpp.obj
+[ 71%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/ObjectStream/ObjectStreamTextIn.cpp.obj
+[ 74%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/ObjectStream/ObjectStreamTextOut.cpp.obj
+[ 74%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/ObjectStream/TypeDeclarations.cpp.obj
+[ 74%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Compute/CPU/ComputeQueueCPU.cpp.obj
+[ 74%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Compute/CPU/ComputeBufferCPU.cpp.obj
+[ 76%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Compute/CPU/ComputeSystemCPU.cpp.obj
+[ 76%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Shaders/HairWrapper.cpp.obj
+[ 76%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Shaders/TestComputeWrapper.cpp.obj
+[ 76%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Compute/DX12/ComputeQueueDX12.cpp.obj
+[ 76%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Compute/DX12/ComputeBufferDX12.cpp.obj
+[ 79%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Compute/DX12/ComputeSystemDX12.cpp.obj
+[ 79%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Compute/DX12/ComputeSystemDX12Impl.cpp.obj
+[ 79%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Compute/VK/ComputeBufferVK.cpp.obj
+[ 79%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Compute/VK/ComputeQueueVK.cpp.obj
+[ 79%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Compute/VK/ComputeShaderVK.cpp.obj
+[ 82%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Compute/VK/ComputeSystemVK.cpp.obj
+[ 82%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Compute/VK/ComputeSystemVKImpl.cpp.obj
+[ 82%] Building CXX object CMakeFiles/Jolt.dir/D_/tmp/jolt/wt-v5.6.0-parity/Jolt/Compute/VK/ComputeSystemVKWithAllocator.cpp.obj
+[ 82%] Linking CXX static library libJolt.a
+[100%] Built target Jolt
+[100%] Building CXX object CMakeFiles/PerformanceTest.dir/D_/tmp/jolt/wt-v5.6.0-parity/PerformanceTest/PerformanceTest.cpp.obj
+[100%] Linking CXX executable PerformanceTest.exe
+C:\Users\flint\AppData\Local\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin\ar.exe: CMakeFiles/PerformanceTest.dir/D_/tmp/jolt/wt-v5.6.0-parity/PerformanceTest/PerformanceTest.cpp.obj: plugin needed to handle lto object
+lto-wrapper.exe: warning: using serial compilation of 26 LTRANS jobs
+lto-wrapper.exe: note: see the '-flto' option documentation for more information
+[100%] Built target PerformanceTest
+[2026-09-25 00:36:27] build exit 0
