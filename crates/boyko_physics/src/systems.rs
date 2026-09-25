@@ -428,8 +428,8 @@ pub fn physics_broadphase(
 ///
 /// With [`PhysicsConfig::contact_reuse`] on, a slow touching box pair writes a reuse record beside
 /// its tag, and the next step refreshes that record from the current poses instead of running the
-/// SAT and the clip while the relative motion stays within the reuse distance. Off by default:
-/// then every pair takes the path above, bit for bit.
+/// SAT and the clip while the relative motion stays within the reuse distance. On by default since
+/// L9 C4; with it off every pair takes the path above, bit for bit.
 ///
 /// # The serial loop and the parallel chunks (L5)
 ///

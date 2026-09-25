@@ -1,7 +1,8 @@
 //! G-L9b-4, the system arm (L9 C3, `docs/physics/perf-campaign/levers/L9-contact-reuse/02-DESIGN-REV1.md`):
-//! a resting two-box stack on a static floor, contact reuse on, on the default pipeline. The first
-//! step builds both contacts' records from the full collision; from the second step on, every
-//! touching box pair reuses its record — 100 % hits — for as long as the stack rests.
+//! a resting two-box stack on a static floor, on the default pipeline, which has contact reuse on
+//! since L9 C4 (asserted, not forced). The first step builds both contacts' records from the full
+//! collision; from the second step on, every touching box pair reuses its record — 100 % hits —
+//! for as long as the stack rests.
 //!
 //! The narrowphase's own classes (`Manifolds::pair_classes`) are read after every step. Their
 //! closure is asserted too, and the stack must be at rest in fact, not by a vacuous count: two
@@ -91,9 +92,13 @@ fn a_resting_two_box_stack_reuses_every_contact_after_one_step() {
     add_physics_systems::<DefaultRigidSolver>(&mut builder, &mut world);
     world.insert_resource(FixedTime::new(Duration::from_secs_f32(DT)));
     let mut physics = builder.build(&mut world);
-    let cfg = world.resource_mut::<PhysicsConfig>();
-    assert!(!cfg.contact_reuse, "L9 C3: contact reuse is off by default");
-    cfg.contact_reuse = true;
+    // No override: since L9 C4 the world `add_physics_systems` builds has contact reuse on, so
+    // this stack runs the shipped default rather than a forced arm.
+    assert!(
+        world.resource::<PhysicsConfig>().contact_reuse,
+        "L9 C4: the default world must have contact reuse on; its `PhysicsConfig` resource has \
+         it off"
+    );
 
     let mut rows = Vec::with_capacity(STEPS);
     for step in 0..STEPS {

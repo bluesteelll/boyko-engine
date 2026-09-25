@@ -69,7 +69,10 @@
 //! simulated time with sleeping off, which is the default. It is 14× under A7-R1's bound over
 //! A7-R1's window. It is not A7b: over steps 600-3000, 0 of 9 743 983 support manifold-steps
 //! were on the edge path (A7a alone: 33.3 %), so the mechanism A7b removed is not acting on
-//! the supports. It is an open question in `docs/OPEN-QUESTIONS.md`.
+//! the supports. It is an open question in `docs/OPEN-QUESTIONS.md`. Every figure in this
+//! paragraph was read with contact reuse off, the default until L9 C4; with reuse on (the
+//! default since) A7-R1 reads 0.6670 mm over steps 600-3000, and the 5400-step extension has
+//! not been re-run.
 //!
 //! ## S5's rung, pre-registered before any pile run of it (2026-09-18)
 //!
@@ -141,7 +144,9 @@
 //!   generator). In a debug build they are ignored, and `-- --ignored` in a debug build is NOT
 //!   their leg. A7-R1 is the long one: ~73 s in release, ~80 s for the whole binary before
 //!   the SIMD on/off differential below was added (it runs A7-R1's scene twice more; its
-//!   time is not measured yet).
+//!   time is not measured yet). Since L9 C4 A7-R1 runs its scene twice itself, contact reuse
+//!   on (the default) and off: 85.8 s for both in release (2026-09-24, on a shared machine, so
+//!   a liveness figure, not a timing).
 //! * `simd_solve_on_off_bit_identical` (release only, like A7) runs G2's scene, G7's sixteen
 //!   draws and A7-R1's scene once with `simd_solve` on (the default since 2026-09-18) and
 //!   once off, and requires the per-frame state hash, the contact-change wake events and
@@ -250,7 +255,8 @@ const LONG_SETTLE_LIMIT: usize = 6000;
 /// `flicker_redraw_distribution` measured on the A7b tree (step 243, msvc release,
 /// 2026-09-18), so that G2's event budget, not the step limit, is what a flicker overrun
 /// reaches first: the most-woken draw took its four events by step 183. G2's own draw froze
-/// at step 67. Before A7b the latest freeze was step 9987 and this limit 20 000.
+/// at step 67 (step 65 at L9 C4, contact reuse on by default, 2026-09-24). Before A7b the
+/// latest freeze was step 9987 and this limit 20 000.
 const MEDIUM_SETTLE_LIMIT: usize = 2 * 243;
 /// Settle budget (steps) for each of G7's draws: eight times the latest freeze of the 30
 /// height-4 draws measured on the A7b tree (step 127, the same run). Eight, not two, because
@@ -271,14 +277,15 @@ const G7_SETTLE_LIMIT: usize = 8 * 127;
 /// and 183), and a model that treats them as independent understates the tail. A budget is
 /// therefore never set below the largest count its own generator sample produced. At 4 the
 /// model's tail is `p^5`: 0.13 % at p and 0.30 % at one standard error above it. G2's own draw
-/// takes 0. Before A7b this was 18, sized for p = 160/216; a budget sized for the pre-fix
-/// flicker is one the pre-fix flicker passes.
+/// takes 0, at L9 C4 too. Before A7b this was 18, sized for p = 160/216; a budget sized for the
+/// pre-fix flicker is one the pre-fix flicker passes.
 const G2_MAX_EVENTS: usize = 4;
 /// G7's cap on the contact-change wake events summed over its sixteen draws, re-derived by
 /// the same rule from the same run: `P(>= 7 events)` over sixteen draws is 0.03 % at the
 /// measured [`MEASURED_P_HEIGHT_4`] = 2/32 and 0.59 % at p = 0.105 (one standard error above
 /// it); a budget of 5 would be 1.8 % there. G7's own draws take 2 (movers 2 and 9, one
-/// each). Before A7b this was 56, sized for p = 48/78.
+/// each); at L9 C4 (contact reuse on by default, 2026-09-24) they take 1 (mover 12). Before A7b
+/// this was 56, sized for p = 48/78.
 const G7_MAX_EVENTS: usize = 6;
 /// The per-latch-attempt wake probability at height 4, pooled over the 30 height-4 draws
 /// of `flicker_redraw_distribution` on the A7b tree (2 events in 32 attempts, msvc release,
@@ -307,17 +314,28 @@ const MEASURED_P_HEIGHT_5: f64 = 20.0 / 76.0;
 ///   TWO face-face sideways manifolds again, partners 9 and 14, whose reference boxes both
 ///   swap to 13 (9 -> 13, 14 -> 13). 13 of 16 pass: 3 and 5..=16. Three have no lateral
 ///   manifold before the move (1, 2, 4). Mover 13 is kept.
+/// * Re-measured at L9 C4 (contact reuse on by default; 2026-09-24, msvc, the same temporary
+///   probe over the 16 movers, debug and release printing identical lines). With reuse ON no
+///   mover passes: 13 have face-face sideways manifolds and none swaps its reference box, and
+///   three (1, 4, 5) have none. None of the 13 woke. A flipped pair of the frozen pile is served
+///   from its record, and the record keeps its reference box across a row-order flip (L9
+///   ruling W2), so the premise is a property of the full collision. With reuse OFF on the same
+///   binary the A7b reading comes back exactly: 13 of 16 pass (3 and 5..=16), and mover 13
+///   swaps partners 9 and 14 to 13. So G4 runs with contact reuse off (the L9 design's rule for
+///   a test whose subject is the exact narrowphase), and mover 13 is kept.
 const G4_MOVER_ID: u32 = 13;
 /// A7-R1's window: the vertical settle is over by `CREEP_FROM`.
 const CREEP_FROM: usize = 600;
 const CREEP_TO: usize = 3000;
 /// A7-R1's bound on horizontal displacement over the window: 2 × Box2D's `B2_LINEAR_SLOP`.
 const CREEP_BOUND_M: f32 = 0.01;
-/// A7-R1's exact reading, pinned by its bits: D_max = 0.0007180063 m (`0x3a3c_3896`; box
-/// 1227, layer 12) on the default config, where contact reuse is off. Read in msvc release at
-/// L9 C3 (`aef7dda4`); the S5 rung recorded it as 0.0007180 m (module header). The comparison
-/// is on bits. The test prints D_max with `{}`, which is `f32`'s shortest round-trip form, so
-/// the printed decimal parses back to exactly these bits.
+/// A7-R1's exact reading on the default config, pinned by its bits: D_max = 0.0006670445 m
+/// (`0x3a2e_dc99`; box 1240, layer 14), with contact reuse on. Re-pinned at L9 C4 (contact reuse
+/// on by default; msvc release, 2026-09-24) from the old value 0.0007180063 m (`0x3a3c_3896`;
+/// box 1227, layer 12), read at L9 C3 (`aef7dda4`) when the default had reuse off, which is now
+/// [`A7_R1_D_MAX_BITS_REUSE_OFF`]. The reading is in the L9 design's pre-registered "confirms"
+/// band (under 2 mm). The comparison is on bits. The test prints D_max with `{}`, which is
+/// `f32`'s shortest round-trip form, so the printed decimal parses back to exactly these bits.
 ///
 /// This is a regression pin, separate from [`CREEP_BOUND_M`], which is an acceptance
 /// criterion and is never tightened toward a reading. The pin makes "nothing moved"
@@ -327,10 +345,16 @@ const CREEP_BOUND_M: f32 = 0.01;
 /// **Re-pin rule.** The value moves only with a commit that changes values by design (a
 /// value-changing lever). That commit re-reads it from A7-R1's own `D_max` line (msvc
 /// release), re-pins it here in the same commit, and names the lever and the old value in
-/// this doc. In a commit that claims bit identity, a change is a defect, never a re-pin. L9
-/// C4 (contact reuse on by default) is such a lever and re-pins it. By the L9 design its
-/// reuse-off run must still read this value exactly.
-const A7_R1_D_MAX_BITS: u32 = 0x3a3c_3896;
+/// this doc. In a commit that claims bit identity, a change is a defect, never a re-pin.
+const A7_R1_D_MAX_BITS: u32 = 0x3a2e_dc99;
+/// A7-R1's exact reading with contact reuse OFF, the exact narrowphase: D_max = 0.0007180063 m
+/// (`0x3a3c_3896`; box 1227, layer 12). Read in msvc release at L9 C3 (`aef7dda4`), when it was
+/// the default's, and again on the L9 C4 tree by the reuse-off arm: the L9 design requires that
+/// arm to read it exactly. The S5 rung recorded it as 0.0007180 m (module header).
+///
+/// **Re-pin rule.** [`A7_R1_D_MAX_BITS`]'s, except that no contact-reuse change may move it:
+/// with reuse off no reuse code runs.
+const A7_R1_D_MAX_BITS_REUSE_OFF: u32 = 0x3a3c_3896;
 /// A7-R1's standing guard: the largest vertical drop any pile box may have taken by
 /// [`CREEP_FROM`]. Half a box edge — losing one layer costs a full [`BOX_SIZE`], while the
 /// vertical settle's penetration slop is millimetres per layer. Without it a pile that had
@@ -1612,6 +1636,8 @@ fn sixteen_height_4_draws_freeze_within_the_onset_flicker_budget() {
 ///   2.43 s and 2.44 s in two debug runs, printing the same line. The kernel as committed
 ///   (a held face that realizes no patch yields to the built best-face patch) prints the
 ///   same line in release.
+/// * L9 C4 (contact reuse on by default, 2026-09-24): it froze at step 66 with `contact_wakes`
+///   0 and no rise event, the same line in release and debug.
 ///
 /// Every contact change re-draws that freeze step, so it is a reading, not a pin. The
 /// test's bound is [`LONG_SETTLE_LIMIT`]. At 2.4 s in debug a `slow:` ignore would be a false
@@ -1702,10 +1728,17 @@ fn a_quarter_overlap_face_contact_has_distinct_feature_ids() {
 ///   realizes no patch yields to the built best-face patch). Green, in the pre-registered
 ///   "confirms" band of the module header. The residue is a drift rate, not an offset: over
 ///   steps 3000-5400 it adds another 1.0965 mm (module header).
+/// * L9 C4 (contact reuse on by default, 2026-09-24): the test runs the pile twice. The default
+///   arm (reuse on) reads 0.0006670445 m, box 1240 in layer 14, in the design's pre-registered
+///   "confirms" band (under 2 mm; 2-10 mm acceptable and reported, 10 mm or more a stop). The
+///   reuse-off arm, the exact narrowphase, reads 0.0007180063 m, box 1227 in layer 12, as the
+///   design requires. At step 600 the default arm holds 6932 manifolds and 22 295 contact
+///   points, the reuse-off arm 6671 and 22 975 (the S5 rung's reading).
 ///
 /// [`CREEP_BOUND_M`] is not tightened toward the reading: it is an acceptance criterion at
-/// Box2D's slop scale, not a regression pin. The regression pin is separate: D_max must also
-/// equal [`A7_R1_D_MAX_BITS`] exactly, re-pinned only under that constant's rule.
+/// Box2D's slop scale, not a regression pin. The regression pins are separate: D_max must also
+/// equal [`A7_R1_D_MAX_BITS`] (reuse on) and [`A7_R1_D_MAX_BITS_REUSE_OFF`] (reuse off)
+/// exactly, each re-pinned only under its constant's rule.
 ///
 /// A revert of A7b's selection alone (the edge taken
 /// whenever its SAT depth is below the face's by more than `SAT_EPS`) is caught at the kernel
@@ -1716,141 +1749,203 @@ fn a_quarter_overlap_face_contact_has_distinct_feature_ids() {
 ///
 /// **The fallback census** (the `thinbox` lane, `design_rev2.md` §6.2 (ii)): under the
 /// non-default `narrowphase-counts` feature the run also reads the box-box fallback's census over
-/// the settle (steps 0-600) and over the window (600-3000), and asserts the face bound never fired
-/// in either — no phantom answer, no capped hint, no corner — with the fallback exercised in the
-/// window. The fix changes a run's output only when one of those fires, so this is what says a
-/// moved D_max was not the fix. Run it alone (`--exact`): the counters are process-wide.
+/// the settle (steps 0-600) and over the window (600-3000) of each arm, and asserts the face bound
+/// never fired in either — no phantom answer, no capped hint, no corner — with the fallback
+/// exercised in the reuse-off arm's window. The fix changes a run's output only when one of those
+/// fires, so this is what says a moved D_max was not the fix. Run it alone (`--exact`): the
+/// counters are process-wide.
 #[test]
 #[cfg_attr(
     any(miri, debug_assertions),
-    ignore = "slow: a 1240-box pile for 3000 steps through the real schedule; release only, \
-              intractable under Miri"
+    ignore = "slow: a 1240-box pile for 3000 steps through the real schedule, twice (contact \
+              reuse on and off); release only, intractable under Miri"
 )]
 fn a_resting_jolt_pyramid_does_not_creep_with_sleeping_off() {
-    under_watchdog("A7-R1", JOLT_TIMEOUT, || {
-        let mut h = Harness::new();
-        h.world.resource_mut::<PhysicsConfig>().sleeping = false;
-        let pile = spawn_scene(&mut h, JOLT, false, None);
-        assert_eq!(
-            pile.len(),
-            1240,
-            "construction: Jolt's pyramid holds 1240 boxes"
-        );
-        #[cfg(feature = "narrowphase-counts")]
-        let _ = fallback_census::take();
-        for _ in 0..CREEP_FROM {
-            h.step();
-        }
-        #[cfg(feature = "narrowphase-counts")]
-        let settle_census = fallback_census::take();
-        let from = h.centres(&pile);
-
-        // The window's premise: `CREEP_FROM`'s doc says the vertical settle is over by now,
-        // and a collapsed-and-resting pile satisfies the creep bound below for every box.
-        let spawn = pyramid_positions(JOLT);
-        let mut worst_drop = (0.0f32, 0u32);
-        for &(id, centre) in &from {
-            let drop = spawn[id as usize - 1].y - centre.y;
-            if drop > worst_drop.0 {
-                worst_drop = (drop, id);
-            }
-        }
-        assert!(
-            worst_drop.0 <= STANDING_DROP_M,
-            "A7-R1 premise: at step {CREEP_FROM} the pyramid must still be a pyramid, but box id \
-             {} in layer {} has dropped {} m below its spawn height (bound {STANDING_DROP_M} m). \
-             A pile that collapsed and came to rest before the window meets the creep bound \
-             trivially, so the creep reading below would be vacuous",
-            worst_drop.1,
-            layer_of(JOLT, worst_drop.1),
-            worst_drop.0
-        );
-
-        for _ in CREEP_FROM..CREEP_TO {
-            h.step();
-        }
-        #[cfg(feature = "narrowphase-counts")]
-        a7_r1_fallback_census(settle_census, fallback_census::take());
-        let to = h.centres(&pile);
-        let mut layer_max = vec![0.0f32; JOLT];
-        let mut top_sum = (0.0f64, 0.0f64, 0usize);
-        let mut worst = (0.0f32, 0u32);
-        for (&(id, a), &(id_b, b)) in from.iter().zip(&to) {
-            assert_eq!(id, id_b, "harness: both records follow the pile order");
-            let (dx, dz) = (b.x - a.x, b.z - a.z);
-            let d = (dx * dx + dz * dz).sqrt();
-            let layer = layer_of(JOLT, id);
-            layer_max[layer] = layer_max[layer].max(d);
-            if layer >= 10 {
-                top_sum.0 += f64::from(dx);
-                top_sum.1 += f64::from(dz);
-                top_sum.2 += 1;
-            }
-            if d > worst.0 {
-                worst = (d, id);
-            }
-        }
-        let n = top_sum.2.max(1) as f64;
-        println!(
-            "A7-R1: D_max = {} m (box {}, layer {}); mean (dx, dz) of layers 10-14 = ({:.6}, \
-             {:.6}) m",
-            worst.0,
-            worst.1,
-            layer_of(JOLT, worst.1),
-            top_sum.0 / n,
-            top_sum.1 / n
-        );
-        assert!(
-            worst.0 <= CREEP_BOUND_M,
-            "A7-R1: a resting height-15 box pyramid with sleeping off moved sideways by \
-             D_max = {} m between steps {CREEP_FROM} and {CREEP_TO} (bound {CREEP_BOUND_M} m): \
-             worst box id {} in layer {} (layer i holds (15 - i)² boxes); mean (dx, dz) of layers \
-             10-14 = ({:.4}, {:.4}) m; per-layer maximum, layer 0 first: {layer_max:?}",
-            worst.0,
-            worst.1,
-            layer_of(JOLT, worst.1),
-            top_sum.0 / n,
-            top_sum.1 / n
-        );
-        assert_eq!(
-            worst.0.to_bits(),
-            A7_R1_D_MAX_BITS,
-            "A7-R1: D_max moved: {} m ({:#010x}, box {}), pinned {} m ({A7_R1_D_MAX_BITS:#010x}), \
-             contact reuse {}. It is still within the {CREEP_BOUND_M} m bound, so this is a value \
-             change, not a creep. In a commit that claims bit identity it is a defect; only a \
-             value-changing lever re-pins, under `A7_R1_D_MAX_BITS`'s rule",
-            worst.0,
-            worst.0.to_bits(),
-            worst.1,
-            f32::from_bits(A7_R1_D_MAX_BITS),
-            h.world.resource::<PhysicsConfig>().contact_reuse
-        );
+    // The shipped default first (contact reuse on since L9 C4), then the exact narrowphase on the
+    // same binary: each arm must hold the creep bound, and each reads its own pin.
+    let default_arm = under_watchdog("A7-R1, contact reuse on", JOLT_TIMEOUT, || {
+        a7_r1_arm("contact reuse on (the default)", None)
     });
+    let reuse_off_arm = under_watchdog("A7-R1, contact reuse off", JOLT_TIMEOUT, || {
+        a7_r1_arm("contact reuse off", Some(false))
+    });
+    for (arm, reading, pinned, pin) in [
+        ("contact reuse on (the default)", default_arm, A7_R1_D_MAX_BITS, "A7_R1_D_MAX_BITS"),
+        (
+            "contact reuse off",
+            reuse_off_arm,
+            A7_R1_D_MAX_BITS_REUSE_OFF,
+            "A7_R1_D_MAX_BITS_REUSE_OFF",
+        ),
+    ] {
+        assert_eq!(
+            reading.d_max.to_bits(),
+            pinned,
+            "A7-R1, {arm}: D_max moved: {} m ({:#010x}, box {}), pinned {} m ({pinned:#010x}). It \
+             is still within the {CREEP_BOUND_M} m bound, so this is a value change, not a creep. \
+             In a commit that claims bit identity it is a defect; only a value-changing lever \
+             re-pins, under `{pin}`'s rule",
+            reading.d_max,
+            reading.d_max.to_bits(),
+            reading.worst_id,
+            f32::from_bits(pinned)
+        );
+    }
 }
 
-/// A7-R1's fallback census over the settle and the window (`narrowphase-counts` only): printed,
+/// What one arm of A7-R1 read: D_max and the box that moved it.
+#[derive(Clone, Copy, Debug)]
+struct CreepReading {
+    /// The largest horizontal displacement of any pile box between [`CREEP_FROM`] and
+    /// [`CREEP_TO`].
+    d_max: f32,
+    /// The pile id of the box that moved `d_max`.
+    worst_id: u32,
+}
+
+/// One arm of A7-R1: Jolt's height-15 pile with sleeping off, and `contact_reuse` set to the
+/// value given (the default's when `None`), stepped to [`CREEP_TO`]. Asserts the standing guard
+/// and [`CREEP_BOUND_M`], prints D_max and the step-[`CREEP_FROM`] contact counts, and returns
+/// the reading its caller compares with the arm's pin.
+fn a7_r1_arm(arm: &'static str, contact_reuse: Option<bool>) -> CreepReading {
+    let mut h = Harness::new();
+    {
+        let cfg = h.world.resource_mut::<PhysicsConfig>();
+        cfg.sleeping = false;
+        if let Some(reuse) = contact_reuse {
+            cfg.contact_reuse = reuse;
+        }
+    }
+    let reuse = h.world.resource::<PhysicsConfig>().contact_reuse;
+    let pile = spawn_scene(&mut h, JOLT, false, None);
+    assert_eq!(
+        pile.len(),
+        1240,
+        "construction: Jolt's pyramid holds 1240 boxes"
+    );
+    #[cfg(feature = "narrowphase-counts")]
+    let _ = fallback_census::take();
+    for _ in 0..CREEP_FROM {
+        h.step();
+    }
+    #[cfg(feature = "narrowphase-counts")]
+    let settle_census = fallback_census::take();
+    let from = h.centres(&pile);
+    let points: usize = h
+        .world
+        .resource::<Manifolds>()
+        .manifolds()
+        .iter()
+        .map(|m| usize::from(m.count))
+        .sum();
+    println!(
+        "A7-R1, {arm} (contact_reuse {reuse}): step {CREEP_FROM}: {} manifolds, {points} contact \
+         points",
+        h.manifold_count()
+    );
+
+    // The window's premise: `CREEP_FROM`'s doc says the vertical settle is over by now,
+    // and a collapsed-and-resting pile satisfies the creep bound below for every box.
+    let spawn = pyramid_positions(JOLT);
+    let mut worst_drop = (0.0f32, 0u32);
+    for &(id, centre) in &from {
+        let drop = spawn[id as usize - 1].y - centre.y;
+        if drop > worst_drop.0 {
+            worst_drop = (drop, id);
+        }
+    }
+    assert!(
+        worst_drop.0 <= STANDING_DROP_M,
+        "A7-R1 premise, {arm}: at step {CREEP_FROM} the pyramid must still be a pyramid, but box \
+         id {} in layer {} has dropped {} m below its spawn height (bound {STANDING_DROP_M} m). \
+         A pile that collapsed and came to rest before the window meets the creep bound \
+         trivially, so the creep reading below would be vacuous",
+        worst_drop.1,
+        layer_of(JOLT, worst_drop.1),
+        worst_drop.0
+    );
+
+    for _ in CREEP_FROM..CREEP_TO {
+        h.step();
+    }
+    #[cfg(feature = "narrowphase-counts")]
+    a7_r1_fallback_census(arm, settle_census, fallback_census::take(), !reuse);
+    let to = h.centres(&pile);
+    let mut layer_max = vec![0.0f32; JOLT];
+    let mut top_sum = (0.0f64, 0.0f64, 0usize);
+    let mut worst = (0.0f32, 0u32);
+    for (&(id, a), &(id_b, b)) in from.iter().zip(&to) {
+        assert_eq!(id, id_b, "harness: both records follow the pile order");
+        let (dx, dz) = (b.x - a.x, b.z - a.z);
+        let d = (dx * dx + dz * dz).sqrt();
+        let layer = layer_of(JOLT, id);
+        layer_max[layer] = layer_max[layer].max(d);
+        if layer >= 10 {
+            top_sum.0 += f64::from(dx);
+            top_sum.1 += f64::from(dz);
+            top_sum.2 += 1;
+        }
+        if d > worst.0 {
+            worst = (d, id);
+        }
+    }
+    let n = top_sum.2.max(1) as f64;
+    println!(
+        "A7-R1, {arm}: D_max = {} m (box {}, layer {}); mean (dx, dz) of layers 10-14 = ({:.6}, \
+         {:.6}) m",
+        worst.0,
+        worst.1,
+        layer_of(JOLT, worst.1),
+        top_sum.0 / n,
+        top_sum.1 / n
+    );
+    assert!(
+        worst.0 <= CREEP_BOUND_M,
+        "A7-R1, {arm}: a resting height-15 box pyramid with sleeping off moved sideways by \
+         D_max = {} m between steps {CREEP_FROM} and {CREEP_TO} (bound {CREEP_BOUND_M} m): \
+         worst box id {} in layer {} (layer i holds (15 - i)² boxes); mean (dx, dz) of layers \
+         10-14 = ({:.4}, {:.4}) m; per-layer maximum, layer 0 first: {layer_max:?}",
+        worst.0,
+        worst.1,
+        layer_of(JOLT, worst.1),
+        top_sum.0 / n,
+        top_sum.1 / n
+    );
+    CreepReading { d_max: worst.0, worst_id: worst.1 }
+}
+
+/// A7-R1's fallback census over one arm's settle and window (`narrowphase-counts` only): printed,
 /// with the margin of the face bound's 5 mm over the largest accepted edge excess (τ is
 /// `min(5 mm, 0.1·h_min)` and the pile's boxes are 1 m half-extents), and asserted to hold no event
-/// that changes the kernel's output. Pre-registered for the window (`design_rev2.md` §6.2 (ii)):
-/// `calls` 12 572, `phantom` 0, `hint_capped` 0, `max_accepted_excess` ≤ 2e-4.
+/// that changes the kernel's output on either arm. Pre-registered for the window
+/// (`design_rev2.md` §6.2 (ii)), on the trajectory that is now the contact-reuse-off arm: `calls`
+/// 12 572, `phantom` 0, `hint_capped` 0, `max_accepted_excess` ≤ 2e-4. That arm must exercise the
+/// fallback in the window (`require_calls`); the reuse-on arm need not, since its slow pairs skip
+/// the full collision that runs it. `refresh_stale` is printed, not asserted: on a reuse-on arm the
+/// thin-box R1's refusal of a stale refresh changes the trajectory by design.
 #[cfg(feature = "narrowphase-counts")]
-fn a7_r1_fallback_census(settle: fallback_census::Snapshot, window: fallback_census::Snapshot) {
+fn a7_r1_fallback_census(
+    arm: &str,
+    settle: fallback_census::Snapshot,
+    window: fallback_census::Snapshot,
+    require_calls: bool,
+) {
     const TAU: f32 = 5.0e-3;
     for (phase, s) in [("settle 0-600", settle), ("window 600-3000", window)] {
         println!(
-            "A7-R1 fallback census, {phase}: {s:?}; margin τ / max_accepted_excess = {}",
+            "A7-R1 fallback census, {arm}, {phase}: {s:?}; margin τ / max_accepted_excess = {}",
             TAU / s.max_accepted_excess
         );
         assert!(
             s.phantom == 0 && s.hint_capped == 0 && s.corner == 0,
-            "A7-R1: the box-box fallback's face bound fired during the {phase}: {s:?}. That \
-             changes the kernel's output on this pile; the pinned D_max no longer measures the \
-             unchanged kernel"
+            "A7-R1, {arm}: the box-box fallback's face bound fired during the {phase}: {s:?}. \
+             That changes the kernel's output on this pile; the pinned D_max no longer measures \
+             the unchanged kernel"
         );
     }
     assert!(
-        window.calls > 0,
-        "A7-R1: the fallback never ran in the window: {window:?}"
+        !require_calls || window.calls > 0,
+        "A7-R1, {arm}: the fallback never ran in the window: {window:?}"
     );
 }
 
@@ -1865,6 +1960,8 @@ fn a7_r1_fallback_census(settle: fallback_census::Snapshot, window: fallback_cen
 ///   `contact_wakes` 2480 and two rise events, at steps [68, 128]; 4.95 s. On the kernel as
 ///   committed (a held face that realizes no patch yields to the built best-face patch) it
 ///   froze at step 248 with `contact_wakes` 3720 and three rise events, at [68, 128, 188].
+/// * L9 C4 (contact reuse on by default, 2026-09-24): it froze at step 250 with
+///   `contact_wakes` 3720 and three rise events, at [70, 130, 190].
 ///
 /// The freeze step is a reading, not a pin: every contact change re-draws it — the two kernels
 /// differ only in that yield, so it fired in this scene and moved the freeze by one latch
@@ -2168,9 +2265,16 @@ fn flicker_redraw_distribution() {
 /// delete the lone box so `mover` swap-moves from the last row into row 1 while the island
 /// ids renumber; then hold. Returns the mover's lateral reference boxes before and after.
 /// When `mover_index` names a box (G4), the mover must have a lateral manifold before the
-/// delete.
-fn swap_remove_scene(what: &'static str, mover_index: Option<usize>) -> (Lateral, Lateral) {
+/// delete. `contact_reuse` overrides the default's when it is `Some`.
+fn swap_remove_scene(
+    what: &'static str,
+    mover_index: Option<usize>,
+    contact_reuse: Option<bool>,
+) -> (Lateral, Lateral) {
     let mut h = Harness::new();
+    if let Some(reuse) = contact_reuse {
+        h.world.resource_mut::<PhysicsConfig>().contact_reuse = reuse;
+    }
     let pile = spawn_scene(&mut h, SMALL, true, mover_index);
     let mover = *pile.last().expect("construction: the pile is not empty");
     let walk = h.walk_ids();
@@ -2286,13 +2390,19 @@ fn a_frozen_box_pile_ignores_a_despawn_that_renumbers_its_island_and_moves_its_r
             30,
             "construction: the Jolt loop spawns the top box last"
         );
-        swap_remove_scene("G3", None);
+        swap_remove_scene("G3", None, None);
     });
 }
 
 /// G4: pile id 13, layer 0's `j = 3, k = 0` corner box (x = 2, y = 1, z = -4), moves from
 /// the last row into row 1, so its lateral knife-edge pairs reverse order and swap their
 /// reference box: nothing may wake.
+///
+/// Contact reuse OFF, although it is on by default since L9 C4: the swap is the full
+/// collision's (the SAT takes the reference face by pair order), and with reuse on every
+/// flipped pair of the frozen pile is served from its record, which keeps its reference box
+/// across a row-order flip (L9 ruling W2), so no mover can meet the premise
+/// ([`G4_MOVER_ID`]'s L9 C4 probe). The same scene with reuse on is G3's.
 #[test]
 #[cfg_attr(
     miri,
@@ -2308,7 +2418,7 @@ fn a_frozen_box_pile_whose_bottom_corner_reverses_its_pair_order_takes_no_contac
             "construction: pile id 13 is layer 0's j = 3, k = 0 corner"
         );
         // Pile ids follow the Jolt index, so the mover keeps its id while spawned last.
-        let (before, after) = swap_remove_scene("G4", Some(index));
+        let (before, after) = swap_remove_scene("G4", Some(index), Some(false));
         let swapped: Vec<(u32, u32, u32)> = before
             .face_face
             .iter()

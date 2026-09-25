@@ -59,3 +59,55 @@ snapshot step (a probe system after the narrowphase); classes per the bench's mo
   storing rows) are red.
 - Unchanged on C1: A7-R1 D_max 0.0007180063 m (release), the bodytype golden, the pyramid determinism test, the
   release frame allocation census, the physics `Vec` census (pin 34) and UG-02.
+
+## C4 (contact reuse on by default, 2026-09-24): the reuse-on fixtures (`fixtures-c4/`) and H8
+
+Lane `u/phys-l9-c4`, base `integ/unified` at `6c40b3e6` (L9 C0-C3, the tree C3b query and the thin-box fix),
+commit `989ca0f0` (`PhysicsConfig::default().contact_reuse = true`, τ 1 mm). Parity runner exe sha256
+`c6908070a72fdbfa162ee58b70aa825472e37b355060db98cb13b584af45ba45` (msvc, `--profile parity`, no `RUSTFLAGS`); the
+base exe (`6c40b3e6`) sha256 `3048b7564a29c2e7e8b54ecf06288fe5cae5d0a8c3db7bb8e7e0632e6241c2c5`. Untimed, on a shared
+machine: pose bytes and counters only.
+
+From C4 on, a runner row without `--contact-reuse` runs contact reuse, and `--contact-reuse off` is the exact
+narrowphase, the pre-C4 trajectory. So `fixtures/` above stays the reuse-off reference and is never re-recorded, and
+`fixtures-c4/` holds the same ten rows recorded as C4 ships them: the flags of the table above with no reuse flag,
+`--workers W --steps 600 --pose-out`. `SHA256SUMS` holds the files' sha256.
+
+| row | W | C4 pose hash (reuse on) | `fixtures/` (reuse off) |
+|---|---|---|---|
+| J-A | 1, 8 | `0xcb74d44c7ddd1c69` | `0x49a5ed10875958d7` |
+| J-D | 1, 8 | `0xcb74d44c7ddd1c69` | `0x49a5ed10875958d7` |
+| R | 1, 8 | `0x2a5c44cb0c823cc9` | `0xa945b866513aab84` |
+| R-S | 1, 8 | `0xb7f1e9e8f91f75ab` | `0x2a2b7926a48aab00` |
+| J-Son | 1, 8 | `0x3db47fae414b655c` | `0xcc2a5400c66eecce` |
+
+- **The flip moved only the default.** Every `fixtures-c4/` file is byte-identical to the base exe's run of the same
+  row with `--contact-reuse on`, and the C4 exe with `--contact-reuse on` reproduces them too (ten of ten each).
+- **Reuse off did not move.** The C4 exe with `--contact-reuse off` reproduces `fixtures/` (ten of ten `match`).
+- **The window-6 families**, the same exe, W 1 and 8, one hash per row across W:
+
+| row | reuse on (the C4 default, no flag) | `--contact-reuse off` (unchanged) |
+|---|---|---|
+| J500 (`--cfg default`, `as`, `a` × `--broadphase allpairs`, `tree`) | `0x30c5438bc6ad9ffa`, 12 of 12 | `0x32d5e235342b4143`, 12 of 12 |
+| R1100 (`--scene rest --solver colored`, 1100 steps) | `0xc8bbe34cf6a8afc6` | `0x87e561d20589d4a5` |
+| RS800 (`--scene rest --sleeping`, 800 steps) | `0xb7f1e9e8f91f75ab` | `0x2a2b7926a48aab00` |
+| Son-J1000 (`--scene jolt --gap 0.5 --cfg a --sleeping`, 1000 steps) | `0x3db47fae414b655c` | `0xcc2a5400c66eecce` |
+| S16-300 (`--scene s16 --cfg a`, 300 steps) | `0x4dccd02c5709844d` | `0x8877dbb1192e9b92` |
+| rest-500 (`--scene rest --cfg default`, 500 steps) | `0x6cbe24bf8fafda26` | `0xee2a67a98434919a` |
+
+  Every reuse-on row equals the base exe's `--contact-reuse on` run. J500 and R1100 equal window 6's JAon500 and
+  Ron1100 files (`docs/measurements/2026-09-24-physics-window6/gate/fixtures/`) byte for byte, although those were
+  recorded on `4db26681`, before the thin-box fix, so the fix moved neither row at τ = 1 mm. The
+  explicit `--contact-reuse on` rows Offp-J1000 and RSOffp800 are byte-identical on the base and C4 exes. Every row
+  kind (J-A, J-D, J-A armed, R, R-S, J-Son, S16, the self-check) exits 0 with no void step on the C4 exe; the
+  self-check (no flags, 3 steps of s16) now runs reuse on and reads `0x9f678e72645e0633` (15 pairs reused), where it
+  read `0x2d9782c2598c835a` before. A cross-window bridge from C4 on runs its rows with `--contact-reuse off`.
+- **H8** (W=1, the runner's `--csv`, mean over the window; the same exe for both arms):
+
+| row | window | manifolds, reuse on | manifolds, reuse off | pairs, reuse on | pairs, reuse off |
+|---|---|---|---|---|---|
+| J-A | [100, 500) | 4,467.665 | 4,519.2575 | 9,545.12 | 9,559.215 |
+| R | [600, 1100) | 6,913.51 | 6,662.254 | 9,570 | 9,570 |
+
+  The per-manifold denominators move with the manifold count: from C4 on, a per-manifold figure of a default row
+  divides by the reuse-on column.
