@@ -209,12 +209,12 @@ The repair belongs in those two crates, not in the gate.
 
 The four commands above run **none** of the `#[ignore]`d tests.
 [tests/ignore_reasons_census.rs](tests/ignore_reasons_census.rs) prints what exists on every run
-(`cargo test -p boyko-engine --test ignore_reasons_census -- --nocapture`). Measured 2026-09-24 on
-the trunk at the `u/d-m0` merge (first parent `6c40b3e6`, the `u/phys-thinbox` merge; rung D-M0 adds
-one `solo` site to B3's `7d5a0015` reading), it read:
+(`cargo test -p boyko-engine --test ignore_reasons_census -- --nocapture`). Measured 2026-09-25 on
+the trunk at the `u/fix-cq-sb` merge (first parent `93b2615b`, the `u/d-m0` merge; rung D-M0 adds one
+`solo` site to B3's `7d5a0015` reading, and `u/fix-cq-sb` adds one `.rs` file and no site), it read:
 
 ```text
-[ignore census] 356 sites (192 plain, 164 cfg_attr) across 12 crates, 1823 .rs files walked, 0 waivers
+[ignore census] 356 sites (192 plain, 164 cfg_attr) across 12 crates, 1824 .rs files walked, 0 waivers
 [ignore classes] <none>=1, deferred=19, feature+gpu=1, feature+gpu-cap=3, feature+gpu-windowed+gpu-cap=4,
   feature+miri-slow=1, flaky=1, generator=7, gpu=29, gpu-cap=1, gpu-windowed=120, gpu-windowed+gpu-cap=1,
   miri-slow=130, miri-unsupported=27, slow=9, solo=2; scopes: miri-only=156, native=199, release-only=1;
