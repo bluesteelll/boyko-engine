@@ -82,7 +82,8 @@ use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use crate::constants::{COMMIT_PAGE, POOL_MAX_SLAB, POOL_MIN_SLAB};
-use crate::vm::VmReservation;
+use crate::owner::{ColumnOwner, CommitOwner};
+use crate::vm::{VmReservation, commit_at};
 
 /// Typed, address-stable, growable column of `T` on one [`VmReservation`].
 ///
@@ -99,8 +100,13 @@ use crate::vm::VmReservation;
 /// `swap_remove` / `set` / `truncate` / `clear` / `extend_exact`) requires
 /// `&mut self`, and cross-thread `&self` reads (`as_slice` / `get`) touch only
 /// committed plain-old-data memory below `len` with no interior mutability.
+///
+/// `O` is the commit owner the column's commits are counted under (UG-04):
+/// [`ColumnOwner`] by default; a KC-18 kernel table is `VmColumn<T, TableOwner>`,
+/// built with [`with_owner`](Self::with_owner). It is a type, so the choice
+/// costs no instruction and no byte.
 #[repr(C)]
-pub struct VmColumn<T: Copy> {
+pub struct VmColumn<T: Copy, O: CommitOwner = ColumnOwner> {
     /// Cached base of the reservation, hot-path twin of `vm`'s base.
     /// **Dangling until the first `grow_to`** — sound because the hot
     /// `as_slice` is `from_raw_parts(base, len)` and `len == 0` until the
@@ -131,17 +137,13 @@ pub struct VmColumn<T: Copy> {
     /// `VmColumn<EntityId>` type, so `type_name` alone cannot. Cold-only
     /// diagnostic metadata; never read on a warm path.
     label: &'static str,
-    /// Ties the erased byte reservation to `T` for the typed pointer API.
-    _marker: PhantomData<T>,
+    /// Ties the erased byte reservation to `T` for the typed pointer API, and
+    /// names the commit owner `O`. A ZST and the last field of the `#[repr(C)]`
+    /// struct, so the owner moves no displacement and no size.
+    _marker: PhantomData<(T, O)>,
 }
 
 impl<T: Copy> VmColumn<T> {
-    /// Element stride in bytes. A zero-size `T` is rejected at construction
-    /// (`new`'s assert) — the id columns this primitive serves are all 8-byte
-    /// `EntityId`, and the element-count math (`committed_bytes / SIZE`) would
-    /// divide by zero for a ZST.
-    const SIZE: usize = size_of::<T>();
-
     /// Creates a LAZY column reserving room for `reserve_elems` elements
     /// (materialized by the first `push` — construction pays no reservation
     /// syscall, mirroring `InlandStore::new`), commit 0, len 0.
@@ -183,6 +185,37 @@ impl<T: Copy> VmColumn<T> {
             reserve_request: bytes,
             vm: None,
             label,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T: Copy, O: CommitOwner> VmColumn<T, O> {
+    /// Element stride in bytes. A zero-size `T` is rejected at construction
+    /// (`new`'s assert) — the id columns this primitive serves are all 8-byte
+    /// `EntityId`, and the element-count math (`committed_bytes / SIZE`) would
+    /// divide by zero for a ZST.
+    const SIZE: usize = size_of::<T>();
+
+    /// Creates a lazy column exactly like [`VmColumn::new`], whose commits are
+    /// counted under owner `O` instead of the default [`ColumnOwner`] (UG-04):
+    /// a KC-18 kernel table is `VmColumn::<T, TableOwner>::with_owner(..)`.
+    ///
+    /// # Panics
+    /// As [`VmColumn::new`].
+    pub fn with_owner(label: &'static str, reserve_elems: usize) -> Self {
+        let lazy = VmColumn::<T>::new(label, reserve_elems);
+        // Re-tagging moves plain fields only: a lazy column holds no
+        // reservation yet (`vm` is `None`), and the owner is read at commit
+        // time alone.
+        Self {
+            base: lazy.base,
+            len: lazy.len,
+            committed_elems: lazy.committed_elems,
+            reserve_elems: lazy.reserve_elems,
+            reserve_request: lazy.reserve_request,
+            vm: lazy.vm,
+            label: lazy.label,
             _marker: PhantomData,
         }
     }
@@ -537,7 +570,14 @@ impl<T: Copy> VmColumn<T> {
         let new_bytes = (old_bytes + step).min(vm.os_len());
         debug_assert!(new_bytes >= needed, "VmColumn::grow_to post-condition (proof) violated");
 
-        vm.commit(old_bytes, new_bytes);
+        // SAFETY: `off + len = new_bytes`, which the `min` above caps at
+        // `vm.os_len()`, and `new_bytes > old_bytes`, so `new_bytes - old_bytes`
+        // cannot wrap: every caller grows past the frontier (`n >
+        // committed_elems`), so `needed >= n * SIZE > old_bytes`; the step is at
+        // least `needed - old_bytes`; and `os_len >= needed`, since `os_len` is
+        // the granule-rounded `reserve_elems * SIZE` and `n <= reserve_elems`
+        // (the exhaustion assert above).
+        unsafe { commit_at::<O>(vm, old_bytes, new_bytes - old_bytes) };
         // Exact division (review #4): `SIZE | COMMIT_PAGE | new_bytes`, so no
         // flooring slack exists. The `min(reserve_elems)` clamp guards the case
         // where page or granule padding rounds the byte frontier above the
