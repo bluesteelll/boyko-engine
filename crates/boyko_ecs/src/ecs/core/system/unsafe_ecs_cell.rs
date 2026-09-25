@@ -179,6 +179,8 @@ impl<'w> UnsafeEcsCell<'w> {
     /// * The cell was minted via `new_mutable` (debug-asserted).
     /// * The by-value receiver consumes a `Copy` of the cell — no `&self`
     ///   retag occurs.
+    /// * No worker is live (W0, debug-asserted): the returned `&mut` covers the
+    ///   whole world, including the reservoir other workers RMW.
     ///
     /// [`new_mutable`]: UnsafeEcsCell::new_mutable
     #[inline]
@@ -188,6 +190,16 @@ impl<'w> UnsafeEcsCell<'w> {
             self.allows_mutable_access,
             "invariant U_C3: world_mut() called on a read-only UnsafeEcsCell \
              minted via new_readonly"
+        );
+        // PC-24 / W0: a whole-world `&mut` may only be formed with no worker live.
+        // A thread inside a parallel system body has raised IN_SYSTEM_RUN
+        // (`SystemRunGuard` around the worker's `run_unsafe` in `schedule.rs`);
+        // the dispatcher-solo callers never have.
+        debug_assert!(
+            !boyko_threadpool::is_in_system_run(),
+            "invariant W0 (PC-24): world_mut() inside a parallel system body — a \
+             `&mut EcsMaster` retag covers the reservoir other workers RMW; use a \
+             shared projection"
         );
         // SAFETY (U_C3): caller upholds the access contract; the raw
         //   pointer carries write-capable provenance (minted from
