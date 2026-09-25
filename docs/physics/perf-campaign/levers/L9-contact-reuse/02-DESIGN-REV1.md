@@ -445,6 +445,27 @@ collide_box_pair(k):                           // pure in (bodies, frames, T0 hi
   - Any golden fed by box-pile physics.
   - The two exact pins added after C3 (2026-09-23): `default_world_pyramid_determinism.rs`'s `PINNED_FINAL_HASH` (release and debug) and A7-R1's `A7_R1_D_MAX_BITS` in `sleep_settles_box_piles.rs`. Each is re-pinned under its own doc's rule. A7-R1's reuse-off run keeps reading `0x3a3c_3896` (0.0007180063 m) exactly.
   - The red set is enumerated by running C4. Each pin is re-measured under its own file's rule. A test whose subject is the exact narrowphase sets `contact_reuse: false` explicitly, with a comment saying why.
+- **C4 receipt (2026-09-24, `u/phys-l9-c4` from `6c40b3e6`, flip commit `989ca0f0`; msvc, untimed):**
+  - Red set on the first C4 run: the pyramid pin, A7-R1's pin, GOLDEN (debug and release), G4's scene fitness,
+    `profiling_zone_counts`' `reused == 0`, and the release frame allocation census (S1c). Nothing else.
+  - Re-pinned under their own rules: `PINNED_FINAL_HASH` release `0xa386…a8d3` → `0xb583189fa681f3a6`, debug
+    `0xc7eb…c19b` → `0x839d94268d67b09f`; `A7_R1_D_MAX_BITS` `0x3a3c_3896` → `0x3a2e_dc99` (0.6670 mm, box 1240,
+    layer 14: the "confirms" band). Both files gained a reuse-off pin that reads the C3 values exactly (A7-R1's in the
+    same test fn). The S1c census release pin moved its floor from 134 to 122 (ten dispatched colours on 4,340 of
+    4,352 long-run frames; the same binary with reuse off reads the L11 C2 long run digit for digit). It costs that
+    gate power: the fan-out regression it exists for now reds in release only on the census window's 12
+    eleven-colour frames, and the debug arm no longer reds on it (its window holds no nine-colour frame).
+  - Setups adapted: GOLDEN sets reuse off (its contract allows only that); G4 sets reuse off (with reuse on no layer-0
+    mover's reference box swaps, because a flipped pair keeps its record, ruling W2; with reuse off mover 13 swaps
+    as before); the class bench sets reuse off; `profiling_zone_counts` asserts `reused > 0` on some step instead of 0.
+  - Readings: A7-R2 froze at step 250 (was 248); G2 at 65 (67), 0 events; G7's draws 1 event (2); G8 froze at 66 with
+    no rise (185). H8 J-A [100,500) 4,467.665 manifolds (off 4,519.26), R [600,1100) 6,913.51 (off 6,662.25).
+  - Runner: reuse-on fixtures in `docs/measurements/2026-09-23-l9-contact-reuse/fixtures-c4/` (J `0xcb74d44c7ddd1c69`,
+    R `0x2a5c44cb0c823cc9`, R-S `0xb7f1e9e8f91f75ab`, J-Son `0x3db47fae414b655c`); J500 `0x30c5438bc6ad9ffa`,
+    R1100 `0xc8bbe34cf6a8afc6`. Every `--contact-reuse off` row equals C0's hash; every reuse-on row equals the base
+    exe's `--contact-reuse on` row.
+  - G-L9b-7: `tests/contact_reuse_bounds.rs`, green; M-b1 red on the tipping arm, the `|Δd|²` drop red on the sliding
+    arm.
 
 ## What it cannot claim
 - v5.6.0 per-contact parity at W=1: ~1.4–2.1 ms is still missing after L9 plus the Tree, in solve_build, warm apply, store and L8.
