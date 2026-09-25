@@ -80,7 +80,7 @@ use boyko_physics::plugin::add_physics_colored_solve;
 #[cfg(not(miri))]
 use boyko_physics::resources::PairClasses;
 use boyko_physics::resources::{
-    ConstraintGraph, IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
+    ConstraintGraph, IslandSleep, Manifolds, PhysicsConfig, SleepSkip, SolverScratch,
 };
 
 // ── Scene constants ──────────────────────────────────────────────────────────
@@ -721,15 +721,16 @@ struct BoxPileOutcome {
     upper_contacts_after: Vec<u32>,
 }
 
-/// Floor + cube S under cube U, contact reuse forced on; settle until both are latched;
-/// lower S by [`BOX_SUPPORT_DROP`]; run `POST_STEPS` steps.
+/// Floor + cube S under cube U, contact reuse forced on, L10's sleep-skip `mode`; settle until
+/// both are latched; lower S by [`BOX_SUPPORT_DROP`]; run `POST_STEPS` steps.
 #[cfg(not(miri))]
-fn box_pile_scene() -> BoxPileOutcome {
+fn box_pile_scene(mode: SleepSkip) -> BoxPileOutcome {
     let mut h = Harness::new();
     {
         let cfg = h.world.resource_mut::<PhysicsConfig>();
         cfg.contact_reuse = true;
         cfg.contact_reuse_distance = BOX_PILE_REUSE_DISTANCE;
+        cfg.sleep_skip = mode;
     }
     h.spawn(floor());
     let support = h.spawn(cube(SUPPORT, Vec3::new(0.0, CUBE_HALF, 0.0)));
@@ -761,7 +762,7 @@ fn box_pile_scene() -> BoxPileOutcome {
             .manifolds()
             .iter()
             .filter(|m| pair.contains(&m.body_a.0) && pair.contains(&m.body_b.0))
-            .flat_map(|m| m.points[..usize::from(m.count)].iter())
+            .flat_map(|m| m.points.into_iter().take(usize::from(m.count)))
             .fold(0.0f32, |d, p| d.max(-p.separation))
     };
 
@@ -814,6 +815,12 @@ fn box_pile_scene() -> BoxPileOutcome {
 ///
 /// Contact reuse is set on here (the default since L9 C4, off before it), with its distance
 /// set by [`BOX_PILE_REUSE_DISTANCE`], so the arm is the same before and after C4.
+///
+/// L10 C3b: the scene runs the sleep-skip `Off` — the oracle — because its premises read the
+/// narrowphase's per-slot classes on the latched step, and under `Sets` the latched pile's
+/// pairs are held, not collided, so their slots carry the held-skip tag by design (L10 design
+/// 06 §7: slot tags are not claimed on held slots). [`e_sets_twin_matches_off`] runs the scene
+/// under `Sets` and holds it to this arm's outcome.
 /// `cfg(not(miri))` for the same reason as the scenes above: the real schedule on a thread
 /// pool is intractable under Miri.
 #[test]
@@ -821,7 +828,7 @@ fn box_pile_scene() -> BoxPileOutcome {
 fn e_lowering_a_box_support_by_less_than_tau_eff_wakes_the_box_it_carried() {
     let o = under_watchdog(
         "box pile: S lowered by half of tau_eff, contact reuse on",
-        box_pile_scene,
+        || box_pile_scene(SleepSkip::Off),
     );
     assert!(
         o.upper_depth_latched < BOX_SUPPORT_DROP,
@@ -879,6 +886,33 @@ fn e_lowering_a_box_support_by_less_than_tau_eff_wakes_the_box_it_carried() {
         o.upper_y_before,
         o.upper_y_after
     );
+}
+
+/// (e) under L10's sleep-skip `Sets` (design 06 B4, "a support moved by less than τ_eff behaves
+/// exactly as in Off"): the latched pile is HELD — every one of its three pairs skipped for a
+/// held endpoint on the latched step — and lowering S restores it; the restore computes the
+/// two box pairs from the kept reuse records, so on the step after the drop they hit exactly as
+/// under `Off`, and every observable of the scene equals the `Off` run's.
+#[test]
+#[cfg(not(miri))]
+fn e_sets_twin_matches_off() {
+    let off = under_watchdog("box pile, sleep-skip Off", || box_pile_scene(SleepSkip::Off));
+    let sets = under_watchdog("box pile, sleep-skip Sets", || box_pile_scene(SleepSkip::Sets));
+    println!("(e) Sets twin: latched classes {:?}, after the drop {:?}", sets.classes_latched, sets.classes_after_drop);
+    assert_eq!(
+        (sets.classes_latched.held_skipped, sets.classes_latched.pairs),
+        (3, 3),
+        "anti-vacuity: under Sets the latched pile's three pairs must be held on the latched step"
+    );
+    assert_eq!(sets.classes_after_drop, off.classes_after_drop, "the step after the drop collides as Off does");
+    assert_eq!(sets.settle_steps, off.settle_steps, "settle steps");
+    assert_eq!(sets.upper_depth_latched.to_bits(), off.upper_depth_latched.to_bits(), "U's resting depth");
+    assert_eq!(sets.upper_y_before.to_bits(), off.upper_y_before.to_bits(), "U's height before the drop");
+    assert_eq!(sets.upper_awake_first_step, off.upper_awake_first_step, "U awake on the first step");
+    assert_eq!(sets.upper_contacts_after_first_step, off.upper_contacts_after_first_step, "U's contacts then");
+    assert_eq!(sets.upper_awake_steps, off.upper_awake_steps, "U's awake steps");
+    assert_eq!(sets.upper_y_after.to_bits(), off.upper_y_after.to_bits(), "U's height after");
+    assert_eq!(sets.upper_contacts_after, off.upper_contacts_after, "U's contacts after");
 }
 
 // ── (c) guard: a parked support is not a lost support ────────────────────────

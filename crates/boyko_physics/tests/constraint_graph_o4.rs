@@ -217,7 +217,7 @@ fn check_csr_invariants(
     // static-static degenerate edge appears in none.
     let mut island_seen = vec![0u32; manifolds.len()];
     for i in 0..g.n_islands() {
-        for &mi in g.island(i) {
+        for mi in g.island(i) {
             if (mi as usize) >= manifolds.len() {
                 return Err(format!("island {i} references out-of-range manifold {mi}"));
             }
@@ -261,7 +261,7 @@ fn snapshot(g: &ConstraintGraph, n_bodies: u32) -> PartitionSnapshot {
         n_islands: g.n_islands(),
         island_of: (0..n_bodies).map(|r| g.island_of(r)).collect(),
         colors: (0..g.n_colors()).map(|c| g.color(c).to_vec()).collect(),
-        islands: (0..g.n_islands()).map(|i| g.island(i).to_vec()).collect(),
+        islands: (0..g.n_islands()).map(|i| g.island(i).iter().collect()).collect(),
     }
 }
 

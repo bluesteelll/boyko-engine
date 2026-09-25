@@ -119,8 +119,9 @@ pub use scene_sync::{
 };
 pub use resources::{
     BodyState, BroadphaseGrid, BroadphaseKind, BroadphaseSelectMode, ConstraintGraph,
-    ContactPairs, DEFAULT_SLEEP_FRAMES, DEFAULT_SLEEP_THRESHOLD, IntegrationMode, IslandSleep,
-    Manifolds, PhysicsConfig, SdfNarrowphaseKernel, SolverScratch, TouchedMask,
+    ContactPairs, DEFAULT_SLEEP_FRAMES, DEFAULT_SLEEP_THRESHOLD, HELD_BASE, IntegrationMode,
+    IslandManifolds, IslandSleep, Manifolds, ManifoldsView, PairsView, PhysicsConfig,
+    SdfNarrowphaseKernel, SleepSkip, SolverScratch, TouchedMask,
 };
 pub use sdf_query::{SdfField, sample_sdf};
 pub use soft::{
@@ -131,9 +132,11 @@ pub use solver::{
     ColoredSoftStepSolver, DefaultRigidSolver, NoopSolver, RigidSolver, SoftStepSolver,
     WarmSeedStats,
 };
+pub use sleep_sets::{SleepSets, SleepSkipStats};
 pub use systems::{
-    body_bounding_radius, physics_apply, physics_broadphase, physics_build_graph, physics_gather,
-    physics_integrate, physics_narrowphase, physics_narrowphase_sdf, physics_solve_colored,
+    body_bounding_radius, physics_apply, physics_broadphase, physics_broadphase_colored,
+    physics_build_graph, physics_gather, physics_integrate, physics_narrowphase,
+    physics_narrowphase_colored, physics_narrowphase_sdf, physics_solve_colored,
     physics_solve_step,
 };
 
@@ -141,7 +144,16 @@ pub use systems::{
 /// counters the per-stage profile reads (see the module docs for the zone table).
 pub mod profiling;
 
+/// L10: the frozen-pair skip ([`SleepSets`](sleep_sets::SleepSets)) — a frozen, clean island's
+/// pairs and solve are skipped while its contacts stay in every view (`levers/L10-sleeping/`).
+pub mod sleep_sets;
+
 // This crate declares profiling zones (`profiling`), so it names its lane region -- the one line
 // every engine crate writes. `declare_zone!` reads `crate::__BOYKO_ZONE_PARTITION` from the
 // DECLARING crate's root. Placed at the end of the file so no line the internal docs cite moves.
 boyko_diag::profiling_partition!(Engine);
+
+/// L10 C3b: the held store — a held island's row table, kept manifolds and kept pairs — owned by
+/// [`Manifolds`](resources::Manifolds). Internal; declared last so no line the internal docs cite
+/// moves.
+pub(crate) mod held_store;

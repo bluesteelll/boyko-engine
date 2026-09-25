@@ -63,7 +63,7 @@ fn all_pairs(bodies: &[BodyState]) -> Vec<(BodyIndex, BodyIndex)> {
 fn grid_pairs(grid: &mut BroadphaseGrid, bodies: &[BodyState]) -> Vec<(BodyIndex, BodyIndex)> {
     let mut out = ContactPairs::with_capacity(0);
     grid.build(bodies, &mut out);
-    out.pairs().to_vec()
+    out.pairs().iter().copied().collect::<Vec<_>>()
 }
 
 /// Asserts the grid pair set is bit-identical (same `(min, max)` order) to
@@ -528,7 +528,7 @@ mod world_ab {
         let (mut world, mut schedule) = static_cluster_world();
         world.resource_mut::<PhysicsConfig>().broadphase = kind;
         schedule.run(&mut world);
-        world.resource::<ContactPairs>().pairs().to_vec()
+        world.resource::<ContactPairs>().pairs().iter().copied().collect::<Vec<_>>()
     }
 
     #[test]
@@ -608,7 +608,7 @@ mod o3_parallel {
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
             let mut out = ContactPairs::with_capacity(0);
             grid.build_parallel(bodies, &mut out);
-            out.pairs().to_vec()
+            out.pairs().iter().copied().collect::<Vec<_>>()
         })
     }
 
@@ -637,7 +637,7 @@ mod o3_parallel {
             let mut grid = BroadphaseGrid::with_capacity(bodies.len());
             let mut serial = ContactPairs::with_capacity(0);
             grid.build(&bodies, &mut serial);
-            let serial = serial.pairs().to_vec();
+            let serial = serial.pairs().iter().copied().collect::<Vec<_>>();
             let oracle = all_pairs(&bodies);
             assert_eq!(serial, oracle, "O2 serial build == all-pairs (n={n})");
             assert!(!serial.is_empty(), "anti-vacuity: scene n={n} has survivors");
@@ -669,7 +669,7 @@ mod o3_parallel {
         let mut grid = BroadphaseGrid::with_capacity(bodies.len());
         let mut serial = ContactPairs::with_capacity(0);
         grid.build(&bodies, &mut serial);
-        let serial = serial.pairs().to_vec();
+        let serial = serial.pairs().iter().copied().collect::<Vec<_>>();
         assert!(!serial.is_empty(), "anti-vacuity: the one-worker scene has survivors");
 
         let pool = ThreadPoolBuilder::new().num_threads(1).build();
@@ -685,7 +685,7 @@ mod o3_parallel {
             let before = super::ALLOC.count();
             grid.build_parallel(&bodies, &mut out);
             let after = super::ALLOC.count();
-            (out.pairs().to_vec(), after.wrapping_sub(before))
+            (out.pairs().iter().copied().collect::<Vec<_>>(), after.wrapping_sub(before))
         });
 
         assert_eq!(
@@ -725,7 +725,7 @@ mod o3_parallel {
             let mut grid = BroadphaseGrid::with_capacity(big.len());
             let mut out = ContactPairs::with_capacity(0);
             grid.build_parallel(&big, &mut out);
-            out.pairs().to_vec()
+            out.pairs().iter().copied().collect::<Vec<_>>()
         });
 
         // (b) The SAME scene with NO ambient pool → the no-pool shaped fallback
@@ -734,7 +734,7 @@ mod o3_parallel {
             let mut grid = BroadphaseGrid::with_capacity(big.len());
             let mut out = ContactPairs::with_capacity(0);
             grid.build_parallel(&big, &mut out);
-            out.pairs().to_vec()
+            out.pairs().iter().copied().collect::<Vec<_>>()
         };
 
         // (c) Below the threshold, even inside a pool → the serial fallback.
@@ -743,7 +743,7 @@ mod o3_parallel {
             let mut grid = BroadphaseGrid::with_capacity(small.len());
             let mut out = ContactPairs::with_capacity(0);
             grid.build_parallel(&small, &mut out);
-            out.pairs().to_vec()
+            out.pairs().iter().copied().collect::<Vec<_>>()
         });
 
         // Every branch reproduces all-pairs byte-for-byte (the whole contract).

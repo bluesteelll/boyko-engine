@@ -611,6 +611,12 @@
 //! still green. Headroom is zero wherever a count is
 //! structural and is justified at each non-zero pin (see [`pins`]).
 //!
+//! **S1d (L10 C0)** is S1b with `sleeping` on: the pile freezes inside the window, so its
+//! steady frames drive `IslandSleep::begin_step` / `end_step` over the frozen path, and a
+//! frozen row on some steady frame is its anti-vacuity. It carries S1b's pin exactly: since
+//! C0 the latch and the per-island scratch are kernel columns, so sleeping adds no heap
+//! acquisition to a step. RED-first: a `Vec::with_capacity(1)` in `begin_step`.
+//!
 //! S1c's number is DATA-DEPENDENT: its warm-up spans 290..387 as the pile
 //! collapses, and after it the count moves in whole dispatched colours as the
 //! contact set settles (244..269 per step over 4,352 steps since L9 C4; 268..269 after
@@ -824,7 +830,7 @@ use boyko_physics::components::{
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::{add_physics_colored_solve, add_physics_systems};
-use boyko_physics::resources::{Manifolds, PhysicsConfig};
+use boyko_physics::resources::{IslandSleep, Manifolds, PhysicsConfig};
 use boyko_physics::solver::SoftStepSolver;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2020,14 +2026,17 @@ fn spawn_jolt_pyramid(world: &mut EcsMaster) -> Vec<Entity> {
     out
 }
 
-/// One arm of S1. `reuse_off` overrides `PhysicsConfig::contact_reuse` to `false`; every
-/// other arm inherits the default (on since L9 C4).
+/// One arm of S1. `sleeping` sets `PhysicsConfig::sleeping` (the colored solve's island
+/// sleep, `IslandSleep`); a sleeping arm must also see a frozen row on some steady frame.
+/// `reuse_off` overrides `PhysicsConfig::contact_reuse` to `false`; every other arm
+/// inherits the default (on since L9 C4).
 fn run_pyramid_arm(
     rows: &mut Vec<Row>,
     label: &str,
     colored: bool,
     workers: usize,
     parallel: bool,
+    sleeping: bool,
     reuse_off: bool,
 ) {
     let mut samples: Vec<Snap> = Vec::with_capacity(TOTAL_FRAMES);
@@ -2051,7 +2060,7 @@ fn run_pyramid_arm(
         // Since L5 C4 the default is ON; the serial arm (S1b) overrides it so that it
         // stays the control, and the parallel arm carries the dispatch it prices.
         cfg.parallel_narrowphase = parallel;
-        cfg.sleeping = false;
+        cfg.sleeping = sleeping;
         if reuse_off {
             cfg.contact_reuse = false;
         }
@@ -2089,10 +2098,21 @@ fn run_pyramid_arm(
     // pin would see it).
     let np_after_setup = world.resource::<Manifolds>().narrowphase_dispatches();
     let mut np_log: Vec<u64> = Vec::with_capacity(TOTAL_FRAMES + 2);
+    // A sleeping arm's witness that the frozen path ran inside the window: steady frames on
+    // which some row is frozen. Read from `IslandSleep` after each frame; the read allocates
+    // nothing, so it cannot move the counts it sits beside.
+    let rows_n = bodies.len() + 1;
+    let mut frame = 0usize;
+    let mut frozen_frames = 0usize;
     drive(
         || {
             schedule.run(&mut world);
             np_log.push(world.resource::<Manifolds>().narrowphase_dispatches());
+            frame += 1;
+            if sleeping && frame > WARM_BUDGET {
+                let sleep = world.resource::<IslandSleep>();
+                frozen_frames += usize::from((0..rows_n).any(|r| !sleep.is_row_awake(r)));
+            }
         },
         &mut samples,
     );
@@ -2186,17 +2206,22 @@ fn run_pyramid_arm(
         "{label}: ANTI-VACUITY FAILED — no sampled body moved (max {max_move}); the \
          integrate/solve stages did not advance the world"
     );
+    assert!(
+        !sleeping || frozen_frames > 0,
+        "{label}: ANTI-VACUITY FAILED — sleeping is on and no row froze on any of the \
+         {STEADY_FRAMES} steady frames, so the frozen path never ran inside the window"
+    );
 
     rows.push(report(
         label,
         &format!(
-            "{} dynamic bodies + 1 static floor, {workers} worker(s), sleeping OFF, \
+            "{} dynamic bodies + 1 static floor, {workers} worker(s), sleeping {}, \
              dt=1/60. Frame = ONE fixed step = one real physics `Schedule::run`. \
              Steady-state contacts = {contacts}; sampled bodies moved up to {max_move:.3} m; \
              the narrowphase dispatched on {np_window} of the {STEADY_FRAMES} steady frames; \
-             contact reuse {reuse_side}, {reused} box pairs served from reuse records on the \
-             last step.",
-            bodies.len()
+             a row was frozen on {frozen_frames} of them; contact reuse {reuse_side}, \n             {reused} box pairs served from reuse records on the last step.",
+            bodies.len(),
+            if sleeping { "ON" } else { "OFF" }
         ),
         setup,
         &samples,
@@ -2216,6 +2241,7 @@ fn s1a_rigid_pile_reference_pipeline_serial(rows: &mut Vec<Row>) {
         1,
         false,
         false,
+        false,
     );
 }
 
@@ -2232,6 +2258,23 @@ fn s1b_rigid_pile_colored_serial(rows: &mut Vec<Row>) {
         4,
         false,
         false,
+        false,
+    );
+}
+
+/// L10 C0 (design 04 "Gates", C0): S1b with `sleeping` on — the pile freezes inside the
+/// window, so the steady frames run `IslandSleep`'s latch and per-island columns through
+/// `begin_step` / `end_step` on the frozen path. Its pin is S1b's: sleeping adds no heap
+/// acquisition to a step. RED-first: a `Vec::with_capacity(1)` in `begin_step`.
+fn s1d_rigid_pile_colored_serial_sleeping(rows: &mut Vec<Row>) {
+    run_pyramid_arm(
+        rows,
+        "S1d — rigid pile, DEFAULT pipeline (colored + simd_solve), parallel OFF, sleeping ON",
+        true,
+        4,
+        false,
+        true,
+        false,
     );
 }
 
@@ -2245,6 +2288,7 @@ fn s1c_rigid_pile_colored_parallel(rows: &mut Vec<Row>) {
         true,
         4,
         true,
+        false,
         false,
     );
 }
@@ -2266,8 +2310,432 @@ fn s1e_rigid_pile_colored_parallel_reuse_off(rows: &mut Vec<Row>) {
         true,
         4,
         true,
+        false,
         true,
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// S8 / S8b — L10 C3b's sleep-skip transitions (design 04 "Census (W5)", 08 §7, ruling W1)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A unit cube's components at `position`: dynamic (`inv_mass` 1) or not, with `friction`.
+fn cube_parts(position: Vec3, velocity: Vec3, dynamic: bool, friction: f32) -> (RigidBody, RigidBodyMass, Collider) {
+    (
+        RigidBody { position, linear_velocity: velocity, rotation: Quat::IDENTITY, angular_velocity: Vec3::ZERO },
+        RigidBodyMass {
+            inv_inertia: if dynamic { Mat3::from_diagonal(Vec3::new(6.0, 6.0, 6.0)) } else { Mat3::ZERO },
+            inv_mass: if dynamic { 1.0 } else { 0.0 },
+            restitution: 0.0,
+            friction,
+        },
+        Collider { shape: ColliderShape::Box { half_extents: Vec3::new(0.5, 0.5, 0.5) }, layer: 1, mask: 1 },
+    )
+}
+
+/// A static slab of half-extents `half` at `position` with `friction`.
+fn slab_parts(position: Vec3, half: Vec3, friction: f32) -> (RigidBody, RigidBodyMass, Collider) {
+    (
+        RigidBody { position, linear_velocity: Vec3::ZERO, rotation: Quat::IDENTITY, angular_velocity: Vec3::ZERO },
+        RigidBodyMass { inv_inertia: Mat3::ZERO, inv_mass: 0.0, restitution: 0.0, friction },
+        Collider { shape: ColliderShape::Box { half_extents: half }, layer: 1, mask: 1 },
+    )
+}
+
+/// A ball of radius 0.3 at `position` moving at `velocity`.
+fn ball_parts(position: Vec3, velocity: Vec3) -> (RigidBody, RigidBodyMass, Collider) {
+    (
+        RigidBody { position, linear_velocity: velocity, rotation: Quat::IDENTITY, angular_velocity: Vec3::ZERO },
+        RigidBodyMass {
+            inv_inertia: Mat3::from_diagonal(Vec3::new(20.0, 20.0, 20.0)),
+            inv_mass: 8.0,
+            restitution: 0.0,
+            friction: 0.5,
+        },
+        Collider { shape: ColliderShape::Sphere { radius: 0.3 }, layer: 1, mask: 1 },
+    )
+}
+
+/// A frictionless sphere of radius 0.5 at `position` moving at `velocity` (S8b's sliders: one
+/// contact point per manifold, so a colour of them stays narrow).
+fn slider_parts(position: Vec3, velocity: Vec3) -> (RigidBody, RigidBodyMass, Collider) {
+    (
+        RigidBody { position, linear_velocity: velocity, rotation: Quat::IDENTITY, angular_velocity: Vec3::ZERO },
+        RigidBodyMass {
+            inv_inertia: Mat3::from_diagonal(Vec3::new(3.0, 3.0, 3.0)),
+            inv_mass: 1.0,
+            restitution: 0.0,
+            friction: 0.0,
+        },
+        Collider { shape: ColliderShape::Sphere { radius: 0.5 }, layer: 1, mask: 1 },
+    )
+}
+
+/// Spawns `(body, mass, collider)`; a dynamic one is `Simulated`.
+fn spawn_parts(world: &mut EcsMaster, parts: (RigidBody, RigidBodyMass, Collider)) -> Entity {
+    let dynamic = parts.1.inv_mass != 0.0;
+    spawn_body(world, parts.0, parts.1, parts.2, dynamic)
+}
+
+/// The towers S8 and S8b hold: 16 towers of `levels` unit cubes on the floor, a 4 x 4 grid of
+/// pitch 4 at `(x0, z0)`, each exactly touching the one below. Returns the bottom cubes' centres.
+fn spawn_towers(world: &mut EcsMaster, levels: usize, x0: f32, z0: f32) -> [Vec3; 16] {
+    let mut bases = [Vec3::ZERO; 16];
+    for (t, base) in bases.iter_mut().enumerate() {
+        let (x, z) = (x0 + 4.0 * (t % 4) as f32, z0 + 4.0 * (t / 4) as f32);
+        *base = Vec3::new(x, 0.5, z);
+        for level in 0..levels {
+            spawn_parts(world, cube_parts(Vec3::new(x, 0.5 + level as f32, z), Vec3::ZERO, true, 0.5));
+        }
+    }
+    bases
+}
+
+/// S8 (design 04 "Census (W5)"): W = 1, parallel off, the SDF pipeline with sleeping on and the
+/// sleep-skip `Sets`. Sixteen towers are settled until every dynamic row is held BEFORE the
+/// window; inside it, every transition the sleep-skip has runs: a static body spawned ahead of
+/// the towers every third frame and despawned three frames later (a Rows step each time: the
+/// held rows translate and their keys are mirrored), a ball knocked into a tower every 40th frame
+/// (D2, wake, re-freeze, move-in), the SDF field replaced (D5), sleeping off and back on (D-H,
+/// then a Reset step), and `wake_all` (D6). The last tower carries a third cube, and a lone cube
+/// stands 0.1 beside it — separated cross pairs between two islands — so nudging that third cube
+/// (which has no cross pair) restores the tower alone, and its move-in back copies the cross pairs
+/// from the lone cube's record (Invariant K). The nudge runs twice, so the window copies more
+/// cross pairs than the OTHER budget's two acquisitions could absorb had each copy allocated.
+/// Expected: S1b's frame, no heap acquisition added.
+/// RED-first: `Vec::with_capacity(1)` in the restore-source build, the move-in's capture and the
+/// cross-pair copy.
+///
+/// With `tree` (S8-tree, L10 C3c) the same window runs on the tree broadphase with its brute path
+/// off, so every transition also drives the tree's sleeper set: sleeper admissions after the
+/// move-ins, releases on the D2 steps, the Rows steps' translation of the withheld list, a static
+/// admitted and vanishing with the spawned slab, and the flushes dissolving the set. RED-first:
+/// `Vec::with_capacity(1)` in the tree's release and in its sleeper admission.
+fn s8_sleep_skip_transitions(rows: &mut Vec<Row>, tree: bool) {
+    use boyko_physics::broadphase_tree::BroadphaseTree;
+    use boyko_physics::plugin::add_physics_sdf;
+    use boyko_physics::resources::{BroadphaseKind, BroadphaseSelectMode};
+    use boyko_physics::sdf_query::SdfField;
+    use boyko_physics::sleep_sets::SleepSets;
+    use boyko_physics::solver::DefaultRigidSolver;
+    use boyko_sdf_math::{SdfEdit, sdf_op};
+
+    let label = if tree {
+        "S8-tree — sleep-skip transitions, SDF pipeline, sleeping ON (Sets), serial, Tree"
+    } else {
+        "S8 — sleep-skip transitions, SDF pipeline, sleeping ON (Sets), serial"
+    };
+    let mut samples: Vec<Snap> = Vec::with_capacity(TOTAL_FRAMES);
+    let setup_before = Snap::now();
+    let mut world = EcsMaster::new();
+    spawn_parts(&mut world, slab_parts(Vec3::new(0.0, -1.0, 0.0), FLOOR_HALF_EXTENTS, 0.5));
+    let bases = spawn_towers(&mut world, 2, -6.0, -6.0);
+    let third = spawn_parts(&mut world, cube_parts(bases[15] + Vec3::new(0.0, 2.0, 0.0), Vec3::ZERO, true, 0.5));
+    spawn_parts(&mut world, cube_parts(bases[15] + Vec3::new(1.1, 0.0, 0.0), Vec3::ZERO, true, 0.5));
+    let n_dynamic = 34u32;
+    let mut builder = ScheduleBuilder::new(pool(1));
+    let _ = add_physics_sdf::<DefaultRigidSolver>(&mut builder, &mut world);
+    // A field far below the floor: it collides nothing, and replacing it changes the sleep
+    // epoch's edit bits.
+    let field = |top: f32| SdfEdit::box_shape([0.0, top - 50.0, 0.0], [50.0, 50.0, 50.0], sdf_op::UNION, 0.0);
+    world.resource_mut::<SdfField>().push(field(-40.0));
+    world.insert_resource(FixedTime::new(Duration::from_secs_f32(DT)));
+    {
+        let cfg = world.resource_mut::<PhysicsConfig>();
+        cfg.gravity = Vec3::new(0.0, -9.81, 0.0);
+        cfg.dt = DT;
+        cfg.parallel_solve = false;
+        cfg.parallel_broadphase = false;
+        cfg.parallel_narrowphase = false;
+        cfg.sleeping = true;
+        if tree {
+            cfg.broadphase_select = BroadphaseSelectMode::Manual;
+            cfg.broadphase = BroadphaseKind::Tree;
+        }
+    }
+    if tree {
+        world.resource_mut::<BroadphaseTree>().set_brute_max_rows(0);
+    }
+    let mut schedule = builder.build(&mut world);
+    // Settle until every tower is held, then take the transitions' first shapes (a spawn, a
+    // despawn, a ball) before the window, so the archetypes and the columns exist.
+    let mut settle = 0;
+    while world.resource::<SleepSets>().stats().held_rows < n_dynamic {
+        schedule.run(&mut world);
+        settle += 1;
+        assert!(settle < 600, "S8: construction: the towers were not all held within 600 steps");
+    }
+    let warm_extra = spawn_parts(&mut world, slab_parts(Vec3::new(40.0, 5.0, 40.0), Vec3::new(0.5, 0.5, 0.5), 0.5));
+    schedule.run(&mut world);
+    assert!(world.delete_entity(warm_extra), "S8: construction: the warm-up body is live");
+    schedule.run(&mut world);
+    let setup = Snap::now().since(setup_before);
+
+    let rules_before = world.resource::<SleepSets>().rule_counts();
+    let tree_before = world.resource::<BroadphaseTree>().diag();
+    let mut frame = 0usize;
+    let mut extra: Option<Entity> = None;
+    let (mut restored_frames, mut moved_frames, mut rows_frames) = (0usize, 0usize, 0usize);
+    let (mut released_frames, mut withheld_frames) = (0usize, 0usize);
+    drive(
+        || {
+            frame += 1;
+            if frame.is_multiple_of(3) {
+                match extra.take() {
+                    Some(e) => {
+                        let _ = world.delete_entity(e);
+                    }
+                    None => {
+                        extra = Some(spawn_parts(
+                            &mut world,
+                            slab_parts(Vec3::new(40.0, 5.0, 40.0), Vec3::new(0.5, 0.5, 0.5), 0.5),
+                        ));
+                    }
+                }
+                rows_frames += 1;
+            }
+            if frame % 40 == 5 {
+                let base = bases[(frame / 40) % 16];
+                spawn_parts(&mut world, ball_parts(base + Vec3::new(2.5, -0.2, 0.0), Vec3::new(-6.0, 0.0, 0.0)));
+            }
+            if frame == 70 || frame == 80 {
+                let nudge = if frame == 70 { 1.0e-4 } else { -1.0e-4 };
+                world.get_component_mut::<RigidBody>(third).expect("S8: the third cube is live").position.x += nudge;
+            }
+            if frame == 100 {
+                let f = world.resource_mut::<SdfField>();
+                f.clear();
+                f.push(field(-41.0));
+            }
+            if frame == 150 {
+                world.resource_mut::<PhysicsConfig>().sleeping = false;
+            }
+            if frame == 153 {
+                world.resource_mut::<PhysicsConfig>().sleeping = true;
+            }
+            if frame == 290 {
+                world.resource_mut::<IslandSleep>().wake_all();
+            }
+            schedule.run(&mut world);
+            if frame > WARM_BUDGET {
+                let st = world.resource::<SleepSets>().stats();
+                restored_frames += usize::from(st.restored > 0);
+                moved_frames += usize::from(st.moved_in > 0);
+                released_frames += usize::from(st.released_rows > 0);
+                withheld_frames += usize::from(st.withheld_pairs > 0);
+            }
+        },
+        &mut samples,
+    );
+    let (control, live) = liveness_probe(label, &samples, || schedule.run(&mut world));
+    let rules = world.resource::<SleepSets>().rule_counts();
+    let (d2, d5, d6, dh, cross) = (
+        rules.d2_scan - rules_before.d2_scan,
+        rules.d5_epoch - rules_before.d5_epoch,
+        rules.d6_wake_all - rules_before.d6_wake_all,
+        rules.dh_mode - rules_before.dh_mode,
+        rules.cross_copies - rules_before.cross_copies,
+    );
+    assert!(
+        restored_frames > 0 && moved_frames > 0 && d2 > 0 && d5 > 0 && d6 > 0 && dh > 0 && cross > 2,
+        "{label}: ANTI-VACUITY FAILED — restores on {restored_frames} steady frames, move-ins on \
+         {moved_frames}, D2 {d2}, D5 {d5}, D6 {d6}, D-H {dh}, cross copies {cross}: a transition \
+         the arm prices did not run"
+    );
+    // The tree seam's transitions (L10 C3c): the diag is cumulative, so the window's share is a
+    // difference; the warm-up's own admissions and releases are outside it.
+    let tree_after = world.resource::<BroadphaseTree>().diag();
+    let (z_rebuilds, s_rebuilds, translations) = (
+        tree_after.sleeper_rebuilds - tree_before.sleeper_rebuilds,
+        tree_after.static_rebuilds - tree_before.static_rebuilds,
+        tree_after.translations - tree_before.translations,
+    );
+    if tree {
+        assert!(
+            z_rebuilds > 0 && s_rebuilds > 0 && translations > 0 && released_frames > 0 && withheld_frames > 0,
+            "{label}: ANTI-VACUITY FAILED — sleeper-set rebuilds {z_rebuilds}, static-set rebuilds \
+             {s_rebuilds}, translations {translations}, releases on {released_frames} steady \
+             frames, pairs withheld on {withheld_frames}: a tree-seam transition did not run"
+        );
+    }
+    rows.push(report(
+        label,
+        &format!(
+            "16 towers of 2 cubes (the last with a third) and a lone cube beside it, held before \
+             the window ({settle} settle steps), 1 worker, the SDF pipeline. In the window: a Rows \
+             step on {rows_frames} frames, a ball every 40th frame, the third cube nudged twice, an SDF \
+             field replacement, sleeping off/on, wake_all. Restores on {restored_frames} steady \
+             frames, move-ins on {moved_frames}; D2 {d2}, D5 {d5}, D6 {d6}, D-H {dh}, cross copies \
+             {cross}. Tree seam: sleeper-set rebuilds {z_rebuilds}, static-set rebuilds \
+             {s_rebuilds}, translations {translations}, releases on {released_frames} frames, \
+             pairs withheld on {withheld_frames}."
+        ),
+        setup,
+        &samples,
+        control,
+        live,
+    ));
+}
+
+/// S8b (design 08 §7, ruling W1): W = 4, the parallel narrowphase on, sleeping on, `Sets`, on
+/// the Tree (`kind`) or the Grid. Phase A (dispatching): 80 touching spheres sliding on ice,
+/// steered by a velocity write every frame so they never rest, give the stream at least 256 pairs
+/// (one contact point each, so no colour reaches the solver's dispatch width) beside 16
+/// held towers of 3 cubes, and a ball knocks a tower every 5th frame, so restores are computed
+/// inside chunks. The held towers' pairs are skipped inside the chunks on the Grid; on the Tree
+/// its sleeper set withholds them from the stream (L10 C3c), and the released rows' pairs join
+/// the chunks on each knock. Phase B (inline, from frame 200): the sliders are despawned and the stream
+/// falls below 256 pairs. Pinned in L5 C4's structural form on every steady frame: the scene
+/// holds fewer than `MIN_PARALLEL_BODIES` bodies, so the Grid opens no emit scope, and every
+/// colour stays below the solver's dispatch width (asserted), so a frame opens exactly the
+/// install frame plus the narrowphase's dispatch: `scope == 1 + Δnp_dispatches`, exact.
+fn s8b_sleep_skip_parallel_narrowphase(rows: &mut Vec<Row>, kind: boyko_physics::resources::BroadphaseKind) {
+    use boyko_physics::resources::{BroadphaseSelectMode, ConstraintGraph};
+    use boyko_physics::sleep_sets::SleepSets;
+
+    let label = match kind {
+        boyko_physics::resources::BroadphaseKind::Tree => "S8b-tree — sleep-skip, W=4, parallel narrowphase ON, Tree",
+        _ => "S8b-grid — sleep-skip, W=4, parallel narrowphase ON, Grid",
+    };
+    const MIN_COLOR_SLOTS: u32 = 256;
+    const SLIDERS_X: usize = 8;
+    const SLIDERS_Z: usize = 10;
+    let mut samples: Vec<Snap> = Vec::with_capacity(TOTAL_FRAMES);
+    let setup_before = Snap::now();
+    let mut world = EcsMaster::new();
+    spawn_parts(&mut world, slab_parts(Vec3::new(0.0, -1.0, 0.0), FLOOR_HALF_EXTENTS, 0.5));
+    let bases = spawn_towers(&mut world, 3, -30.0, -30.0);
+    spawn_parts(&mut world, slab_parts(Vec3::new(20.0, -1.0, 0.0), Vec3::new(10.0, 1.0, 40.0), 0.0));
+    let mut sliders: Vec<Entity> = Vec::with_capacity(SLIDERS_X * SLIDERS_Z);
+    for i in 0..SLIDERS_X {
+        for k in 0..SLIDERS_Z {
+            let p = Vec3::new(15.0 + i as f32, 0.5, -30.0 + k as f32);
+            sliders.push(spawn_parts(&mut world, slider_parts(p, Vec3::new(0.0, 0.0, 1.0))));
+        }
+    }
+    let mut builder = ScheduleBuilder::new(pool(4));
+    let _ = add_physics_colored_solve(&mut builder, &mut world);
+    world.insert_resource(FixedTime::new(Duration::from_secs_f32(DT)));
+    let passes = {
+        let cfg = world.resource_mut::<PhysicsConfig>();
+        cfg.gravity = Vec3::new(0.0, -9.81, 0.0);
+        cfg.dt = DT;
+        cfg.parallel_narrowphase = true;
+        cfg.broadphase_select = BroadphaseSelectMode::Manual;
+        cfg.broadphase = kind;
+        cfg.sleeping = true;
+        cfg.substeps as u64 * (1 + cfg.relax_iterations as u64)
+    };
+    let mut schedule = builder.build(&mut world);
+    let steer = |world: &mut EcsMaster, sliders: &[Entity], frame: usize| {
+        for &e in sliders {
+            if let Some(mut b) = world.get_component_mut::<RigidBody>(e) {
+                b.linear_velocity.z = 1.0 + 1.0e-4 * (frame % 2) as f32;
+            }
+        }
+    };
+    let mut settle = 0usize;
+    while world.resource::<SleepSets>().stats().held_rows < 48 {
+        steer(&mut world, &sliders, settle);
+        schedule.run(&mut world);
+        settle += 1;
+        assert!(settle < 600, "{label}: construction: the towers were not all held within 600 steps");
+    }
+    let setup = Snap::now().since(setup_before);
+
+    let n_rows = world.resource::<boyko_physics::resources::SolverScratch>().bodies_len();
+    assert!(n_rows < 4096, "{label}: premise: below the Grid's parallel-emit floor, so it opens no scope");
+    let mut np_log: Vec<u64> = Vec::with_capacity(TOTAL_FRAMES + 2);
+    let mut widest_log: Vec<u32> = Vec::with_capacity(TOTAL_FRAMES + 2);
+    let np_before = world.resource::<Manifolds>().narrowphase_dispatches();
+    let mut frame = 0usize;
+    let (mut chunk_restores, mut chunk_skips, mut chunk_withheld) = (0usize, 0usize, 0usize);
+    let (mut np_a, mut np_b) = (0u64, 0u64);
+    let mut last_np = np_before;
+    drive(
+        || {
+            frame += 1;
+            if frame == 200 {
+                for e in sliders.drain(..) {
+                    let _ = world.delete_entity(e);
+                }
+            }
+            steer(&mut world, &sliders, frame);
+            if frame.is_multiple_of(5) && frame < 200 {
+                let base = bases[(frame / 5) % 16];
+                spawn_parts(&mut world, ball_parts(base + Vec3::new(2.5, -0.2, 0.0), Vec3::new(-6.0, 0.0, 0.0)));
+            }
+            schedule.run(&mut world);
+            let np_now = world.resource::<Manifolds>().narrowphase_dispatches();
+            let dispatched = np_now > last_np;
+            last_np = np_now;
+            np_log.push(np_now);
+            // The widest colour's live slots, the solver's own dispatch measure (no allocation).
+            let widest = {
+                let graph = world.resource::<ConstraintGraph>();
+                let m = world.resource::<Manifolds>().solver_manifolds();
+                (0..graph.n_colors())
+                    .map(|c| graph.color(c).iter().map(|&mi| u32::from(m[mi as usize].count)).sum::<u32>())
+                    .max()
+                    .unwrap_or(0)
+            };
+            widest_log.push(widest);
+            if frame > WARM_BUDGET {
+                let st = world.resource::<SleepSets>().stats();
+                if frame < 200 {
+                    np_a += u64::from(dispatched);
+                    chunk_restores += usize::from(dispatched && st.restored_pairs > 0);
+                    chunk_skips += usize::from(dispatched && st.held_skipped_pairs > 0);
+                    chunk_withheld += usize::from(dispatched && st.withheld_pairs > 0);
+                } else if frame > 200 {
+                    np_b += u64::from(dispatched);
+                }
+            }
+        },
+        &mut samples,
+    );
+    let (control, live) = liveness_probe(label, &samples, || {
+        schedule.run(&mut world);
+        np_log.push(world.resource::<Manifolds>().narrowphase_dispatches());
+        widest_log.push(0);
+    });
+    // The structural pin, per steady frame (ruling W1, L5 C4's form with no colour and no emit
+    // scope): exactly the install frame plus the narrowphase's dispatch scope.
+    for (i, f) in samples[WARM_BUDGET..].iter().enumerate() {
+        let j = WARM_BUDGET + i;
+        let np = np_log[j] - if j == 0 { np_before } else { np_log[j - 1] };
+        assert!(widest_log[j] < MIN_COLOR_SLOTS, "{label}: frame {j}: the widest colour holds {} slots, the solver dispatches from {MIN_COLOR_SLOTS}", widest_log[j]);
+        assert!(np <= 1, "{label}: frame {j}: {np} narrowphase dispatches in one step");
+        assert_eq!(f.scope, 1 + np, "{label}: frame {j}: {} scope frames, the structure has 1 + {np} (and {passes} passes open none)", f.scope);
+        assert_eq!(f.chunk, 1 + np, "{label}: frame {j}: {} chunks, one per scope frame", f.chunk);
+    }
+    // The held pairs beside the dispatching chunks: skipped inside them on the Grid; on the Tree
+    // (L10 C3c) withheld from the stream by its sleeper set, so none reaches a chunk while the
+    // towers stay held (the Grid arm keeps the chunk's skip path covered).
+    let held_beside_chunks = if kind == boyko_physics::resources::BroadphaseKind::Tree {
+        chunk_withheld
+    } else {
+        chunk_skips
+    };
+    assert!(
+        np_a > 0 && chunk_restores > 0 && held_beside_chunks > 0 && np_b == 0,
+        "{label}: ANTI-VACUITY FAILED — phase A dispatched on {np_a} frames, restored inside chunks \
+         on {chunk_restores}, skipped held pairs inside chunks on {chunk_skips}, pairs withheld \
+         beside them on {chunk_withheld}; phase B dispatched on {np_b} (must be 0)"
+    );
+    rows.push(report(
+        label,
+        &format!(
+            "16 towers of 3 cubes held ({settle} settle steps) beside 80 steered sliders, 4 workers. \
+             Phase A: {np_a} dispatching frames, restores inside chunks on {chunk_restores}, held \
+             skips inside chunks on {chunk_skips}, pairs withheld beside them on {chunk_withheld}. \
+             Phase B (sliders despawned): {np_b} dispatches."
+        ),
+        setup,
+        &samples,
+        control,
+        live,
+    ));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2616,7 +3084,7 @@ impl Pin {
 /// (header, "S1c after L9 C4"). S1e (2026-09-25) is S1c's pile with contact reuse off,
 /// pinned at S1c's L11 C2 envelope in both profiles, which its window reproduces: the arm
 /// on which the fan-out regression reds on every release frame (same header section).
-fn pins() -> [Pin; 13] {
+fn pins() -> [Pin; 18] {
     // An App frame: one install frame (a `ScopeShared` + one chunk) and at most
     // one injector block — the block arrives once per 63 dispatcher-side pushes,
     // so its per-frame max is 1 and it is already inside the measured 3.
@@ -2678,6 +3146,50 @@ fn pins() -> [Pin; 13] {
         Pin {
             other_per_frame: colored_other,
             ..app("S1b", 1, 4)
+        },
+        // L10 C0: S1b with sleeping on, pinned as S1b — the latch and the per-island scratch
+        // are kernel columns resized in place, so a sleeping step acquires nothing S1b does not.
+        Pin {
+            other_per_frame: colored_other,
+            ..app("S1d", 1, 4)
+        },
+        // L10 C3b (design 04 "Census (W5)"): every sleep-skip transition inside the window —
+        // Rows steps, restores, move-ins, a field edit, the D-H flush and its Reset step,
+        // `wake_all` — on S1b's frame: the held store, the restore sources and the capture are
+        // kernel columns, so no transition acquires anything.
+        Pin {
+            other_per_frame: colored_other,
+            ..app("S8 —", 1, 1)
+        },
+        // L10 C3c: S8's window on the tree broadphase — the sleeper set's admissions, releases,
+        // translations and dissolutions live in tree columns and `ContactPairs`' withheld
+        // column, so the tree seam acquires nothing either.
+        Pin {
+            other_per_frame: colored_other,
+            ..app("S8-tree", 1, 1)
+        },
+        // L10 C3b (design 08 §7, ruling W1): the install frame, plus the narrowphase's one
+        // scope and one block on a dispatching frame (phase A) and none inline (phase B). The
+        // arm asserts the exact per-frame structure (`scope == 1 + Δnp`, every colour below the
+        // solver's dispatch width, no Grid emit scope below its body floor); the range here is
+        // its two frame shapes, no headroom.
+        Pin {
+            scene: "S8b-tree",
+            workers: 4,
+            scope: (1, 2),
+            chunk: (1, 2),
+            dispatch_max: 5,
+            other_per_frame: colored_other,
+            realloc_sum: 0,
+        },
+        Pin {
+            scene: "S8b-grid",
+            workers: 4,
+            scope: (1, 2),
+            chunk: (1, 2),
+            dispatch_max: 5,
+            other_per_frame: colored_other,
+            realloc_sum: 0,
         },
         if RELEASE {
             // 1240 bodies. RE-PINNED from the 4,352-step long run after A7b
@@ -2800,7 +3312,7 @@ fn pins() -> [Pin; 13] {
 /// failing, so one red run names all of them rather than the first.
 fn gate(rows: &[Row]) {
     let pins = pins();
-    let mut violations: Vec<String> = Vec::with_capacity(16);
+    let mut violations: Vec<String> = Vec::with_capacity(18);
     let mut covered = 0usize;
     say!(
         "\n══════════ GATE — pinned steady-state envelopes ({}) ══════════",
@@ -2950,7 +3462,7 @@ fn frame_allocation_census() {
     class_predicates_match_the_threadpool_receipt();
     worker_thread_allocations_are_counted();
 
-    let mut rows: Vec<Row> = Vec::with_capacity(16);
+    let mut rows: Vec<Row> = Vec::with_capacity(17);
     s0_executor_floor_per_system(&mut rows);
     s0b_executor_floor_with_fixed_substep(&mut rows);
     s2_spawn_despawn_churn_and_par_iter(&mut rows);
@@ -2959,6 +3471,11 @@ fn frame_allocation_census() {
     s1b_rigid_pile_colored_serial(&mut rows);
     s1c_rigid_pile_colored_parallel(&mut rows);
     s1e_rigid_pile_colored_parallel_reuse_off(&mut rows);
+    s1d_rigid_pile_colored_serial_sleeping(&mut rows);
+    s8_sleep_skip_transitions(&mut rows, false);
+    s8_sleep_skip_transitions(&mut rows, true);
+    s8b_sleep_skip_parallel_narrowphase(&mut rows, boyko_physics::resources::BroadphaseKind::Tree);
+    s8b_sleep_skip_parallel_narrowphase(&mut rows, boyko_physics::resources::BroadphaseKind::Grid);
 
     // ── Anti-vacuity across arms: the parallel dispatch really did engage ──
     //

@@ -321,7 +321,7 @@ fn sphere_vs_sdf_box_manifold() {
 
     let manifolds = world.resource::<Manifolds>().manifolds();
     assert_eq!(manifolds.len(), 1, "exactly one body-vs-SDF manifold");
-    let m = manifolds[0];
+    let m = manifolds.get(0).expect("one manifold");
     assert_eq!(m.body_b, SDF_SENTINEL, "SDF manifold keys body_b == SDF_SENTINEL");
     assert_eq!(m.body_a.0, 0, "body_a is the sphere's dense row");
     assert_eq!(m.count, 1, "a sphere emits a single contact point");
