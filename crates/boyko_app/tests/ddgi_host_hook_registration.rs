@@ -83,7 +83,7 @@ use boyko_render::light::DDGI_MODE_BIT;
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
     ClusterConfig, CsmCasterScratch, CsmPlugin, DdgiConfig, DdgiPlugin, LightingConfig,
-    LightingPlugin, Material, MeshGpu, MeshRenderScratch, RenderPathFrozenConsumers,
+    LightingPlugin, Material, MaterialUploadStaging, MeshGpu, MeshRenderScratch, RenderPathFrozenConsumers,
     RenderPathPlugin, ResolvedDdgi, ShadowAtlasPlugin, ShadowDenoisePlugin, SsaoConfig,
     SsaoPlugin,
 };
@@ -118,6 +118,9 @@ fn production_subset_app() -> App {
     app.add_plugin(CameraPlugin);
     app.insert_resource(MeshRenderScratch::default());
     app.insert_resource(CsmCasterScratch::default());
+    // `EnginePlugins::build` inserts it beside the two scratches above; the production
+    // registration's `stage_material_edits` (DM1) reads it every frame.
+    app.insert_resource(MaterialUploadStaging::default());
     app.insert_resource(Assets::<Material>::default());
     app.world_mut().insert_non_send_resource(Assets::<MeshGpu>::default());
     app.add_systems_cfg(register_main_frame_systems);

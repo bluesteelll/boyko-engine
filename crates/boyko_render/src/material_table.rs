@@ -540,16 +540,7 @@ impl MaterialTable {
                 "invariant: Handle::index() {row} exceeds Assets<Material>'s own \
                  high_water() {high_water} — an Assets internal-consistency bug"
             );
-            // Derive-at-upload (grooming item B): re-derive MATERIAL_FLAG_TEXTURED from
-            // `textures.any()` on a LOCAL copy of `gpu` rather than trusting whatever bit
-            // `material.gpu.mrr[3]` already carries — see this fn's doc.
-            let mut gpu = material.gpu;
-            let flags = gpu.mrr[3].to_bits();
-            gpu.mrr[3] = f32::from_bits(if material.textures.any() {
-                flags | MATERIAL_FLAG_TEXTURED
-            } else {
-                flags & !MATERIAL_FLAG_TEXTURED
-            });
+            let gpu = derive_gpu_row(material);
             // SAFETY: `dst` targets >= `high_water * stride` valid mapped bytes (this
             // fn's caller contract); `row < high_water` (hard-asserted above) keeps
             // `row * stride .. + stride` in bounds; `gpu` is a local, distinct from
@@ -570,6 +561,26 @@ impl Default for MaterialTable {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The [`MaterialGpu`] bytes one material row uploads as — its `gpu` field with
+/// [`MATERIAL_FLAG_TEXTURED`] RE-DERIVED from `textures.any()` (ORed in when a slot is bound,
+/// ANDed out otherwise) on a local copy, regardless of whatever bit `gpu.mrr[3]` already carries.
+///
+/// The ONE host→GPU derive every table write path shares: the full image
+/// ([`MaterialTable::seed_rows`]) and the compact per-frame staging
+/// (`crate::material_upload::stage_material_edits`) both call it, so a row uploaded either way
+/// carries identical bytes. A non-textured material's result is byte-identical to its `gpu`.
+#[inline]
+pub(crate) fn derive_gpu_row(material: &Material) -> MaterialGpu {
+    let mut gpu = material.gpu;
+    let flags = gpu.mrr[3].to_bits();
+    gpu.mrr[3] = f32::from_bits(if material.textures.any() {
+        flags | MATERIAL_FLAG_TEXTURED
+    } else {
+        flags & !MATERIAL_FLAG_TEXTURED
+    });
+    gpu
 }
 
 #[cfg(test)]

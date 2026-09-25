@@ -205,6 +205,11 @@ pub mod material;
 /// [`MaterialId`](material::MaterialId). Replaces the standalone mesh-materials rung
 /// M(-1) `MaterialRegistry`.
 pub mod material_table;
+/// Dynamic-materials DM1 — how a Tier-1 material edit reaches the GPU table: the compact
+/// [`MaterialUploadStaging`](material_upload::MaterialUploadStaging) resource and the
+/// [`stage_material_edits`](material_upload::stage_material_edits) system that drains
+/// `Assets<Material>`'s edited set into it.
+pub mod material_upload;
 /// The GPU-resident mesh asset record (mesh foundation M2, asset-system rung A2):
 /// [`MeshGpu`] / [`Vertex`], the GPU vertex+index buffers a `MeshHandle` indexes.
 pub mod mesh;
@@ -604,6 +609,7 @@ pub use material::{
     MATERIAL_FLAG_TEXTURED, MATERIAL_GPU_WORDS, Material, MaterialGpu, MaterialId, MaterialTextures,
 };
 pub use material_table::MaterialTable;
+pub use material_upload::{MATERIAL_ROW_BYTES, MaterialUploadStaging, stage_material_edits};
 pub use mesh::{MeshGpu, U16_INDEX_VERTEX_LIMIT, VERTEX_STRIDE as MESH_VERTEX_STRIDE, Vertex};
 pub use mesh_assets::{MeshAssetsExt, MeshAssetsVbExt, OrphanedMeshGpu, build_mesh_gpu};
 pub use mesh_data::MeshData;
