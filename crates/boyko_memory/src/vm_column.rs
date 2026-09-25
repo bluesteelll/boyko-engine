@@ -129,11 +129,11 @@ pub struct VmColumn<T: Copy, O: CommitOwner = ColumnOwner> {
     /// Live element count — the bounds oracle for `as_slice`/`get`/`set` and
     /// the frontier for `push`/`swap_remove`. Mutated only under `&mut self`.
     len: usize,
-    /// Commit frontier in ELEMENTS (== committed_bytes / size_of::<T>()).
+    /// Commit frontier in ELEMENTS (`== committed_bytes / size_of::<T>()`).
     /// Warm-path comparator in `push`; the `n * size` overflow class is
     /// confined to the cold `grow_to` path's checked math.
     committed_elems: usize,
-    /// Hard element ceiling (== reservation / size_of::<T>(), the value the
+    /// Hard element ceiling (`== reservation / size_of::<T>()`, the value the
     /// constructor was sized for). `push` past it panics loudly — the caller's
     /// row-index type (`u32` `unit_index`) cannot represent a larger column.
     reserve_elems: usize,

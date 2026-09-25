@@ -23,9 +23,9 @@
 //! - Unix: anonymous `mmap` pages are zero-fill; `mprotect` does not alter
 //!   contents.
 //! - Fallback (Miri / wasm32 / exotic): the WHOLE reservation is eagerly
-//!   acquired with [`alloc_zeroed`] (NOT `alloc` — the X.G/X.I consumers
-//!   READ never-program-written memory by design, see `InlandStore`'s I-Z
-//!   invariant and the pool's J-XI tick contract).
+//!   acquired with [`std::alloc::alloc_zeroed`] (NOT `alloc` — the X.G/X.I
+//!   consumers READ never-program-written memory by design, see
+//!   `InlandStore`'s I-Z invariant and the pool's J-XI tick contract).
 //!
 //! De-jure status of the syscall arms (plan R2-W1): the Rust abstract machine
 //! does not model raw-syscall memory; the justification is equivalence with
