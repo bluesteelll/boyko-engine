@@ -720,7 +720,7 @@ fn new_rows(reds: &[Red]) -> Vec<usize> {
     reds.iter().filter(|r| r.rule == "R2'(a) new row").map(|r| r.line).collect()
 }
 
-/// FX1 — trunk `unsafe_ecs_cell.rs:218`, the PC-24 line itself: R5 and R4 RED.
+/// FX1 — the cell file's trunk `:218`, the PC-24 line itself: R5 and R4 RED.
 #[test]
 fn fx1_trunk_archetype_ptr_mut_reds_r5_and_r4() {
     let text = cell_fixture(
