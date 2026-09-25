@@ -3993,9 +3993,10 @@ impl ColoredSoftStepSolver {
         self.solve_colored_inner(config, manifolds, graph, scratch, None, None);
     }
 
-    /// The colored solve with O8 sleeping (plan O8 / Decision 5) — the entry the
-    /// [`physics_solve_colored`](crate::systems::physics_solve_colored) stage calls
-    /// when `PhysicsConfig::sleeping` is on.
+    /// The colored solve with O8 sleeping (plan O8 / Decision 5), with no L10 held inputs. The
+    /// [`physics_solve_colored`](crate::systems::physics_solve_colored) stage's sleeping arm
+    /// calls its crate-private sibling `solve_colored_held` (this solve plus L10's sleep-skip
+    /// inputs), not this entry.
     ///
     /// Identical to [`solve_colored`](Self::solve_colored) but threads the
     /// [`IslandSleep`] state: slept islands skip ONLY their SOLVE + INTEGRATE work

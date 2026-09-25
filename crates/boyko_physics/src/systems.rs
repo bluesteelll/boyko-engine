@@ -1906,10 +1906,11 @@ pub fn physics_build_graph(
 /// # O8 sleeping (plan O8 / Decision 5)
 ///
 /// When [`PhysicsConfig::sleeping`] was on at this step's broadphase, this stage drives
-/// [`ColoredSoftStepSolver::solve_colored_sleeping`](crate::solver::ColoredSoftStepSolver::solve_colored_sleeping),
-/// threading the [`IslandSleep`] resource so slept islands skip ONLY their SOLVE +
-/// INTEGRATE — `physics_gather` still walks every row (IM-1 intact). When off, it
-/// drives the byte-identical
+/// `ColoredSoftStepSolver::solve_colored_held` (crate-private: the public
+/// [`solve_colored_sleeping`](crate::solver::ColoredSoftStepSolver::solve_colored_sleeping)
+/// with L10's sleep-skip inputs), threading the [`IslandSleep`] resource so slept islands
+/// skip ONLY their SOLVE + INTEGRATE — `physics_gather` still walks every row (IM-1 intact).
+/// When off, it drives the byte-identical
 /// [`solve_colored`](crate::solver::ColoredSoftStepSolver::solve_colored) (the
 /// `IslandSleep` resource is read but untouched — the 0%-gate).
 ///
