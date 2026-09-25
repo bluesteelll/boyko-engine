@@ -682,6 +682,11 @@ pub struct SleepSets {
     epoch: SleepEpoch,
     /// The mode the broadphase recorded for this step.
     step_mode: SleepSkip,
+    /// Whether sleeping was on at the broadphase that recorded `step_mode`: the colored solve
+    /// picks its sleeping or plain arm from it, never from the configuration (design 04 D9).
+    step_sleeping: bool,
+    /// The gather sequence `step_mode` and `step_sleeping` were recorded on.
+    step_seq: u64,
     /// Whether the narrowphase runs its `Sets` arm this step (design 08 D-H: the step mode is
     /// `Sets`, or a restore set is non-empty).
     np_sets: bool,
@@ -750,6 +755,8 @@ impl SleepSets {
             cursor: RemapCursor::default(),
             epoch: SleepEpoch::UNSET,
             step_mode: SleepSkip::Off,
+            step_sleeping: false,
+            step_seq: 0,
             np_sets: false,
             cls_seq: 0,
             restore_rec_seq: 0,
@@ -780,6 +787,20 @@ impl SleepSets {
     #[inline]
     pub fn step_mode(&self) -> SleepSkip {
         self.step_mode
+    }
+
+    /// Whether the colored solve of `rows`' gather runs its sleeping arm: sleeping as this
+    /// gather's broadphase read it (design 04 D9). A configuration write between the broadphase
+    /// and the solve takes effect on the next step, as it does for every other stage, so the
+    /// solve never integrates rows the narrowphase skipped for a held island (review W1 of C3c).
+    #[inline]
+    pub(crate) fn solve_sleeping(&self, rows: &RowIdentity) -> bool {
+        debug_assert_eq!(
+            self.step_seq,
+            rows.gather_seq(),
+            "invariant: the colored solve runs after its gather's colored broadphase"
+        );
+        self.step_sleeping
     }
 
     /// Whether row `row` is held this step: its pairs are skipped and its island is not solved.
@@ -915,6 +936,8 @@ impl SleepSets {
             _ => SleepSkip::Off,
         };
         self.step_mode = mode;
+        self.step_sleeping = p.cfg.sleeping;
+        self.step_seq = p.rows.gather_seq();
         self.np_sets = false;
         self.drain = false;
         if mode == SleepSkip::Off && held.live_records() == 0 {

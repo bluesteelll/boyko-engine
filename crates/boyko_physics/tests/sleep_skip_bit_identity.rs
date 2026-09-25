@@ -467,6 +467,33 @@ fn oracle_pairs(
     probe.mismatches += u64::from(probe.oracle.pairs() != pairs.pairs());
 }
 
+/// A configuration write a script schedules for the middle of a step (review W1 of L10 C3c,
+/// design 04 D9): [`mid_step_config`] applies it between the broadphase and the narrowphase, where
+/// a gameplay system with no ordering against the physics block can run, so every later stage of
+/// the step runs after the write. Inert while both fields are `None`.
+#[derive(Resource, Default)]
+struct MidStep {
+    /// `PhysicsConfig::sleeping` to write, once.
+    sleeping: Option<bool>,
+    /// `PhysicsConfig::sleep_skip` to write, once.
+    sleep_skip: Option<SleepSkip>,
+}
+
+// `clippy::needless_pass_by_value`: `Res` / `ResMut` are by-value `SystemParam`s.
+#[allow(clippy::needless_pass_by_value)]
+fn mid_step_config(mut cfg: ResMut<PhysicsConfig>, mut mid: ResMut<MidStep>) {
+    if mid.sleeping.is_none() && mid.sleep_skip.is_none() {
+        return;
+    }
+    let mid = &mut *mid;
+    if let Some(v) = mid.sleeping.take() {
+        cfg.sleeping = v;
+    }
+    if let Some(v) = mid.sleep_skip.take() {
+        cfg.sleep_skip = v;
+    }
+}
+
 /// One world of a lockstep pair.
 struct Rig {
     world: EcsMaster,
@@ -503,6 +530,15 @@ impl Rig {
             let mut before = probe.key();
             before.0 = keys.narrowphase;
             probe.after(after).before(before);
+        }
+        world.insert_resource(MidStep::default());
+        {
+            let writer = builder.add_system(mid_step_config);
+            let mut after = writer.key();
+            after.0 = keys.broadphase;
+            let mut before = writer.key();
+            before.0 = keys.narrowphase;
+            writer.after(after).before(before);
         }
         world.insert_resource(FixedTime::new(Duration::from_secs_f32(DT)));
         let schedule = builder.build(&mut world);
@@ -1305,6 +1341,47 @@ fn s3_sleeping_and_mode_toggles() {
                     ev.withheld[k]
                 );
             }
+        },
+    );
+}
+
+/// Review W1 of L10 C3c (design 04 D9: every stage reads the mode the broadphase recorded, never
+/// the configuration): `sleeping` and the mode written by a system between the broadphase and the
+/// narrowphase ([`MidStep`]). Sleeping on → off on a step whose broadphase held the towers: the
+/// narrowphase has skipped their pairs, so a solve that picked its arm from the configuration
+/// would integrate the held rows at their raw inverse mass with no contacts, where `Off` keeps the
+/// towers' contacts. Then off → on, and the mode `Sets → Off → Sets`, the same way. Each write
+/// takes effect on the next step, whose broadphase flushes (D-H).
+#[test]
+fn s3_mid_step_config_writes_take_effect_on_the_next_step() {
+    arm(
+        "S3 mid-step writes",
+        &towers(),
+        ARM_STEPS,
+        &mut |step, rig: &mut Rig| {
+            let mode = rig.mode;
+            let mid = rig.world.resource_mut::<MidStep>();
+            match step {
+                s if s == HELD_BY => mid.sleeping = Some(false),
+                s if s == HELD_BY + 3 => mid.sleeping = Some(true),
+                s if s == HELD_BY + 120 => mid.sleep_skip = Some(SleepSkip::Off),
+                s if s == HELD_BY + 123 => mid.sleep_skip = Some(mode),
+                _ => {}
+            }
+        },
+        &|label, ev| {
+            assert_held_before_events(label, ev);
+            // Each "off" write landed mid-step: its step's broadphase held every dynamic row, and
+            // the next step's broadphase flushed them.
+            for k in [HELD_BY, HELD_BY + 120] {
+                assert!(
+                    ev.stats[k].held_rows as usize == ev.dynamic_rows[k] && ev.stats[k + 1].flushes == 1,
+                    "{label}: void: the write at step {k} did not land mid-step on a held step: {:?} then {:?}",
+                    ev.stats[k],
+                    ev.stats[k + 1]
+                );
+            }
+            assert!(ev.rules.dh_mode >= 2, "{label}: void: {} D-H flushes", ev.rules.dh_mode);
         },
     );
 }

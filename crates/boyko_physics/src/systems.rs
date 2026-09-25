@@ -1895,13 +1895,19 @@ pub fn physics_build_graph(
 ///
 /// # O8 sleeping (plan O8 / Decision 5)
 ///
-/// When [`PhysicsConfig::sleeping`] is on, this stage drives
+/// When [`PhysicsConfig::sleeping`] was on at this step's broadphase, this stage drives
 /// [`ColoredSoftStepSolver::solve_colored_sleeping`](crate::solver::ColoredSoftStepSolver::solve_colored_sleeping),
 /// threading the [`IslandSleep`] resource so slept islands skip ONLY their SOLVE +
 /// INTEGRATE — `physics_gather` still walks every row (IM-1 intact). When off, it
 /// drives the byte-identical
 /// [`solve_colored`](crate::solver::ColoredSoftStepSolver::solve_colored) (the
 /// `IslandSleep` resource is read but untouched — the 0%-gate).
+///
+/// The arm is the one [`SleepSets`] recorded at the broadphase, never the configuration as it
+/// stands at the solve (L10 design 04 D9): the narrowphase, the SDF stage and the graph already
+/// followed the broadphase's classification, so a write to `sleeping` between the broadphase and
+/// the solve would otherwise solve held rows at their raw inverse mass with their contacts
+/// skipped. Such a write takes effect on the next step.
 //
 // `clippy::needless_pass_by_value`: `ResMut<_>` / `Res<_>` are by-value
 // `SystemParam`s used through reborrows — the same false-positive as the other
@@ -1916,7 +1922,7 @@ pub fn physics_solve_colored(
     mut sleep: ResMut<IslandSleep>,
     mut sets: ResMut<SleepSets>,
 ) {
-    if cfg.sleeping {
+    if sets.solve_sleeping(&scratch.rows) {
         // L10 A6 (design 04, 06 A1–A3, 08 A1′): the held rows, the restore warm source and the
         // move-in capture of the step the broadphase classified; nothing on a step it did not.
         let held = sets.solve_inputs(&scratch.rows, manifolds.held.view());
@@ -1929,11 +1935,11 @@ pub fn physics_solve_colored(
             held,
         );
     } else {
-        // Sleeping off: byte-identical to the O6/O7 colored path; `IslandSleep` and
-        // `SleepSets` are resolved (so the params exist) but never read or written — a D-H
-        // flush into this arm was drained by the broadphase (ruling on L10 rev 2.3, open
-        // question 2).
-        let _ = (&mut sleep, &mut sets);
+        // Sleeping off at the broadphase: byte-identical to the O6/O7 colored path;
+        // `IslandSleep` is resolved (so the param exists) but never read or written, and
+        // `SleepSets` is read only for the arm — a D-H flush into this arm was drained by the
+        // broadphase (ruling on L10 rev 2.3, open question 2).
+        let _ = &mut sleep;
         solver.solve_colored(&cfg, manifolds.solver_manifolds(), &graph, &mut scratch);
     }
 }
