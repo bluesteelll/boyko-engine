@@ -605,20 +605,21 @@ fn checked_slab_round(bytes: usize) -> usize {
 mod tests {
     use super::*;
 
-    /// An 8-byte id standing in for `boyko_ecs`'s `EntityId` (`#[repr(transparent)]` over
-    /// `usize`), the element type of the columns these tests model.
+    /// An 8-byte element standing in for `boyko_ecs`'s entity id (`#[repr(transparent)]` over
+    /// `usize`), the element type of the columns these tests model. Not named `EntityId`: UG-15's
+    /// containment map resolves types by name across the census crates.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     #[repr(transparent)]
-    struct EntityId(usize);
+    struct ElemId(usize);
 
-    const SIZE: usize = size_of::<EntityId>(); // 8 on the 64-bit target
+    const SIZE: usize = size_of::<ElemId>(); // 8 on the 64-bit target
     const MIN_ELEMS: usize = POOL_MIN_SLAB / SIZE;
 
-    fn eid(v: usize) -> EntityId {
-        EntityId(v)
+    fn eid(v: usize) -> ElemId {
+        ElemId(v)
     }
 
-    fn col(reserve: usize) -> VmColumn<EntityId> {
+    fn col(reserve: usize) -> VmColumn<ElemId> {
         VmColumn::new("test", reserve)
     }
 
@@ -664,7 +665,7 @@ mod tests {
     #[test]
     fn swap_remove_matches_vec() {
         let mut c = col(1024);
-        let mut model: Vec<EntityId> = Vec::new();
+        let mut model: Vec<ElemId> = Vec::new();
         for i in 0..64 {
             c.push(eid(i));
             model.push(eid(i));
@@ -798,7 +799,7 @@ mod tests {
     ///
     /// Packing plan S2 re-derivation: the alignment pin read "a multiple of
     /// `COMMIT_GRANULE`", which the first frontier no longer is — it is one
-    /// `COMMIT_PAGE` (`MIN_ELEMS` = 4096 / 8 = 512 `EntityId`s, was 8192).
+    /// `COMMIT_PAGE` (`MIN_ELEMS` = 4096 / 8 = 512 `ElemId`s, was 8192).
     #[test]
     fn grow_policy() {
         let mut c = col(64 * MIN_ELEMS);
@@ -840,7 +841,7 @@ mod tests {
         let c = col(16);
         assert_eq!(c.len(), 0);
         assert!(c.is_empty());
-        assert_eq!(c.as_slice(), &[] as &[EntityId]);
+        assert_eq!(c.as_slice(), &[] as &[ElemId]);
         assert_eq!(c.get(0), None);
     }
 
