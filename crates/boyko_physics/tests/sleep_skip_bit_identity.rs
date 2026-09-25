@@ -2131,8 +2131,8 @@ fn s3_parked_member_floor_turn_kinematic_platform_degenerate_box() {
 }
 
 /// A missed gather while held (design 04 S3's last scene; D7; 08 O-2, N32; M-R4):
-/// `physics_gather` run once between two steps, so every row-keyed consumer â€” the latch, the
-/// mask, L9's carry, the solver's warm cursor, L10's own â€” classifies the next step as a Reset.
+/// `physics_gather` run once between two steps, so every row-keyed consumer — the latch, the
+/// mask, L9's carry, the solver's warm cursor, L10's own — classifies the next step as a Reset.
 /// `Off` wakes the towers on the latch's Reset and misses every carried join and warm record;
 /// `Sets` flushes every record on its Reset arm, which has no previous rows and so leaves both
 /// restore sources unstamped (empty to the solve and the narrowphase). The step before, a member
