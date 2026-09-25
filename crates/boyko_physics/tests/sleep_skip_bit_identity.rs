@@ -1629,6 +1629,79 @@ fn s3_cross_pairs_restored_x_then_y_then_both() {
     );
 }
 
+/// Review W2 of L10 C3c (design 06 B3, Invariant K): a move-in copies its cross pairs from a held
+/// record restored on the same step, which it reads tombstoned, its row table translated out of
+/// order. Tower X (four cubes) stands beside island Y — two cubes on the floor, `y0` 0.1 from X
+/// and `yr` beyond it, bridged by `y1` resting across both — so `y0` and `y1` share separated
+/// cross pairs with X's lower cubes, and `yr` pairs with nothing of X. Both move in; X's top cube
+/// (no cross pair) is nudged, so X alone restores and, its latch still asleep, is a candidate on
+/// the next step, whose despawn restores Y (D1):
+///
+/// * vanished: `yr`, whose row lies between `y0`'s and `y1`'s, is despawned, and an unrelated far
+///   cube — the archetype's last row — takes its row: Y's members read `[y0, NONE, y1]`;
+/// * jumper: an unrelated far cube spawned before Y is despawned, and `yr` — the last row — takes
+///   its row: Y's members read `[y0, y1, jumper]`.
+///
+/// Either way a binary search of Y's members misses `y1`, which is present and rests: X would move
+/// in without the separated pair on `y1` that `Off` still carries, so its held slot's kept tag
+/// would differ from `Off`'s, and a later restore would compute the pair with no state.
+#[test]
+fn s3_move_in_copies_from_a_record_restored_on_its_step() {
+    let x_tower = tower(4, 0.0, 0.0, 0.5);
+    // X spans x <= 0.5; y0 spans [0.6, 1.6] and yr [1.6, 2.6]. y1 spans [1.1, 2.1] one level up,
+    // resting on both, so the three are one island through its two contacts. yr's centre is 2.1
+    // from X's axis, past two bounding spheres' reach (2 x 0.866): no pair with X. y1's is 1.6
+    // from X's second cube (a pair, 0.6 apart) and 1.89 from the others (none, the top cube
+    // included).
+    let y0 = Spec::cube(Vec3::new(1.1, 0.5, 0.0), 0.5);
+    let yr = Spec::cube(Vec3::new(2.1, 0.5, 0.0), 0.5);
+    let y1 = Spec::cube(Vec3::new(1.6, 1.5, 0.0), 0.5);
+    let far = Spec::cube(Vec3::new(20.0, 0.5, 0.0), 0.5);
+    // Body indices: the floor 0, X 1..=4 (its top cube 4), then each scene's four.
+    let scenes: [(&str, [Spec; 4], usize); 2] = [
+        ("vanished", [y0, yr, y1, far], 6),
+        ("jumper", [far, y0, y1, yr], 5),
+    ];
+    for (name, tail, despawned) in scenes {
+        let mut specs = vec![Spec::floor()];
+        specs.extend(x_tower.iter().copied());
+        specs.extend(tail);
+        arm(
+            &format!("S3 move-in from a restored record ({name})"),
+            &specs,
+            ARM_STEPS,
+            &mut |step, rig: &mut Rig| {
+                if step == HELD_BY {
+                    rig.body_mut(4).position.x -= 1.0e-4;
+                }
+                if step == HELD_BY + 1 {
+                    rig.despawn(despawned);
+                }
+            },
+            &|label, ev| {
+                assert_held_before_events(label, ev);
+                // X, Y and the far cube: Y is ONE record, so its member run is the one the
+                // despawn unsorts.
+                let before = ev.stats[HELD_BY - 1];
+                assert_eq!(before.held_islands, 3, "{label}: void: Y is not one held island: {before:?}");
+                let k = HELD_BY + 1;
+                assert!(
+                    ev.stats[k].moved_in >= 1 && ev.stats[k].restored >= 1,
+                    "{label}: void: step {k} did not both restore Y and move X in: {:?}",
+                    ev.stats[k]
+                );
+                assert!(
+                    ev.rules.cross_reads_dead > 0 && ev.rules.cross_copies > 0,
+                    "{label}: void: no cross pair was looked up in a record restored on its step \
+                     ({} lookups, {} copies)",
+                    ev.rules.cross_reads_dead,
+                    ev.rules.cross_copies
+                );
+            },
+        );
+    }
+}
+
 /// Arms 4 and 4b (design 06 D-E, 08 D-E′; N15, N23): the epoch's config inputs changed while
 /// held — `contact_reuse` toggled, τ changed, then the rate halved (`dt`) — each flushes.
 #[test]

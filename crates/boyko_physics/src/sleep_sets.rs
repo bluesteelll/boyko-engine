@@ -508,6 +508,9 @@ pub struct SleepRuleCounts {
     pub refused_m3: u64,
     /// Kept pairs copied from another record's copy (Invariant K, design 06 B3).
     pub cross_copies: u64,
+    /// Held-skip pairs whose copy a move-in looked up in a record restored on the same step, and
+    /// so read tombstoned (design 06 B3; review W2 of C3c).
+    pub cross_reads_dead: u64,
     /// `REC` pairs admitted on a settled miss (`HIT = 0 ∧ SETTLED = 1`, ruling W3's arm 9).
     pub rec_settled_misses: u64,
     /// `REC` pairs held without a manifold (design 06 anti-vacuity).
@@ -1697,6 +1700,18 @@ fn class_of(r: &RowRemap<'_>) -> u8 {
     }
 }
 
+/// Whether `record` keeps a pair on current rows `{a, b}`, found by translating every kept pair's
+/// two row-table indices: the debug oracle of `capture_island`'s cross-copy lookup, which goes
+/// through `local_of` and `find_pair` and shares neither (review W2 of C3c). Linear in the
+/// record's kept pairs.
+fn keeps_pair_on(view: HeldView<'_>, record: &HeldIsland, a: u32, b: u32) -> bool {
+    let table = view.rows(record.rows_range());
+    view.pairs(record.pairs_range()).iter().any(|kp| {
+        let (x, y) = (table[kp.la as usize], table[kp.lb as usize]);
+        (x, y) == (a, b) || (x, y) == (b, a)
+    })
+}
+
 /// Captures one candidate island into the store (A2.4, one island): the members, the kept
 /// manifolds (the previous stream's, through the previous graph's island), the kept pairs (the
 /// previous pair list's bucket, a cross pair from the held record's copy), the anchors, M2 and
@@ -1774,10 +1789,18 @@ fn capture_island(
                 let k_y = cls[y as usize].island;
                 let view = held.view();
                 let rec_y = view.records()[k_y as usize];
+                // A record the prologue or A2.5a restored this step is read tombstoned, its table
+                // translated but possibly out of order: `local_of` scans it (review W2 of C3c).
+                rules.cross_reads_dead += u64::from(!rec_y.live());
                 let copy = match (view.local_of(&rec_y, ra), view.local_of(&rec_y, rb)) {
                     (Some(la), Some(lb)) => view.find_pair(&rec_y, la, lb).copied(),
                     _ => None,
                 };
+                debug_assert!(
+                    copy.is_some() || !keeps_pair_on(view, &rec_y, ra, rb),
+                    "invariant: the lookup finds the copy of ({ra}, {rb}) its held record keeps \
+                     (Invariant K, design 06 B3)"
+                );
                 match copy {
                     Some(kp) => {
                         tag = kp.tag;

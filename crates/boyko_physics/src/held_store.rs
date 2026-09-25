@@ -279,16 +279,41 @@ impl<'a> HeldView<'a> {
     }
 
     /// The row-table index of current row `row` in `record` (members first, then anchors), or
-    /// `None`. Two binary searches: a record touching a jumper is restored, so a surviving
-    /// record's two runs are sorted (design 06 B3).
+    /// `None`.
+    ///
+    /// A live record: two binary searches. A record touching a vanished row or a jumper is
+    /// restored, so a surviving record's two runs are sorted (design 06 B3). A tombstoned record
+    /// is translated on every Rows step like a live one — a move-in of the step that restored it
+    /// reads its copy of a cross pair (design 06 B3) — so on that step a vanished row reads
+    /// [`NONE`] and a jumper sits out of order in its runs, where a binary search can miss a row
+    /// that is present (review W2 of L10 C3c); its table is scanned instead.
     #[inline]
     pub(crate) fn local_of(&self, record: &HeldIsland, row: u32) -> Option<u32> {
+        if !record.live() {
+            return self.local_of_dead(record, row);
+        }
         let members = &self.rows[record.members_range()];
+        let anchors = &self.rows[record.anchors_range()];
+        debug_assert!(
+            members.is_sorted() && anchors.is_sorted(),
+            "invariant: a live record's member and anchor runs are sorted (design 06 B3)"
+        );
         if let Ok(i) = members.binary_search(&row) {
             return Some(i as u32);
         }
-        let anchors = &self.rows[record.anchors_range()];
         anchors.binary_search(&row).ok().map(|i| record.n_members + i as u32)
+    }
+
+    /// [`local_of`](Self::local_of) for a tombstoned record: a linear scan of its row table, in
+    /// table order, so the position is the row-table index. The translation maps distinct
+    /// previous rows to distinct current rows, so a present row matches at most one entry; only
+    /// [`NONE`] repeats, and no caller looks it up. Off the steady path: only a move-in on the
+    /// step a record restored reads a tombstoned one.
+    #[cold]
+    #[inline(never)]
+    fn local_of_dead(&self, record: &HeldIsland, row: u32) -> Option<u32> {
+        debug_assert_ne!(row, NONE, "invariant: a row-table lookup names a present row");
+        self.rows[record.rows_range()].iter().position(|&r| r == row).map(|i| i as u32)
     }
 
     /// `record`'s kept pair with row-table indices `(la, lb)`, if it keeps one (a binary search:
