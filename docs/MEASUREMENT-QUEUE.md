@@ -1537,8 +1537,8 @@ set median 0.26 %, p95 3.87 %, max 5.07 %; the idle rule: 24 waits, 78 polls, ne
 - **The canary is SEEN:** its span reads 1.0008x / 1.0006x the injection (tip / parent, every process within
   0.42 %); the step rise is +0.4481 ms on the tip (105 %), claimed under all three, and +0.4694 on the parent
   (106 %), claimed under SE only (G9's own form).
-- **G9 is not formally closed:** J-A at W 2/4/16 was not run, and the design's K=12 is not met (every cell is K = 6
-  or 5).
+- ~~**G9 is not formally closed:** J-A at W 2/4/16 was not run, and the design's K=12 is not met (every cell is K = 6
+  or 5).~~ ⚠ *2026-09-24, doc fix-up W1 (orchestrator ruling: this queue's status lines are annotated, as at `:800`): G9 on C3 is CLOSED by ruling, `docs/physics/perf-campaign/levers/00-RULINGS.md:216-228` ("G9 on C3 CLOSED by ruling"). K = 6 under the window protocol supersedes the letter "K=12", a cell read at K = 5 stands, and J-A at W 2/4/16, which no window has run, goes to the next quiet window as a record against the same "not claimed slower" gate.*
 - **Bridge 2 HOLDS** (window 4b's tip `f8873aae` against window 5's parent on J-As, interleaved): +0.16 % at W=1
   (not claimed), **+1.75 % (+0.078 ms) at W=8, SE only**. The line merge costs at most 1.75 % at W=8, so window 5's
   +11.5 % was mostly machine state.
@@ -1553,7 +1553,7 @@ absolute-threshold decision (C2's 0.235, "into the band", D6, a single-block T(8
 interleaved within-block comparisons are unaffected.
 
 **Not claimed / not measured.** L10's own gain; L9's G-TW on a C4 binary; a same-binary armed C3b A/B; G9's J-A
-at W 2/4/16 and its K=12; the Tree as the shipped default; any re-run of Jolt.
+at W 2/4/16 ~~and its K=12~~ ⚠ *2026-09-24, doc fix-up 1 (critic O2): K=12 is superseded, not owed. G9 on C3 is closed by ruling under K = 6 (`docs/physics/perf-campaign/levers/00-RULINGS.md:216-228`; the struck G9 line at `:1540-1541`). J-A at W 2/4/16 stays unmeasured and goes to the next quiet window.*; the Tree as the shipped default; any re-run of Jolt.
 
 Receipts: `docs/measurements/2026-09-24-physics-window6/`: `README.md` (the protocol block, the binaries table
 with the `Compiling` lines and the pruned lock, the idle-rule summary, what was reused from windows 3, 4, 4b and 5
