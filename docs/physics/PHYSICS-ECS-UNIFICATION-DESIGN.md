@@ -2,9 +2,9 @@
 
 - **Date:** 2026-09-10
 - **Code tree:** `D:/wt/joltab` @ `ca582e72` (branch `merge/ke16-into-ecsnative`)
-- **Revision:** ~~rev 2 after one critique pass~~ (the rev-2 header, kept). **Current: rev 5, closed 2026-09-11, ~~plus Erratum E1 and Erratum E2 (2026-09-23; unified-system-plan step DOC-2, reviewed by EP3)~~ plus Errata E1, E2 and E3 (2026-09-23: E2 is unified-system-plan step DOC-2, reviewed by EP3; E3 adopts EP3's two remarks on this file).** See the ~~two~~ three status sections at the end of the file.
+- **Revision:** ~~rev 2 after one critique pass~~ (the rev-2 header, kept). **Current: rev 5, closed 2026-09-11, ~~plus Erratum E1 and Erratum E2 (2026-09-23; unified-system-plan step DOC-2, reviewed by EP3)~~ ~~plus Errata E1, E2 and E3 (2026-09-23: E2 is unified-system-plan step DOC-2, reviewed by EP3; E3 adopts EP3's two remarks on this file).~~ plus Errata E1, E2, E3 (2026-09-23: E2 is unified-system-plan step DOC-2, reviewed by EP3; E3 adopts EP3's two remarks on this file) and E4 (2026-09-24: K3's edit policy, from the engine's rev 4.2, which answers EP4 W2′; its closure, E4-2 and E4-3, answers EP5).** See the ~~two~~ ~~three~~ ~~four~~ five status sections at the end of the file.
 - **Research (surveys and the owner's orders):** [PHYSICS-ECS-UNIFICATION-RESEARCH.md](PHYSICS-ECS-UNIFICATION-RESEARCH.md)
-- **Status:** ~~design only. No gate was run and no timing was taken. The owner questions in section 14 (Q1-Q5) are open.~~ (rev 2's status, kept). **Current: closed at rev 5; ~~Erratum E2 is pending engine critique pass 3 (EP3).~~ EP3 reviewed Erratum E2 on 2026-09-23 with no Critical or Important remark on this file; Erratum E3 adopts its two Optional ones. Design only: no gate was run and no timing was taken for any revision or erratum.**
+- **Status:** ~~design only. No gate was run and no timing was taken. The owner questions in section 14 (Q1-Q5) are open.~~ (rev 2's status, kept). **Current: closed at rev 5; ~~Erratum E2 is pending engine critique pass 3 (EP3).~~ EP3 reviewed Erratum E2 on 2026-09-23 with no Critical or Important remark on this file; Erratum E3 adopts its two Optional ones. EP4 (2026-09-24) found E3 resolved; its W2′ rests on this file's `DenseColumnMut` and `GroupHead::view`, which Erratum E4 bounds to `Unlogged` groups. EP5 (2026-09-24) reviewed E4; E4's closure makes `DenseColumn` read-only by structure (E4-2, its W1) and adds the binder's mark for `Logged` groups (E4-3, its O3). Design only: no gate was run and no timing was taken for any revision or erratum.**
 
 ## Provenance tags
 
@@ -87,7 +87,7 @@ Tree: `D:/wt/joltab` @ `ca582e72`. I ran nothing and edited nothing. "arith." me
 | Heap allocations per step | 331.6 | ≤ 16 after P2. The rest are scope boxes and chunks, owned by the allocator plan. |
 | Physics data-path allocations per step | 0 | 0 |
 | Dispatcher rounds in the physics chain | 8 | 6 (§6) |
-| `pool.scope` sites in physics src | 4 (`resources.rs:1957`, `:2049`, `colored.rs:2867`, `soft/colored.rs:1122`) | 0 |
+| `pool.scope` sites in physics src | ~~4 (`resources.rs:1957`, `:2049`, `colored.rs:2867`, `soft/colored.rs:1122`)~~ ⚠ *2026-09-24, reconcile: B1 PC-d, 5 `pool.scope` and 5 `try_with_active_pool` on the trunk, both pinned by UG-02's physics slice (`docs/memory/ledger/ug02-pins.tsv`; plan 00 §2)* | 0 |
 | Per-body persistent + derived bytes | 220 B (arith.) | 168 B (arith., §5) |
 | Tick commit on solver-derived columns | none (scratch) | none (K2, compile-time enforced) |
 | Broadphase `sqrt` per step (AllPairs, n=1241) | 2 × 769,420 | 1241 |
@@ -730,7 +730,7 @@ Finally, `commands.release_dense_group::<PhysicsBody>()`.
 
 **G-form** — `tests/physics_entity_model_census.rs`:
 - the physics `Vec`/`Box`/`HashMap` field scanner, with a list that only shrinks;
-- a `pool.scope(`/`try_with_active_pool(` list that only shrinks (4 → 0);
+- a `pool.scope(`/`try_with_active_pool(` list that only shrinks (~~4 → 0~~ ⚠ *2026-09-24, reconcile: B1 PC-d, 5 `pool.scope` + 5 `try_with_active_pool` on the trunk, each → 0, pinned by UG-02's physics slice (`docs/memory/ledger/ug02-pins.tsv`)*);
 - registry assertions: each group column is Dense, in `PhysicsBody`, `TICKS_TRACKED == false`, with a `DEAD` value;
 - removed ids are unregistered.
 
@@ -3806,7 +3806,7 @@ The critic's NB1 fix is "one erratum line, appended with this log". This file is
 
 ## How to read Erratum E2
 
-- **What it is.** The unified system plan (rev 6.2) owes this design one erratum, E2, as its step DOC-2 (`docs/unification/UNIFIED-SYSTEM-PLAN-00-OVERVIEW.md` §5, the rows at `:155` and `:161`; `UNIFIED-SYSTEM-PLAN-02-ORDER-OF-WORK.md` §2, "Document steps", `:97`). E2 applies the plan's rulings U-2, U-3, U-17, U-20 and U-28 (00 §3), the kernel contract's KC-10, KC-12, KC-13, KC-15 and KC-36 (01 §2), and hazards H-03 and H-16 (01 §2.1). It adds no mechanism of its own. Each item restates a ruling the plan has already made, at the place where this design states the text the ruling supersedes.
+- **What it is.** The unified system plan (rev 6.2) owes this design one erratum, E2, as its step DOC-2 (`docs/unification/UNIFIED-SYSTEM-PLAN-00-OVERVIEW.md` §5, the rows at `:155` and `:161`; `UNIFIED-SYSTEM-PLAN-02-ORDER-OF-WORK.md` §2, "Document steps", `:123`). E2 applies the plan's rulings U-2, U-3, U-17, U-20 and U-28 (00 §3), the kernel contract's KC-10, KC-12, KC-13, KC-15 and KC-36 (01 §2), and hazards H-03 and H-16 (01 §2.1). It adds no mechanism of its own. Each item restates a ruling the plan has already made, at the place where this design states the text the ruling supersedes.
 - **Append-only, as before.** Nothing above is rewritten. The only lines edited in place are the two header lines at the top of the file (`:5`, `:7`); each keeps its old text, struck through, on the same line. So no line number cited anywhere in this file, or in the plan, moves. Where E2 supersedes a passage, the passage is named below by its line on this tree and left where it is.
 - **Reading order:** rev 2 → `P-§…` → `P4-§…` → `P5-§…` → Erratum E1 → **Erratum E2**. Where E2 and earlier text disagree, E2 rules.
 - **Review.** E2 is reviewed by engine critique pass 3 (EP3), together with the engine design's rev-3 patch and rev 4 (02 §2). EP3 must close before D-S3(iii), AS2 and every engine-sourced D-E rung.
@@ -3814,7 +3814,7 @@ The critic's NB1 fix is "one erratum line, appended with this log". This file is
   - **[J]** = `D:/wt/joltab` @ `d552be05`, the plan's tree;
   - **[I]** = `integ/unified` @ `c33d786d`, the trunk line on 2026-09-23.
 
-  Plan documents are cited at `49f2fcfb`. Every citation below was re-located by content on the tree it names, with read-only `git show` / `git grep`; none is copied from the plan without that check. Neither this file nor the engine design changed between the plan's `b716a5dc` and `49f2fcfb` (`git log b716a5dc..49f2fcfb` on both paths is empty), so the plan's citations into them hold here.
+  Plan documents are cited at `49f2fcfb`. Every citation below was re-located by content on the tree it names, with read-only `git show` / `git grep`; none is copied from the plan without that check. Neither this file nor the engine design changed between the plan's `b716a5dc` and `49f2fcfb` (`git log b716a5dc..49f2fcfb` on both paths is empty), so the plan's citations into them hold here. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in E2 now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
 - Nothing was built, run or timed for this erratum.
 
 ## E2-1. `Release` is an associated type with markers `Immediate`, `Chained` and `Stamped` (U-3; 01 KC-12, KC-13)
@@ -4078,7 +4078,7 @@ EP3 is the unified plan's engine critique pass 3. It reviewed Erratum E2 togethe
 - **What it is.** E3 adopts the two Optional remarks EP3 made on this file (the log above). It adds one type bound (E3-1) and rewords one heading (E3-2).
 - **Append-only, as before.** Only the header lines `:5` and `:7` are edited in place, each keeping its old text struck through. Every superseded passage is named below by its line on this tree and left where it is.
 - **Reading order:** rev 2 → `P-§…` → `P4-§…` → `P5-§…` → Erratum E1 → Erratum E2 → **Erratum E3**. Where E3 and earlier text disagree, E3 rules.
-- **Trees.** Line numbers are on `u/doc-1-2` (base `49f2fcfb`); E2 and E3 are appended after `:3803`, so no earlier line number moves.
+- **Trees.** Line numbers are on `u/doc-1-2` (base `49f2fcfb`); E2 and E3 are appended after `:3803`, so no earlier line number moves. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in E3 now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
 - Nothing was built, run or timed.
 
 ## E3-1. `open_chain` and `close_chain` are bounded to `Release = Chained` (EP3 O1; U-3; 01 KC-12)
@@ -4112,7 +4112,7 @@ impl<G: DenseGroup> GroupTail<'_, G> {
 
 **Cost.** 0. `PhysicsBody` is `Chained`, so S1's and S6's calls (`:3616`) compile unchanged, and the bound is checked before monomorphisation.
 
-**Gate.** Two UG-17 fixtures in D-S3(iii)'s E0271 family: `open_chain` on a `Stamped` group → E0271, and `close_chain` on a `Stamped` group → E0271. The plan's D-S3(iii) row (`02:143`) is patched on the same line (2026-09-23).
+**Gate.** Two UG-17 fixtures in D-S3(iii)'s E0271 family: `open_chain` on a `Stamped` group → E0271, and `close_chain` on a `Stamped` group → E0271. The plan's D-S3(iii) row (`02:169`) is patched on the same line (2026-09-23).
 
 **Rejected:** EP3's alternative, a census of zero `open_chain` call sites in `boyko_render`. It pins call sites in one crate, and it cannot see a generic caller instantiated elsewhere; the bound covers every caller at no cost.
 
@@ -4136,7 +4136,7 @@ E2-7's bullets (`:3998-4000`) and its replay paragraphs (`:4002-4008`) stand; th
 
 | Item | EP3 | Supersedes in this file (left in place) | Plan (same-line, 2026-09-23) | Plan rung |
 |---|---|---|---|---|
-| E3-1 chain methods bounded to `Chained` | O1 | `:3435`, `:3439`; the invariant at `:3881` | `02:143` | D-S3(iii) |
+| E3-1 chain methods bounded to `Chained` | O1 | `:3435`, `:3439`; the invariant at `:3881` | `02:169` | D-S3(iii) |
 | E3-2 E2-7 reworded | O3 | `:3995`; `:3997` (first sentence) | `00:161` | — |
 
 ## External sources (read 2026-09-23)
@@ -4147,6 +4147,193 @@ E2-7's bullets (`:3998-4000`) and its replay paragraphs (`:4002-4008`) stand; th
 
 - The design stays **closed at rev 5**. Errata E1 (2026-09-11), E2 and E3 (2026-09-23) apply on top of it, in that order.
 - **EP3 reviewed Erratum E2 on 2026-09-23.** It raised no Critical or Important remark against this file. Its two Optional remarks on this file are adopted by E3. Its verdict for the pass as a whole, CHANGES_REQUESTED, rests on engine-design remarks, which the engine's rev 4.1 resolves.
-- **What waits.** D-S3(iii)'s own content is untouched by EP3's remarks (EP3's map). It gains E3-1's two fixtures. Whether EP3 now counts as closed for D-S3(iii)'s prerequisite ("EP3 closed", `02:143`) is the orchestrator's call.
+- **What waits.** D-S3(iii)'s own content is untouched by EP3's remarks (EP3's map). It gains E3-1's two fixtures. Whether EP3 now counts as closed for D-S3(iii)'s prerequisite ("EP3 closed", `02:169`) is the orchestrator's call.
 - **Pass-5 non-blocking items:** unchanged since E2. NB1 is closed by E1, NB2 is closed as U-17 (E2-3), and NB3–NB5 are to be handled during implementation.
-- **Evidence.** This file and the plan at `49f2fcfb` plus this branch's commits. EP3's review is logged in the engine design. No cargo was run and nothing was timed.
+- **Evidence.** This file and the plan at `49f2fcfb` plus this branch's commits. EP3's review is logged in the engine design. No cargo was run and nothing was timed. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in this status block now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
+
+# Erratum E4 (2026-09-24): K3's edit policy (engine rev 4.2; EP4 W2′)
+
+## How to read Erratum E4
+
+- **What it is.** Engine critique pass 4 (EP4) found that EK6g's edit log, an engine kernel feature that sits beside this design's `DenseGroupStore`, can be bypassed through two of this design's K3 params: `DenseColumnMut` (`:524`) and `GroupHead::view` (`:2780`). That is EP4's W2′, logged verbatim in the engine design's "Critique log - pass 4".
+  - The engine's rev 4.2 closes it in the kernel (`ENGINE-RUNTIME-ECS-DESIGN.md`, P4.2-EK6g).
+  - The closure changes K3's public API, which this design owns, so E4 records it here.
+  - It changes nothing that physics runs.
+- **Append-only, as before.** Only the header lines `:5` and `:7` are edited in place, each keeping its old text struck through. Every superseded passage is named below by its line on this tree and left where it is.
+- **Reading order:** rev 2 → `P-§…` → `P4-§…` → `P5-§…` → Erratum E1 → Erratum E2 → Erratum E3 → **Erratum E4**. Where E4 and earlier text disagree, E4 rules.
+- **Trees.** Line numbers are on `u/doc-3-4` @ `4db26681`. This file there is byte-identical to `c1e9f1db`, where EP4 read it. E4 is appended after `:4152`, so no earlier line number moves. The K3 surface is not on that tree's code yet (`git grep` finds no `DenseColumnMut`, `GroupColumn`, `DenseGroup` or `GroupHead` under `crates/`), so everything below is design text. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in E4 now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
+- Nothing was built, run or timed.
+
+## E4-1. `DenseGroup` gains `type Edits: EditPolicy`; `DenseColumnMut` and `GroupHead::view` are bounded to `Unlogged` (EP4 W2′; 01 KC-23)
+
+**Supersedes (left in place):**
+- rev 2 §9 (`:524`): `pub struct DenseColumnMut<'w, T: GroupColumn>;             // SystemParam, write`;
+- P4-§9 (`:2780`): `pub fn view<T: GroupColumn<Group = G>>(&self) -> TypedDenseView<'_, T>;`;
+- E2-1's `DenseGroup` (`:3834-3839`), which gains one item.
+
+**Replacement (§9, K3):**
+```rust
+pub trait EditPolicy: 'static { const LOGGED: bool; }
+pub struct Unlogged; impl EditPolicy for Unlogged { const LOGGED: bool = false; }
+pub struct Logged;   impl EditPolicy for Logged   { const LOGGED: bool = true; }
+pub trait DenseGroup: 'static {
+    const WIDTH: usize;
+    type Release: ReleasePolicy;
+    type Edits: EditPolicy;   // new: `Unlogged`, or `Logged` with #[dense_group]'s `edit_log` option (the engine's EK6g)
+    type Anchor: Component;
+    type ChainKey: 'static;
+}
+pub struct DenseColumnMut<'w, T: GroupColumn> where T::Group: DenseGroup<Edits = Unlogged>; // SystemParam, write
+impl<G: DenseGroup> GroupHead<'_, G> {
+    pub fn view<T: GroupColumn<Group = G>>(&self) -> TypedDenseView<'_, T>
+    where G: DenseGroup<Edits = Unlogged>;
+}
+```
+
+**Also stated** (rev 2 §9 lists no method for it, `:523`): `DenseColumn<'w, T>` hands out shared references only (`&T`, `&[T]`), never a `TypedDenseView`, whose accessors return `*mut T` (`:530-531`). So a read param is never a write route. S2–S4 and S6 read through it (`:401-406`), and shared slices serve them. ⚠ *E4 closure (EP5 W1): S5 and S7 read through it too; its form, and the census that gates it, are E4-2's.*
+
+**Why.**
+- EK6g's reader uploads only the slots its log names (engine `:1853`).
+- A write through `DenseColumnMut::solve_view` or `GroupHead::view` goes through `TypedDenseView`'s `unsafe` accessors (`:526-531`). Their contract is bounds and disjointness; it says nothing about a log. So such a write can honour its `unsafe` contract and still leave a logged group's GPU row stale.
+- The policy type makes that misuse E0271, before monomorphisation. It is the same form, and the same reason, as E2-1's `type Release` and E3-1's chain bound.
+- The engine adds the one write route into a `Logged` group, `LoggedColumnMut<T>`, which marks the log on access. It also bounds `GroupEdits`/`GroupEditsMut` to `Logged` (engine P4.2-EK6g). Those are EK6g's params, so they are not restated here.
+- **No `Default`.** `#[dense_group]` spells `type Edits` in every impl it emits. A trait default for an associated type is unstable (rust-lang/rust#29661).
+
+**What physics sees: nothing.** ⚠ *superseded by E4-2's "What physics sees now" (EP5 W1)*
+- `PhysicsBody` is emitted without `edit_log`, so it is `Unlogged`.
+- S1's `GroupHead<PhysicsBody>` views and S5's `DenseColumnMut` params (`:1629`) compile unchanged.
+- `GroupColumn` (`:2752-2755`) is unchanged.
+
+**Cost.** 0 on every physics path. The bounds are resolved at type check, and the bodies and codegen are unchanged.
+
+**Rung.** Plan D-E7 (KC-23, EK6 + EK6g), not D-S3(ii) or D-S3(iii). Before D-E7 no `Logged` group can exist, so the unbounded forms that D-S3(ii) builds open no route in the meantime. No D-S3 rung reopens.
+
+**Gate.** The engine's K-EK6g fixtures K1–K3 (UG-17, E0271) and their green arm, in D-E7 (engine P4.2-EK6g).
+
+## Changelog: Erratum E4
+
+| Item | EP4 | Supersedes in this file (left in place) | Plan (same-line; the plan's Close stage applies it) | Plan rung |
+|---|---|---|---|---|
+| E4-1 `type Edits`; `DenseColumnMut` and `GroupHead::view` bounded to `Unlogged`; `DenseColumn` read-only | W2′ | `:524`, `:2780`; E2-1's `DenseGroup` at `:3834-3839` (one item added) | `01:173` (KC-23), `01:99` (KC-12), `02:196` (D-E7) | D-E7 |
+
+## External sources (read 2026-09-24)
+
+- Rust error index, E0271 (as in E2): <https://doc.rust-lang.org/error_codes/E0271.html>
+- rust-lang/rust#29661, "Associated type defaults" (RFC 2532): open and unstable. <https://github.com/rust-lang/rust/issues/29661>
+
+# Status after Erratum E4 (2026-09-24) ⚠ *superseded by "Status after the Erratum E4 closure", at the end of the file*
+
+- The design stays **closed at rev 5**. Errata E1 (2026-09-11), E2, E3 (2026-09-23) and E4 (2026-09-24) apply on top of it, in that order.
+- **EP4 reviewed** the engine's rev 4.1 and this file's Erratum E3 on 2026-09-24.
+  - It found E3's two items resolved (its O1 and O3 rows).
+  - Its W2′ rests on this file's `DenseColumnMut` and `GroupHead::view`, and E4-1 bounds both. The engine's rev 4.2 carries the rest of the fix.
+- **What waits.** EP4 released D-S3(iii), and E4 does not touch its content. E4-1 lands in D-E7, which builds on the engine's rev 4.2; a re-review scoped to that delta can confirm it.
+- **Pass-5 non-blocking items:** unchanged since E2.
+- **Evidence.** This file and the plan on `u/doc-3-4` @ `4db26681`. No cargo was run and nothing was timed.
+
+# Erratum E4 closure (2026-09-24): `DenseColumn` read-only by structure, `SolverBodies`, and the binder's mark (engine rev 4.2 closure; EP5 W1, O3)
+
+## How to read the closure
+
+- **What it is.** Engine critique pass 5 (EP5), a closure review of the engine's rev 4.2 and of Erratum E4, raised one Important remark, W1, on this file's text.
+  - W1: E4-1's "`DenseColumn` hands out shared references only" left S5 with no way to build `SolverBodies` (`:555`), and the property had no gate.
+  - EP5's O3 proposed that the binder log a `Logged` group's anchor-time DEAD fill. The engine adopts it, and the binder is this design's (D13).
+  - Both are closed in the engine's rev-4.2 closure (`ENGINE-RUNTIME-ECS-DESIGN.md`, C-1 and C-4). E4-2 and E4-3 record what changes in K3's text here.
+- **Convention: no line moves.** The closure is appended after `:4232`, which was E4's last line. In place, only the header's `:5` and `:7` gain a clause, and a one-line marker is added at the end of each of three lines: `:4193`, `:4202` and `:4224`.
+- **Where E4-2 and E4-3 disagree with earlier text,** including E4-1, they rule.
+- **Trees.** As in E4: this file on `u/doc-3-4`, and code at `4db26681`. Nothing was built, run or timed. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in the E4 closure now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
+
+## E4-2. `DenseColumn` holds a shared slice only; `SolverBodies` reads `BodyInertia` through one (EP5 W1)
+
+**Supersedes (left in place):**
+- rev 2 §9's `pub struct DenseColumn<'w, T: GroupColumn>;` (`:523`), whose form it gives;
+- `:555`, `pub struct SolverBodies<'a> { /* TypedDenseView over BodyVel, BodyPose, BodyInertia, BodyGate */ }`;
+- E4-1's "Also stated" (`:4193`), whose basis it replaces, and E4-1's "What physics sees: nothing" (`:4202-4205`).
+
+**Replacement (§9, K3; boyko_physics):**
+```rust
+pub struct DenseColumn<'w, T: GroupColumn> { col: &'w [T] }   // SystemParam, read. The shared slice is its only data
+impl<T: GroupColumn> DenseColumn<'_, T> {
+    pub fn as_slice(&self) -> &[T];                // length = the high-water mark (live + dying + free) = DenseColumnMut::len
+    pub fn get(&self, slot: u32) -> Option<&T>;
+    pub fn len(&self) -> usize;
+}
+pub struct SolverBodies<'a> {
+    /* TypedDenseView over BodyVel, BodyPose, BodyGate  (DenseColumnMut::solve_view: the columns S5 writes)
+       &'a [BodyInertia]                                (DenseColumn::as_slice: the column S5 reads) */
+}
+```
+
+**Why a slice, not a view or a write.**
+- S5 only reads `BodyInertia`, which holds `local_inv` (`:362`) and is recomputed only by S1 (`:303`, `:628`).
+- The world inertia that the solve refreshes each substep is `BodyVel::inv_inertia_world` (`:340`), and S5 writes `BodyVel` already.
+- Today's `refresh_inertia` has the same split: `(bodies_eff: &mut [BodyEffective], snapshot: &[BodyState])` (`crates/boyko_physics/src/solver/simd.rs:122` @ `4db26681`).
+- So S5's declared access (`:404`) is right as it stands, and the solver needs a read of `BodyInertia`, not a pointer it may write through.
+- The engine closure weighs the alternatives (engine C-1): declaring a write would put a false edge in the schedule, and a read-only view type duplicates what a slice already does.
+
+**Why a shared reference cannot write.** `GroupColumn: Copy` (`:2752`). A `Copy` type's fields must all be `Copy` (E0204), `UnsafeCell` is not `Copy`, and `UnsafeCell` is the only way to mutate through a shared reference (the Reference, "Interior mutability"). So a `&T` into a column is read-only by the language.
+
+**What physics sees now** (supersedes `:4202-4205`):
+- `SolverBodies` holds `&'a [BodyInertia]` in place of a view. U5 builds it this way when it re-types the `RigidSolver` seam (`:1998`).
+- U5a's ported `refresh_inertia` reads `local_inv` from a `&[BodyInertia]` and writes `inv_inertia_world` through `BodyVel`'s view. The op sequence is unchanged, so U5a's bit-oracle gate (`:1987`) stands.
+- S2–S4, S6 and S7 read through `as_slice`/`get`. S5 does too, for `BodyInertia` and `BodyMaterial`.
+- `PhysicsBody` is `Unlogged`. S1's `GroupHead<PhysicsBody>` views and S5's `DenseColumnMut` params compile unchanged.
+
+**Cost: 0.** A slice is a pointer and a length, as a view is. A lane indexes it under the bound it already proves for `row_ptr` (`slot < slot_bound ≤ len`), and may use `get_unchecked` under a `// SAFETY:` comment where a bounds check is measured to matter.
+
+**Gate: the engine's `DenseColumn` read-only census** (engine C-1).
+- Rules: (r0) the only field that is not zero-sized is `&'w [T]`; (r1) no ~~`pub` fn returns `*mut`, `&mut`, `TypedDenseView`, `NonNull` or a `Cell`~~ fn of it, inherent `pub` or in any trait impl, returns a type that contains `*mut`, `&mut`, `TypedDenseView`, `NonNull`, `Cell` or `UnsafeCell` ⚠ *2026-09-24, doc fix-up W2: EP6 O1 (plan 02 `:175`), as engine C-1's (r1) now reads (`ENGINE-RUNTIME-ECS-DESIGN.md:4954`). "`pub` fn" never matches a trait impl's fns, which the census reads too (`SystemParam` included), and `UnsafeCell` is refused beside `Cell`; a `&mut` parameter is not refused, because `init_state`, `init_access` and `get_param` must spell `&mut`*; (r2) no `DerefMut`, `AsMut`, `BorrowMut` or `IndexMut`; (r3) no `from_raw_parts_mut`, `as_mut_ptr`, `cast_mut` or `*mut` in its impls.
+- Anti-vacuity, and red controls (c1) a `view()` → exactly {r1} and (c2) an `as_mut_slice()` → exactly {r1, r3}.
+- It is red-first at **D-S3(ii)**, which builds K3's params (plan `02:168`), and D-E7 re-runs it.
+- UG-08's Tree Borrows leg on D-S3(ii) reports a write through the slice as undefined behaviour.
+
+**Rungs.**
+- **D-S3(ii):** the census. Its content is unchanged, because rev 2 §9 never gave `DenseColumn` a view.
+- **U5:** `SolverBodies` in this form.
+- **U5a:** the kernel port reads `&[BodyInertia]`.
+
+## E4-3. The binder marks a `Logged` group's newly anchored slot (EP5 O3; engine C-4)
+
+**Supersedes (left in place):** D13's transition bullet (`:1377-1378`), which gains one step, and the invariant of engine P4.2-EK6g, which the engine's C-4 restates.
+
+**Replacement (D13, transition):**
+- For each bit in `new & !old`, `anchor_transition` does a group insert (DEAD bytes, SEEN = 0), as before.
+- Then, **if the group's `logged` byte is set**, it records one EK6g mark of that slot, stamped with the world's current change tick.
+- `DenseGroupStore` gains `logged: bool` (1 B). It is written once at `ensure_group` from `<G::Edits as EditPolicy>::LOGGED`, and read only inside the `#[cold] #[inline(never)]` `anchor_transition`. That is the same pattern and price as KC-12's `release` byte (plan `01:99`).
+
+**Why.**
+- A newly anchored slot of a `Logged` group may hold a previous occupant's bytes in its device row.
+- Before this item, nothing refreshed that row: the engine's O-14, which is now closed.
+- With the mark, EK6g's reader uploads the slot's DEAD bytes in its next window.
+
+**What physics sees: nothing.** `PhysicsBody` is `Unlogged`, so its transition pays one byte compare inside a cold function and makes no mark.
+
+**Cost.** 0 on every op whose anchor mask is unchanged. On the cold transition, one compare, plus one append for each newly anchored slot of a `Logged` group.
+
+**Rung.** D-E7, where EK6g's log lands. Before D-E7 no log exists, and the byte lands with it. Red-first case (g6), with a mutation, is in engine C-4.
+
+## Changelog: Erratum E4 closure
+
+| Item | EP5 | Supersedes in this file (left in place) | Plan (same-line, applied by the plan's Close step) | Plan rung |
+|---|---|---|---|---|
+| E4-2: `DenseColumn` is `{ &'w [T] }` with shared accessors; `SolverBodies` holds `&'a [BodyInertia]`; the read-only census | W1 | `:523` (form), `:555`, `:4193` (basis), `:4202-4205` | `02:168` (D-S3(ii)), `02:485` (U5), `02:196` (D-E7), `01:99` (KC-12) | D-S3(ii), U5, D-E7 |
+| E4-3: `anchor_transition` marks a `Logged` group's newly anchored slot through a `logged` byte | O3 | `:1377-1378` (one step added) | `02:196`, `01:99` | D-E7 |
+
+## External sources (read 2026-09-24)
+
+- The Rust Reference, "Interior mutability": <https://doc.rust-lang.org/reference/interior-mutability.html>
+- Rust error index, E0204: <https://doc.rust-lang.org/error_codes/E0204.html>
+- `std::cell::UnsafeCell`, trait implementations (`!Sync`, no `Copy`): <https://doc.rust-lang.org/std/cell/struct.UnsafeCell.html>
+
+# Status after the Erratum E4 closure (2026-09-24)
+
+- The design stays **closed at rev 5**. Errata E1–E4 apply on top of it, in that order, with E4's closure (E4-2, E4-3) last.
+- **EP5 reviewed** the engine's rev 4.2 and Erratum E4 on 2026-09-24.
+  - Its W1 rested on E4-1's `DenseColumn` sentence and on `:555`; E4-2 resolves it.
+  - Its O3 (the binder's mark) is adopted as E4-3.
+- **What waits.**
+  - D-S3(ii) gains the census as a red-first test, and its other content is unchanged. EP5 said D-S3(ii) "is affected only if the `DenseColumn` it builds hands out a `TypedDenseView`"; the census checks exactly that.
+  - U5 builds `SolverBodies` in E4-2's form.
+  - E4-1 and E4-3 land in D-E7. Releasing D-E7 on the engine's closure is the orchestrator's call.
+- **Pass-5 non-blocking items:** unchanged since E2.
+- **Evidence.** This file and the plan on `u/doc-3-4` @ `4db26681`. No cargo was run and nothing was timed.

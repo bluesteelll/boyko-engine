@@ -156,7 +156,7 @@ const UNDER_MIRI: bool = cfg!(miri);
 #[allow(clippy::assertions_on_constants)]
 #[cfg_attr(
     not(all(miri, feature = "tb-neg-m2w")),
-    ignore = "miri-arm: decides a Tree-Borrows property that only Miri can install, under an arm \
+    ignore = "feature+miri-slow: decides a Tree-Borrows property that only Miri can install, under an arm \
               that only `--features tb-neg-m2w` builds. Its success is an ABORT, so it is green in \
               no configuration whatsoever and would otherwise stand permanently red in \
               `cargo test --workspace`. Run it through `scripts/tb_neg_gate.sh` (or `.ps1`), which \

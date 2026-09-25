@@ -403,6 +403,91 @@
 //! the L5 C4 debug run above recorded, because a debug colour's scope holds one chunk
 //! whatever its task count. Its pin is unchanged.
 //!
+//! **S1c after L9 C4 (contact reuse on by default) — the pile settles to ten colours; no
+//! new allocation site.** L9 C4 (2026-09-24, lane `u/phys-l9-c4`) turns
+//! `PhysicsConfig::contact_reuse` on by default, so a slow touching box pair's contact is
+//! refreshed from its record instead of re-collided. That moves the pile's contact set by
+//! design (5,021 steady contacts against 5,060), and with it the colours the solve
+//! dispatches: the census window read scope 122..134 and chunk 122..134, outside the pinned
+//! 134..=134 on both lines. Adjudicated by this protocol on the C4 tree (`989ca0f0` and its
+//! re-pins): this file's scene extended to 17 x 256 steady steps, and as the attribution arm
+//! the same binary with `contact_reuse = false` set in the rigid-pile setup (both extensions
+//! copied in and restored by copy, md5-checked; `stable-x86_64-pc-windows-msvc`, release):
+//!
+//! ```text
+//!                         reuse off (the A/B arm)     reuse on (the C4 default)
+//! census window, mean      —                           245.250
+//! census window, range     —                           244..269
+//! window histogram         —                           244->213 245->31 268->11 269->1
+//! window scope / chunk     —                           122..134 / 122..134, 1.00 per scope
+//! long run, per step       268..269, mean 268.127      244..269, mean 244.193
+//! long run, histogram      268->3800 269->552          244->3789 245->551 268->11 269->1
+//! long run, scope          134 x 4352                  122 x 4340, 134 x 12
+//! long run, chunk          134 x 4352                  122 x 4340, 134 x 12
+//! long run, half means     268.127 / 268.127           244.259 (MAX 269) / 244.127 (MAX 245)
+//! bytes acquired / step    583,360.8                   531,280.8
+//! OTHER / realloc          0 / 0                       0 / 0
+//! warm-up K (budget 64)    57                          58
+//! ```
+//!
+//! The reuse-off arm reproduces the L11 C2 long run above to every printed digit, so the
+//! flip alone moved it. The reuse-on pile dispatches ten colours (scope 122 = 1 + 1 +
+//! 12 x 10) on 4,340 of the 4,352 steady frames and eleven on 12, all of them early in the
+//! census window. Every scope still holds exactly one chunk, the per-frame structural
+//! assertion held on every frame, and the dispatch MAX (269, an eleven-colour frame with
+//! its injector block) did not move. The release pins are the new long run's envelope
+//! under the rule in "The gate" below: scope 122..=134, chunk 122..=134, dispatch MAX 269.
+//! That is a move of the floor DOWN, the case that rule names ("a pile that settles further
+//! ... reds downward, and that red is a re-measure"), and nothing moved upward.
+//!
+//! What the move costs S1c's pins, MEASURED by re-running the mutation on this tree (one
+//! `pool.scope` with one spawn at the top of `solve_all_colors`, under `if parallel`;
+//! 2026-09-25, release and debug): the fan-out regression (+12 scope and +12 chunks a frame)
+//! lands at 134 / 134 and dispatch 268..269 on the ten-colour frames, inside the new pins, and
+//! at 146 / 146 and dispatch 292..293 on the 12 eleven-colour frames (window histogram
+//! 268->213 269->31 292->11 293->1). Those 12 are inside the census window, so S1c's release
+//! arm still reds on that regression four ways (steady MAX 293 > 277, dispatch MAX 293 > 269,
+//! scope and chunk 134..=146 outside 122..=134), but on 12 of the window's 256 frames where it
+//! used to red on all of them, and a later change that re-draws those 12 as ten-colour frames
+//! would leave it blind with nothing to signal it.
+//!
+//! The debug scene's envelope did NOT move, so its pin is unchanged. Its 4,352-step long
+//! run with reuse on reads 197..222 (mean 198.892; histogram 197->3521 198->511 221->279
+//! 222->41) on scope and chunk 98..=110, dispatch MAX 221, `OTHER` 1 a frame; the same
+//! binary with reuse off reads the L11 C2 debug long run above digit for digit (mean
+//! 202.862; 197->2893 198->419 221->907 222->133). But with reuse on its nine-colour
+//! frames (scope 110) all fall in the second half of the long run (first half: mean
+//! 197.127, MAX 198), so the debug census window holds none of them, and the fan-out
+//! regression lands at scope 110, chunk 110 and dispatch 221 on every window frame (measured:
+//! histogram 221->224 222->32), inside the debug pin. **Since L9 C4 S1c's debug arm no longer
+//! reds on that regression, and the whole census passes with it.**
+//!
+//! **S1e gives the gate back its every-frame red.** S1e is S1c's scene and switches with
+//! `contact_reuse` overridden to `false` — the reuse-off arm the pyramid and A7-R1 already
+//! keep — and it carries S1c's pins from before the flip: release scope and chunk 134..=134,
+//! dispatch MAX 269; debug 98..=110, 221. Its census window reads the L11 C2 window above
+//! digit for digit — release 268.125 / 268..269 (histogram 268->224 269->32, scope and chunk
+//! 134 on all 256, K 57), debug 198.250 / 197..221 (197->212 198->32 221->12, scope and chunk
+//! 98 or 110) — and its last step serves 0 box pairs from reuse records where S1c's serves
+//! 5,098 (debug 1,490). Both are asserted, so the two arms are seen to differ in that switch
+//! alone. The same mutation, measured on both arms (2026-09-25,
+//! `stable-x86_64-pc-windows-msvc`):
+//!
+//! ```text
+//!                   S1c (reuse on)                     S1e (reuse off)
+//! release window    268->213 269->31 292->11 293->1    292->224 293->32
+//!         scope     134..=146 in 122..=134             146..=146 in 134..=134
+//!         verdict   RED four ways, on 12 frames        RED four ways, on all 256 frames
+//! debug   window    221->224 222->32                   221->212 222->32 245->12
+//!         scope     110..=110 in 98..=110              110..=122 in 98..=110
+//!         verdict   GREEN                              RED four ways, on 12 frames
+//! ```
+//!
+//! In release S1e reds on every frame whatever S1c's trajectory does. In debug it reds on the
+//! 12 nine-colour frames its window holds, which is the power the debug gate had before L9 C4
+//! and no more: on the eight-colour frames the regression lands at 110 / 110 and dispatch
+//! 220..221, inside the pin.
+//!
 //! **S2 after EM2′ (same tree plus the entity-id recycling fix, 2026-09-11,
 //! release and debug alike): 4.031 / 5, `realloc` 0.** The 0.008 it lost is
 //! exactly the two free-list reallocs the AFTER column's window carried
@@ -435,12 +520,17 @@
 //! S2        2 exact      2 exact            2/63       0 (first touch)  0 (was 2, EM2′)
 //! S3        1 exact      1 exact            4/63       0 (first touch)  0
 //! S1a/S1b   1 exact      1 exact            ~7/63      0                0
-//! S1c     134 exact (window) 134 exact (1.00/scope) 0.125  0             0
-//! S1c long 134 exact   134 exact             —         0                0
+//! S1c   122..134 (window) 122..134 (1.00/scope) 0.125  0           0
+//! S1c long 122..134    122..134              —         0                0
+//! S1e   134 exact (window) 134 exact (1.00/scope) 0.125  0          0
+//! S1e long 134 exact   134 exact             —         0                0
 //! ```
 //!
-//! (S1c's rows are the tree after L11 C2: 1 of the 134 scopes and 1 of the 134 chunks are
-//! the narrowphase's, and every scope holds exactly one chunk. After the default parallel
+//! (S1c's rows are the tree after L9 C4: 1 of the scopes and 1 of the chunks are the
+//! narrowphase's, every scope holds exactly one chunk, and 12 of the 4,352 long-run frames,
+//! all in the window, read 134 where the rest read 122. S1e is the same pile with contact
+//! reuse off, and its rows are what S1c's read after L11 C2. Before L9 C4, S1c's rows: after
+//! L11 C2 they read 134 / 134 on every frame. After the default parallel
 //! narrowphase (L5 C4), on the 25-word view, they read 134 / 230 at 1.72 chunks per scope;
 //! after the default SIMD flip 133 / 229. After A7b on the scalar kernel
 //! the window and the long run read 133 / 229..241 at 1.81 chunks per scope. After A7a
@@ -454,15 +544,17 @@
 //!   C4), and of each dispatched colour in each of the solver's 12 colour passes:
 //!   `1 + np + 12 x` the dispatched colours, asserted on every steady frame with `np`
 //!   READ from the narrowphase's own counter (1 on every frame here). On the
-//!   1240-body pile that is `1 + 1 + 12 x 11 = 134` on every frame of the census
-//!   window and of the long run (before L5 C4, 133; after A7a alone,
+//!   1240-body pile that is `1 + 1 + 12 x 10 = 122` on 4,340 of the long run's 4,352
+//!   frames and `1 + 1 + 12 x 11 = 134` on the other 12, all in the census window (since
+//!   L9 C4; before it 134 on every frame; before L5 C4, 133; after A7a alone,
 //!   `1 + 12 x 10 = 121` on 255 of the window's 256 frames and 133 on one, and
 //!   `1 + 12 x 9 = 109` later in the long run; before A7a, 121 on all 256). Per
 //!   stage: `Schedule::run`'s install frame owns 1 scope + 1 chunk of every step,
 //!   `physics_narrowphase` owns 1 scope + 1 chunk of every step that dispatches (its
 //!   24 task cells fit the scope's first block; the attribution binary's D2′), and
 //!   `physics_solve_colored` owns every other dispatch object. In the census window
-//!   that is 132 scopes + 132 chunks of the 268.125 (after L5 C4 on the 25-word view,
+//!   that is 120.562 scopes + 120.562 chunks of the 245.250 (after L11 C2, 132 + 132 of
+//!   the 268.125; after L5 C4 on the 25-word view,
 //!   132 + 228 of the 364.125; after A7b on the scalar kernel,
 //!   132 + 239.109 of the 373.234; after A7a alone, 120.047 + 213.938 of the
 //!   336.109; before A7a, 120 + ~209.7 of the 331.8).
@@ -493,7 +585,7 @@
 //!   reuses the ids it despawns: at rest the stack holds one frame's 64
 //!   despawns and the slot store does not move.
 //!
-//! In a DEBUG build S1b and S1c carry one extra `OTHER` per step: the
+//! In a DEBUG build S1b, S1c and S1e carry one extra `OTHER` per step: the
 //! `cfg!(debug_assertions)`-gated `debug_assert_coloring` scratch in
 //! `ConstraintGraph::build` (the allocation `constraint_graph_o4_world.rs`
 //! already tolerates). The debug S1c scene is the height-10 pile: after L5 C4,
@@ -527,16 +619,33 @@
 //!
 //! S1c's number is DATA-DEPENDENT: its warm-up spans 290..387 as the pile
 //! collapses, and after it the count moves in whole dispatched colours as the
-//! contact set settles (268..269 per step over 4,352 steps since L11 C2; 364..365
+//! contact set settles (244..269 per step over 4,352 steps since L9 C4; 268..269 after
+//! L11 C2; 364..365
 //! after L5 C4 on the 25-word view; 362..363
 //! after the default SIMD flip; 362..375 after A7b on the scalar kernel; 314..350
 //! after A7a alone; 302..339 before it). Quote it as a range, never as a figure.
 //! Its release pins are that long run's envelope with NO upward headroom — scope
-//! 134..=134, chunk 134..=134, dispatch MAX 269 (after L5 C4 on the 25-word view:
+//! 122..=134, chunk 122..=134, dispatch MAX 269 (after L11 C2: 134..=134, 134..=134,
+//! 269; after L5 C4 on the 25-word view:
 //! 134..=134, 230..=230, 365; after the default SIMD flip:
 //! 133..=133, 229..=229, 363; after A7b on the scalar kernel:
 //! 133..=133, 229..=241, 375; after A7a alone: 109..=133,
 //! 205..=217, 350; before A7a: 109..=121, 193..=217, 339):
+//!
+//! * **The sixth re-pin, after L9 C4, moves the floor DOWN and nothing else, and it is
+//!   attributed by an A/B on one binary.** Contact reuse on by default changes the contact
+//!   set by design, and the pile dispatches ten colours on 4,340 of the long run's frames
+//!   (header, "S1c after L9 C4"); the same binary with `contact_reuse = false` reads the
+//!   L11 C2 long run digit for digit. Scope and chunk 134..=134 became 122..=134; the top
+//!   and dispatch MAX 269 did not move. It is the downward case the rule below names, a
+//!   re-measure and not an allocation regression. It costs S1c's pins power, measured by a
+//!   re-run of the mutation: the fan-out regression (+24 a frame) reds S1c's release arm only
+//!   on the window's 12 eleven-colour frames (292..293 against 269, and 146 outside
+//!   122..=134 on both classes), lands inside the pins on the other 244, and passes S1c's
+//!   debug arm outright. **S1e keeps the power:** the same pile with contact reuse off,
+//!   pinned at S1c's L11 C2 envelope (release 134..=134 / 134..=134 / 269, debug 98..=110 /
+//!   98..=110 / 221), reds on that regression on every release frame and on the debug
+//!   window's 12 nine-colour frames (header, "S1c after L9 C4").
 //!
 //! * **The fifth re-pin, after L11 C2, is a NARROWING, and it is attributed by a size,
 //!   not by a mean.** The colour task's closure shrank from 264 B to 104 B with the view
@@ -1919,6 +2028,8 @@ fn spawn_jolt_pyramid(world: &mut EcsMaster) -> Vec<Entity> {
 
 /// One arm of S1. `sleeping` sets `PhysicsConfig::sleeping` (the colored solve's island
 /// sleep, `IslandSleep`); a sleeping arm must also see a frozen row on some steady frame.
+/// `reuse_off` overrides `PhysicsConfig::contact_reuse` to `false`; every other arm
+/// inherits the default (on since L9 C4).
 fn run_pyramid_arm(
     rows: &mut Vec<Row>,
     label: &str,
@@ -1926,6 +2037,7 @@ fn run_pyramid_arm(
     workers: usize,
     parallel: bool,
     sleeping: bool,
+    reuse_off: bool,
 ) {
     let mut samples: Vec<Snap> = Vec::with_capacity(TOTAL_FRAMES);
 
@@ -1949,6 +2061,9 @@ fn run_pyramid_arm(
         // stays the control, and the parallel arm carries the dispatch it prices.
         cfg.parallel_narrowphase = parallel;
         cfg.sleeping = sleeping;
+        if reuse_off {
+            cfg.contact_reuse = false;
+        }
     }
     let mut schedule = builder.build(&mut world);
 
@@ -2006,6 +2121,30 @@ fn run_pyramid_arm(
         np_log.push(world.resource::<Manifolds>().narrowphase_dispatches());
     });
     assert_eq!(np_log.len(), TOTAL_FRAMES + 2, "one counter reading per driven frame");
+
+    // Which side of the contact-reuse A/B this arm ran, read from the last step's pair
+    // classes after the last window closed (O(pairs), allocates nothing). S1c and S1e differ
+    // in that switch alone, so each must be seen to hold its side, or the two pins gate the
+    // same pile twice and the fan-out arm (S1e) is not what it says.
+    let reused = world.resource::<Manifolds>().pair_classes().reused;
+    let reuse_side = if reuse_off {
+        "OFF (overridden)"
+    } else {
+        "at its default"
+    };
+    if reuse_off {
+        assert_eq!(
+            reused, 0,
+            "{label}: contact reuse is overridden OFF, yet the last step served {reused} box \
+             pairs from their reuse records"
+        );
+    } else if parallel {
+        assert!(
+            reused > 0,
+            "{label}: this arm runs the shipped default (contact reuse on since L9 C4), yet its \
+             last step served no box pair from a reuse record, so S1e is not its reuse-off A/B"
+        );
+    }
 
     // ── The structural claim, per frame: a parallel step opens ONE install frame,
     // ONE nested scope when the narrowphase dispatches (L5; its own counter says
@@ -2080,7 +2219,7 @@ fn run_pyramid_arm(
              dt=1/60. Frame = ONE fixed step = one real physics `Schedule::run`. \
              Steady-state contacts = {contacts}; sampled bodies moved up to {max_move:.3} m; \
              the narrowphase dispatched on {np_window} of the {STEADY_FRAMES} steady frames; \
-             a row was frozen on {frozen_frames} of them.",
+             a row was frozen on {frozen_frames} of them; contact reuse {reuse_side}, \n             {reused} box pairs served from reuse records on the last step.",
             bodies.len(),
             if sleeping { "ON" } else { "OFF" }
         ),
@@ -2102,6 +2241,7 @@ fn s1a_rigid_pile_reference_pipeline_serial(rows: &mut Vec<Row>) {
         1,
         false,
         false,
+        false,
     );
 }
 
@@ -2116,6 +2256,7 @@ fn s1b_rigid_pile_colored_serial(rows: &mut Vec<Row>) {
         "S1b — rigid pile, DEFAULT pipeline (colored + simd_solve), parallel OFF (control for S1c)",
         true,
         4,
+        false,
         false,
         false,
     );
@@ -2133,6 +2274,7 @@ fn s1d_rigid_pile_colored_serial_sleeping(rows: &mut Vec<Row>) {
         4,
         false,
         true,
+        false,
     );
 }
 
@@ -2147,6 +2289,29 @@ fn s1c_rigid_pile_colored_parallel(rows: &mut Vec<Row>) {
         4,
         true,
         false,
+        false,
+    );
+}
+
+/// S1c's scene and switches with `contact_reuse` overridden OFF: the arm on which the
+/// fan-out gate reds on EVERY frame. Since L9 C4 the shipped default (S1c) settles the release
+/// pile to ten colours on 244 of the census window's 256 frames, and one extra `pool.scope`
+/// per colour pass lands inside S1c's pin on those (in debug, on all 256). With reuse off the
+/// release pile dispatches eleven colours on every frame, so this pin keeps no headroom above
+/// and the same regression reds on every frame (header, "S1c after L9 C4").
+///
+/// Named S1e, not S1d: S1d is L10's sleeping-on arm (L10 C0), and [`gate`] gives each pin
+/// exactly one row by label prefix, so a census running both arms under one name panics at
+/// the gate before it reads an envelope.
+fn s1e_rigid_pile_colored_parallel_reuse_off(rows: &mut Vec<Row>) {
+    run_pyramid_arm(
+        rows,
+        "S1e — rigid pile, COLORED solve + parallel ON, contact reuse OFF (S1c's fan-out arm)",
+        true,
+        4,
+        true,
+        false,
+        true,
     );
 }
 
@@ -2911,8 +3076,15 @@ impl Pin {
 /// (2026-09-21, same toolchain): the colour task's cell shrank from 280 B to 120 B and
 /// every colour scope fits its first block, so chunk 230 -> 134 and dispatch MAX 365 ->
 /// 269 on every frame of the long run; scope unmoved, and the debug pin unmoved because
-/// its long run reproduced every figure (header, "S1c after L11 C2").
-fn pins() -> [Pin; 17] {
+/// its long run reproduced every figure (header, "S1c after L11 C2"). The RELEASE pin was
+/// re-pinned a sixth time after L9 C4 (2026-09-24, same toolchain): contact reuse on by
+/// default settles the pile to ten colours on 4,340 of the long run's 4,352 frames, so
+/// scope and chunk 134..=134 -> 122..=134, top and dispatch MAX unmoved, attributed by the
+/// same binary with reuse off; the debug pin unmoved, its long run's envelope the same
+/// (header, "S1c after L9 C4"). S1e (2026-09-25) is S1c's pile with contact reuse off,
+/// pinned at S1c's L11 C2 envelope in both profiles, which its window reproduces: the arm
+/// on which the fan-out regression reds on every release frame (same header section).
+fn pins() -> [Pin; 18] {
     // An App frame: one install frame (a `ScopeShared` + one chunk) and at most
     // one injector block — the block arrives once per 63 dispatcher-side pushes,
     // so its per-frame max is 1 and it is already inside the measured 3.
@@ -3055,11 +3227,19 @@ fn pins() -> [Pin; 17] {
             // is a colour scope that overflowed its first block again (a closure past
             // 112 B at W=8's 32 tasks, or a colour past 34 tasks), and a red to
             // re-measure.
+            // RE-PINNED, FLOOR DOWN, after L9 C4 (2026-09-24): contact reuse on by
+            // default moves the contact set by design, and the long run dispatches ten
+            // colours (scope and chunk 122) on 4,340 frames and eleven (134) on 12, all in
+            // the census window; dispatch MAX 269 and the top did not move. The same
+            // binary with `contact_reuse = false` reads 134 / 134 on all 4,352 frames, the
+            // L11 C2 long run digit for digit (header, "S1c after L9 C4"). The rule keeps
+            // no upward headroom; the cost is that the fan-out regression reds here only
+            // on the 12 eleven-colour frames (measured). S1e, below, reds on all 256.
             Pin {
                 scene: "S1c",
                 workers: 4,
-                scope: (134, 134),
-                chunk: (134, 134),
+                scope: (122, 134),
+                chunk: (122, 134),
                 dispatch_max: 269,
                 other_per_frame: 0,
                 realloc_sum: 0,
@@ -3078,9 +3258,45 @@ fn pins() -> [Pin; 17] {
             // after the default parallel narrowphase"). UNCHANGED by L11 C2 (2026-09-21):
             // its 4,352-step debug long run reproduced every figure digit for digit — a
             // debug colour's scope holds one chunk whatever its cell size (header, "S1c
-            // after L11 C2").
+            // after L11 C2"). UNCHANGED by L9 C4 (2026-09-24): its debug long run with
+            // contact reuse on reaches the same envelope (98..=110, dispatch MAX 221), but
+            // its nine-colour frames no longer fall in the census window, so this arm no
+            // longer reds on the fan-out regression (measured); S1e's debug arm, below,
+            // does (header, "S1c after L9 C4").
             Pin {
                 scene: "S1c",
+                workers: 4,
+                scope: (98, 110),
+                chunk: (98, 110),
+                dispatch_max: 221,
+                other_per_frame: 1,
+                realloc_sum: 0,
+            }
+        },
+        if RELEASE {
+            // S1c with contact reuse OFF: the pin S1c carried after L11 C2 (2026-09-21),
+            // measured again on the L9 C4 tree by S1c's long-run protocol, same binary, reuse
+            // off: 134 / 134 on all 4,352 frames, dispatch MAX 269 (header, "S1c after L9 C4").
+            // No headroom either way. This is the every-frame arm of the fan-out gate: that
+            // regression lands at 146 / 146 and 292..293 on all 256 window frames here
+            // (measured, 2026-09-25), where S1c's pin sees it on 12.
+            Pin {
+                scene: "S1e",
+                workers: 4,
+                scope: (134, 134),
+                chunk: (134, 134),
+                dispatch_max: 269,
+                other_per_frame: 0,
+                realloc_sum: 0,
+            }
+        } else {
+            // S1c's debug pin before L9 C4, whose long run the same binary with contact reuse
+            // off reproduces digit for digit: 98 or 110 scope frames with one chunk each,
+            // dispatch MAX 221, and the census window holds 12 of the nine-colour frames
+            // (header, "S1c after L9 C4"). The fan-out regression reds here through those 12
+            // (measured, 2026-09-25: scope 110..=122, dispatch 244), where S1c's pin is green.
+            Pin {
+                scene: "S1e",
                 workers: 4,
                 scope: (98, 110),
                 chunk: (98, 110),
@@ -3096,7 +3312,7 @@ fn pins() -> [Pin; 17] {
 /// failing, so one red run names all of them rather than the first.
 fn gate(rows: &[Row]) {
     let pins = pins();
-    let mut violations: Vec<String> = Vec::with_capacity(17);
+    let mut violations: Vec<String> = Vec::with_capacity(18);
     let mut covered = 0usize;
     say!(
         "\n══════════ GATE — pinned steady-state envelopes ({}) ══════════",
@@ -3254,6 +3470,7 @@ fn frame_allocation_census() {
     s1a_rigid_pile_reference_pipeline_serial(&mut rows);
     s1b_rigid_pile_colored_serial(&mut rows);
     s1c_rigid_pile_colored_parallel(&mut rows);
+    s1e_rigid_pile_colored_parallel_reuse_off(&mut rows);
     s1d_rigid_pile_colored_serial_sleeping(&mut rows);
     s8_sleep_skip_transitions(&mut rows, false);
     s8_sleep_skip_transitions(&mut rows, true);

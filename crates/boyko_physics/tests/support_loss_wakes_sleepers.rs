@@ -813,7 +813,7 @@ fn box_pile_scene(mode: SleepSkip) -> BoxPileOutcome {
 /// unchanged. This test turns red then; the sphere scenes above cannot, since contact reuse
 /// touches box pairs only.
 ///
-/// Contact reuse is forced on here (it is off by default before L9 C4), with its distance
+/// Contact reuse is set on here (the default since L9 C4, off before it), with its distance
 /// set by [`BOX_PILE_REUSE_DISTANCE`], so the arm is the same before and after C4.
 ///
 /// L10 C3b: the scene runs the sleep-skip `Off` — the oracle — because its premises read the

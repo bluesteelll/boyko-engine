@@ -109,7 +109,7 @@ fn setup(
 /// instruments pairing, so a fixture that also rejected geometry would give a red two possible
 /// causes.
 #[test]
-#[ignore = "needs a real windowed GPU device; the pairing driver spawns it with both knobs set"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the pairing driver spawns it with both knobs set"]
 fn vb_cull_hzb_pairing_worker() {
     // A worker booted without the knobs arms no capture, so the host loop has nothing to complete
     // and `app.run()` never returns — a hang, the worst failure mode a sweep can have.
@@ -146,7 +146,7 @@ fn word(bytes: &[u8], i: usize) -> u32 {
 /// **THE B2 GATE** — one process, both knobs, both files, and (since step P3-7) both stamped with
 /// the same engine frame.
 #[test]
-#[ignore = "live GPU gate (spawns one windowed worker); the orchestrator runs it with --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU gate (spawns one windowed worker); the orchestrator runs it with --test-threads=1"]
 fn both_captures_are_produced_by_one_process() {
     let exe = std::env::current_exe().expect("invariant: the test binary knows its own path");
     let cull_out: PathBuf = std::env::temp_dir().join("boyko_vb_cull_hzb_pairing_cull.txt");

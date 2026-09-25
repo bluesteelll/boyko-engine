@@ -1,0 +1,33 @@
+== .text check of clear: release vs seam-census
+tree         D:\wt\lighttable (HEAD 05cd7715fa02445ee61ffed3d47630046a4ebe8e, 0 uncommitted path(s))
+target dir   D:/wt/_targets/vkval-msvc
+host         x86_64-pc-windows-msvc (msvc)
+rustc -vV    rustc 1.98.1 (48a229cea 2026-09-01)
+rustc -vV    binary: rustc
+rustc -vV    commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
+rustc -vV    commit-date: 2026-09-01
+rustc -vV    host: x86_64-pc-windows-msvc
+rustc -vV    release: 1.98.1
+rustc -vV    LLVM version: 22.1.8
+llvm-nm          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-nm.exe
+llvm-objdump     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-objdump.exe
+llvm-readobj     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-readobj.exe
+llvm-size        LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-size.exe
+llvm-ar          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-ar.exe
+subject      clear (boyko-app --example clear)
+profile      release
+object       D:/wt/_targets/vkval-msvc\release\examples\clear.o
+object sha   5c516d98162dda9a5108223cc2208db8928a3d732e0cef43954aff6872d8fe47
+image        D:/wt/_targets/vkval-msvc\release\examples\clear.exe
+image sha    08f1edb97bc935c28de276e1865288b4bc39b69c295840e22c0011fb383bb2b3
+pdb          D:/wt/_targets/vkval-msvc\release\examples\clear.pdb
+link args    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "D:/wt/_targets/vkval-msvc\\release\\examples\\clear.clear.e44d60cb4f5a059a-cgu.0.rcgu.o" "D:/wt/_targets/vkval-msvc\\release\\examples\\rustcQN7wAo\\libwindows_sys-438931091cde2c45.rlib" "D:/wt/_targets/vkval-msvc\\release\\examples\\rustcQN7wAo\\libstd-44a584f44bc3dd65.rlib" "C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib\\libcompiler_builtins-d2ba6b5d33df79c1.rlib" "winmm.lib" "user32.lib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/OUT:D:/wt/_targets/vkval-msvc\\release\\examples\\clear.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libstd.natvis"
+final rustc  Running `C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name clear --edition=2024 'crates\boyko_app\examples\clear.rs' --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C opt-level=3 -C lto=fat --warn=unexpected_cfgs '--allow=clippy::missing_const_for_thread_local' '--deny=clippy::disallowed_types' --check-cfg 'cfg(loom)' --check-cfg 'cfg(force_alloc_panic)' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("hwrt", "profiling-alloc", "profiling-census"))' -C metadata=3343a1334041dab7 --out-dir 'D:/wt/_targets/vkval-msvc\release\examples' -C strip=debuginfo -L 'dependency=D:/wt/_targets/vkval-msvc\release\deps' --extern 'boyko_app=D:/wt/_targets/vkval-msvc\release\deps\libboyko_app-039a09f70e2628bf.rlib' --extern 'boyko_diag=D:/wt/_targets/vkval-msvc\release\deps\libboyko_diag-b560511677c8eafc.rlib' --extern 'boyko_ecs=D:/wt/_targets/vkval-msvc\release\deps\libboyko_ecs-2f70a22dd5086947.rlib' --extern 'boyko_fontbake=D:/wt/_targets/vkval-msvc\release\deps\libboyko_fontbake-7bf6f040de063476.rlib' --extern 'boyko_input=D:/wt/_targets/vkval-msvc\release\deps\libboyko_input-8b753057ea004ccb.rlib' --extern 'boyko_log=D:/wt/_targets/vkval-msvc\release\deps\libboyko_log-64926abcbf6a9ab1.rlib' --extern 'boyko_macros=D:/wt/_targets/vkval-msvc\release\deps\boyko_macros-f880e435a2f5fc23.dll' --extern 'boyko_math=D:/wt/_targets/vkval-msvc\release\deps\libboyko_math-691a90f099553bba.rlib' --extern 'boyko_physics=D:/wt/_targets/vkval-msvc\release\deps\libboyko_physics-9837b005f132116d.rlib' --extern 'boyko_render=D:/wt/_targets/vkval-msvc\release\deps\libboyko_render-f2096f6585ca22bf.rlib' --extern 'boyko_scene=D:/wt/_targets/vkval-msvc\release\deps\libboyko_scene-7fe78beeed6440a5.rlib' --extern 'boyko_rhi=D:/wt/_targets/vkval-msvc\release\deps\libboyko_rhi-8f04a45cab82b45e.rlib' --extern 'boyko_rhi_vulkan=D:/wt/_targets/vkval-msvc\release\deps\libboyko_rhi_vulkan-de8f5eeea3fd23ae.rlib' --extern 'boyko_sdf_math=D:/wt/_targets/vkval-msvc\release\deps\libboyko_sdf_math-33c564606409eae8.rlib' --extern 'boyko_shaderdsl=D:/wt/_targets/vkval-msvc\release\deps\libboyko_shaderdsl-ad6ba3404cad468c.rlib' --extern 'bytemuck=D:/wt/_targets/vkval-msvc\release\deps\libbytemuck-23c8285741eda9c3.rlib' --emit=obj --print link-args -C target-cpu=x86-64-v3`
+section         release  seam-census
+.text           1956051      1956051
+.rdata          3022594      3022594
+.data            386048       386048
+.pdata            48180        48180
+.reloc             6236         6236
+Total           5419109      5419109
+.text equal: true

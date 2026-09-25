@@ -379,7 +379,7 @@ const VB_MESH_PATH: RenderPathConfig =
 /// `HzbMode::Build` is what makes `GBufferScene::hzb` `Some`, which is what the dump, the poison
 /// and the build chain all read.
 #[test]
-#[ignore = "needs a real windowed GPU device; the G8 driver spawns it with BOYKO_HZB_DUMP set"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the G8 driver spawns it with BOYKO_HZB_DUMP set"]
 fn hzb_engine_pyramid_dump() {
     if dump_path_or_skip("hzb_engine_pyramid_dump").is_none() {
         return;
@@ -400,7 +400,7 @@ fn hzb_engine_pyramid_dump() {
 /// whole-block move exists for, and the one whose halves the declarator's `poison < build` assert
 /// refuses to let drift apart (dev profile — which is what every golden and gate run uses).
 #[test]
-#[ignore = "needs a real windowed GPU device; the G5 driver spawns it with BOYKO_HZB_DUMP set"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the G5 driver spawns it with BOYKO_HZB_DUMP set"]
 fn hzb_engine_pyramid_dump_occ() {
     if dump_path_or_skip("hzb_engine_pyramid_dump_occ").is_none() {
         return;
@@ -451,7 +451,7 @@ fn setup_mixed(
 /// is still a property of the PROCESS, and the driver still selects it on the CHILD (VG R3 piece 4
 /// rung P4-4 moved that decode out of `GpuSceneBundles::boot`, where it was shipping code).
 #[test]
-#[ignore = "needs a real windowed GPU device; the G-P3-E driver spawns it with BOYKO_HZB_DUMP and BOYKO_VG_OCC_FORCE=late"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the G-P3-E driver spawns it with BOYKO_HZB_DUMP and BOYKO_VG_OCC_FORCE=late"]
 fn hzb_engine_pyramid_dump_occ_late() {
     if dump_path_or_skip("hzb_engine_pyramid_dump_occ_late").is_none() {
         return;
@@ -1153,7 +1153,7 @@ fn assert_engine_pyramid_equals_the_oracle(
 /// See the module header for the five non-vacuity clauses and for why the POISON — not the scene's
 /// coverage — is what makes the agreement mean anything.
 #[test]
-#[ignore = "live GPU gate (spawns a windowed worker); the orchestrator runs it with --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU gate (spawns a windowed worker); the orchestrator runs it with --test-threads=1"]
 fn hzb_engine_pyramid_equals_the_oracle() {
     assert_engine_pyramid_equals_the_oracle(
         WORKER,
@@ -1211,7 +1211,7 @@ fn hzb_engine_pyramid_equals_the_oracle() {
 /// the unsplit pyramid path — every shipping frame's — with no engine-level gate at the very step
 /// that makes its `hzb_build` slot conditional.
 #[test]
-#[ignore = "live GPU gate (spawns a windowed worker); the orchestrator runs it with --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU gate (spawns a windowed worker); the orchestrator runs it with --test-threads=1"]
 fn hzb_engine_pyramid_equals_the_oracle_occ() {
     assert_engine_pyramid_equals_the_oracle(
         WORKER_OCC,
@@ -1252,7 +1252,7 @@ fn hzb_engine_pyramid_equals_the_oracle_occ() {
 /// in general and only one pyramid is dumped. That limit is narrowed, not closed, and closing it
 /// would need a second dump pass.
 #[test]
-#[ignore = "live GPU gate (spawns one windowed worker); the orchestrator runs it with --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU gate (spawns one windowed worker); the orchestrator runs it with --test-threads=1"]
 fn hzb_engine_pyramid_equals_the_oracle_force_late() {
     assert_engine_pyramid_equals_the_oracle(
         WORKER_OCC_LATE,

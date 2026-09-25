@@ -639,7 +639,7 @@ fn sv0_edit_staging_is_not_dirty_after_the_one_shot_upload() {
 /// `SdfEditStaging`, needs no mesh/material/camera, and this binary registers no GPU mesh for a
 /// `MeshHandle` to name.
 #[test]
-#[ignore = "needs a real windowed GPU device; run with BOYKO_WINDOW_FRAMES=2 and --test-threads=1"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; run with BOYKO_WINDOW_FRAMES=2 and --test-threads=1"]
 #[cfg(windows)]
 fn sv0_edit_staging_stays_clean_under_the_real_runner() {
     let frames: u64 = std::env::var("BOYKO_WINDOW_FRAMES")

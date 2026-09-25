@@ -446,7 +446,7 @@ fn scroll_atlas_single_axis_step_equals_full() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[test]
-#[ignore = "GPU on-device M5a scroll parity — requires a Vulkan device (the owner's RTX); run with --ignored"]
+#[ignore = "gpu: GPU on-device M5a scroll parity — requires a Vulkan device (the owner's RTX); run with --ignored"]
 fn m5a_scroll_update_renders_identically_to_rebake_all_on_device() {
     use boyko_rhi::RhiDevice;
     use boyko_rhi_vulkan::brick_atlas::BrickClipmap;

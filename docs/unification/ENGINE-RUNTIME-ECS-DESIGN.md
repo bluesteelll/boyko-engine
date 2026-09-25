@@ -1,10 +1,10 @@
 # Engine runtime as ECS - design
 
 - **Date:** 2026-09-11
-- **Revision:** ~~rev 2 after one critique pass~~ (the rev-2 header, kept; rev 3 restated it in its P-header block). ~~**Current: rev 4 (2026-09-23): the rev-3 patch plus the rev-4 patch, both appended at the end; written by unified-system-plan step DOC-2 and reviewed by engine critique pass 3 (EP3).**~~ **Current: rev 4.1 (2026-09-23): the rev-3, rev-4 and rev-4.1 patches, appended at the end in that order. Rev 4 was written by unified-system-plan step DOC-2; engine critique pass 3 (EP3) reviewed it (CHANGES_REQUESTED: 1 Critical, 4 Important), and rev 4.1 resolves every remark.**
+- **Revision:** ~~rev 2 after one critique pass~~ (the rev-2 header, kept; rev 3 restated it in its P-header block). ~~**Current: rev 4 (2026-09-23): the rev-3 patch plus the rev-4 patch, both appended at the end; written by unified-system-plan step DOC-2 and reviewed by engine critique pass 3 (EP3).**~~ ~~**Current: rev 4.1 (2026-09-23): the rev-3, rev-4 and rev-4.1 patches, appended at the end in that order. Rev 4 was written by unified-system-plan step DOC-2; engine critique pass 3 (EP3) reviewed it (CHANGES_REQUESTED: 1 Critical, 4 Important), and rev 4.1 resolves every remark.**~~ **Current: rev 4.2 (2026-09-24): the rev-3, rev-4, rev-4.1 and rev-4.2 patches, appended at the end in that order. Rev 4 was written by unified-system-plan step DOC-2, and rev 4.1 resolved engine critique pass 3 (EP3). Engine critique pass 4 (EP4), a closure review of rev 4.1, returned CHANGES_REQUESTED (0 Critical, 2 Important, 4 Optional); rev 4.2 (step DOC-3) resolves both Important remarks and adopts the four Optional ones. Engine critique pass 5 (EP5), a closure review of rev 4.2, returned CHANGES_REQUESTED (0 Critical, 1 Important, 4 Optional); the rev-4.2 closure, appended after pass 5's log, resolves W1, adopts O1–O4 and answers both of its questions.**
 - **Research (surveys and the owner's orders):** [ENGINE-RUNTIME-ECS-RESEARCH.md](ENGINE-RUNTIME-ECS-RESEARCH.md)
 - **Sibling physics study:** [../physics/PHYSICS-ECS-UNIFICATION-DESIGN.md](../physics/PHYSICS-ECS-UNIFICATION-DESIGN.md) (owns physics and kernel features K1-K7; this design consumes them and files proposed changes to them as inputs, section 13). The file exists in M at the time of writing; its later revisions (a pass-2 critique and a rev 3 patch appended there) are not reflected here.
-- **Status:** ~~design only. No gate was run and no timing was taken. The owner questions in section 14 (Q1-Q5) are open.~~ (rev 2's status, kept). **Current: design only; Q1-Q5 decided (rev 3); ~~rev 4 pending EP3, which must close before D-S3(iii), AS2 and every engine-sourced D-E rung. See "Status after rev 4" at the end of the file.~~ EP3 ran on 2026-09-23, and rev 4.1 resolves its remarks. See "Status after rev 4.1" at the end of the file.**
+- **Status:** ~~design only. No gate was run and no timing was taken. The owner questions in section 14 (Q1-Q5) are open.~~ (rev 2's status, kept). **Current: design only; Q1-Q5 decided (rev 3); ~~rev 4 pending EP3, which must close before D-S3(iii), AS2 and every engine-sourced D-E rung. See "Status after rev 4" at the end of the file.~~ ~~EP3 ran on 2026-09-23, and rev 4.1 resolves its remarks. See "Status after rev 4.1" at the end of the file.~~ EP3 ran on 2026-09-23, and rev 4.1 resolved its remarks; EP4 re-reviewed rev 4.1 on 2026-09-24, and rev 4.2 resolves its remarks. ~~See "Status after rev 4.2" at the end of the file.~~ EP5 reviewed rev 4.2 on 2026-09-24, and the rev-4.2 closure resolves its remarks. See "Status after the rev-4.2 closure" at the end of the file.**
 
 ## Code trees
 
@@ -117,7 +117,7 @@ The newest code of each subsystem lives in a different worktree, so each subsyst
 
 | Metric | Today | Target |
 |---|---|---|
-| Host frame-loop steps that write the World outside a system (G-LOOP) | 7: F3, F7, F8, F10, F11, F12, F15 (host lens §1) | 0 |
+| Host frame-loop steps that write the World outside a system (G-LOOP) | ~~7: F3, F7, F8, F10, F11, F12, F15 (host lens §1)~~ ⚠ *2026-09-24, reconcile: B2 PC1, 9 steps / 18 sites, pinned by G-LOOP at B2 (`crates/boyko_app/tests/g_loop_runner_world_writes.rs`): the seven struck plus F9 (`take_rebind_pending`) and F14 (the particle readback's two `insert_resource`), which already wrote the World at `[J]` (plan 03 §1 note, UG-14)* | 0 |
 | Per-frame `run_system` calls in the frame loop | 1 (`J:crates/boyko_app/src/runner.rs:1619` `app.world_mut().run_system(boyko_render::sync_vb_instance_ring_system);`) | 0 |
 | Per-frame Main systems that are CpuExclusive only because of a NonSend POD read | 5 scheduled today, plus 1 that HO2 schedules (X-3) | 0 |
 | Exclusive UI systems | 13 (U, UI lens §4) | 1 (`ui_bind_apply`, ED8) |
@@ -1038,7 +1038,7 @@ There is no `dyn` on any per-frame path.
   - Checks against `tests/ecs_form_ledger.toml`, where each row is `{form, rung, tag}`.
   - Fails on a new site, a stale row, or a total different from the recorded count (anti-vacuity).
   - **A row may change only its `form` label when a rung changes its index space or its gate without removing storage.** Such a row is not counted as removed (W5).
-- **G-LOOP.** Runner loop census; the allowlist only shrinks, 7 → 0.
+- **G-LOOP.** Runner loop census; the allowlist only shrinks, ~~7 → 0~~ 9 steps / 18 sites → 0. ⚠ *2026-09-24, doc fix-up O2: B2 PC1, pinned by G-LOOP at B2 (`crates/boyko_app/tests/g_loop_runner_world_writes.rs`): the seven steps of this design's G-LOOP row plus F9 and F14, as that row (`:120`) and plan 03 UG-14 (`UNIFIED-SYSTEM-PLAN-03-GATES.md:23`, `:35`) now read.*
 - **G-GRAPH.** A headless `EnginePlugins` app. Checks every §6 system, set and edge, including `UiBindSet` after `GameplaySet`. Main exclusive systems must equal `{ui_bind_apply}`. Each resource-column has one writer.
 - **G-ALLOC.** A counting allocator, steady frames 10..20. Budget only decreases, and the data path is 0. Anti-vacuity: UI nodes > 0 and instances > 0.
 - **G-RES (new, record-only).** Committed bytes of kernel ScratchColumns after boot, recorded per rung (O2). This is not a pass/fail gate.
@@ -2938,7 +2938,7 @@ Depends on: ED5, ED8, ED9, ED16–ED20, §17.
 
 ## How to read rev 4
 
-- **Why rev 4 exists.** Engine critique pass 3 never ran on rev 3 (unified plan risk RK-2, `docs/unification/UNIFIED-SYSTEM-PLAN-00-OVERVIEW.md:171`). Rev 3 was filed against physics rev 3, and physics rev 4 and rev 5 changed the part this design depends on (K6: `M:…PHYSICS…:2449-2463`, `:3330-3343`). The unified system plan, rev 6.2, makes the rulings, and its step DOC-2 writes rev 4 (00 §5, the rows at `:156` and `:162`). **Engine critique pass 3 (EP3)** reviews the rev-3 patch, rev 4 and physics Erratum E2 together (02 §2, `:98`).
+- **Why rev 4 exists.** Engine critique pass 3 never ran on rev 3 (unified plan risk RK-2, `docs/unification/UNIFIED-SYSTEM-PLAN-00-OVERVIEW.md:171`). Rev 3 was filed against physics rev 3, and physics rev 4 and rev 5 changed the part this design depends on (K6: `M:…PHYSICS…:2449-2463`, `:3330-3343`). The unified system plan, rev 6.2, makes the rulings, and its step DOC-2 writes rev 4 (00 §5, the rows at `:156` and `:162`). **Engine critique pass 3 (EP3)** reviews the rev-3 patch, rev 4 and physics Erratum E2 together (02 §2, `:124`).
 - **What rev 4 changes.** Each block names its ruling.
   1. K6′ is re-filed against physics rev 5 (U-3; 01 KC-12, KC-13): P4-ED16, with its consequences in P4-§0, P4-ED5, P4-ED15, P4-§5, P4-names, P4-§6, P4-§9, P4-§10, P4-§11, P4-§13, P4-§17 and P4-§18.
   2. EK1 is registry-free (U-2; 01 KC-10): P4-§0, P4-§9, P4-§10, P4-§13.
@@ -2949,7 +2949,7 @@ Depends on: ED5, ED8, ED9, ED16–ED20, §17.
 - **Reading order:** rev 2 body → the rev-3 patch (`P-…`) → the rev-4 patch (`P4-…`). A section that rev 4 does not name reads as rev 3 left it. As in rev 3, a **Removed** quote leaves the reading order, not the file: every quoted passage stays where it is, and each is named by its line on this tree.
 - **Edited in place:** only the header's two lines, `:4` and `:7`. Each keeps its old text, struck through, on the same line, so no line number moves; the plan cites this file by line (for example `:1883`, `:2080-2092`, `:2454`, `:2824`).
 - **Kernel names.** The kernel is now the plan's KC-01..KC-37 (`UNIFIED-SYSTEM-PLAN-01-KERNEL-CONTRACT.md` §2), mapped from this design's ids in 01 §3. Where rev 2 or rev 3 names a physics rung (U1, U2, U5b, S0) as the owner of a kernel feature, rev 4 names the KC and the plan rung that lands it (P4-§9, P4-§12).
-- **Trees.** Line numbers of this file, of the physics design and of the plan are on `u/doc-1-2` @ `49f2fcfb`. The physics design's lines up to `:3803` are unchanged by Erratum E2, which is appended at `:3805-4035`. Code is cited on two trees, each named at the citation: **[J]** = `D:/wt/joltab` @ `d552be05`, the plan's tree; **[I]** = `integ/unified` @ `c33d786d`, the trunk line on 2026-09-23. Rev 2 and rev 3 read J at `d11962a9`; their citations are re-derived only where rev 4 relies on one. External sources are listed at the end.
+- **Trees.** Line numbers of this file, of the physics design and of the plan are on `u/doc-1-2` @ `49f2fcfb`. The physics design's lines up to `:3803` are unchanged by Erratum E2, which is appended at `:3805-4035`. Code is cited on two trees, each named at the citation: **[J]** = `D:/wt/joltab` @ `d552be05`, the plan's tree; **[I]** = `integ/unified` @ `c33d786d`, the trunk line on 2026-09-23. Rev 2 and rev 3 read J at `d11962a9`; their citations are re-derived only where rev 4 relies on one. External sources are listed at the end. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in rev 4's text now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
 - Nothing was built, run or timed.
 
 ---
@@ -3645,18 +3645,18 @@ O-11, O-12 and O-13 are unchanged.
 
 | EP3 | Action | Where in rev 4.1 | Plan (same-line patches, dated 2026-09-23) |
 |---|---|---|---|
-| C1 (Critical) | FIX. `DESPAWN_AT_ZERO` is re-evaluated at two edges: the count reaching 0 (rev 3's edge), and `Pinned` leaving the entity (new: `Pinned`'s `on_remove`). Each edge enqueues `DespawnAtZeroCommand`, which despawns only if, at its apply, the entity is live, unpinned and at count 0. The redirect still enqueues `RemoveCommand::<Pinned>`. D-E2's red-first set gains both of EP3's orders, the reverse order, a user unpin at count 0, and a re-pin race, each with its mutation | P4.1-§9; P4.1-§17; AS4's cell (P4.1-§12) | 02 §4.4 step 3 (`02:724-726`); 02 §2 D-E2 (`02:282-284`) |
-| W1 | FIX. No absolute depth is asserted, because the drain applies every command inside its own bracket. The observable is a sequence witness, `["returned", "unpinned"]`, plus "no despawn hook or observer of E ran" | P4.1-§17 | `02:282-283`, `02:724-725` |
+| C1 (Critical) | FIX. `DESPAWN_AT_ZERO` is re-evaluated at two edges: the count reaching 0 (rev 3's edge), and `Pinned` leaving the entity (new: `Pinned`'s `on_remove`). Each edge enqueues `DespawnAtZeroCommand`, which despawns only if, at its apply, the entity is live, unpinned and at count 0. The redirect still enqueues `RemoveCommand::<Pinned>`. D-E2's red-first set gains both of EP3's orders, the reverse order, a user unpin at count 0, and a re-pin race, each with its mutation | P4.1-§9; P4.1-§17; AS4's cell (P4.1-§12) | 02 §4.4 step 3 (`02:777-779`); 02 §2 D-E2 (`02:316-318`) |
+| W1 | FIX. No absolute depth is asserted, because the drain applies every command inside its own bracket. The observable is a sequence witness, `["returned", "unpinned"]`, plus "no despawn hook or observer of E ran" | P4.1-§17 | `02:316-317`, `02:777-778` |
 | W2 | FIX. EP3's suggested form is refined: a sealed *supertrait* would still leak `Group`, because a trait bound gives access to its supertraits' associated items (the Rust Reference). So the group, the lane and the key ride on a separate sealed trait in a private module, not a supertrait of `GpuAssetKind`. The key accessor takes an unnameable token. Five UG-17 fixtures and a green arm land with AS2 | P4.1-ED16; P4.1-§10; AS2's cell (P4.1-§12) | — |
 | W3 | FIX. `EcsMaster::clear()` is refused with a coded panic, before any store is touched, while an `AssetSentinel` lives. `:2717` and `:2743` are superseded, and `:3497` is corrected | P4.1-ED5; P4.1-§12; P4.1-§13 | — |
-| W4 | FIX. G-ALLOC is UG-03's engine scenes: E1 (headless `EnginePlugins` + `UiPlugins`, lands in B2) and E1v (the VisibilityBuffer boot in the device leg, lands in HO2 as its red-first). HO2's cell is restated | P4.1-§12 | 03 UG-03 (`03:12`, `03:39`); 02 B2 (`02:72`) |
-| O1 | ADOPTED in physics Erratum E3-1: `open_chain` and `close_chain` are bounded to `Release = Chained` (E0271) | physics E3-1 | 02 D-S3(iii) (`02:143`) |
-| O2 | ADOPTED. The `every_tick` reader refusal covers every schedule other than Fixed | P4.1-ED7; P4.1-§17 | 02 D-E8 (`02:169`) |
+| W4 | FIX. G-ALLOC is UG-03's engine scenes: E1 (headless `EnginePlugins` + `UiPlugins`, lands in B2) and E1v (the VisibilityBuffer boot in the device leg, lands in HO2 as its red-first). HO2's cell is restated | P4.1-§12 | 03 UG-03 (`03:12`, `03:45`); 02 B2 (`02:72`) |
+| O1 | ADOPTED in physics Erratum E3-1: `open_chain` and `close_chain` are bounded to `Release = Chained` (E0271) | physics E3-1 | 02 D-S3(iii) (`02:169`) |
+| O2 | ADOPTED. The `every_tick` reader refusal covers every schedule other than Fixed | P4.1-ED7; P4.1-§17 | 02 D-E8 (`02:197`) |
 | O3 | ADOPTED in physics Erratum E3-2: E2-7's heading and fact line are reworded | physics E3-2 | 00 `:161` |
-| O4 | ADOPTED. [I] `boyko_ui/tests/ui_a0_clock.rs:421` joins D-E23's caller list | P4.1-§4.2 | 02 D-E23 (`02:184`) |
+| O4 | ADOPTED. [I] `boyko_ui/tests/ui_a0_clock.rs:421` joins D-E23's caller list | P4.1-§4.2 | 02 D-E23 (`02:212`) |
 | O5 | ADOPTED. `os_event_sink` takes `&mut self` and is setup-only. The rank-4 teardown callback takes each lane out of the world before the release | P4.1-ED7; P4.1-§5 | — |
 | Flags (a)–(e) | (a) and (c) accepted by EP3; (b) confirmed on [I] as well; (d) is W2's subject; (e) is W3's | P4.1-ED7; P4.1-ED16 | — |
-| Q1 | D-E20–D-E23 are plan-sourced (KC-37 (b), (c), (i), (j)), not engine-sourced. Like D-E0, D-E18 and D-E19, they do not wait for EP3; the plan's DAG already draws them so (02 `:550`) | P4.1-§12 | 00 `:156` |
+| Q1 | D-E20–D-E23 are plan-sourced (KC-37 (b), (c), (i), (j)), not engine-sourced. Like D-E0, D-E18 and D-E19, they do not wait for EP3; the plan's DAG already draws them so (02 `:590`) | P4.1-§12 | 00 `:156` |
 | Q2 | Intended, and now stated: the despawn at zero is a plain despawn, and it cascades | P4.1-§9 | — |
 
 The review follows verbatim.
@@ -3798,7 +3798,7 @@ Sources: [Rust error index E0446](https://doc.rust-lang.org/error_codes/E0446.ht
   - As before, a **Removed** quote takes a passage out of the reading order, not out of the file. Each quoted passage is named by its line on this tree.
 - **Edited in place:** only the header's two lines, `:4` and `:7`. Each keeps its old text struck through on the same line, so no line number moves.
 - **Trees.**
-  - Line numbers of this file, of the physics design and of the plan are on `u/doc-1-2`. Its base is `49f2fcfb`, and the allocator's commit `226894d9` sits beneath this patch; that commit touches no line cited here except in plan files 00, 02 and 03, and those edits are same-line.
+  - Line numbers of this file, of the physics design and of the plan are on `u/doc-1-2`. Its base is `49f2fcfb`, and the allocator's commit `226894d9` sits beneath this patch; that commit touches no line cited here except in plan files 00, 02 and 03, and those edits are same-line. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in rev 4.1's text, its action table in the pass-3 log included (`:3646-3660`), now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
   - Code is cited on **[I]** = `integ/unified` @ `c33d786d`, read with read-only `git show`, and on **[J]** = `d552be05` where rev 4 cited it.
   - EP3 cited the `D:/wt/joltab` working copy. Where its numbers differ from [I], both are given.
 - **Plan edits.** Every plan passage these remarks name is patched on its own line, dated 2026-09-23 and marked `⚠`. The changelog lists them.
@@ -3859,7 +3859,7 @@ Sources: [Rust error index E0446](https://doc.rust-lang.org/error_codes/E0446.ht
 > - **A re-pin between the unlink and the apply** (`[unlink I→A to 0, insert Pinned on A]` in one queue). The count edge's command finds `Pinned` and does nothing, so A stays alive, pinned, at count 0. Rev 3's plain despawn would have killed A. Rev 4.1 closes that window too.
 >
 > **What does not change.**
-> - The redirect, and the step order inside `delete_entity_core` (02 §4.4; 01 `:977`): the redirect still enqueues `RemoveCommand::<Pinned>`.
+> - The redirect, and the step order inside `delete_entity_core` (02 §4.4; 01 `:989`): the redirect still enqueues `RemoveCommand::<Pinned>`.
 > - An unpinned asset that was never linked is not despawned, because neither edge has fired. A loading asset may be unreferenced (ED5).
 > - **EP3 Q2:** the despawn at zero is a plain despawn, so it cascades to hierarchy children.
 >   - A deferred `despawn_without_children` records no per-request mode. Recording one would cost a component or a flag per deferred entity.
@@ -3878,7 +3878,7 @@ Sources: [Rust error index E0446](https://doc.rust-lang.org/error_codes/E0446.ht
 > - **Re-checking the count inside the unpin command only** (EP3's first option). It closes C1's order, but it leaves the same zombie for a user's `remove::<Pinned>()` at count 0, which rev 3 already had. That would fix the race and leave the class open.
 > - **A plain despawn from either edge.** A re-pin before the apply would be ignored.
 >
-> **Rung:** D-E2 (KC-29b). **Plan:** 02 §4.4 step 3's closing paragraph (`02:724-726`) and 02 §2's D-E2 red-first list (`02:282-284`) are patched on the same lines.
+> **Rung:** D-E2 (KC-29b). **Plan:** 02 §4.4 step 3's closing paragraph (`02:777-779`) and 02 §2's D-E2 red-first list (`02:316-318`) are patched on the same lines.
 
 ---
 
@@ -4050,7 +4050,7 @@ impl<K: sealed::AssetGroupKind> AssetWrite<'_, K> { pub fn get_mut(&mut self, h:
 
 ## P4.1-§4.2: D-E23's caller list (EP3 O4)
 
-**Added (to D-E23's caller list, P4-§4.2 `:3186` and 02 §2):** [I] `crates/boyko_ui/tests/ui_a0_clock.rs:421` calls `FixedTime::overstep()`. It is present on [I] `c33d786d` and absent at [J] `d552be05`, where 02's list was verified. It migrates to `Time::fixed_overstep()` with the other tests. 02 `:184` is patched on the same line.
+**Added (to D-E23's caller list, P4-§4.2 `:3186` and 02 §2):** [I] `crates/boyko_ui/tests/ui_a0_clock.rs:421` calls `FixedTime::overstep()`. It is present on [I] `c33d786d` and absent at [J] `d552be05`, where 02's list was verified. It migrates to `Time::fixed_overstep()` with the other tests. 02 `:212` is patched on the same line.
 
 ---
 
@@ -4088,7 +4088,7 @@ impl<K: sealed::AssetGroupKind> AssetWrite<'_, K> { pub fn get_mut(&mut self, h:
 >   - **Anti-vacuity:** the path reads VB, and VB instances > 0.
 >   - **The red-first.** At HO2's cut, E1v records at least 1 such allocation per VB frame. That is the `FilteredAccessSet::bit_owners` box ([J] and [I] `crates/boyko_ecs/src/ecs/core/system/filtered_access_set.rs:146`), which the runner's per-frame `run_system` of `sync_vb_instance_ring_system` allocates ([J] `crates/boyko_app/src/runner.rs:1625`; [I] `:1714`, through `guarded_run_system`). After HO2, the count is 0.
 >   - **Its first run is also a measurement.** The 24 KB claim is code-derived (`ENGINE-RUNTIME-ECS-RESEARCH.md:924`, `:937`), so E1v's first run at HO2's cut is the measurement the research asked for. A first run that records 0 is a finding to report before HO2 proceeds, not a green.
-> - **Plan:** 03's UG-03 row (`03:12`) and its per-rung list (`03:39`), and 02's B2 row (`02:72`), are patched on the same lines.
+> - **Plan:** 03's UG-03 row (`03:12`) and its per-rung list (`03:45`), and 02's B2 row (`02:72`), are patched on the same lines.
 
 **Removed (rev 2 §12, HO2's gate cell, `:1059`, fragment):**
 > the 24 KB/frame allocation gone (G-ALLOC)
@@ -4110,7 +4110,7 @@ impl<K: sealed::AssetGroupKind> AssetWrite<'_, K> { pub fn get_mut(&mut self, h:
 > - **Engine-sourced** means a D-E rung whose content this design defines, through the EK* features of P4-§9's table: D-E1–D-E17. It does not cover D-E0 (physics P-§14, KC-36), D-E18 or D-E19 (ledger KF-10 and KF-09), or D-E20–D-E23 (EP3 Q1).
 >   - D-E20–D-E23 are the plan's KC-37 (b), (c), (i) and (j): the replay contract, 01 §2.1.
 >   - Rev 4 applies D-E20's and D-E23's rulings to this design, and the design names neither D-E21 nor D-E22.
->   - The plan's DAG already gives all seven no EP3 edge (02 `:550`, `:555`), and EP3 raised nothing against the D-E20 or D-E23 text.
+>   - The plan's DAG already gives all seven no EP3 edge (02 `:590`, `:595`), and EP3 raised nothing against the D-E20 or D-E23 text.
 > - **Extra-gate cells.** They are unchanged, except the AS2, AS4, AS5 and HO2 cells, which rev 4.1 restates above. Rev 4 said P4-§17 restated the AS4 and K-EK15c cells; it restated neither (EP3 W3). K-EK15c's cell (`:2722`) stands as rev 3 wrote it.
 
 ---
@@ -4165,15 +4165,15 @@ The K7 and K6′ hand-offs (P4-§13) stand. The `EcsMaster::clear()` hand-off's 
 
 | EP3 | Change | Supersedes on this tree (left in place) | Sections | Plan (same-line, 2026-09-23) | Rung |
 |---|---|---|---|---|---|
-| C1 | `DESPAWN_AT_ZERO` at two edges (count and pin); `DespawnAtZeroCommand` re-checks liveness, `Pinned` and the count at its apply; the despawn at zero cascades (Q2) | `:2546` (fragment), `:3040`, `:3294` (first sentence) | P4.1-§9, §12 (AS4), §17 | `02:724-726`, `02:282-284` | D-E2 |
-| W1 | The redirect's observable is a sequence witness; no absolute depth | `:3554`, `:3581` | P4.1-§17 | `02:282-283`, `02:724-725` | D-E2 |
+| C1 | `DESPAWN_AT_ZERO` at two edges (count and pin); `DespawnAtZeroCommand` re-checks liveness, `Pinned` and the count at its apply; the despawn at zero cascades (Q2) | `:2546` (fragment), `:3040`, `:3294` (first sentence) | P4.1-§9, §12 (AS4), §17 | `02:777-779`, `02:316-318` | D-E2 |
+| W1 | The redirect's observable is a sequence witness; no absolute depth | `:3554`, `:3581` | P4.1-§17 | `02:316-317`, `02:777-778` | D-E2 |
 | W2 | Sealed, non-super `sealed::AssetGroupKind` carrying the group, the lane and the key (behind a token); `render_retire` is `pub(crate)`; five UG-17 fixtures and a green arm | `:1883` (2nd sentence), `:3016` (2nd sentence), `:3135`, `:3142`, `:3417-3419`, `:2633`, `:2635`, `:3543` (fragment) | P4.1-ED16, §10, §12 (AS2) | — | AS2 |
 | W3 | `clear()` refused while an `AssetSentinel` lives; the stale AS5 and hand-off cells superseded; `:3497` corrected | `:2717` (fragment), `:2743` (3rd cell), `:3582`, `:3497` | P4.1-ED5, §12, §13 | — | D-E2; AS5 |
-| W4 | G-ALLOC = UG-03 scenes E1 (B2) and E1v (HO2's red-first); HO2's cell restated | `:3449` (last two sentences), `:1059` (fragment) | P4.1-§12 | `03:12`, `03:39`, `02:72` | B2; HO2 |
-| O1 | `open_chain`/`close_chain` bounded to `Chained` | physics `:3435`, `:3439` | physics E3-1 | `02:143` | D-S3(iii) |
-| O2 | The `every_tick` refusal covers every non-Fixed schedule | `:3064` (sentence), `:3574` (fragment), `:3583` | P4.1-ED7, §17 | `02:169` | D-E8 |
+| W4 | G-ALLOC = UG-03 scenes E1 (B2) and E1v (HO2's red-first); HO2's cell restated | `:3449` (last two sentences), `:1059` (fragment) | P4.1-§12 | `03:12`, `03:45`, `02:72` | B2; HO2 |
+| O1 | `open_chain`/`close_chain` bounded to `Chained` | physics `:3435`, `:3439` | physics E3-1 | `02:169` | D-S3(iii) |
+| O2 | The `every_tick` refusal covers every non-Fixed schedule | `:3064` (sentence), `:3574` (fragment), `:3583` | P4.1-ED7, §17 | `02:197` | D-E8 |
 | O3 | E2-7's heading and fact line reworded | physics `:3995`, `:3997` | physics E3-2 | `00:161` | — |
-| O4 | D-E23's caller list gains [I] `ui_a0_clock.rs:421` | — (adds to `:3186`'s list) | P4.1-§4.2 | `02:184` | D-E23 |
+| O4 | D-E23's caller list gains [I] `ui_a0_clock.rs:421` | — (adds to `:3186`'s list) | P4.1-§4.2 | `02:212` | D-E23 |
 | O5 | `os_event_sink(&mut self)`, setup-only; rank 4 takes each lane out before the release | `:958`, `:3208` | P4.1-ED7, §5 | — | D-E20; D-E9 |
 | Q1 | D-E20–D-E23 are plan-sourced and do not wait for EP3 | `:2975` (status), `:3496` | P4.1-header, §12 | `00:156` (status) | — |
 
@@ -4202,3 +4202,901 @@ The K7 and K6′ hand-offs (P4-§13) stand. The `EcsMaster::clear()` hand-off's 
   - This file, the physics design and the plan, at `49f2fcfb` plus this branch's two commits.
   - Code at [I] `c33d786d`, and at [J] `d552be05` where cited, read with read-only `git show` and `git grep`.
   - External sources as listed.
+
+# Critique log - pass 4 (EP4, 2026-09-24)
+
+**Critic and scope.** The critic is `architecture-critic`, running a closure review of rev 4.1 and physics Erratum E3 against engine critique pass 3 (EP3). The unified plan calls it EP4.
+
+**What it read.** The documents in `D:/wt/docs` at `c1e9f1db`, and the code in `D:/wt/docs/crates` at the same commit. It re-read every [I] line that rev 4.1 cites.
+
+**Verdict.** CHANGES_REQUESTED: 0 Critical, 2 Important (W2′, N1), 4 Optional (O-a–O-d). It found EP3's C1, W1, W3, W4 and O1–O5 resolved, and Q1 and Q2 answered. It rated W2 PARTIAL: rev 4.1 closed the key half, and W2′ is the half it left open.
+
+**How this log is laid out.**
+- The architect's action for each remark comes first, in the table below. The actions are rev 4.2's, which is appended after this log.
+- The review follows, reproduced verbatim.
+- EP4's ids (W2′, N1, O-a–O-d) are a series of their own. W2′ reopens EP3's W2; N1 is new.
+- W2′'s kernel half changes K3's public API, which the physics design owns, so physics Erratum E4 records it there.
+
+## Architect's action per remark (rev 4.2)
+
+| EP4 | Action | Where in rev 4.2 | Plan (same-line patches, listed for the plan's Close stage) | Rung |
+|---|---|---|---|---|
+| W2′ (Important) | FIX, for the class. **(a) Kernel:** `DenseGroup` gains `type Edits: EditPolicy`, with markers `Unlogged` and `Logged`; it replaces EK6g's `const EDIT_LOG: bool`. `DenseColumnMut` and `GroupHead::view` are bounded to `Edits = Unlogged`, and `GroupEdits`/`GroupEditsMut` to `Edits = Logged`, so misuse is E0271. A `Logged` group's columns are written only through the new `LoggedColumnMut<T>`, which marks the log on access. **(b) Render:** each asset group's column is a private `#[repr(transparent)]` newtype of the public value. So `GpuAssetKind::Value` is not a `GroupColumn`, and no projection from a public item reaches an asset group (E0277). `:3998` and `:4016` are corrected. There are fixtures for both projection routes, and kernel fixtures that hold inside the declaring crate | P4.2-EK6g; P4.2-ED16; P4.2-ED5; P4.2-§10; P4.2-§11; P4.2-§12; physics Erratum E4 | 01 KC-23 (`01:173`) and KC-12 (`01:99`); 02 D-E7 (`02:196`); 03 UG-17's rung list (`03:54`) | D-E7 (kernel half); AS2 (render half) |
+| N1 (Important) | FIX. The witness observes `Pinned`'s removal with a per-world **observer**. That is additive, and it runs right after the hook in the same window. It no longer uses a test hook on `Pinned`, whose one hook set the pin edge owns. The in-hook `group_get` read is replaced by reads that `DeferredEcsMaster` has, plus a `group_get` after the drain. Case 3's "despawn hooks" becomes an observer too | P4.2-§17 | 02 D-E2 (`02:317`, `02:318`) | D-E2 |
+| O-a | ADOPTED. `:3434`'s "at depth 0" is superseded | P4.2-§11 | — | — |
+| O-b | ADOPTED. `DespawnAtZeroCommand` gains condition (iv), the `DESPAWN_AT_ZERO` opt-in, read in the same cold walk as the count. D-E2 gains case 7 and its mutation | P4.2-§9; P4.2-§17 | 02 D-E2 (`02:318`); 02 §4.4 (`02:779`) | D-E2 |
+| O-c | ADOPTED (plan only). D-E2 joins the `ecs_master.rs` lock row | — | 02 §4.3 (`02:689`) | D-E2 |
+| O-d | ADOPTED (plan only). D-E20–D-E23 join the EP3 exemptions in RK-2 and in the lane-ENG text | — | 00 RK-2 (`00:171`); 02 lane ENG (`02:183-185`) | — |
+
+The review follows verbatim.
+
+VERDICT: CHANGES_REQUESTED; CRITICAL=0; IMPORTANT=2
+
+# Closure review EP4: engine rev 4.1 and physics Erratum E3, against EP3
+
+Paths used below: engine = `D:/wt/docs/docs/unification/ENGINE-RUNTIME-ECS-DESIGN.md`, physics = `D:/wt/docs/docs/physics/PHYSICS-ECS-UNIFICATION-DESIGN.md`, 02/03/00 = `D:/wt/docs/docs/unification/UNIFIED-SYSTEM-PLAN-0{2,3,0}-*.md`. Code was read at `D:/wt/docs/crates` (c1e9f1db). Every [I] line cited in rev 4.1 matched the code.
+
+| EP3 remark | Status | Resolving lines |
+|---|---|---|
+| C1 | RESOLVED | engine :3835-3881, :4101, :4131-4139; 02:284, 02:726. The drain loops until the queue is empty (`ecs_master.rs:708-726`), so the `DespawnAtZeroCommand` that the unpin enqueues is applied in the same drain. The queue `[despawn(I), despawn(A)]` now kills A. The reverse order and the re-pin case walk correctly. The fix itself introduces N1 (below). |
+| W1 | RESOLVED (the observable) | engine :4127-4130, :4141-4142; 02:283, 02:724-725. No depth is asserted any more, and the mutant logs `["unpinned","returned"]`. The tool it measures with is broken by C1 (N1). One stale "at depth 0" remains (O-a). |
+| W2 | PARTIAL | engine :3963-4022, :4040-4047, :4099. The key half holds: the ChainKey cannot be constructed, `chain_key` is behind a Token, and `render_retire` is `pub(crate)`. The EK6g half does not hold (W2′). |
+| W3 | RESOLVED | engine :3898-3919, :4103, :4114. `clear()` fires no hooks (`ecs_master.rs:1026-1046`), and `EcsMaster` has no `Drop` that calls it. Lock-table gap: O-c. |
+| W4 | RESOLVED | engine :4078-4097; 03:12, 03:39; 02:72. The box is `1536 × 16 B = 24 576 B` (`filtered_access_set.rs:114-127, :146`), exactly 24 KiB, so "≥ 24 KiB" catches it. |
+| O1 | RESOLVED | physics :4084-4117; 02:143 |
+| O2 | RESOLVED | engine :3929, :4148, :4154; 02:169 |
+| O3 | RESOLVED | physics :4119-4133; 00:161 |
+| O4 | RESOLVED | engine :4053; 02:184 |
+| O5 | RESOLVED | engine :3937-3939, :4063-4067 |
+| Q1 | ANSWERED | engine :4110-4113; 00:156. Two sites still list the old exemptions (O-d). |
+| Q2 | ANSWERED | engine :3864-3867 |
+
+## 🟡 Important
+
+#### W2′. The sealed form hides `K::Group` but leaves the group's value column writable, so the EK6g bypass that W2 named is still open
+- **Where:** engine :3998 ("It cannot reach a group type or a key at all") and :4016 (`pub` markers rejected because "the column writes would bypass EK6g"). These are contradicted by:
+  - engine :3980: `type Value` is an item of the public `GpuAssetKind`.
+  - engine :4044: `AssetRead` is `DenseColumn<K::Value>`, so `K::Value: GroupColumn`. :1880 confirms that `Material { gpu, textures }` is `MaterialGroup`'s column.
+  - physics :2752-2753: `pub unsafe trait GroupColumn { type Group: DenseGroup; … }`.
+  - physics :523-524: `DenseColumnMut<'w, T: GroupColumn>`, a public write SystemParam. It is not on rev 4's deletion list (:2784), and :1629 keeps it.
+- **Problem:** two routes remain open to any outside crate:
+  - It can name the group by projection: `GroupHead<'_, <<Material as GpuAssetKind>::Value as GroupColumn>::Group>` compiles. That defeats the property fixtures (2) and (3) are meant to check.
+  - It can write the column without naming the group at all: `DenseColumnMut<'_, <Material as GpuAssetKind>::Value>`.
+- **Consequence:** an outside crate's Main system edits material bytes through `DenseColumnMut` and never marks the EK6g log. R2 uploads only the slots the log names (:1853), so the GPU material row stays stale until an overflow or grow forces a full re-stage. That is exactly W2's consequence. None of the five UG-17 fixtures (:4005-4009) can go red on either route, so AS2's gate would pass while the leak is open.
+- **Confidence:** CONFIRMED from the design text above. The route relies on the ordinary rule that a public associated type in a public impl can be reached by projection.
+- **What is needed:**
+  - Close column writes and group naming for `EDIT_LOG` groups outside the declaring crate. Possible directions: kernel-side on `DenseColumnMut` or `GroupColumn::Group`, or a column type distinct from the public `Value`.
+  - Correct :3998 and :4016.
+  - Add fixtures for both projection routes.
+- **Rungs held:** AS2. D-E7 as well, if the fix lands in the kernel's EK6g/`DenseColumnMut` surface.
+
+#### N1. C1's pin edge takes the one `on_remove` slot that W1's sequence witness needs (new contradiction)
+- **Where:**
+  - engine :3837 and :3870: `Pinned` gains a kernel `on_remove` hook.
+  - engine :4129-4130 and :4142, and 02:283: the witness relies on "`Pinned`'s test `on_remove` hook", and on a `group_get` read "inside the `"unpinned"` hook".
+- **Problem:** a component has exactly one hook set, written once and process-wide:
+  - `builder.rs:10-25` and `:132-160`: hooks come from the derive or the runtime builder, never both, and are stored with `OnceLock::set`.
+  - `observer_api.rs:86-89, :104-106`: `register_component_hooks::<C>()` panics if `C` already has derive hooks.
+- **Consequence:** D-E2's red-first cannot be built as written. Registering the test hook panics, either through `register_component_hooks_derive_conflict_panic` or with `AlreadyRegistered`. Worse, a test hook that won the slot would remove the pin edge for the whole test binary. Cases (1), (2) and (4) would then go red for the wrong reason.
+- **Confidence:** CONFIRMED.
+- **What is needed:** restate the witness at engine :4129-4130 and :4142 and at 02:283 using something the kernel allows alongside a hook. One option is an `observe_on_remove::<Pinned>` observer, which runs inline right after the hook (`observer_api.rs:138-139, :166-168`). Another is a check with no hook: the `"returned"` closure asserts that E still holds `Pinned`.
+- **Rung held:** D-E2.
+
+## 🟢 Optional
+
+- **O-a.** engine :3434 (P4-§11) still says the `Pinned` removal is "applied by the outermost drain at depth 0". Rev 4.1 did not supersede it. Nothing breaks, since rev 4.1 wins where the two disagree, but it is the section that describes the depth model. CONFIRMED.
+- **O-b.** `DespawnAtZeroCommand`'s three conditions (engine :3839-3842) omit the opt-in. `DESPAWN_AT_ZERO` is `false` by default (:2594), yet the pin edge fires on every `Pinned` removal (:3837). So `remove::<Pinned>()` would despawn any entity that has no opted-in counted relation, because its count is then 0. PLAUSIBLE: I could not find a non-asset user of `Pinned`. Either add the opt-in as a condition, or state that `Pinned` is valid only on opted-in targets and add a D-E2 case for it.
+- **O-c.** The W3 refusal lands in D-E2 inside `ecs_master.rs::clear` (engine :3912). The `ecs_master.rs` lock row at 02:638 does not list D-E2, so D-E2 could be open at the same time as D-S6 or D-R2a on that file. CONFIRMED.
+- **O-d.** RK-2 (00:171) and the lane-ENG text (02:155-157) still name only D-E0, D-E18 and D-E19 as exempt from EP3. The Q1 answer (engine :4110; 00:156) also exempts D-E20–D-E23, and the DAG rows already agree with it. CONFIRMED text; nothing breaks.
+
+## Which rungs this pass releases (02 §1 rule 8: a reopened item holds only the rungs that rest on it)
+
+- **D-S3(iii): may cut.** No open remark touches it, and E3-1's two E0271 fixtures agree with 02:143.
+- **D-E1 and D-E3–D-E19: may cut** as far as this pass is concerned. The exception is D-E7, if W2′ is fixed in the kernel.
+- **D-E2: waits** for N1. O-b and O-c are best settled in the same edit.
+- **AS2: waits** for W2′.
+
+## Positive
+
+- C1 was fixed for the whole class, not just the reported order. The decision is taken when the command applies (live, unpinned, count 0), so every queue order converges, and rev 3's re-pin window is closed as well.
+- Choosing a sealed trait that is not a supertrait of `GpuAssetKind`, plus the Token, is the right answer to the supertrait leak. The reasoning about `private_bounds` and E0446 is sound.
+- E1v's "a first run that records 0 is a finding" guard stops a vacuous HO2 gate.
+
+# Rev 4.2 patch
+
+## How to read rev 4.2
+
+- **Why rev 4.2 exists.** Engine critique pass 4 (EP4; the log above) re-reviewed rev 4.1. It returned CHANGES_REQUESTED with 0 Critical, 2 Important and 4 Optional remarks. Rev 4.2 resolves both Important remarks, W2′ and N1, and adopts all four Optional ones. It was written as document step DOC-3.
+- **One remark crosses into physics.** W2′'s kernel half changes K3's public API, which the physics design owns. It lands there as Erratum E4. No other physics text changes.
+- **Reading order:** rev 2 body → the rev-3 patch (`P-…`) → the rev-4 patch (`P4-…`) → the rev-4.1 patch (`P4.1-…`) → the rev-4.2 patch (`P4.2-…`).
+  - A section that rev 4.2 does not name reads as rev 4.1 left it. Where rev 4.2 and earlier text disagree, rev 4.2 rules.
+  - As before, a **Removed** quote takes a passage out of the reading order, not out of the file. Each quoted passage is named by its line on this tree.
+- **Edited in place:** only the header's two lines, `:4` and `:7`. Each keeps its old text struck through on the same line, so no line number moves.
+- **Trees.**
+  - Line numbers of this file, of the physics design and of the plan are on `u/doc-3-4`. Its base is **[T]** = `4db26681`, the `integ/unified` trunk. The design documents on [T] are byte-identical to `c1e9f1db`, where EP4 read them (`git diff c1e9f1db 4db26681` on the three design files is empty), so EP4's line numbers hold here. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in rev 4.2's text, its action table in the pass-4 log included (`:4222-4229`), now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
+  - Code is cited on [T], read with read-only `git show`. Rev 4.1 cited [I] = `c33d786d`. [I] is an ancestor of [T] (`git merge-base --is-ancestor`), and the files re-cited below are unchanged between the two (`git diff c33d786d 4db26681` is empty for `ecs_master/{ecs_master, entity_api, observer_api}.rs`, `component/hooks/**`, `commands/migration_helpers.rs`, `schedule/schedule.rs` and `relationship/**`). So every [I] line rev 4.1 gives holds on [T].
+  - The K3 dense-group surface is not on [T] yet: `git grep` finds no `DenseColumnMut`, `GroupColumn`, `DenseGroup` or `GroupHead` under `crates/`. It lands in D-S3(ii) and D-S3(iii). Every K3 signature below is design text.
+- **Plan edits.** None is made in this step. The plan's same-line patches are listed in the step's report for the plan's Close stage, so that two document steps never edit one plan file at once.
+- **Not compiled.** The rustc error codes named for the fixtures follow from documented rules; this is a documents-only step. The rungs' UG-17 `.stderr` files are the check. Nothing was built, run or timed.
+
+---
+
+## P4.2-header
+
+**Removed (rev 4.1 P4.1-header, `:3816-3817`):**
+> - EP3 ran on 2026-09-23, and rev 4.1 resolves every remark it made.
+> - By EP3's own map, none of its remarks touches D-S3(iii)'s content. C1 and W1 fall on D-E2, W2 on AS2, W3 on AS5 and W4 on HO2, and each of those rungs builds on rev 4.1's resolution.
+
+**Added:**
+> - EP3 ran on 2026-09-23, and rev 4.1 resolved every remark it made. EP4, a closure review of rev 4.1, ran on 2026-09-24. Rev 4.2 resolves its two Important remarks and adopts its four Optional ones.
+> - EP4 released D-S3(iii), D-E1, D-E3–D-E6 and D-E8–D-E19; rev 4.2 does not touch their content. D-E2 (N1, O-b), D-E7 (W2′'s kernel half) and AS2 (W2′'s render half) build on rev 4.2's resolutions. AS5 and HO2 build on rev 4.1's, which EP4 found resolved.
+
+---
+
+## P4.2-EK6g: a `Logged` group's columns are written only through its log (EP4 W2′, kernel half)
+
+**Removed (rev 3 P-§9, EK6g row, `:2538`, fragment):**
+> opt-in per K3 group (`const EDIT_LOG: bool`)
+
+**Removed (rev 3 P-§10, `:2599-2600`):**
+```
+pub struct GroupEditsMut<'w, G: DenseGroup>; impl<G: DenseGroup> GroupEditsMut<'_, G> { pub fn mark(&mut self, slot: u32); } // EK6g
+pub struct GroupEdits<'w, G: DenseGroup>;    impl<G: DenseGroup> GroupEdits<'_, G> { pub fn read(&self) -> EditWindow<'_>; }
+```
+
+**Added:**
+
+> **The defect** (EP4 W2′, confirmed against the text).
+> - `type Value` is an item of the `pub` trait `GpuAssetKind` (`:3980`). The Rust Reference: "Associated items in a `pub` Trait are public by default".
+> - For the material kind, `Value` is `MaterialGroup`'s column (`:1880`), so it implements `GroupColumn`, whose `type Group` is public too (physics `:2752-2753`).
+> - So any crate can name the group with a qualified path, `<<Material as GpuAssetKind>::Value as GroupColumn>::Group`. It can also write the column without naming the group, through `DenseColumnMut<'_, <Material as GpuAssetKind>::Value>`. That is a public write param (physics `:524`), which no revision deleted (physics `:2784` lists the deletions, and `:1629` keeps it).
+> - Such a write goes through `TypedDenseView`'s `unsafe` `row_ptr` and `range_mut` (physics `:526-531`), or through `GroupHead::view` (physics `:2780`) to the same view.
+>   - The `unsafe` contract is bounds and disjointness, and it says nothing about the log. So a write that honours it still leaves the slot out of EK6g's window.
+>   - R2 uploads only the slots the log names (`:1853`), so the GPU row stays stale until an overflow or a grow re-stages the table.
+> - **The hole is wider than outside crates.** `boyko_render`'s own systems reach the same params: R2's installs, EK21's re-stage, and any later writer such as transparency's lane. Rev 3 made "no write path skips the log" a property of one facade (`:1897`). It held only while every render system used that facade.
+>
+> **Options weighed.**
+> - **(a) Refuse the unlogged routes in the kernel, by type. Chosen.**
+>   - The log's integrity becomes a kernel property, used the same way by every group of every crate. That includes the crate that declares the group, which no visibility trick can reach.
+>   - A misuse fails before monomorphisation, and non-logged groups pay nothing.
+> - **(b) Give each asset group a column type distinct from the public `Value`. Adopted as well, for naming** (P4.2-ED16).
+>   - On its own, (b) is a convention of one crate. A later edit that made a column public again, or a render system writing through `DenseColumnMut`, would reopen the hole.
+>   - (b) is what stops an outside crate from naming the asset groups at all.
+> - **(c) What Bevy and flecs do.** Both make marking a property of the write route, not of the caller's discipline.
+>   - **Bevy:** "Normally change detection is triggered by either `DerefMut` or `AsMut`" (`DetectChangesMut`). Marking is a side effect of mutable access. The only unmarked write is the explicit `bypass_change_detection`, which Bevy's docs call "a risky operation".
+>   - **flecs:** for a query with write (`inout`) terms, "iterating the query will write to the dirty state of iterated tables". Marking follows the declared write access, per table.
+>   - **Adopted: Bevy's form,** marking on mutable access, at slot granularity, inside a kernel param.
+>   - **Not adopted: flecs's per-table marking.** It would make every writer run upload the whole material table, which is the cost EK6g exists to avoid.
+>   - **Not adopted: Bevy's bypass.** An unlogged write to a `Logged` group has no correct use here; it is exactly the stale-row defect.
+> - **Rejected forms of (a).**
+>   - **A `const` assert on the log flag inside `DenseColumnMut`** (an inline `const { assert!(…) }`). That is a post-monomorphisation error (E0080), and `cargo check` is not required to report one. RFC 3477 puts "the emphasis of `cargo check` … on giving a 'fast' answer rather than giving a 'complete' answer" (rust-lang/rust#99682 is the known case). A fixture's verdict would then depend on whether trybuild checks or builds. Physics Erratum E2-1 chose `type Release` over a `const` for the same reason. It also retires rev 3's const-assert on `mark` (P4.2-§12).
+>   - **A runtime refusal at `init_state`** (a coded panic at schedule build). It works, but it goes red later than a type error for no gain, and it needs the log flag on an erased path.
+>   - **Routing `DenseColumnMut::solve_view` through the log.** The solver takes raw ranges from it. Marking per slot there would either mark every body of every step of groups that have no log, or branch on a policy known at compile time.
+>
+> **The form** (kernel; physics Erratum E4-1 records it on K3):
+> ```rust
+> // boyko_ecs — K3 + EK6g (rev 4.2)
+> pub trait EditPolicy: 'static { const LOGGED: bool; }
+> pub struct Unlogged; impl EditPolicy for Unlogged { const LOGGED: bool = false; }
+> pub struct Logged;   impl EditPolicy for Logged   { const LOGGED: bool = true; }
+> pub trait DenseGroup: 'static {
+>     const WIDTH: usize;
+>     type Release: ReleasePolicy;
+>     type Edits: EditPolicy;   // replaces EK6g's `const EDIT_LOG: bool`. #[dense_group] emits `Unlogged`, or `Logged`
+>                               //   with its `edit_log` option. The macro spells it: associated type defaults are unstable
+>     type Anchor: Component;
+>     type ChainKey: 'static;
+> }
+> pub struct DenseColumnMut<'w, T: GroupColumn> where T::Group: DenseGroup<Edits = Unlogged>; // physics S5's param
+> impl<G: DenseGroup> GroupHead<'_, G> {
+>     pub fn view<T: GroupColumn<Group = G>>(&self) -> TypedDenseView<'_, T>
+>     where G: DenseGroup<Edits = Unlogged>;                        // method-level `where`, so E0271 (E2-1's form)
+> }
+> // The one write route into a Logged group's columns:
+> pub struct LoggedColumnMut<'w, T: GroupColumn> where T::Group: DenseGroup<Edits = Logged>;
+> //   SystemParam: a write on T's column id, a write on the group's edit-log node (GroupEditsMut's node),
+> //   and a read on the group's slot-map node
+> impl<T: GroupColumn> LoggedColumnMut<'_, T> where T::Group: DenseGroup<Edits = Logged> {
+>     pub fn get(&self, e: Entity) -> Option<&T>;              // live, anchored entities only (the slot map)
+>     pub fn get_mut(&mut self, e: Entity) -> Option<&mut T>;  // marks e's slot (EK6g's per-run dedup), then hands out &mut
+> }
+> pub struct GroupEditsMut<'w, G: DenseGroup<Edits = Logged>>; impl<G: DenseGroup<Edits = Logged>> GroupEditsMut<'_, G> { pub fn mark(&mut self, slot: u32); }
+> pub struct GroupEdits<'w, G: DenseGroup<Edits = Logged>>;    impl<G: DenseGroup<Edits = Logged>> GroupEdits<'_, G> { pub fn read(&self) -> EditWindow<'_>; }
+> ```
+> - **Why a marker type, not a `const`.** It is E2-1's reason for `type Release`. An equality bound on an associated type fails at type check with E0271, "A type mismatched an associated type of a trait" (Rust error index). That is before monomorphisation, so `cargo check` reports it.
+> - **Where the bounds sit.**
+>   - On the `DenseColumnMut`, `LoggedColumnMut`, `GroupEdits` and `GroupEditsMut` structs: any mention of the type over the wrong group is E0271, in a system signature as much as anywhere else.
+>   - On `view`, as a method-level `where`: `GroupHead` itself stays nameable over a `Logged` group, because R1 needs it for `release_dying_before`.
+>   - Struct bounds are not implied, so each kernel `impl` of those structs repeats its bound. That is spelling only.
+> - **Marking on access.** `get_mut` marks, as rev 3's `AssetWrite::get_mut` did (`:1897`) and as Bevy's `DerefMut` does. A reference taken and never written costs one extra upload of unchanged bytes. EK6g's reader already tolerates that: it uploads the current bytes, "so a duplicate or post-reuse record is idempotent" (`:1853`).
+> - **Why the route takes an entity.** The slot comes from the slot map, which maps only live, anchored entities. So the route cannot write a `dying` or `free` slot, whose bytes stay intact until the release (P4-ED5, `:3034`).
+> - **`DenseColumn` (read) hands out shared references only** (physics E4-1 states this; rev 2 §9 listed no method for it). So a read param is not a third write route.
+> - **`GroupEditsMut` stays.** It marks without writing, which EK21's re-stage can use, and a spurious mark costs only an upload. Its bound now makes marking a group with no log E0271.
+>
+> **The kernel invariant (EK6g, restated).** Every write that a system param or an `EcsMaster` API can make to a `Logged` group's column goes through `LoggedColumnMut::get_mut`, so it is in the log.
+> - The kernel's own writes stay outside the log, as in rev 3:
+>   - the DEAD fill of a newly anchored slot (the binder);
+>   - the DEAD fill of a released slot (`release_dying_before` and the teardown form).
+> - A released slot is free, and its next occupant is logged when it is installed.
+> - What the anchor-time DEAD fill leaves open is recorded as O-14 (P4.2-§18). It predates this revision and does not depend on it.
+>
+> **Who writes the asset columns under (a).** `asset_install::<Material>`, `AssetWrite<K>`, R2's mesh and texture installs, and EK21's re-stage all write through `LoggedColumnMut<K::Column>` (P4.2-ED5). R1 holds `GroupHead<K::Group>` for `release_dying_before` only. It never calls `view` on an asset group, and now it cannot.
+>
+> **Cost.**
+> - **Unlogged groups (`PhysicsBody` and every physics param): 0.** The bounds are resolved at type check. The params' bodies and codegen are unchanged, and `#[dense_group]` writes `type Edits = Unlogged`.
+> - **Logged groups: no new work.** A write costs what rev 3's `AssetWrite::get_mut` cost: a slot-map lookup, EK6g's dedup compare on `last_marked[slot]` (`:2446`), and one append on the first mark of a slot in a writer run.
+> - **Access sets.**
+>   - `LoggedColumnMut<T>` declares one column write, one log-node write and one slot-map read.
+>   - Rev 4's `AssetWrite` declared `GroupHead`'s write on every column id and on the recycle node. A Main asset writer now declares less.
+>   - It still serialises with R1 on the column node, and with R2's reader on the log node, as rev 3 required (`:2665`). P4.2-§11 restates `:3439`.
+>
+> **Gates: K-EK6g, landing in D-E7.** The UG-17 fixtures live in a test crate that declares its own groups: `LG` with the `edit_log` option (column `LCol`), and `UG` without it (column `UCol`). So they show the refusal holding inside the declaring crate, which (b) cannot cover. That crate must fail to compile each of:
+>   - **K1.** `DenseColumnMut<'_, LCol>` → E0271.
+>   - **K2.** `view::<LCol>()` on a `GroupHead<'_, LG>` → E0271.
+>   - **K3.** `GroupEditsMut<'_, UG>`, and separately `GroupEdits<'_, UG>` → E0271. These replace rev 3's const-assert on `mark` (`:2726`).
+>
+>   **Green arm (anti-vacuity):**
+>   - `LoggedColumnMut<'_, LCol>::get_mut(e)` edits a value, and e's slot appears in the next window that `GroupEdits<LG>` reads.
+>   - `DenseColumnMut<'_, UCol>` and `GroupHead<'_, UG>::view::<UCol>()` compile.
+>   - `get_mut` on a despawned or never-anchored entity returns `None` and marks nothing.
+>
+>   The `.stderr` files pin the exact text; the codes listed are the expected ones (Rust error index).
+>
+> **Rungs.**
+> - **D-E7 lands all of it** (KC-23: EK6 + EK6g): `EditPolicy` and `type Edits`, the four bounds, `LoggedColumnMut`, the `edit_log` option of `#[dense_group]`, and K1–K3.
+> - **Nothing earlier reopens.** Before D-E7 no `Logged` group can exist, because the log lands there. So D-S3(ii)'s unbounded `DenseColumnMut` and `view` open no route in the meantime, and D-S3(ii) and D-S3(iii) are not reopened.
+> - **D-E7's touch set grows** by the file that defines `DenseGroup`, by `system/params/**` (the bounds and the new param) and by `boyko_macros` (`#[dense_group]`).
+>   - The macro gives every group it emits the new item.
+>   - A hand-written `impl DenseGroup` that exists at D-E7's cut gains one line and is named at the cut.
+>
+>   The plan's D-E7 row is patched by the Close stage.
+
+---
+
+## P4.2-ED16: the asset columns are not the public values (EP4 W2′, naming half)
+
+**Removed (rev 4.1 P4.1-ED16, `:3998`, last sentence):**
+> It cannot reach a group type or a key at all.
+
+**Removed (rev 4.1 P4.1-ED16, `:4016`):**
+> - `pub` markers (the column writes would bypass EK6g).
+
+**Removed (rev 4.1 P4.1-ED16, the `sealed` module of the block at `:3982-3992`):** the module as written there. The replacement below keeps every item it had and adds the columns.
+
+**Added:**
+
+> **Why (b) as well as (a).**
+> - (a) makes an unlogged write impossible for every crate. It does not stop an outside crate from naming the asset groups by projection. Fixtures (2) and (3) (`:4006-4007`) were meant to prove that it cannot, and EP4 showed they do not: under (a) alone, `GroupHead<'_, <<Material as GpuAssetKind>::Value as GroupColumn>::Group>` still compiles.
+> - After (a), such a param can write nothing, but it still does harm without purpose:
+>   - It declares a write on every column id and on the recycle node of an asset group (physics P5-§8, `:3402`), so a user system holding it serialises against R1 and the asset writers.
+>   - `GroupTail` and `GroupEditsMut` are reachable the same way. Spurious marks cost extra uploads.
+>   - So is a Fixed-schedule `GroupEdits` reader, which lengthens the log's retention (ED17, `:2139`).
+> - None of this is unsound. All of it is surface that `boyko_render` never meant to publish, and (b) removes it at no cost.
+>
+> **The form.** Each asset group's column is a `#[repr(transparent)]` newtype of the public value, declared in the private module:
+> ```rust
+> // boyko_render (rev 4.2; the `sealed` module replaces P4.1-ED16's, `:3982-3992`)
+> pub trait GpuAssetKind: sealed::Sealed + 'static { type Value: Copy + 'static; }   // unchanged (`:3979-3981`)
+> mod sealed {
+>     pub trait Sealed {}
+>     pub struct Token(());
+>     // The asset groups' columns, declared through #[dense_group(<G>, edit_log)]. Each is a `pub` item of this
+>     // private module, with a `pub(crate)` field:
+>     #[repr(transparent)] #[derive(Clone, Copy)] pub struct MeshMetaColumn(pub(crate) MeshMeta);       // MeshGroup
+>     #[repr(transparent)] #[derive(Clone, Copy)] pub struct MaterialColumn(pub(crate) Material);       // MaterialGroup
+>     #[repr(transparent)] #[derive(Clone, Copy)] pub struct TextureMetaColumn(pub(crate) TextureMeta); // TextureGroup
+>     pub trait AssetGroupKind: super::GpuAssetKind {       // still NOT a supertrait of GpuAssetKind (P4.1-ED16)
+>         type Group: DenseGroup<Release = Stamped, Edits = Logged>;
+>         type Column: GroupColumn<Group = Self::Group>;
+>         type DeviceLane: 'static;
+>         fn value(c: &Self::Column) -> &Self::Value;            // `&c.0`
+>         fn value_mut(c: &mut Self::Column) -> &mut Self::Value; // `&mut c.0`
+>         fn chain_key(_: Token) -> <Self::Group as DenseGroup>::ChainKey;
+>     }
+>     // #[dense_group] MeshGroup, MaterialGroup, TextureGroup; AssetWriteState<K>, AssetReadState<K>: as in P4.1-ED16
+> }
+> ```
+> - **Why it compiles.** It is P4.1-ED16's rule for the markers: an associated type in an impl is checked by `pub` annotation, not by reachability (RFC 2145, E0446). So `impl sealed::AssetGroupKind for Material { type Column = sealed::MaterialColumn; … }` is accepted, and still no path outside the crate reaches the column.
+> - **Cost: 0.**
+>   - `#[repr(transparent)]` gives each column its value's layout, so the material table upload reads the same bytes as today (`:1853`).
+>   - `value` and `value_mut` are field projections.
+> - **For users, nothing changes.** `GpuAssetKind::Value` is unchanged, and `AssetRead<'_, Material>` and `AssetWrite<'_, Material>` still hand out `&Material` and `&mut Material`.
+> - **The DEAD constants move to the columns,** with the same bytes (P4.2-ED5).
+> - **The projection routes, now.** `<Material as GpuAssetKind>::Value`, the `Material { gpu, textures }` value, implements no `GroupColumn`. So each of these is E0277, "You tried to use a type which doesn't implement some trait in a place which expected that trait" (Rust error index):
+>   - `<<Material as GpuAssetKind>::Value as GroupColumn>::Group`;
+>   - `DenseColumnMut<'_, <Material as GpuAssetKind>::Value>`;
+>   - `LoggedColumnMut<'_, <Material as GpuAssetKind>::Value>`.
+>
+> **`:3998`, corrected** (the paragraph now reads):
+> > **What an outside crate can do.**
+> > - It can write `AssetRead<'_, Material>` and `AssetWrite<'_, Material>` in a Main system, and read and edit material values through them; every edit marks the EK6g log.
+> > - It cannot be generic over `AssetWrite<'_, K>` for its own `K`, because the struct's bound is one it cannot name.
+> > - It cannot name an asset group or an asset column, either through `GpuAssetKind` (fixtures 2 and 3) or through `GpuAssetKind::Value` (fixtures 6–8).
+> > - It cannot obtain a key (fixture 4).
+> > - No crate, `boyko_render` included, can write a `Logged` group's column except through `LoggedColumnMut`, which marks the log (P4.2-EK6g).
+>
+> **`:4016`, corrected** (the rejected-list item now reads):
+> > - `pub` markers or a public column type. After P4.2-EK6g they would no longer allow an unlogged write, but they would publish `GroupHead`, `GroupTail` and the edit-log params over the asset groups to every crate (above).
+>
+> **Gates (AS2).** Fixtures 1–5 stand (`:4005-4009`); what (2) and (3) prove is now "not through `GpuAssetKind`". An outside test crate must also fail to compile each of:
+>   6. `GroupHead<'_, <<Material as GpuAssetKind>::Value as GroupColumn>::Group>` → E0277 (EP4's first route);
+>   7. `DenseColumnMut<'_, <Material as GpuAssetKind>::Value>` → E0277 (EP4's second route);
+>   8. `LoggedColumnMut<'_, <Material as GpuAssetKind>::Value>` → E0277;
+>   9. `boyko_render::…::sealed::MaterialColumn` by path → E0603.
+>
+>   - **Why the pinned code matters.** The `.stderr` files pin E0277 on 6–8. If (b) regressed and the value became a column again, 7 would still fail, through (a), but with E0271. The pinned text then turns the fixture red, instead of letting it pass on the other closure.
+>   - **Green arm:** unchanged (`:4011`). RE6's red-first (`:2712`, "a material edit after boot reaches the GPU") already covers the upload of that edit.
+
+---
+
+## P4.2-ED5: value writers, the asset columns and their DEAD values (EP4 W2′)
+
+**Removed (rev 3 P-ED5, `:1879-1881`):**
+> - `MeshGroup`: `MeshMeta`, whose `geometry_slot` indexes the mesh meta lane;
+> - `MaterialGroup`: `Material { gpu, textures }`, indexing the material table row;
+> - `TextureGroup`: `TextureMeta`, indexing the bindless slot.
+
+**Added:**
+> - `MeshGroup`: column `sealed::MeshMetaColumn(MeshMeta)`, whose `geometry_slot` indexes the mesh meta lane;
+> - `MaterialGroup`: column `sealed::MaterialColumn(Material)`; `Material { gpu, textures }` indexes the material table row;
+> - `TextureGroup`: column `sealed::TextureMetaColumn(TextureMeta)`, indexing the bindless slot (P4.2-ED16).
+
+**Removed (rev 4 P4-ED5, `:3016`, fragment):**
+> and `EDIT_LOG = true` (EK6g)
+
+**Added:**
+> and `type Edits = Logged` (EK6g; P4.2-EK6g)
+
+**Removed (rev 4 P4-ED5, `:3022`):**
+> - **Value writers.** Only these systems hold `GroupHead<G>`. It is physics rev 5's param: it writes every column id and the recycle node, reads the slot-map node and provides typed views (`M:…PHYSICS…:3402-3404`). `DenseGroupMut` was deleted by physics rev 4 (`:2463`). The table of writers is unchanged:
+
+**Added:**
+> - **Value writers.** Only these systems write the asset columns, each through `LoggedColumnMut<K::Column>`, which marks the edit log (P4.2-EK6g). R1 holds `GroupHead<G>` for the release alone; `view` is refused on a `Logged` group. The table of writers is unchanged:
+
+**Removed (rev 4 P4-ED5, `:3028`):**
+> `AssetWrite<K>` is a hand-written SystemParam (X-27) over `GroupHead<K::Group>`, `GroupEditsMut<K::Group>` and `GroupSlot` reads.
+
+**Removed (rev 3 P-ED5, `:1897`, second sentence):**
+> Its `get_mut(handle)` marks the edit log on access, so no write path skips the log.
+
+**Added:**
+> `AssetWrite<K>` is a hand-written SystemParam (X-27) over `LoggedColumnMut<K::Column>`, which carries the slot-map read, plus the `Handle<K>` → entity resolution. Its `get_mut(handle)` returns `LoggedColumnMut::get_mut` through `K::value_mut`. So the mark is the kernel param's, and no write path skips the log, for any crate (P4.2-EK6g).
+
+**Removed (rev 3 P-ED5, `:1900-1902`, the three constants' names):** `MeshMeta::DEAD`, `Material::DEAD`, `TextureMeta::DEAD`.
+
+**Added:** `MeshMetaColumn::DEAD`, `MaterialColumn::DEAD`, `TextureMetaColumn::DEAD`. Each wraps the bytes `:1900-1902` give, and `GroupColumn::DEAD` is the column's (physics `:2754`). The values do not implement `GroupColumn` (P4.2-ED16), so they carry no `DEAD`.
+
+**Removed (rev 3 P-§6, R2 row, `:2505`, fragment):**
+> install values via `DenseGroupMut`; mark the edit log;
+
+**Added:**
+> install values via `LoggedColumnMut` (which marks the edit log);
+
+---
+
+## P4.2-§10: public API (EP4 W2′)
+
+**Removed (rev 4.1 P4.1-§10, `:4044-4046`):**
+```
+pub struct AssetRead<'w, K: sealed::AssetGroupKind>;   // hand-written SystemParam: DenseColumn<K::Value> + GroupSlot reads
+pub struct AssetWrite<'w, K: sealed::AssetGroupKind>;  // hand-written SystemParam: GroupHead + GroupEditsMut + GroupSlot reads
+impl<K: sealed::AssetGroupKind> AssetWrite<'_, K> { pub fn get_mut(&mut self, h: Handle<K>) -> Option<&mut K::Value>; } // marks
+```
+**Added:**
+```rust
+// boyko_render (rev 4.2; EP4 W2′): see P4.2-ED16 for `sealed`, P4.2-EK6g for LoggedColumnMut
+pub struct AssetRead<'w, K: sealed::AssetGroupKind>;   // hand-written SystemParam: DenseColumn<K::Column> + GroupSlot reads; hands out &K::Value
+pub struct AssetWrite<'w, K: sealed::AssetGroupKind>;  // hand-written SystemParam: LoggedColumnMut<K::Column>
+impl<K: sealed::AssetGroupKind> AssetWrite<'_, K> { pub fn get_mut(&mut self, h: Handle<K>) -> Option<&mut K::Value>; } // the kernel param marks
+```
+The kernel's side (`EditPolicy`, the bounded `GroupEditsMut`/`GroupEdits`, `LoggedColumnMut`) is P4.2-EK6g's block. It replaces `:2599-2600`.
+
+---
+
+## P4.2-§9: `DESPAWN_AT_ZERO`'s opt-in is a condition of the command (EP4 O-b)
+
+**Removed (rev 4.1 P4.1-§9, `:3839`):**
+> Each edge enqueues `DespawnAtZeroCommand(e)` on `deferred_hook_queue`. Its apply runs under `&mut EcsMaster` and despawns `e` if and only if all three conditions hold **at that apply**:
+
+**Added:**
+> Each edge enqueues `DespawnAtZeroCommand(e)` on `deferred_hook_queue`. Its apply runs under `&mut EcsMaster` and despawns `e` if and only if all four conditions hold **at that apply**: (i)–(iii) as `:3840-3842` state them, and
+> - (iv) at least one of `e`'s counted target components opts in: its type sets `DESPAWN_AT_ZERO` (default `false`, `:2594`).
+>
+> - **Why (EP4 O-b).** The pin edge fires on every `Pinned` removal, whatever the entity (`:3837`).
+>   - Without (iv), `remove::<Pinned>()` would despawn an entity whose counted target types all leave `DESPAWN_AT_ZERO` off. It would also despawn one that holds no counted target at all, because the empty sum is 0. Nothing asked for either despawn.
+>   - The count edge was already scoped to targets that opt in: "Target option `const DESPAWN_AT_ZERO`" (rev 3, `:2546`). (iv) gives the pin edge the same scope, and it is checked at apply, like (i)–(iii).
+> - **How it is read.** The walk that computes (iii) visits `e`'s counted target components through their registration records, which already give it each count (EK15b's cold sum, `:2546`).
+>   - The record also carries the type's `DESPAWN_AT_ZERO`, written once at registration from the `const`. So (iv) is an OR inside the same walk.
+>   - It adds no structure, and no instruction outside the command's cold apply.
+> - **Rejected:** "`Pinned` is valid only on opted-in targets" (EP4's second option). It needs a refusal at insert, and it still leaves a wrong despawn once the entity's components change after the pin.
+> - **Cost:** 0 on every path except the command's apply, which stays cold.
+> - **Rung:** D-E2, with case 7 of P4.2-§17. 02 §4.4's closing paragraph (`02:779`) and D-E2's case list (`02:318`) are patched by the Close stage.
+
+---
+
+## P4.2-§11: multithreading (EP4 O-a, W2′)
+
+**Removed (rev 4 P4-§11, `:3434`, parenthesis):**
+> (applied by the outermost drain at depth 0)
+
+**Added:**
+> (applied by the outermost drain inside its own bracket, after the queue that enqueued it has returned; P4.1-§17)
+
+This supersedes the last "depth 0" in the section that describes the depth model (EP4 O-a). Rev 4.1 already ruled where the two disagreed.
+
+**Removed (rev 4 P4-§11, `:3439`, last sentence):**
+> The access sets are the same (`M:…PHYSICS…:2484-2486`), so R1 and Main's asset writers still serialise on the group's column and recycle nodes.
+
+**Added:**
+> R1 holds `GroupHead` (every column id and the recycle node), and Main's asset writers hold `LoggedColumnMut` (the column, the edit-log node, and a read of the slot map). So they still serialise, on the column node (P4.2-EK6g). The edit-log node serialises Main's writers with R2's reader, as rev 3 required (`:2665`).
+
+---
+
+## P4.2-§12: rung cells (EP4 W2′, O-b)
+
+**Added (to AS2's gate cell, after P4.1-§12's addition at `:4099`):** fixtures 6–9 (P4.2-ED16).
+
+**Removed (rev 3 P-§12, K-EK6g row, `:2726`, fragment):**
+> a const-assert rejects `mark` on a group without `EDIT_LOG`;
+
+**Added:**
+> fixtures K1–K3 (E0271) and their green arm (P4.2-EK6g);
+
+**Added (rung map of rev 4.2):**
+> - **D-E2:** N1's witness and O-b's condition (iv) and case 7 (P4.2-§17, P4.2-§9). O-c puts D-E2 on the `ecs_master.rs` lock row (02 §4.3), for P4.1-ED5's refusal in `clear()`.
+> - **D-E7:** W2′'s kernel half (P4.2-EK6g; physics Erratum E4). Its prerequisites (D-E6, D-S3(iii); `02:196`) are unchanged.
+> - **AS2:** W2′'s render half (P4.2-ED16, ED5, §10). AS2 already waits for D-E7 (`02:523`), so the new param exists when AS2 cuts. 03's UG-17 rung list (`03:54`) does not name AS2, though rev 4.1 already gave AS2 five UG-17 fixtures; the Close stage adds it.
+> - No other rung's content changes. EP4's release of D-S3(iii), D-E1, D-E3–D-E6 and D-E8–D-E19 stands.
+
+---
+
+## P4.2-§17: validation (EP4 N1, O-b)
+
+**Removed (rev 4.1 P4.1-§17, `:4129-4130`):**
+> - **Sequence witness.** One system's `Commands` queue `despawn(E)` and then a closure command that appends `"returned"` to a test log. `Pinned`'s test `on_remove` hook appends `"unpinned"`. The log must read `["returned", "unpinned"]`: the removal ran in the drain, after `delete_entity_core` and the rest of the queue had returned. **Mutation:** performing the removal inside the redirect gives `["unpinned", "returned"]`, which is red.
+> - **Nothing of E's despawn ran.** A test `on_remove` hook on E's anchor `TA` and a despawn observer on E both record nothing. Inside the `"unpinned"` hook, `group_get(E)` returns E's bytes.
+
+**Added:**
+> - **The sequence witness observes `Pinned`'s removal with an observer, not a hook** (rev 4.2; EP4 N1).
+>   - **Why not a hook.** A component has one hook set, written once, for the whole process.
+>     - It comes from the derive or from the runtime builder, never both ([T] `component/hooks/builder.rs:10-25`). Its commit is a write-once set, and a second write panics (`:132-160`).
+>     - `register_component_hooks::<C>()` panics when `C` already has derive hooks ([T] `ecs_master/observer_api.rs:86-89`, `:104-106`).
+>     - `Pinned` owns its `on_remove`, for the pin edge (P4.1-§9). So a test hook on `Pinned` either panics at registration or, had it won the slot, would remove the pin edge from every world in the test binary, because hooks are process-global (`observer_api.rs:77-82`).
+>   - **Why an observer works.**
+>     - Observers are per-world and additive. `observe_on_remove::<Pinned>(runner)` ([T] `observer_api.rs:170-173`) adds to the world's registry, and a walk raises the archetype bit on existing archetypes, with no staleness panic (`:126-133`).
+>     - In a removal, the kernel fires the `on_remove` hook and then the `on_remove` observers, in the same window, before the value drops ([T] `commands/migration_helpers.rs:1464-1478`: "Observers fire in the same window as their matching hook (hooks first)").
+>     - So the pin edge has enqueued its `DespawnAtZeroCommand` before the observer runs, and the witness does not perturb it.
+>   - **The witness.**
+>     - One system's `Commands` queue `despawn(E)`, then a closure command that appends `"returned"` to a `TestLog` resource.
+>     - The observer on `Pinned` appends `"unpinned"` through `DeferredEcsMaster::resource_mut` ([T] `component/hooks/deferred_master.rs:103`).
+>     - The log must read `["returned", "unpinned"]`: the removal ran in the drain, after `delete_entity_core` and the rest of the queue had returned.
+>     - **Mutation:** performing the removal inside the redirect gives `["unpinned", "returned"]`, which is red.
+> - **Nothing of E's despawn ran.**
+>   - Two observers on E's anchor `TA` both record nothing: a `Despawn`-kind one (`add_observer(ObserverKind::Despawn, …)`, [T] `observer_api.rs:182-189`; `Despawn` fires first in a despawn, [T] `component/observers/mod.rs:79-83`) and an `on_remove` one.
+>     - These are observers for the same reason. `TA` carries `#[component(anchor_group = TG)]`, and whether that derive also takes `TA`'s hook set is the macro's business, not the test's.
+>   - Inside the `"unpinned"` observer, `is_alive(E)` and `get_component::<TA>(E).is_some()` both hold ([T] `deferred_master.rs:128`, `:81`). E is live and still anchored, so its slot has not left `live`.
+>     - The observer does not call `group_get`: a `DeferredEcsMaster` offers no group read ([T] `deferred_master.rs:81-133`), and the kernel does not gain one for a test.
+>   - After the drain, E is live and has no `Pinned`, and `group_get(E)` (physics P4-§9) returns E's bytes unchanged.
+
+**Removed (rev 4.1 P4.1-§17, `:4134`, case 3):**
+> 3. The reverse order, `[despawn(E), despawn(I)]` → E is dead, and E's despawn hooks ran exactly once.
+
+**Added:**
+> 3. The reverse order, `[despawn(E), despawn(I)]` → E is dead, and the `Despawn`-kind observer on `TA` recorded E exactly once.
+
+**Added (a seventh case, after `:4137`; EP4 O-b):**
+> 7. `remove::<Pinned>()` on a live E at count 0 whose counted target types all leave `DESPAWN_AT_ZERO` `false` → E is alive after 10 frames. The same holds for a pinned entity that has no counted target at all.
+
+**Removed (rev 4.1 P4.1-§17, `:4139`):**
+> **Mutations:** deleting the pin edge (`Pinned`'s `on_remove`) turns 1, 2 and 4 red; dropping the `Pinned` re-check from `DespawnAtZeroCommand` turns 5 red.
+
+**Added:**
+> **Mutations:** deleting the pin edge (`Pinned`'s `on_remove`) turns 1, 2 and 4 red; dropping the `Pinned` re-check from `DespawnAtZeroCommand` turns 5 red; dropping condition (iv) turns 7 red.
+
+**Removed (rev 4.1 P4.1-§17, `:4142`):**
+> - a despawn of a pinned asset with count > 0, issued from inside a hook: the `Pinned` removal still runs in the outermost drain, after the hook's own op has returned (the sequence witness, driven from a hook's deferred queue).
+
+**Added:**
+> - a despawn of a pinned asset with count > 0, issued from inside a hook: the `Pinned` removal still runs in the outermost drain, after the hook's own op has returned.
+>   - **The driver** is an `on_remove` hook on a test-only component `TDrive`. `TDrive` is a plain `#[derive(Component)]`, so its hook slot is free for the runtime builder ([T] `builder.rs:21-25`). The hook issues `despawn(E)` and the `"returned"` closure through `DeferredEcsMaster`'s command API (`commands()`, `add`; [T] `deferred_master.rs:148`, `:177`).
+>   - `"unpinned"` comes from the observer on `Pinned`, as above.
+
+---
+
+## P4.2-§18: open items (EP4 W2′, a finding while restating the invariant)
+
+**Added:**
+> - **O-14 (new; not verified against a device): the device row of a newly anchored `MaterialGroup` slot.**
+>   - The binder writes `MaterialColumn::DEAD` into a newly anchored slot: "The value is DEAD until installed" (`:1887`). That is a kernel write, so it is not in the edit log, as in rev 3 (P4.2-EK6g's invariant).
+>   - Rev 3 states that "a loading material draws as the default" (`:1901`). That holds only if the device row holds the DEAD bytes as well.
+>   - For textures, R2 rewrites every newly anchored slot (`Added<TextureAsset>`), and R1's release visitor re-nulls a released one (`:1903`). No text does either for materials.
+>   - So once a slot has been reused, a loading material may draw with its previous occupant's row until it is installed.
+>   - Two remedies are possible, for AS2 or RE6 to choose; neither is decided here:
+>     - R2 uploads the DEAD row for each `Added<MaterialAsset>` (the texture pattern, render-side, cold);
+>     - R1's material visitor writes the DEAD row at release.
+>   - It predates rev 4.2 and does not depend on it; rev 4.2's restatement of the invariant exposed it.
+
+---
+
+## Changelog: rev 4.1 → rev 4.2
+
+| EP4 | Change | Supersedes on this tree (left in place) | Sections | Plan (same-line; the Close stage applies them) | Rung |
+|---|---|---|---|---|---|
+| W2′ (a) | `type Edits: EditPolicy` (`Unlogged`/`Logged`) on `DenseGroup` replaces `const EDIT_LOG`. `DenseColumnMut`, `GroupHead::view` are bounded to `Unlogged`; `GroupEdits`/`GroupEditsMut` to `Logged` (E0271). `LoggedColumnMut<T>`, which marks on access, is a `Logged` group's only write route. Kernel fixtures K1–K3 and a green arm | `:2538` (fragment), `:2599-2600`, `:2726` (fragment), `:3439` (last sentence) | P4.2-EK6g, §11, §12; physics E4-1 | `01:173`, `01:99`, `02:196` | D-E7 |
+| W2′ (b) | The asset columns are private `#[repr(transparent)]` newtypes of the public values. `AssetGroupKind` gains `Column`, `value`, `value_mut`. `AssetRead`/`AssetWrite` sit on `DenseColumn`/`LoggedColumnMut<K::Column>`. `:3998` and `:4016` corrected. Fixtures 6–9 | `:3998` (last sentence), `:4016`, the `sealed` module at `:3982-3992`, `:1879-1881`, `:1897` (2nd sentence), `:1900-1902` (names), `:2505` (fragment), `:3016` (fragment), `:3022`, `:3028`, `:4044-4046` | P4.2-ED16, ED5, §10, §12 | `03:54` | AS2 |
+| N1 | The sequence witness and the "nothing ran" checks use observers; no test hook on `Pinned`; no in-hook `group_get` | `:4129-4130`, `:4134` (case 3's result), `:4142` | P4.2-§17 | `02:317`, `02:318` | D-E2 |
+| O-a | `:3434`'s "depth 0" superseded | `:3434` (parenthesis) | P4.2-§11 | — | — |
+| O-b | `DespawnAtZeroCommand` gains condition (iv), the opt-in; case 7; its mutation | `:3839`, `:4139` | P4.2-§9, §17 | `02:318`, `02:779` | D-E2 |
+| O-c | D-E2 on the `ecs_master.rs` lock row | — | P4.2-§12 | `02:689` | D-E2 |
+| O-d | D-E20–D-E23 join the EP3 exemptions | — | — | `00:171`, `02:183-185` | — |
+| — | O-14 opened (a finding, not an EP4 remark) | — | P4.2-§18 | — | AS2 or RE6 |
+
+## External sources (read 2026-09-24)
+
+- The Rust Reference, "Visibility and privacy": "By default, everything is *private*, with two exceptions: Associated items in a `pub` Trait are public by default; Enum variants in a `pub` enum are also public by default." <https://doc.rust-lang.org/reference/visibility-and-privacy.html>. Qualified paths, `<Type as Trait>::Item`: <https://doc.rust-lang.org/reference/paths.html#qualified-paths>
+- Rust error index:
+  - E0271, "A type mismatched an associated type of a trait": <https://doc.rust-lang.org/error_codes/E0271.html>
+  - E0277, "You tried to use a type which doesn't implement some trait in a place which expected that trait": <https://doc.rust-lang.org/error_codes/E0277.html>
+  - E0603 and E0446: as in rev 4.1's sources.
+- RFC 3477, "Cargo check lang policy": "`cargo check` should catch as many errors as possible, but the emphasis of `cargo check` is on giving a 'fast' answer rather than giving a 'complete' answer". <https://rust-lang.github.io/rfcs/3477-cargo-check-lang-policy.html>. The known case: rust-lang/rust#99682, "'cargo check' passes but 'cargo build' fails when there are errors during monomorphization", <https://github.com/rust-lang/rust/issues/99682>
+- rust-lang/rust#29661, the tracking issue for RFC 2532, "Associated type defaults": open and unstable, behind `#![feature(associated_type_defaults)]`. <https://github.com/rust-lang/rust/issues/29661>
+- Bevy `DetectChangesMut`: "Normally change detection is triggered by either `DerefMut` or `AsMut`, however it can be manually triggered via `set_changed`". `bypass_change_detection` is documented as "a risky operation". <https://docs.rs/bevy/latest/bevy/ecs/change_detection/trait.DetectChangesMut.html>
+- flecs, the change-tracking example: "iterating the query will write to the dirty state of iterated tables". <https://github.com/SanderMertens/flecs/blob/master/examples/cpp/queries/change_tracking/src/main.cpp>. The Query manual: <https://github.com/SanderMertens/flecs/blob/master/docs/Queries.md>
+
+# Status after rev 4.2 (2026-09-24) ⚠ *superseded by "Status after the rev-4.2 closure", at the end of the file*
+
+- **Rev 4.2 = the rev 2 body + the rev-3, rev-4, rev-4.1 and rev-4.2 patches.** Design only: no gate was run and no timing was taken.
+- **EP4 ran on 2026-09-24 and returned CHANGES_REQUESTED** (0 Critical, 2 Important, 4 Optional).
+  - Rev 4.2 resolves W2′ and N1 and adopts O-a–O-d. O-c and O-d are plan-only, and so are parts of W2′, N1 and O-b; their same-line patches are listed for the Close stage.
+  - Physics Erratum E4 records W2′'s kernel half.
+  - No remark needs an owner ruling.
+- **What waits on what.**
+  - EP4 released D-S3(iii), D-E1, D-E3–D-E6 and D-E8–D-E19, and rev 4.2 does not touch their content.
+  - D-E2 (N1, O-b), D-E7 (W2′'s kernel half) and AS2 (W2′'s render half) build on rev 4.2. A re-review scoped to the rev-4.2 delta and Erratum E4 can confirm them before those rungs cut. Whether EP4 counts as closed is the orchestrator's call.
+  - D-E0, D-E18, D-E19 and D-E20–D-E23 do not wait (P4.1-§12).
+- **Open items.** Q1–Q5 stay decided (rev 3). O-9 is closed (rev 4). O-11, O-12 and O-13 stay open. O-14 is new and open (P4.2-§18).
+- **Evidence.**
+  - This file, the physics design and the plan on `u/doc-3-4` @ `4db26681`.
+  - Code at [T] `4db26681`, read with read-only `git show` and `git grep`.
+  - External sources as listed.
+
+# Critique log - pass 5 (EP5, 2026-09-24)
+
+**Critic and scope.** The critic is `architecture-critic`, running a closure review of rev 4.2 and physics Erratum E4 against engine critique pass 4 (EP4). The unified plan calls it EP5.
+
+**What it read.** The design text in `D:/wt/docs` on `u/doc-3-4` (uncommitted, base `4db26681`), and the code in `D:/wt/docs/crates` at `4db26681`.
+
+**Verdict.** CHANGES_REQUESTED: 0 Critical, 1 Important (W1), 4 Optional (O1–O4), and two open questions.
+- It found every EP4 remark resolved: W2′ (a) and (b), N1, and O-a–O-d.
+- It released D-E2, and AS2 on content.
+- It held D-E7 on W1 alone. It also said that physics rung U5 must not build `SolverBodies` as physics `:555` describes it until W1 is settled.
+
+**How this log is laid out.** As in pass 4:
+- the architect's action for each remark comes first, in the table below;
+- the review follows, verbatim;
+- the actions are the rev-4.2 closure's, which is appended after this log.
+
+EP5's ids are a series of their own. Its W1 is not EP3's W1.
+
+## Architect's action per remark (rev 4.2 closure)
+
+Each remark was checked against the text before acting. None could be refuted.
+
+| EP5 | Checked against the text | Action | Where | Plan (same-line; applied in this step) | Rung |
+|---|---|---|---|---|---|
+| W1 (Important) | CONFIRMED.<br>• Physics `:555` builds `SolverBodies` from `TypedDenseView` over `BodyInertia`.<br>• S5 holds only `DenseColumn<BodyInertia>` (`:404`).<br>• E4-1 says `DenseColumn` never yields a view (`:4193`), so S5 has no route.<br>The deciding physics fact: S5 only **reads** `BodyInertia` (`local_inv`, physics `:362`). The world inertia it refreshes each substep is `BodyVel::inv_inertia_world` (`:340`), which S5 already writes | FIX. `DenseColumn` is read-only **by structure**, with a gate:<br>• its only data is a `&'w [T]`;<br>• its accessors return shared references;<br>• ~~no impl of it names `*mut`, `&mut` or `TypedDenseView`~~ ⚠ *2026-09-24, reconcile: EP6 O1 (plan 02 `:175`): no `SystemParam` impl can pass that, because the census reads it and it must spell `&mut`. The gate is C-1's (r0)–(r3), with (r1) read as "no fn of it, inherent `pub` or in any trait impl, returns a type that contains `*mut`, `&mut`, `TypedDenseView`, `NonNull`, `Cell` or `UnsafeCell`"*.<br>`SolverBodies` holds `TypedDenseView`s for the three columns S5 writes and a `&'a [BodyInertia]` for the one it reads.<br>A census with two red controls lands where `DenseColumn` is built (D-S3(ii)), and D-E7 re-runs it. D-S3(ii) is bound by it. "What physics sees: nothing" is corrected | C-1; physics E4-2 | 02 D-S3(ii), D-E7, the U5 DAG row; 01 KC-12 | D-S3(ii) (census), U5 (`SolverBodies`), D-E7 (re-run) |
+| O1 | CONFIRMED | ADOPTED. The green arm runs a scheduled system that holds `GroupHead<'_, LG>` and calls `live_count()` and `release_dying_before` | C-2 | 02 D-E7 | D-E7 |
+| O2 | CONFIRMED against the kernel: an intra-system conflict panics at `init_access` with B0002 | ADOPTED.<br>• The one-log-param rule is stated.<br>• EK21 holds one of the two params, never both.<br>• A tuple write param is deferred to the first multi-column `Logged` group (O-15) | C-3 | 01 KC-23 | D-E7 |
+| O3 | CONFIRMED: O-14 had no owner | ADOPTED, in EP5's direction. The binder marks the edit log when it DEAD-fills a newly anchored slot of a `Logged` group.<br>• The invariant loses its anchor-time exception.<br>• O-14 is closed for every `Logged` group.<br>• The owner is D-E7, which gets a red-first case | C-4; physics E4-3 | 02 D-E7; 01 KC-12 | D-E7 |
+| O4 | CONFIRMED | ADOPTED. The recycled-index case is added, and the entity lookup's generation check is stated as a requirement | C-2 | 02 D-E7 | D-E7 |
+| Question: "closure command" | CONFIRMED: no blanket `impl Command for FnOnce` ([T] `commands/command.rs:53-56`; `system/params/commands.rs:126`) | Wording fixed: the witness uses a test `Command` struct | C-5 | 02 D-E2 | D-E2 |
+| Question: `TDrive` | CONFIRMED ([T] `ecs_master/observer_api.rs:88`, `:119`) | Stated: the `TDrive` case is its own integration-test binary, which registers the hook before any spawn | C-5 | 02 D-E2 | D-E2 |
+
+The review follows verbatim.
+
+VERDICT: CHANGES_REQUESTED; CRITICAL=0; IMPORTANT=1
+
+**Rungs this pass releases**
+- **D-E2: released.** N1 is closed and O-a, O-b and O-c are resolved.
+- **AS2: released on content.** W2′'s render half is closed and fixtures 6–9 are sound. The DAG still puts AS2 after D-E7 (`02:487`).
+- **D-E7: waits for W1.** Everything else in P4.2-EK6g is approved. W1 needs only a text fix plus the gate that goes with it.
+- **U5** (a physics rung, outside EP scope) must not build `SolverBodies` as physics `:555` describes it until W1 is settled.
+- **Stand unchanged:** EP4's release of D-S3(iii), D-E1, D-E3–D-E6 and D-E8–D-E19. D-S3(ii) is affected only if the `DenseColumn` it builds hands out a `TypedDenseView`.
+
+# Architecture review EP5: engine rev 4.2 and physics Erratum E4, checked against EP4
+
+Paths: engine = `D:/wt/docs/docs/unification/ENGINE-RUNTIME-ECS-DESIGN.md`, physics = `D:/wt/docs/docs/physics/PHYSICS-ECS-UNIFICATION-DESIGN.md`. Code was read at `D:/wt/docs/crates` (`4db26681`). I read the design text directly; I did not run the git diff.
+
+| EP4 remark | Status | Where resolved |
+|---|---|---|
+| W2′ (a), kernel | ✅ RESOLVED | engine :4376-4405, :4416-4423, :4433-4443; physics :4174-4191 |
+| W2′ (b), naming | ✅ RESOLVED | engine :4476-4528, :4586-4591 |
+| N1 | ✅ RESOLVED | engine :4660-4702 |
+| O-a | ✅ | engine :4619-4625 |
+| O-b | ✅ | engine :4598-4613, :4687-4694 |
+| O-c, O-d | ✅ (plan-only, via patches P4, P5, P6) | doc3.md |
+
+## Trying to build an unlogged write into a `Logged` column
+
+I tried every route the brief lists. Only one is still open, and it is W1.
+1. **Projection through `Value`.** `<Material as GpuAssetKind>::Value` is no longer a `GroupColumn` (:4505), so all three projection routes fail with E0277.
+2. **Through `SystemParam::State`.** `<AssetWrite<'static, Material> as SystemParam>::State` does resolve, to `sealed::AssetWriteState<Material>`. Its fields are private (:3991, :3997). Even a reconstructed `LoggedColumnMut<MaterialColumn>` would still mark the log.
+3. **Deref.** None of `AssetRead`, `AssetWrite`, `LoggedColumnMut` or `GroupHead` declares `Deref`. `get_mut` returns `&mut K::Value` through `value_mut` (:4563).
+4. **A generic fn bound.** Struct bounds are not implied for fn parameters, so `fn f<T: GroupColumn>(_: DenseColumnMut<'_, T>)` has to repeat `Edits = Unlogged`. The `SystemParam` impl repeats the bound too (:4410). So no value can be obtained even in positions where rustc skips the well-formedness check (type aliases).
+5. **`GroupHead`'s other methods** (`open_chain` for `Chained`, `release_dying_before` for `Stamped` with `visit(slot)`, `live_count`) hand out no column bytes (physics :4095-4097, :3841-3845).
+6. **`GroupRef` and `group_get`** return `&T` only (physics :2757-2758).
+7. **Serde** excludes group columns from save, and load re-inserts DEAD (physics :1704).
+8. **A hand-written `unsafe impl GroupColumn`** whose `column_id()` returns a `Logged` column's id breaks the id-block contract (physics :2752-2754). It is not a route that honours its contract.
+
+**Cost on `Unlogged` groups:** zero. Every bound is resolved at type check, and the bodies are unchanged. The one physics impact is W1.
+
+**Fixtures:**
+- K1–K3 fail on the `Edits` projection (E0271). That is the right reason, and they are declared in the defining crate.
+- 6–8 fail with E0277 on `Material: GroupColumn`.
+- 9 fails with E0603.
+- If (b) regressed, 6 and 8 would compile and 7 would change to E0271. So every one of them goes red on a regression.
+
+## 🟡 Important
+
+#### W1. E4-1's "`DenseColumn` is read-only" contradicts the physics solver seam, and the rule that closes the third route has no gate
+- **Where:**
+  - physics :4193 ("never a `TypedDenseView` … S2–S4 and S6 read through it") and :4202-4205 ("What physics sees: nothing").
+  - These are contradicted by:
+    - physics :555: `SolverBodies<'a> { /* TypedDenseView over BodyVel, BodyPose, BodyInertia, BodyGate */ }`;
+    - :404 and :1629: S5 keeps `DenseColumn<BodyInertia>`, a read param.
+  - The :4193 list covers `:401-406` but skips S5, the one reader that feeds a `TypedDenseView`.
+- **Problem:** under E4-1, S5 has no stated way to get `TypedDenseView<BodyInertia>` from its declared params. Physics cannot call `TypedDenseView`'s constructor, which is not public.
+- **Consequence:** at U5, `physics_solve` cannot build `SolverBodies` as :555 specifies. The cheapest local fix is a `DenseColumn::view()` or a public `TypedDenseView` constructor, and that reopens W2′'s class:
+  - `DenseColumn` has no `Edits` bound, and `AssetRead` is `DenseColumn<K::Column>` (engine :4588).
+  - So `boyko_render` would get a `*mut` into a `Logged` column through a read param. That write skips the log, and the scheduler sees it as a read.
+  - No UG-17 fixture covers `DenseColumn`. K1–K3 test `DenseColumnMut`, `view` and `GroupEdits`; fixtures 6–9 test naming. AS2's and D-E7's gates would stay green.
+- **Confidence:** CONFIRMED from the text lines above. Grep finds no `SolverBodies` or `TypedDenseView` under `crates/`, so nothing is built yet.
+- **What is needed:**
+  - State how S5 passes its read-only columns to the solver without a `*mut`. Directions include a shared slice, a read-only view type, or declaring a write; the choice is yours.
+  - Correct "What physics sees: nothing".
+  - Give the `DenseColumn` read-only property a gate and a rung. It is load-bearing for the W2′ closure (engine :4413), but today it is one sentence.
+  - Say whether D-S3(ii), which builds `DenseColumn`, is bound by it.
+
+## 🟢 Optional
+
+- **O1. D-E7's green arm does not pin `GroupHead<'_, LG>` as nameable** (engine :4438-4441).
+  - R1 depends on the method-level placement (:4409). A struct-level bound would still pass K2 once its `.stderr` is blessed, and the break would only show at AS2, on another lane.
+  - Add `GroupHead<'_, LG>` to the green arm, for example calling `release_dying_before` on it.
+  - CONFIRMED.
+- **O2. `LoggedColumnMut`'s write on the log node makes it exclusive within one system.**
+  - The kernel panics at init on conflicting access between two params of one system (`filtered_access_set.rs:1-2`; `function_system.rs:257-259`).
+  - So `LoggedColumnMut` cannot share a system with `GroupEditsMut`, `GroupEdits`, or a second `LoggedColumnMut` over another column of the same group.
+  - :4414 offers `GroupEditsMut` to EK21, while :4423 has EK21 write through `LoggedColumnMut`. A system holding both panics at schedule build.
+  - A future `Logged` group with more than one column could not write two columns from one system.
+  - State the rule. PLAUSIBLE: EK21's exact param set is not written down.
+- **O3. O-14 has two candidate owners and no plan row** (engine :4714; no patch touches the AS2 or RE6 row). Name the owner and its red-first test. One direction to weigh: log the binder's anchor-time DEAD fill for `Logged` groups. That would remove the one exception to the invariant (:4417-4419) and fix O-14 for every `Logged` group, not just materials.
+- **O4. The `get_mut` green arm (:4441) misses the recycled-index case.**
+  - It covers a despawned entity, but not a stale `Entity` whose index a newly anchored entity of the same group has reused.
+  - A slot map without a generation check passes the arm as written, and then edits the wrong asset.
+  - Add that case.
+
+## Positive (keep these)
+
+- **(a) is a type-level refusal in the kernel,** so it also covers the crate that declares the group. The const-assert was rightly rejected for `cargo check` reasons (RFC 3477, rust#99682).
+- **Pinning E0277 rather than E0271** on fixture 7 makes it tell which of the two closures fired.
+- **`AssetWrite` no longer sits on `GroupHead`,** which is a single-claim param per world (physics :2731, :2776). This removes a second claim next to R1's, and Main writers now declare less access.
+- **Condition (iv) builds on the kernel as it is.** Emptied target collections are kept (`relationship/mod.rs:692-693`, "No remove-on-empty"), so the walk finds the count at 0. It also restores :3863's rule that an asset nobody ever linked is not despawned.
+- **N1 was verified against the code:**
+  - `RemoveCommand` reaches `migrate_entity_remove` (`remove_command.rs:121`), which runs the hook and then the observers (`migration_helpers.rs:1473-1478`).
+  - The observer is a fn pointer that writes through `resource_mut` straight away (`deferred_master.rs:103`; `observers/mod.rs:98`).
+  - FIFO drain order gives `["returned","unpinned"]`, and the mutant gives the reverse.
+  - `TA`'s observers avoid the hook-slot problem that the derive creates.
+
+## Open questions
+
+- **"Closure command":** the kernel has no blanket `impl Command for FnOnce` (`command.rs:53-56`; `Commands::add<C: Command>` at `commands.rs:126`). The witness therefore needs a small test `Command` struct. This is buildable; it is just a wording fix.
+- **`TDrive`:** hooks are process-global, and `register_component_hooks` panics if `TDrive` has already been placed in an archetype of any world in the process (`observer_api.rs:88-89`, `:119-121`). So only one test may use `TDrive`, or registration has to happen once before any spawn. Does D-E2 want that stated?
+
+# Rev 4.2 closure (EP5, 2026-09-24)
+
+## How to read the closure
+
+- **What it is.** The closure is part of rev 4.2. It answers EP5, whose log precedes it: one Important remark (W1), four Optional ones (O1–O4) and two open questions. Where the closure and earlier rev-4.2 text disagree, the closure rules.
+- **Physics.** W1 and O3 change K3 text, which the physics design owns. They land there as Erratum E4's closure items, E4-2 and E4-3.
+- **Convention: no line moves.** Every rev-4.2 passage the closure supersedes is named by its line and left in place. Only three lines are edited in place: the header's `:4` and `:7`, and rev 4.2's status heading (`:4746`), which gains a pointer to the status after the closure.
+- **Plan edits.** Unlike DOC-3, this Close step applies the plan's same-line patches itself. Each carries the plan's `⚠ *2026-09-24 …*` marker. The list is at the end.
+- **Trees and scope.** As in P4.2: line numbers are on `u/doc-3-4`, and code is cited on [T] = `4db26681`. Nothing was compiled, built, run or timed. The UG-17 `.stderr` files and the census named below are the checks, at their rungs. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in the closure's text now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
+
+---
+
+## C-1: `DenseColumn` is read-only by structure; `SolverBodies` reads through a shared slice (EP5 W1)
+
+**Supersedes (left in place).**
+- P4.2-EK6g's bullet at `:4413`, "`DenseColumn` (read) hands out shared references only … So a read param is not a third write route". The claim stands; its basis changes from one sentence to a structure with a gate.
+- Physics `:555` (`SolverBodies`), `:4193` (E4-1's "Also stated") and `:4202-4205` ("What physics sees: nothing"). Physics E4-2 carries those changes.
+
+**The defect, confirmed.**
+- Physics `:555` has `SolverBodies` built from `TypedDenseView`s over `BodyVel`, `BodyPose`, `BodyInertia` and `BodyGate`.
+- S5 declares `DenseColumn<BodyInertia>`, a read param (physics `:404`, `:1629`).
+- E4-1 says `DenseColumn` never hands out a `TypedDenseView`, and its list of readers skips S5 (physics `:4193`).
+- So S5 has no stated way to build `SolverBodies`. The cheapest local fix, a `DenseColumn::view()`, would give `boyko_render` a `*mut` into a `Logged` column through `AssetRead`, which is `DenseColumn<K::Column>` (`:4588`). That is W2′'s class again, and nothing gates it.
+
+**The physics fact that decides the fix.** S5 does not write `BodyInertia`.
+- `BodyInertia` is `{ local_inv: Mat3 }`, recomputed only on a collider or mass change, or on the first fill (physics `:303`, `:362`).
+- The world inertia that the solve refreshes each substep is `BodyVel::inv_inertia_world` (physics `:340`). S5 writes that column through `DenseColumnMut<BodyVel>`.
+- Today's kernel matches: `refresh_inertia(bodies_eff: &mut [BodyEffective], snapshot: &[BodyState])` ([T] `crates/boyko_physics/src/solver/simd.rs:122`) writes the effective body and reads the rest. The coloured solve calls it inside the step ([T] `solver/colored.rs:3990`).
+
+**Options weighed.**
+- **(i) Declare a write:** S5 takes `DenseColumnMut<BodyInertia>`. **Rejected.** S5 never writes the column. A false write would serialise S5 against every other reader of `BodyInertia`, and the scheduler's graph would no longer describe what runs.
+- **(ii) A read-only view type**, such as a `TypedReadView<'_, T>` whose accessor returns `*const T`. **Rejected.** It is a second view type for a job a shared slice already does, and it keeps `unsafe` on a path that needs none.
+- **(iii) A shared slice. Chosen.** `DenseColumn::as_slice()` returns `&[T]`, and `SolverBodies` holds `&'a [BodyInertia]`.
+  - A read is exactly what S5 does with the column.
+  - **Cost: 0.** A slice is a pointer and a length, as the view is. A solver lane indexes it under the bound it already proves for `row_ptr` (`slot < slot_bound ≤ len`), and may use `get_unchecked` with a `// SAFETY:` comment where a bounds check is measured to matter.
+
+**The form** (K3; physics E4-2 records it):
+```rust
+// boyko_ecs — K3 (rev 4.2 closure)
+pub struct DenseColumn<'w, T: GroupColumn> { col: &'w [T] }   // SystemParam, read. The shared slice is its only data
+impl<T: GroupColumn> DenseColumn<'_, T> {
+    pub fn as_slice(&self) -> &[T];                // length = the high-water mark (live + dying + free) = DenseColumnMut::len
+    pub fn get(&self, slot: u32) -> Option<&T>;
+    pub fn len(&self) -> usize;
+}
+```
+
+**Why a shared reference into a column cannot write.**
+- `GroupColumn` requires `Copy` (physics `:2752`).
+- Every field of a `Copy` type must be `Copy`; otherwise it is E0204, "The `Copy` trait was implemented on a type which contains a field that doesn't implement the `Copy` trait".
+- `UnsafeCell` implements neither `Copy` nor `Sync` (std docs).
+- The Reference makes `UnsafeCell` the only way to mutate through a shared reference: "`std::cell::UnsafeCell<T>` type is the only allowed way to disable this requirement".
+
+So no column type contains an `UnsafeCell`, and a `&T` into a column is read-only by the language, not by convention. A write through a pointer derived from `DenseColumn`'s slice would be undefined behaviour, which UG-08's Tree Borrows leg reports; UG-08 runs on D-S3(ii) (03 §2).
+
+**Gate: the `DenseColumn` read-only census.**
+- **What it is.** A `syn` test in `boyko_ecs`'s tests, in the form of the path-keyed censuses that UG-18 already runs. It reads the struct `DenseColumn` and every `impl` block whose self type is `DenseColumn`, for any trait, `SystemParam` included.
+- **Rules:**
+  - **(r0)** The struct has exactly one field that is not zero-sized, and its type is `&'w [T]`.
+  - **(r1)** No ~~`pub` fn of it~~ fn of it, inherent `pub` or in any trait impl, returns a type that contains `*mut`, `&mut`, `TypedDenseView`, `NonNull`, `Cell` or `UnsafeCell`. ⚠ *2026-09-24, reconcile: EP6 O1 (plan 02 `:175`): "`pub` fn" never matches a trait impl's fns, which the census reads too (`SystemParam` included), so (r1) names both; a `&mut` parameter is not refused, because `init_state`, `init_access` and `get_param` must spell `&mut`.*
+  - **(r2)** It implements none of `DerefMut`, `AsMut`, `BorrowMut` and `IndexMut`.
+  - **(r3)** The tokens `from_raw_parts_mut`, `as_mut_ptr`, `cast_mut` and `*mut` appear in none of its impl blocks. The one `unsafe` block that `get_param` needs builds the slice with `core::slice::from_raw_parts`.
+- **Anti-vacuity.** The census must find the struct, at least one impl block, and `as_slice`. Finding zero of any of them is RED.
+- **Red controls.** Each runs in a control branch, and passes only if its reported reasons **equal** the expected set:
+  - **(c1)** add `pub fn view(&self) -> TypedDenseView<'_, T>` → exactly {r1};
+  - **(c2)** add `pub fn as_mut_slice(&self) -> &mut [T]`, built with `from_raw_parts_mut` → exactly {r1, r3}.
+- **Green arm.** In one schedule, a system holding `DenseColumn<'_, UCol>` reads `as_slice().len()`, and a second system holding `DenseColumnMut<'_, UCol>` reads `len()`. The two are equal. They are two systems because, in one system, the two params conflict on the column node, which is B0002 at `init_access`.
+
+**Rung: D-S3(ii), which is bound by this** (EP5's last question).
+- The property is not about edit logs. A `*mut T` from a read param is an **undeclared write**: the scheduler runs it beside the column's other readers, which is a data race whatever the group's edit policy.
+- So read-only-ness is a soundness property of K3's access model from the rung that builds `DenseColumn`. That rung is D-S3(ii): its touch set holds `system/params/**` (`02:168`), and K3's params are part of it (physics `:480`).
+- D-S3(ii)'s content does not change: physics rev 2 §9 never gave `DenseColumn` a view (`:523`). The rung gains the census as a red-first test.
+- D-E7 touches `system/params/**` again, so it re-runs the census.
+- U5 builds `SolverBodies` in E4-2's form.
+- EP5 said D-S3(ii) "is affected only if the `DenseColumn` it builds hands out a `TypedDenseView`". The census makes that condition checkable, and D-S3(ii) meets it by construction.
+
+---
+
+## C-2: D-E7's green arm, restated (EP5 O1, O4)
+
+**Supersedes (left in place):** P4.2-EK6g's green arm (`:4438-4441`).
+
+**Green arm (anti-vacuity), in full.** The test crate declares `LG` with the `edit_log` option and `type Release = Stamped`, as the asset groups are, and `UG` without the option.
+- **(g1)** `LoggedColumnMut<'_, LCol>::get_mut(e)` edits a value, and e's slot appears in the next window that `GroupEdits<LG>` reads. *(Unchanged.)*
+- **(g2)** `DenseColumnMut<'_, UCol>` and `GroupHead<'_, UG>::view::<UCol>()` compile. *(Unchanged.)*
+- **(g3, O1)** A system whose params include `GroupHead<'_, LG>` is added to a schedule and runs. It calls `live_count()` and `release_dying_before(&key, horizon, |_| {})`.
+  - This pins R1's form, a `GroupHead` over a `Logged` group, as nameable and usable.
+  - If the `Unlogged` bound drifted from the method (`:4409`) to the struct, the break would be red here, on D-E7's own lane, and not first at AS2.
+- **(g4)** `get_mut` on a despawned or never-anchored entity returns `None` and marks nothing. *(Unchanged.)* ⚠ *2026-09-24, doc fix-up W2: EP6 O2 (plan 02 `:215`) recomposes this "marks nothing" clause the way it recomposes (g6)'s precondition (`:5039`), because after C-4 the binder's own mark on a newly anchored slot can make the clause unobservable. Plan 02 `:215` is the statement D-E7 builds from (02 `:196`).*
+- **(g5, O4) Recycled index.**
+  - Anchor `e1` in `LG`, despawn it, and release its slot.
+  - Spawn `e2` so that it reuses `e1`'s index; the test asserts the same index and a different generation. Anchor `e2` in `LG`.
+  - Then `get_mut(e1)` returns `None` and marks nothing, and `get_mut(e2)` edits `e2`'s slot. ⚠ *2026-09-24, doc fix-up W2: EP6 O2 (plan 02 `:215`): after C-4 the binder marks `e2`'s slot when `e2` is anchored, so in a window that spans that anchor "marks nothing" is unobservable. The clause is recomposed the way (g6)'s precondition is (`:5039`).*
+  - **Requirement:** `LoggedColumnMut`'s lookup checks `e`'s generation, as `is_alive` does, before it reads the slot map. A slot map keyed by index alone fails (g5).
+- **(g6, O3) Slot reuse** is C-4's red-first case.
+- The C-1 census is re-run.
+
+The error codes for K1–K3 are unchanged.
+
+---
+
+## C-3: one log-node param per `Logged` group per system (EP5 O2)
+
+**Added to P4.2-EK6g.**
+- **The rule.** For each `Logged` group G, one system holds at most one param that touches G's log node:
+  - a `LoggedColumnMut` over one column of G, which writes the log node;
+  - `GroupEditsMut<G>`, which writes it;
+  - `GroupEdits<G>`, which reads it.
+- **Why.** Any two of these conflict on the log node (write/write or write/read). The kernel refuses an intra-system conflict when the params are initialised: "sibling `SystemParam`s reject conflicting access at registration time" ([T] `system/filtered_access_set.rs:1-2`; `system/function_system.rs:257-259`). The refusal is the B0002 panic ([T] `system/params/diagnostics.rs:64`). So the rule fails loudly at schedule build, never silently.
+- **EK21** holds one of the two params, never both. It holds `LoggedColumnMut` if it writes the column (`:4423`), and `GroupEditsMut` if it only asks for a re-upload. `:4414`'s "which EK21's re-stage can use" reads as that alternative.
+- **The asset groups** have one column each (P4.2-ED5), so every asset writer needs exactly one param.
+- **Open item O-15 (new, deferred): multi-column `Logged` groups.** Such a group could not write two of its columns from one system through two `LoggedColumnMut`s. The kernel form for that case is a tuple param, `LoggedColumnsMut<(A, B, …)>`, with one log-node write and one mark per slot. It lands with the first multi-column `Logged` group, and no plan rung creates one today.
+- **Across systems, nothing changes:** the scheduler serialises writers and readers of the log node, as rev 3 required (`:2665`).
+
+---
+
+## C-4: the binder logs the anchor-time DEAD fill of a `Logged` group; O-14 is closed (EP5 O3)
+
+**Supersedes (left in place):**
+- P4.2-EK6g's invariant, `:4417-4421` (the anchor-time exception);
+- P4.2-§18's O-14 (`:4709-4717`): its two render-side remedies are not taken.
+
+**The mechanism.**
+- When the binder's `anchor_transition` inserts a slot into a group, it DEAD-fills the slot (physics `:1377-1378`). For a `Logged` group, it now also marks that slot in the group's edit log.
+- The erased path cannot see `G`, as KC-12's `release` byte already shows (`01:99`). So `DenseGroupStore` gains a `logged: bool` (1 B). It is written once at `ensure_group` from `<G::Edits as EditPolicy>::LOGGED`, and read only inside the `#[cold] #[inline(never)]` `anchor_transition`.
+- **The record's tick** is the world's current change tick at the structural apply. The binder runs only in an `EcsMaster` structural call, so no system is in flight. Ticks are monotone across schedules, so EK6g's non-decreasing append order (`:2445`, `:2665`) holds.
+- **Cost.**
+  - One byte compare inside the cold transition. That is 0 on every op whose anchor mask is unchanged, the same price as the `release` byte (`01:99`).
+  - One append for each newly anchored slot of a `Logged` group, which happens at an asset spawn.
+  - An `Unlogged` group, such as `PhysicsBody`, pays the compare and nothing else.
+- **The DEAD fill at release stays unlogged.**
+  - The slot becomes `free`, and no entity maps to a free slot.
+  - The slot's next occupant is logged when the binder anchors it, so a stale device row is never read.
+
+**The kernel invariant, restated** (supersedes `:4416-4421`).
+- Every write to a `Logged` group's column is in the edit log, with one exception: the DEAD fill of a released slot, which leaves the slot `free`.
+- Writes by system params and `EcsMaster` APIs go through `LoggedColumnMut::get_mut` (P4.2-EK6g). The binder's anchor-time DEAD fill is marked by the binder.
+
+**O-14: CLOSED, for every `Logged` group, not only materials.**
+- A newly anchored material slot is in R2's next window, and R2 uploads its current bytes, which are `MaterialColumn::DEAD`.
+- So rev 3's "a loading material draws as the default" (`:1901`) holds after slot reuse.
+- Textures keep their own descriptor rule (`:1903`), which this does not change.
+
+**Owner: D-E7**, where EK6g's log lands.
+- **Red-first case (g6):** ⚠ *2026-09-24, doc fix-up W2: EP6 O2 (plan 02 `:215`): (g6) also states and asserts its precondition, that a window read after the release and before `e2` is anchored, at a tick above the install's tick, does not contain the slot. Without it the mutation below survives (`:5043`).*
+  - Anchor `e1` in `LG` and install a value through `LoggedColumnMut`. Read the window.
+  - Despawn `e1` and release its slot, which for a `Stamped` group means `release_dying_before` after the horizon.
+  - Anchor `e2`, and assert it got the same slot. Then the next `GroupEdits<LG>` window contains that slot, and the column holds `LCol::DEAD` there.
+  - **Mutation:** deleting the binder's mark turns (g6) red. ⚠ *2026-09-24, doc fix-up W2: EP6 O2 (plan 02 `:215`): only with (g6)'s precondition asserted (`:5039`). The edit-log window is `[last_run, this_run]` inclusive and marks are deduplicated per tick. So when the installing writer and the reader run in one schedule run, or under `run_system_once`, which never bumps the tick, the post-anchor window holds the slot whether or not the binder marks it, and this mutation stays green.*
+- **The device side.** RE6's existing red-first test, "a material edit after boot reaches the GPU" (`:2712`), covers R2 uploading what the log names. No render rung gains a remedy.
+
+---
+
+## C-5: D-E2's witness, wording (EP5 open questions)
+
+**Supersedes (left in place):** P4.2-§17's "a closure command" (`:4670`) and "the `"returned"` closure" (`:4701`).
+
+- **The `"returned"` step is a test `Command`, not a closure.**
+  - The kernel has no blanket `impl Command for FnOnce`. `Command` is a trait with one `apply(self, &mut EcsMaster)` ([T] `commands/command.rs:53-56`). `Commands::add<C: Command>` ([T] `system/params/commands.rs:126`) and `DeferredEcsMaster::add<C: Command>` ([T] `component/hooks/deferred_master.rs:177`) take any implementor.
+  - So the witness uses a small test struct, `AppendLog(&'static str)`, whose `apply` pushes to `TestLog`.
+  - The observable, `["returned", "unpinned"]`, and its mutation are unchanged.
+- **`TDrive` lives in its own integration-test binary.**
+  - Hooks are process-global. `register_component_hooks` panics once the type "was ever placed in a live archetype of ANY world in this process" ([T] `ecs_master/observer_api.rs:88`; the check is at `:119`).
+  - So the hook-driven case is the only test in its binary, and it calls `register_component_hooks::<TDrive>()` before its first spawn of `TDrive`.
+  - One binary per case makes the order independent of the test harness's threads. The observer-based cases need no such care, because observers are per-world.
+
+---
+
+## Changelog: the rev-4.2 closure
+
+| EP5 | Change | Supersedes on this tree (left in place) | Sections | Plan (same-line, applied in this step) | Rung |
+|---|---|---|---|---|---|
+| W1 | `DenseColumn` holds a `&'w [T]` only and hands out shared references. `SolverBodies` holds `&'a [BodyInertia]`. There is a read-only census with (c1) and (c2). D-S3(ii) is bound by it | `:4413` (its basis); physics `:555`, `:4193`, `:4202-4205` | C-1; physics E4-2 | `02:168` (D-S3(ii)), `02:196` (D-E7), `02:485` (U5), `01:99` (KC-12) | D-S3(ii), U5, D-E7 |
+| O1, O4 | Green arm (g3) (`GroupHead<'_, LG>` is scheduled) and (g5) (recycled index; generation check) | `:4438-4441` | C-2 | `02:196` | D-E7 |
+| O2 | One log-node param per `Logged` group per system (B0002). EK21 holds one of the two. O-15 is opened | — (added); `:4414` read as an alternative | C-3 | `01:173` (KC-23) | D-E7 |
+| O3 | The binder marks the anchor-time DEAD fill of a `Logged` group, through a `logged` byte read only in `anchor_transition`. The invariant is restated and O-14 is closed. Red-first (g6) | `:4416-4421`, `:4709-4717` | C-4; physics E4-3 | `02:196`, `01:99`, `01:173` | D-E7 |
+| Question: closure command | A test `Command` struct | `:4670`, `:4701` (wording) | C-5 | `02:317` | D-E2 |
+| Question: `TDrive` | Its own test binary, with registration before the first spawn | — (added) | C-5 | `02:318` | D-E2 |
+
+## External sources (read 2026-09-24)
+
+- The Rust Reference, "Interior mutability": "`std::cell::UnsafeCell<T>` type is the only allowed way to disable this requirement." <https://doc.rust-lang.org/reference/interior-mutability.html>
+- Rust error index, E0204: "The `Copy` trait was implemented on a type which contains a field that doesn't implement the `Copy` trait." <https://doc.rust-lang.org/error_codes/E0204.html>
+- `std::cell::UnsafeCell`: the trait implementations list `!Sync` and no `Copy`. <https://doc.rust-lang.org/std/cell/struct.UnsafeCell.html>
+- E0271, E0277, E0603, RFC 3477 and rust#99682: as in rev 4.2's sources.
+
+# Status after the rev-4.2 closure (2026-09-24)
+
+- **Rev 4.2 = the rev 2 body + the rev-3, rev-4, rev-4.1 and rev-4.2 patches, with the rev-4.2 closure.** Design only: no gate was run and no timing was taken.
+- **EP5 ran on 2026-09-24 and returned CHANGES_REQUESTED** (0 Critical, 1 Important, 4 Optional, 2 open questions).
+  - The closure resolves W1, adopts O1–O4, and answers both questions. Physics Erratum E4's closure (E4-2, E4-3) carries the physics half.
+  - No remark needs an owner ruling.
+- **What waits on what.**
+  - **Released by EP4** and untouched since: D-S3(iii), D-E1, D-E3–D-E6 and D-E8–D-E19.
+  - **Released by EP5:** D-E2, and AS2 on content. The DAG still puts AS2 after D-E7 (`02:523`). The closure changes only D-E2's wording (C-5).
+  - **D-E7 was held by EP5 on W1 alone.** C-1 supplies both the text fix and the gate that EP5 asked for, and C-2–C-4 add D-E7 content that EP5 proposed. Releasing D-E7 on this closure is the orchestrator's call; a re-review scoped to C-1–C-4 and E4-2/E4-3 is the conservative route.
+  - **D-S3(ii)** is bound by C-1 and gains the census as a red-first test. Its other content is unchanged.
+  - **U5** builds `SolverBodies` in physics E4-2's form.
+  - D-E0, D-E18, D-E19 and D-E20–D-E23 do not wait (P4.1-§12).
+- **Open items.**
+  - Q1–Q5 stay decided (rev 3). O-9 is closed (rev 4).
+  - O-11, O-12 and O-13 stay open.
+  - O-14 is closed (C-4).
+  - O-15 is new, open and deferred (C-3).
+- **Evidence.**
+  - This file, the physics design and the plan on `u/doc-3-4` @ `4db26681`. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in this status block now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
+  - Code at [T] `4db26681`, read read-only.
+  - External sources as listed here and in rev 4.2.

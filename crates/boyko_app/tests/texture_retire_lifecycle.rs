@@ -257,7 +257,7 @@ fn drive_lifecycle(
 }
 
 #[test]
-#[ignore = "needs a real windowed GPU device (do NOT set BOYKO_DISABLE_VALIDATION — see this \
+#[ignore = "gpu-windowed: needs a real windowed GPU device (do NOT set BOYKO_DISABLE_VALIDATION — see this \
             file's module doc); run with --test-threads=1, once default-features and once \
             --features hwrt"]
 fn texture_bindless_slot_retires_fence_gated_not_before_its_horizon() {

@@ -1,0 +1,88 @@
+# UG-15 sensitivity map (b), captured at B3 stage 2 on u/b3 @ 753306ff (engine = a6a97c55's).
+# Method (a mechanism decision, recorded in i2.md): ONE common arm 1 (#[repr(C)] on EcsMaster and
+# ComponentPool; Scope is already #[repr(C, align(64))]) and one arm 2 per type (common + a leading
+# [u8; align] on that type: EcsMaster 64, ComponentPool 8, Scope 64 - leg (3)'s measured aligns),
+# so 4 arm builds instead of 6; T's rows are the pins whose normalised bodies differ between the
+# common arm and T's arm 2. Each arm ran on a local branch cut from u/b3 holding working-tree edits
+# only (scratchpad/b3/s2/mapb_arm.py); the three edited files were restored byte-for-byte from saved
+# copies, git status was verified empty, and the branch was deleted with -d. Pin bodies read per arm:
+arm common: 42 pin name(s), ABSENT 0; arm file sha256 660de5da53929c083c722cc33586f1b595ddc8d5511d8e9b8ef971a4b3cd19a1
+arm EcsMaster: 42 pin name(s), ABSENT 0; arm file sha256 353e24659aa604537de7c522c2587bc5e0b522da8fa861586a61bcfc9b21242c
+arm ComponentPool: 42 pin name(s), ABSENT 0; arm file sha256 38a03b50e1a292222314650ad63d8bd19376e44ed94857053ea6d1f33ae9e1bf
+arm Scope: 42 pin name(s), ABSENT 0; arm file sha256 49f41a3be896fd35da691669f737558864c154454d99889a8f9f5285b39b5b99
+
+== arm common on u/b3-ctl-map-common
+arm common applied
+ crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs | 1 +
+ crates/boyko_ecs/src/ecs/memory/component_pool.rs      | 5 +++--
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+arm common capture exit=0
+Deleted branch u/b3-ctl-map-common (was 753306ff).
+== arm EcsMaster on u/b3-ctl-map-EcsMaster-2
+arm EcsMaster applied
+ crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs | 4 ++++
+ crates/boyko_ecs/src/ecs/memory/component_pool.rs      | 5 +++--
+ 2 files changed, 7 insertions(+), 2 deletions(-)
+arm EcsMaster capture exit=0
+Deleted branch u/b3-ctl-map-EcsMaster-2 (was 753306ff).
+== arm ComponentPool on u/b3-ctl-map-ComponentPool-2
+arm ComponentPool applied
+ crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs | 1 +
+ crates/boyko_ecs/src/ecs/memory/component_pool.rs      | 7 +++++--
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+arm ComponentPool capture exit=0
+Deleted branch u/b3-ctl-map-ComponentPool-2 (was 753306ff).
+== arm Scope on u/b3-ctl-map-Scope-2
+arm Scope applied
+ crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs |  1 +
+ crates/boyko_ecs/src/ecs/memory/component_pool.rs      |  5 +++--
+ crates/boyko_threadpool/src/scope.rs                   | 10 ++++++----
+ 3 files changed, 10 insertions(+), 6 deletions(-)
+arm Scope capture exit=0
+Deleted branch u/b3-ctl-map-Scope-2 (was 753306ff).
+map (b) EcsMaster: 9 pin(s) differ between C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/b3/s2/mapb-common.txt and C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/b3/s2/mapb-EcsMaster.txt
+  EcsMaster	boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+  EcsMaster	clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run
+  EcsMaster	clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+  EcsMaster	phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run
+  EcsMaster	phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize
+  EcsMaster	query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>
+  EcsMaster	swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity
+  EcsMaster	swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>
+  EcsMaster	swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}
+diff EcsMaster exit=0
+map (b) ComponentPool: 6 pin(s) differ between C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/b3/s2/mapb-common.txt and C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/b3/s2/mapb-ComponentPool.txt
+  ComponentPool	boyko_demo	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows
+  ComponentPool	boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+  ComponentPool	clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows
+  ComponentPool	clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+  ComponentPool	swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity
+  ComponentPool	swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}
+diff ComponentPool exit=0
+map (b) Scope: 2 pin(s) differ between C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/b3/s2/mapb-common.txt and C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/b3/s2/mapb-Scope.txt
+  Scope	clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run
+  Scope	phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run
+diff Scope exit=0
+?? crates/boyko_symcensus/ug15/maps/layout-map.tsv
+ALL DONE
+
+map (b) EcsMaster: 9 pin(s) differ between C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/b3/s2/mapb-common.txt and C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/b3/s2/mapb-EcsMaster.txt
+  EcsMaster	boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+  EcsMaster	clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run
+  EcsMaster	clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+  EcsMaster	phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run
+  EcsMaster	phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize
+  EcsMaster	query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>
+  EcsMaster	swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity
+  EcsMaster	swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>
+  EcsMaster	swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}
+map (b) ComponentPool: 6 pin(s) differ between C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/b3/s2/mapb-common.txt and C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/b3/s2/mapb-ComponentPool.txt
+  ComponentPool	boyko_demo	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows
+  ComponentPool	boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+  ComponentPool	clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows
+  ComponentPool	clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+  ComponentPool	swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity
+  ComponentPool	swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}
+map (b) Scope: 2 pin(s) differ between C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/b3/s2/mapb-common.txt and C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/d9f1cf70-4eed-44f3-9e33-2efbf030fc1a/scratchpad/b3/s2/mapb-Scope.txt
+  Scope	clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run
+  Scope	phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run

@@ -1090,7 +1090,7 @@ mod gpu {
     /// validation messages, then writes the BMP. `#[ignore]`d — Vulkan boot can hang a
     /// headless run; the orchestrator runs it on the RTX (see the module header).
     #[test]
-    #[ignore = "boots Vulkan on the GPU; owner-run on the RTX (see module header)"]
+    #[ignore = "gpu: boots Vulkan on the GPU; owner-run on the RTX (see module header)"]
     fn p6b_hud_screenshot() {
         let Some(ctx) = boot_or_skip("p6b_hud_screenshot") else {
             return;
@@ -1166,7 +1166,7 @@ mod gpu {
     /// coverage is continuous and font-dependent); the proof is the eyeballed image +
     /// a zero-validation-message GPU run. `#[ignore]`d for the same Vulkan-boot reason.
     #[test]
-    #[ignore = "boots Vulkan on the GPU; owner-run on the RTX (see module header)"]
+    #[ignore = "gpu: boots Vulkan on the GPU; owner-run on the RTX (see module header)"]
     fn p6b_hud_screenshot_msdf() {
         let Some(ctx) = boot_or_skip("p6b_hud_screenshot_msdf") else {
             return;

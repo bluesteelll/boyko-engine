@@ -264,7 +264,7 @@ fn spawn_minimal_view(commands: &mut Commands) {
 }
 
 #[test]
-#[ignore = "needs a real windowed GPU device (validation not required); run with --test-threads=1"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device (validation not required); run with --test-threads=1"]
 fn a_fill_rejected_mesh_upload_releases_its_device_buffers() {
     let mut app = App::new();
     app.insert_resource(FrameBudget(BUDGET));

@@ -1,0 +1,33 @@
+# UG-09 at B3, boyko-threadpool --test loom_pool (logs in the B3 scratch, ug09/*.log)
+
+## list
+== Wed Sep 23 08:02:57 RTZST 2026  tree c2756e8273211c19f1018fce2b975ee75ad5873a (0 uncommitted)
+== step 1: cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' test --release -p boyko-threadpool --test loom_pool -- --list
+loom_m1_fork_join_no_lost_wakeup: test
+loom_m1c_count_gated_completion_wakes_the_parked_worker_joiner: test
+loom_m2_calibration_no_producer_fence_is_lost: test
+loom_m2_idle_race_c_no_lost_wakeup: test
+loom_m2b_idle_cas_contention_exactly_one: test
+loom_m3_shutdown_handshake_worker_exits: test
+6 tests, 0 benchmarks
+exit=0
+
+## run
+== Wed Sep 23 08:03:38 RTZST 2026
+== step 2: LOOM_MAX_PREEMPTIONS=3 timeout 1800 cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' test --release -v -p boyko-threadpool --test loom_pool -- --test-threads=1 --exact loom_m1_fork_join_no_lost_wakeup loom_m2_idle_race_c_no_lost_wakeup loom_m2_calibration_no_producer_fence_is_lost loom_m2b_idle_cas_contention_exactly_one loom_m3_shutdown_handshake_worker_exits loom_m1c_count_gated_completion_wakes_the_parked_worker_joiner
+running 6 tests
+test loom_m1_fork_join_no_lost_wakeup ... ok
+test loom_m1c_count_gated_completion_wakes_the_parked_worker_joiner ... ok
+test loom_m2_calibration_no_producer_fence_is_lost - should panic ... ok
+test loom_m2_idle_race_c_no_lost_wakeup ... ok
+test loom_m2b_idle_cas_contention_exactly_one ... ok
+test loom_m3_shutdown_handshake_worker_exits ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.62s
+exit=0
+== Wed Sep 23 08:03:39 RTZST 2026
+
+## negative
+== Wed Sep 23 08:03:39 RTZST 2026
+== step 3 (negative arm): cargo --config 'build.rustflags=["--cfg","loom"]' test --release -p boyko-threadpool --test loom_pool -- --list
+0 tests, 0 benchmarks
+exit=0

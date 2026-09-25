@@ -50,6 +50,16 @@
 //! `simd_solve = false` and requires the same [`GOLDEN`], so a SIMD-only or a
 //! scalar-only drift each turn exactly one of the two red.
 //!
+//! ## Contact reuse (L9 C4, 2026-09-24)
+//!
+//! Contact reuse (`PhysicsConfig::contact_reuse`) is on by default since L9 C4, and on this
+//! scene it moves the final state by design: `0x5883_AA9A_E356_5288` in debug and release on
+//! the C4 tree, against [`GOLDEN`]. It is a narrowphase value change within the L9 design's
+//! bounds, not a solve-order drift, so the setup sets it OFF — an adaptation of the SETUP
+//! that this contract allows — and [`GOLDEN`] stays the exact narrowphase's value. The
+//! shipped reuse default is pinned elsewhere (`default_world_pyramid_determinism.rs`, A7-R1
+//! in `sleep_settles_box_piles.rs`).
+//!
 //! Spins up `boyko_threadpool` (intractable under Miri — pool is loom+Miri proven
 //! in the ECS Phase-9 series), so `cfg(not(miri))`.
 
@@ -328,7 +338,8 @@ fn run_scene_hash() -> u64 {
 }
 
 /// Runs the fixed scene for [`STEPS`] steps with the colored contact solve's
-/// `simd_solve` flag set to `simd_solve`, and returns the final state hash.
+/// `simd_solve` flag set to `simd_solve` and contact reuse off (module docs, "Contact reuse"),
+/// and returns the final state hash.
 fn run_scene_hash_with(simd_solve: bool) -> u64 {
     let mut world = EcsMaster::new();
     mixed_scene(&mut world);
@@ -336,11 +347,32 @@ fn run_scene_hash_with(simd_solve: bool) -> u64 {
     let mut schedule = build_colored_schedule(&mut world, DT);
     world.resource_mut::<PhysicsConfig>().gravity = Vec3::new(0.0, -9.81, 0.0);
     world.resource_mut::<PhysicsConfig>().simd_solve = simd_solve;
+    // A setup adaptation the contract allows (module docs, "Contact reuse"): the golden was
+    // captured on the exact narrowphase, and contact reuse, on by default since L9 C4, changes
+    // the trajectory by design without touching the solve order this oracle guards.
+    world.resource_mut::<PhysicsConfig>().contact_reuse = false;
 
     for _ in 0..STEPS {
         schedule.run(&mut world);
     }
+    #[cfg(feature = "narrowphase-counts")]
+    fallback_census_epilogue();
     state_hash(&all_bodies(&mut world))
+}
+
+/// The box-box fallback census of the runs so far (`narrowphase-counts` only; the `thinbox` lane,
+/// `design_rev2.md` §6.2 (iii)): printed, and asserted to hold no event that changes the kernel's
+/// output — no phantom answer, no capped hint. It runs before the caller compares a hash, so a
+/// moved golden is read beside the census that names or clears the face bound as its cause. The
+/// counters are process-wide: a reading covers every run of this binary since the last one.
+#[cfg(feature = "narrowphase-counts")]
+fn fallback_census_epilogue() {
+    let s = boyko_physics::narrowphase::box_box::fallback_census::take();
+    println!("golden scene: box-box fallback census {s:?}");
+    assert!(
+        s.phantom == 0 && s.hint_capped == 0,
+        "golden scene: the box-box fallback's face bound fired: {s:?}"
+    );
 }
 
 // ── The gates ────────────────────────────────────────────────────────────────

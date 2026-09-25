@@ -197,7 +197,7 @@ impl PairTag {
     }
 
     /// The tag of a box pair with no contact for a reason other than a separating axis (no face
-    /// axis, a degenerate reference face, a fallback with no edge axis).
+    /// axis, a degenerate reference face).
     pub(crate) const BOX_NO_CONTACT: Self = Self(Self::AXIS_NONE | Self::BOX);
 
     /// Whether every bit of `flags` is set.

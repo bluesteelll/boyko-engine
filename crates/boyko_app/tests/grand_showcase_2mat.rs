@@ -170,7 +170,7 @@ fn setup(
 /// `#[ignore]`: needs a real windowed GPU device. Run with `BOYKO_DISABLE_VALIDATION=1`;
 /// the orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the material-showcase screenshot"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the material-showcase screenshot"]
 fn grand_showcase_2mat_screenshot_dump() {
     let mut app = App::new();
     // SSAA (AA campaign Stage 3) is boot-fixed, host-authoritative: it cannot be armed by

@@ -1,12 +1,12 @@
 //! `#[derive(Bundle)]` implementation.
 
-use proc_macro::TokenStream;
+use proc_macro2::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{Data, DeriveInput, Fields, Ident, Type, parse_macro_input};
+use syn::{Data, DeriveInput, Fields, Ident, Type};
 
 /// Implementation of `#[derive(Bundle)]` (see the public entry in `lib.rs`).
-pub(crate) fn expand(input: TokenStream) -> TokenStream {
+pub(crate) fn bundle_macro_impl(input: TokenStream) -> TokenStream {
     /// Maximum component count for a derived `Bundle` (Phase 22: 8 → 16).
     ///
     /// Kept in lock-step with the `MAX_BUNDLE_ARITY` stack-collector ceilings
@@ -15,7 +15,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     /// the runtime debug_asserts unreachable for derived bundles.
     const MAX_BUNDLE_ARITY: usize = 16;
 
-    let input = parse_macro_input!(input as DeriveInput);
+    let input = crate::common::parse2_or_compile_error!(input as DeriveInput);
     let name = input.ident.clone();
     let name_span = name.span();
 
@@ -28,8 +28,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             name_span,
             "Bundle derive does not support generics (Phase 8.5 scope)",
         )
-        .to_compile_error()
-        .into();
+        .to_compile_error();
     }
 
     let data = match &input.data {
@@ -39,8 +38,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 name_span,
                 "Bundle can only be derived for structs",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
     };
 
@@ -77,8 +75,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 "Bundle requires at least one field; \
                  to spawn an entity with zero components use Commands::spawn_empty()",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
     };
 
@@ -90,8 +87,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             "Bundle requires at least one field; \
              to spawn an entity with zero components use Commands::spawn_empty()",
         )
-        .to_compile_error()
-        .into();
+        .to_compile_error();
     }
 
     // Phase 22: hard arity ceiling, mirrored by the runtime stack collectors.
@@ -103,8 +99,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                  split the bundle and insert the remainder with EntityCommands::insert"
             ),
         )
-        .to_compile_error()
-        .into();
+        .to_compile_error();
     }
 
     let n_fields = fields.len();
@@ -544,7 +539,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         }
     };
 
-    expanded.into()
+    expanded
 }
 
 /// Internal helper: a single destructured Bundle field.

@@ -2995,7 +2995,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
 /// test` skips it (the harness still compiles it, proving the OFF caller + the new `coarse` field +
 /// the coarse-pipeline creation type-check).
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU"]
 fn p0_windowed_coarse_cull_matches_uncull() {
     with_windowed_present(
         "boyko_rhi_vulkan P0 coarse-cull window",
@@ -4397,7 +4397,7 @@ fn showcase_config(ssao_quality: Option<usize>) -> ShowcaseConfig {
 /// (broken-on-this-box) validation layer does not crash the process; the screenshot is the
 /// deliverable, not a golden assertion.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the screenshot"]
 fn engine_showcase_512_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine showcase 512",
@@ -4415,7 +4415,7 @@ fn engine_showcase_512_screenshot_dump() {
 ///
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the SSAO screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the SSAO screenshot"]
 fn engine_ssao_512_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine SSAO 512",
@@ -4443,7 +4443,7 @@ fn engine_ssao_512_screenshot_dump() {
 ///
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the mesh-floor SSAO screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the mesh-floor SSAO screenshot"]
 fn engine_ssao_mesh_512_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine SSAO mesh floor 512",
@@ -4468,7 +4468,7 @@ fn engine_ssao_mesh_512_screenshot_dump() {
 ///
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the SSAO quality ladder"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the SSAO quality ladder"]
 fn engine_ssao_ladder_off_dump() {
     // ONE window/context per process: a windowed boot only survives the FIRST showcase dump in a
     // process (later boots hit "swapchain kept recreating"), so each ladder rung is its OWN test —
@@ -4478,21 +4478,21 @@ fn engine_ssao_ladder_off_dump() {
 
 /// SSAO ladder rung — LOW (2x3). See [`engine_ssao_ladder_off_dump`] for the one-per-process note.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU"]
 fn engine_ssao_ladder_low_dump() {
     run_showcase_dump("boyko_engine SSAO ladder LOW", SSAO_LADDER_LOW_BMP, mesh_ssao_config(Some(SSAO_QUALITY_LOW)), false);
 }
 
 /// SSAO ladder rung — MEDIUM (2x4, == today). See [`engine_ssao_ladder_off_dump`].
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU"]
 fn engine_ssao_ladder_medium_dump() {
     run_showcase_dump("boyko_engine SSAO ladder MEDIUM", SSAO_LADDER_MEDIUM_BMP, mesh_ssao_config(Some(SSAO_QUALITY_MEDIUM)), false);
 }
 
 /// SSAO ladder rung — HIGH (3x6). See [`engine_ssao_ladder_off_dump`].
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU"]
 fn engine_ssao_ladder_high_dump() {
     run_showcase_dump("boyko_engine SSAO ladder HIGH", SSAO_LADDER_HIGH_BMP, mesh_ssao_config(Some(SSAO_QUALITY_HIGH)), false);
 }
@@ -4506,7 +4506,7 @@ fn engine_ssao_ladder_high_dump() {
 ///
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the hybrid-room screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the hybrid-room screenshot"]
 fn engine_hybrid_room_512_screenshot_dump() {
     run_showcase_dump("boyko_engine hybrid room 512", HYBRID_BMP, hybrid_room_config(), false);
 }
@@ -4819,7 +4819,7 @@ fn instanced_persp_config() -> ShowcaseConfig {
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the instanced screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the instanced screenshot"]
 fn engine_instanced_persp_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine instanced perspective 512",
@@ -5336,7 +5336,7 @@ fn csm_shadow_config() -> ShowcaseConfig {
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the CSM shadow screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the CSM shadow screenshot"]
 fn engine_csm_shadow_512_screenshot_dump() {
     run_showcase_dump("boyko_engine CSM shadow 512", CSM_SHADOW_BMP, csm_shadow_config(), false);
 }
@@ -5519,7 +5519,7 @@ fn spot_shadow_config() -> ShowcaseConfig {
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the spot shadow screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the spot shadow screenshot"]
 fn engine_spot_shadow_512_screenshot_dump() {
     run_showcase_dump("boyko_engine spot shadow 512", SPOT_SHADOW_BMP, spot_shadow_config(), false);
 }
@@ -5695,7 +5695,7 @@ fn point_shadow_config() -> ShowcaseConfig {
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the point shadow screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the point shadow screenshot"]
 fn engine_point_shadow_512_screenshot_dump() {
     run_showcase_dump("boyko_engine point shadow 512", POINT_SHADOW_BMP, point_shadow_config(), false);
 }
@@ -5969,7 +5969,7 @@ fn grand_showcase_config() -> ShowcaseConfig {
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the grand showcase screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the grand showcase screenshot"]
 fn engine_grand_showcase_512_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine grand showcase 512",
@@ -6026,7 +6026,7 @@ fn resolved_render_path_gpu_from(r: &boyko_render::ResolvedRenderPath) -> Resolv
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the deferred-sdf-only leg-disable screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the deferred-sdf-only leg-disable screenshot"]
 fn engine_deferred_sdf_only_512_screenshot_dump() {
     // Multi-paradigm render-path plan, rung R3 (code-review P2-2): drive the REAL boot resolver
     // (`boyko_render::resolve_render_path`) instead of hand-building the carrier, so this golden
@@ -6070,7 +6070,7 @@ const DEFERRED_MESH_ONLY_BMP: &str = r"D:\tmp\deferred_mesh_only.bmp";
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the deferred-mesh-only leg-disable screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the deferred-mesh-only leg-disable screenshot"]
 fn engine_deferred_mesh_only_512_screenshot_dump() {
     // Multi-paradigm render-path plan, rung R3b: drive the REAL boot resolver
     // (`boyko_render::resolve_render_path`) instead of hand-building the carrier, so this golden
@@ -6123,7 +6123,7 @@ const GRAND_SHOWCASE_DDGI_BMP: &str = r"D:\tmp\engine_grand_showcase_ddgi.bmp";
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the DDGI GI-ON showcase screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the DDGI GI-ON showcase screenshot"]
 fn engine_grand_showcase_512_ddgi_screenshot_dump() {
     with_windowed_present("boyko_engine grand showcase DDGI 512", "engine_showcase_512", |bp| {
         // `gpu_timing = None`: ZERO extra commands, byte-identical to the pre-R0 golden.
@@ -7036,7 +7036,7 @@ fn run_interp_smoke<'ctx, 's>(
 /// the static 3 mrad micro-yaw pair then quantifies edge requantization). Prints `[shadow-ab]`
 /// verdict lines and dumps BMPs + ×8 diff maps to `D:\tmp\shadow_ab_*.bmp`.
 #[test]
-#[ignore = "needs a real RTX windowed device; scripted shadow-motion A/B capture protocol"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; scripted shadow-motion A/B capture protocol"]
 fn shadow_motion_ab_dump() {
     // SAFETY: set before any other thread reads the environment (the test body is the process's
     // first activity under `--test-threads=1`, the only supported way to run windowed dumps).
@@ -7056,7 +7056,7 @@ fn shadow_motion_ab_dump() {
 /// forced to a SINGLE cascade. A luminance flip at the split boundary that vanishes in the
 /// single-cascade run convicts the cascade select / layer contents.
 #[test]
-#[ignore = "needs a real RTX windowed device; scripted camera-dolly shadow diagnostic"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; scripted camera-dolly shadow diagnostic"]
 fn shadow_dolly_dump() {
     // SAFETY: set before any other thread reads the environment (the test body is the process's
     // first activity under `--test-threads=1`, the only supported way to run windowed dumps).
@@ -7078,7 +7078,7 @@ fn shadow_dolly_dump() {
 /// identical pose. Nonzero diff = camera-lag-class defect (stale ring slot / mapped-write race /
 /// intra-frame camera inconsistency); all-zero = the lag lives in viewer-loop-only writes.
 #[test]
-#[ignore = "needs a real RTX windowed device; in-motion vs settled same-pose byte comparison"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; in-motion vs settled same-pose byte comparison"]
 fn shadow_lag_dump() {
     // SAFETY: set before any other thread reads the environment (the test body is the process's
     // first activity under `--test-threads=1`, the only supported way to run windowed dumps).
@@ -7180,7 +7180,7 @@ fn csm_cascades_config() -> ShowcaseConfig {
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the CSM cascades screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the CSM cascades screenshot"]
 fn engine_csm_cascades_512_screenshot_dump() {
     run_showcase_dump("boyko_engine CSM cascades 512", CSM_CASCADES_BMP, csm_cascades_config(), false);
 }
@@ -7379,7 +7379,7 @@ fn multimesh_persp_config() -> ShowcaseConfig {
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the multi-mesh screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the multi-mesh screenshot"]
 fn engine_multimesh_persp_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine multi-mesh perspective 512",
@@ -7459,7 +7459,7 @@ fn nonuniform_normals_config() -> ShowcaseConfig {
 /// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the non-uniform-normals screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the non-uniform-normals screenshot"]
 fn engine_nonuniform_normals_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine non-uniform normals 512",
@@ -7619,7 +7619,7 @@ fn capsule_character_config(contact_shadow: bool) -> ShowcaseConfig {
 /// (broken-on-this-box) validation layer does not crash the process; the screenshot is the
 /// deliverable, not a golden assertion.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the capsule-character screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the capsule-character screenshot"]
 fn engine_capsule_character_512_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine capsule character 512",
@@ -7643,7 +7643,7 @@ fn engine_capsule_character_512_screenshot_dump() {
 /// `#[ignore]`: needs a real RTX windowed device. SPLIT into two ONE-render-per-process tests —
 /// a second windowed render in the same process trips the swapchain-recreate path and never dumps.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator dumps the contact-shadow OFF screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator dumps the contact-shadow OFF screenshot"]
 fn engine_contact_shadow_off_512_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine contact shadow OFF 512",
@@ -7654,7 +7654,7 @@ fn engine_contact_shadow_off_512_screenshot_dump() {
 }
 
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator dumps the contact-shadow ON screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator dumps the contact-shadow ON screenshot"]
 fn engine_contact_shadow_on_512_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine contact shadow ON 512",
@@ -7740,7 +7740,7 @@ fn mdf_shadow_config() -> ShowcaseConfig {
 /// (broken-on-this-box) validation layer does not crash the process; the screenshot is the
 /// deliverable, not a golden assertion.
 #[test]
-#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the MDF-shadow screenshot"]
+#[ignore = "gpu-windowed: needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the MDF-shadow screenshot"]
 fn engine_mdf_shadow_512_screenshot_dump() {
     run_showcase_dump("boyko_engine MDF shadow 512", MDF_SHADOW_BMP, mdf_shadow_config(), false);
 }

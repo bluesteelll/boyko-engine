@@ -155,7 +155,7 @@ fn run_with_spec(ctx: &VulkanContext, spec_constants: &[SpecConstant]) -> u32 {
 /// The Rung 1a oracle: an EMPTY spec slice reads back the shader default (3, the
 /// byte-neutral null path); a `SpecConstant { id: 0, value: 7 }` override reads back 7.
 #[test]
-#[ignore = "requires a live GPU (run: --features spec_constant_smoke -- --ignored --test-threads=1)"]
+#[ignore = "feature+gpu: requires a live GPU (run: --features spec_constant_smoke -- --ignored --test-threads=1)"]
 fn spec_constant_empty_vs_override() {
     let Some(ctx) = boot_or_skip("spec_constant_empty_vs_override") else {
         return;

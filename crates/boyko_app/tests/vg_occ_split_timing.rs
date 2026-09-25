@@ -617,7 +617,7 @@ fn setup(
 /// No capture is armed by the worker itself: a capture changes the frame loop it is being used to
 /// time, and holds it open past the frame cap.
 #[test]
-#[ignore = "needs a real windowed GPU device; the drivers spawn it once per (leg, budget)"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the drivers spawn it once per (leg, budget)"]
 fn vg_occ_split_timing_worker() {
     if std::env::var(ENV_LEG).is_err() {
         eprintln!(
@@ -1149,14 +1149,14 @@ fn bench_summary(fixture: Fixture, leg: Leg, k: u32, bench_frames: u32) -> Optio
 
 /// **`vb_occ_mixed`** — the pixel-pinned fixture, eight instances.
 #[test]
-#[ignore = "live GPU measurement (spawns 60 windowed workers); the orchestrator runs it with --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU measurement (spawns 60 windowed workers); the orchestrator runs it with --test-threads=1"]
 fn vg_occ_split_timing_mixed() {
     run_protocol(Fixture::Mixed);
 }
 
 /// **`vb_occ_dense`** — the same geometry with the hidden set replicated `K` times. No pin.
 #[test]
-#[ignore = "live GPU measurement (spawns 60 windowed workers); the orchestrator runs it with --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU measurement (spawns 60 windowed workers); the orchestrator runs it with --test-threads=1"]
 fn vg_occ_split_timing_dense() {
     run_protocol(Fixture::Dense);
 }
@@ -2241,7 +2241,7 @@ fn dense_ring_marked_first(cap: &DenseCapture) -> bool {
 /// Nothing pins this fixture's PIXELS. A defect that produces the oracle's verdicts and the wrong
 /// image is invisible here; pixel correctness stays `[vb_occ_mixed]`'s job, on 8 instances.
 #[test]
-#[ignore = "live GPU gate (spawns three windowed capture workers); run with --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU gate (spawns three windowed capture workers); run with --test-threads=1"]
 fn vb_occ_dense_defers_what_the_host_oracle_rejects() {
     for k in ORACLE_K {
         vb_occ_dense::assert_fixture_invariants(k);

@@ -384,7 +384,7 @@ const HZB_BUILD: HzbConfig = HzbConfig { mode: HzbMode::Build };
 /// property of the TEST (marked, unforced), not of whatever `BOYKO_VG_OCC` the operator's shell
 /// happens to carry.
 #[test]
-#[ignore = "needs a real windowed GPU device; the G2 driver spawns it with BOYKO_VB_PROBE set"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the G2 driver spawns it with BOYKO_VB_PROBE set"]
 fn vb_occ_probe_dump_marked() {
     if probe_path_or_skip("vb_occ_probe_dump_marked").is_none() {
         return;
@@ -407,7 +407,7 @@ fn vb_occ_probe_dump_marked() {
 /// would make the pair differ in two, and `scopes == 1` would then be a statement about the config
 /// rather than about the marker.
 #[test]
-#[ignore = "needs a real windowed GPU device; the G2 driver spawns it with BOYKO_VB_PROBE set"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the G2 driver spawns it with BOYKO_VB_PROBE set"]
 fn vb_occ_probe_dump_unmarked() {
     if probe_path_or_skip("vb_occ_probe_dump_unmarked").is_none() {
         return;
@@ -423,7 +423,7 @@ fn vb_occ_probe_dump_unmarked() {
 
 /// **G2 worker — `vb_occ_multi`**: two registered meshes, a strict subset marked.
 #[test]
-#[ignore = "needs a real windowed GPU device; the G2 driver spawns it with BOYKO_VB_PROBE set"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the G2 driver spawns it with BOYKO_VB_PROBE set"]
 fn vb_occ_probe_dump_multi() {
     if probe_path_or_skip("vb_occ_probe_dump_multi").is_none() {
         return;
@@ -456,7 +456,7 @@ fn vb_occ_probe_dump_multi() {
 /// insert. A green PAIR means "the pyramid arrives by either route"; a red on THIS leg alone means
 /// "the consumer route is gone".
 #[test]
-#[ignore = "needs a real windowed GPU device; the G2 driver spawns it with BOYKO_VB_PROBE set"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the G2 driver spawns it with BOYKO_VB_PROBE set"]
 fn vb_occ_probe_dump_marked_no_hzb() {
     if probe_path_or_skip("vb_occ_probe_dump_marked_no_hzb").is_none() {
         return;
@@ -601,7 +601,7 @@ fn assert_is_a_vb_mesh_frame(label: &str, p: &Probe) {
 /// Read the module header for what this cannot claim (the GPU never enters the picture) and for
 /// the three red controls.
 #[test]
-#[ignore = "live GPU gate (spawns three windowed workers); the orchestrator runs it with --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU gate (spawns three windowed workers); the orchestrator runs it with --test-threads=1"]
 fn vb_occ_split_records_two_scopes() {
     let marked = run_worker("vb_occ_probe_dump_marked");
     let unmarked = run_worker("vb_occ_probe_dump_unmarked");

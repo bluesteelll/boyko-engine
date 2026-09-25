@@ -124,25 +124,25 @@ fn entity_id_roundtrip_including_max() {
 // ─── Gate 2, full-range proptests ────────────────────────────────────────────────────
 
 proptest! {
-    #[cfg_attr(miri, ignore = "full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
+    #[cfg_attr(miri, ignore = "miri-slow: full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
     #[test]
     fn u8_roundtrip_full_range(v in any::<u8>()) {
         prop_assert_eq!(Scalar::from(v).as_u8(), Some(v));
     }
 
-    #[cfg_attr(miri, ignore = "full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
+    #[cfg_attr(miri, ignore = "miri-slow: full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
     #[test]
     fn u16_roundtrip_full_range(v in any::<u16>()) {
         prop_assert_eq!(Scalar::from(v).as_u16(), Some(v));
     }
 
-    #[cfg_attr(miri, ignore = "full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
+    #[cfg_attr(miri, ignore = "miri-slow: full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
     #[test]
     fn u32_roundtrip_full_range(v in any::<u32>()) {
         prop_assert_eq!(Scalar::from(v).as_u32(), Some(v));
     }
 
-    #[cfg_attr(miri, ignore = "full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
+    #[cfg_attr(miri, ignore = "miri-slow: full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
     #[test]
     fn u64_roundtrip_full_range(v in any::<u64>()) {
         prop_assert_eq!(Scalar::from(v).as_u64(), Some(v));
@@ -152,25 +152,25 @@ proptest! {
     // range) — the test names say so because the sign-extension rule's failure mode
     // (C1's second RED) is observable only there.
 
-    #[cfg_attr(miri, ignore = "full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
+    #[cfg_attr(miri, ignore = "miri-slow: full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
     #[test]
     fn i8_roundtrip_full_range_negatives_included(v in any::<i8>()) {
         prop_assert_eq!(Scalar::from(v).as_i8(), Some(v));
     }
 
-    #[cfg_attr(miri, ignore = "full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
+    #[cfg_attr(miri, ignore = "miri-slow: full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
     #[test]
     fn i16_roundtrip_full_range_negatives_included(v in any::<i16>()) {
         prop_assert_eq!(Scalar::from(v).as_i16(), Some(v));
     }
 
-    #[cfg_attr(miri, ignore = "full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
+    #[cfg_attr(miri, ignore = "miri-slow: full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
     #[test]
     fn i32_roundtrip_full_range_negatives_included(v in any::<i32>()) {
         prop_assert_eq!(Scalar::from(v).as_i32(), Some(v));
     }
 
-    #[cfg_attr(miri, ignore = "full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
+    #[cfg_attr(miri, ignore = "miri-slow: full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
     #[test]
     fn i64_roundtrip_full_range_negatives_included(v in any::<i64>()) {
         prop_assert_eq!(Scalar::from(v).as_i64(), Some(v));
@@ -180,7 +180,7 @@ proptest! {
     // which reaches every NaN payload, both zeros, all subnormals and both infinities —
     // strictly more of the domain than `any::<f32>` — and asserted on bits.
 
-    #[cfg_attr(miri, ignore = "full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
+    #[cfg_attr(miri, ignore = "miri-slow: full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
     #[test]
     fn f32_roundtrip_all_bit_patterns_bitwise(bits in any::<u32>()) {
         let v = f32::from_bits(bits);
@@ -188,7 +188,7 @@ proptest! {
         prop_assert_eq!(got.to_bits(), bits);
     }
 
-    #[cfg_attr(miri, ignore = "full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
+    #[cfg_attr(miri, ignore = "miri-slow: full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
     #[test]
     fn f64_roundtrip_all_bit_patterns_bitwise(bits in any::<u64>()) {
         let v = f64::from_bits(bits);
@@ -196,7 +196,7 @@ proptest! {
         prop_assert_eq!(got.to_bits(), bits);
     }
 
-    #[cfg_attr(miri, ignore = "full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
+    #[cfg_attr(miri, ignore = "miri-slow: full-range proptest budget is prohibitive under Miri; the deterministic edge tests in this file carry MIN/MAX/NaN/±0/subnormals under Miri")]
     #[test]
     fn entity_id_roundtrip_full_range(raw in any::<usize>()) {
         prop_assert_eq!(Scalar::from(EntityId(raw)).as_entity_id(), Some(EntityId(raw)));

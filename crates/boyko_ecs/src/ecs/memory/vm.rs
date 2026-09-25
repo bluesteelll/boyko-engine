@@ -38,9 +38,11 @@
 
 #[cfg(any(miri, not(any(windows, unix))))]
 use std::alloc::{Layout, alloc_zeroed, dealloc};
+#[cfg(all(debug_assertions, not(miri), windows))]
+use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
-use crate::ecs::constants::COMMIT_GRANULE;
+use crate::ecs::constants::{COMMIT_GRANULE, COMMIT_PAGE};
 
 /// Cold-path checked `align_up` — twin of `arena.rs::checked_align_up`
 /// (kept private per module until the X.H unification).
@@ -50,6 +52,30 @@ fn checked_align_up(value: usize, granule: usize) -> usize {
         .checked_add(granule - 1)
         .expect("VmReservation: align_up overflow (value too close to usize::MAX)")
         & !(granule - 1)
+}
+
+/// The OS page size, for the debug-only `COMMIT_PAGE` belt in
+/// [`VmReservation::reserve`].
+#[cfg(all(debug_assertions, not(miri), windows))]
+fn os_page_size() -> usize {
+    let mut info = MaybeUninit::<win::SystemInfo>::uninit();
+    // SAFETY: `GetSystemInfo` has no failure mode and writes the whole
+    // `SYSTEM_INFO` it is handed; `info` is a writable buffer of exactly that
+    // (const-asserted, 48 B) layout.
+    unsafe { win::GetSystemInfo(info.as_mut_ptr()) };
+    // SAFETY: fully initialised by `GetSystemInfo` above.
+    let info = unsafe { info.assume_init() };
+    info.page_size as usize
+}
+
+/// The OS page size, for the debug-only `COMMIT_PAGE` belt in
+/// [`VmReservation::reserve`].
+#[cfg(all(debug_assertions, not(miri), unix, not(windows)))]
+fn os_page_size() -> usize {
+    // SAFETY: `sysconf` has no preconditions, and `_SC_PAGESIZE` is a name
+    // every unix supports.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    usize::try_from(page).expect("sysconf(_SC_PAGESIZE) returned a negative value")
 }
 
 /// Windows kernel32 surface — twin of `arena.rs::win` (X.H unifies).
@@ -68,7 +94,30 @@ mod win {
             flProtect: u32,
         ) -> *mut c_void;
         pub fn VirtualFree(lpAddress: *mut c_void, dwSize: usize, dwFreeType: u32) -> i32;
+        #[cfg(debug_assertions)]
+        pub fn GetSystemInfo(lpSystemInfo: *mut SystemInfo);
     }
+
+    /// `SYSTEM_INFO` on Win64, for the debug-only `COMMIT_PAGE` belt in
+    /// `VmReservation::reserve`. Every field is declared so the layout is the
+    /// kernel's; the belt reads one of them.
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    #[repr(C)]
+    pub struct SystemInfo {
+        pub oem_id: u32,
+        pub page_size: u32,
+        pub minimum_application_address: *mut c_void,
+        pub maximum_application_address: *mut c_void,
+        pub active_processor_mask: usize,
+        pub number_of_processors: u32,
+        pub processor_type: u32,
+        pub allocation_granularity: u32,
+        pub processor_level: u16,
+        pub processor_revision: u16,
+    }
+    #[cfg(debug_assertions)]
+    const _: () = assert!(size_of::<SystemInfo>() == 48);
 
     pub const MEM_COMMIT: u32 = 0x1000;
     pub const MEM_RESERVE: u32 = 0x2000;
@@ -108,6 +157,21 @@ impl VmReservation {
     /// deleted with its sole client, the shared Arena (Phase X.J).
     pub(crate) fn reserve(len: usize) -> Self {
         assert!(len > 0, "VmReservation: reserve length must be non-zero");
+        // Packing plan D1 belt: `COMMIT_PAGE` is a compile-time assumption
+        // about the OS page size (it must stay `const` for the layout
+        // proofs). A kernel whose page does not divide it would reject a
+        // legal frontier commit, so say so loudly at the first reservation
+        // instead. Debug-only and stateless — no `static` caches the answer;
+        // both queries are user-mode reads.
+        #[cfg(all(debug_assertions, not(miri), any(windows, unix)))]
+        {
+            let page = os_page_size();
+            debug_assert!(
+                page > 0 && COMMIT_PAGE.is_multiple_of(page),
+                "VmReservation: the OS page ({page} B) does not divide COMMIT_PAGE \
+                 ({COMMIT_PAGE} B); every frontier commit would be misaligned"
+            );
+        }
         let os_len = checked_align_up(len, COMMIT_GRANULE);
         // Twin of arena.rs review-F1: every offset later fed to
         // `base.add(..)` must fit `isize` (pointer::add contract). The
@@ -192,15 +256,20 @@ impl VmReservation {
     }
 
     /// Commits (makes readable/writable, zero-filled) the byte range
-    /// `[old, new)` of the reservation. Granule-aligned, in-bounds,
-    /// monotonic-frontier use only (debug-asserted). No-op on the fallback
-    /// arm (the whole reservation is eagerly RW + zeroed).
+    /// `[old, new)` of the reservation. Page-aligned (`COMMIT_PAGE`),
+    /// in-bounds, monotonic-frontier use only (debug-asserted). `MEM_COMMIT`
+    /// inside a reservation and `mprotect` are page-granular; only the
+    /// reservation itself is bound by the 64 KiB granularity (packing plan
+    /// D1). Page alignment plus `new <= os_len` is what keeps a frontier commit
+    /// inside the kernel's mapping: `os_len` is granule-rounded and a granule
+    /// is a whole number of pages. No-op on the fallback arm (the whole
+    /// reservation is eagerly RW + zeroed).
     #[cold]
     pub(crate) fn commit(&self, old: usize, new: usize) {
         debug_assert!(new > old, "VmReservation::commit: empty or backwards range");
         debug_assert!(
-            old.is_multiple_of(COMMIT_GRANULE) && new.is_multiple_of(COMMIT_GRANULE),
-            "VmReservation::commit: range [{old}, {new}) not granule-aligned"
+            old.is_multiple_of(COMMIT_PAGE) && new.is_multiple_of(COMMIT_PAGE),
+            "VmReservation::commit: range [{old}, {new}) not page-aligned"
         );
         debug_assert!(
             new <= self.os_len,
@@ -212,10 +281,10 @@ impl VmReservation {
         {
             // SAFETY (V-CMT-W, twin of arena W-CMT): the range lies inside
             // our own reservation (`new <= os_len`, asserted), is
-            // granule-aligned (=> page-aligned), and re-committing an already
-            // committed page is documented-idempotent (contents untouched).
-            // NULL result = commit charge exhausted — the loud genuine-OOM
-            // surface.
+            // `COMMIT_PAGE`-aligned on both ends (asserted; the base is
+            // granule-aligned), and re-committing an already committed page
+            // is documented-idempotent (contents untouched). NULL result =
+            // commit charge exhausted — the loud genuine-OOM surface.
             let raw = unsafe {
                 win::VirtualAlloc(
                     self.base.as_ptr().add(old) as *mut core::ffi::c_void,
@@ -234,10 +303,13 @@ impl VmReservation {
         #[cfg(all(not(miri), unix, not(windows)))]
         {
             // SAFETY (V-CMT-U, twin of arena U-CMT): the range lies inside
-            // our own mapping (`new <= os_len == munmap length`) and is
-            // granule-aligned (granule is a multiple of the page size), so
-            // mprotect gets a page-aligned base and length. ENOMEM here is
-            // the overcommit-mode-2 failure surface.
+            // our own mapping (`new <= os_len == munmap length`) and both ends
+            // are `COMMIT_PAGE`-aligned (asserted) from a page-aligned base.
+            // The OS page divides `COMMIT_PAGE` — 4 KiB is the x86_64 base
+            // page and every other arch commits by the granule (packing plan
+            // D1; the debug belt in `reserve` checks it at the first
+            // reservation) — so mprotect gets a page-aligned base and length.
+            // ENOMEM here is the overcommit-mode-2 failure surface.
             let ret = unsafe {
                 libc::mprotect(
                     self.base.as_ptr().add(old) as *mut core::ffi::c_void,

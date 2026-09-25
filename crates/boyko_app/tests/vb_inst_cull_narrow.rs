@@ -81,7 +81,7 @@ fn expected_region(batch: usize) -> Vec<u32> {
 /// RENAMED at rung R2d-6 (`..._reports_the_inert_regions`): the regions are no longer inert, and a
 /// test whose name states the opposite of what it asserts is worse than no name.
 #[test]
-#[ignore = "needs a real windowed GPU device; the orchestrator runs it to read the per-instance cull's survivor regions"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator runs it to read the per-instance cull's survivor regions"]
 fn vb_inst_cull_narrow_drops_the_offscreen_instance() {
     let probe = vb_inst_cull_scene::probe_in_process("narrow", || {
         let mut app = App::new();

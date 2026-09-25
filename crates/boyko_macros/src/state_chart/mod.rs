@@ -56,7 +56,7 @@ use model::Chart;
 /// On failure the expansion is the error PLUS name-resolving stubs for the two registration fns,
 /// so a chart that does not compile costs one diagnostic instead of that diagnostic followed by an
 /// "cannot find function" at every call site a plugin wrote.
-pub fn expand(input: TokenStream) -> TokenStream {
+pub fn state_chart_impl(input: TokenStream) -> TokenStream {
     let name = peek_chart_name(input.clone());
     match syn::parse2::<ChartInput>(input).and_then(|c| Chart::build(&c).and_then(|m| emit::chart_items(&m)))
     {
@@ -567,7 +567,7 @@ mod tests {
     /// error rather than that error plus a "cannot find function" per call site.
     #[test]
     fn a_failed_chart_still_emits_its_registration_stubs() {
-        let out = expand(quote! {
+        let out = state_chart_impl(quote! {
             chart M; initial Nope;
             state A { on E => A; }
         })

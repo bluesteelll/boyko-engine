@@ -1,0 +1,54 @@
+WINDOW 6 DRY RUN: rows6.json, 12 blocks, K = 6 (2 passes x 3 rounds), cutoff 12:45, assumed start 09:12
+per pass: idle rule >= 135 s (3 polls 60 s apart), opening receipt 10 s, one warm-up; per process: the gate's untimed wall + 0.4 s launch + 5 s receipt
+binaries: all match bin/SHA256SUMS
+fixtures: all present
+
+[P1] P1-L10: 2 cells x K 6 = 12 timed processes + 2 warm-ups; per round 25 s; per pass 3.9 min; block 7.8 min; 09:12 -> 09:19 fits
+  pass 0: idle rule; warm-up L10-Son#b4db@W1; each of 3 rounds: L10-Offp#b4db@W1(5.9s), L10-Son#b4db@W1(9.1s)
+  pass 1: idle rule; warm-up L10-Son#b4db@W1; each of 3 rounds: L10-Son#b4db@W1(9.1s), L10-Offp#b4db@W1(5.9s)
+
+[P2] P2a-L9classes: 1 cells x K 6 = 6 timed processes + 2 warm-ups; per round 12 s; per pass 3.2 min; block 6.5 min; 09:19 -> 09:26 fits
+  pass 0: idle rule; warm-up L9-classes#c4db@W1; each of 3 rounds: L9-classes#c4db@W1(7.2s)
+  pass 1: idle rule; warm-up L9-classes#c4db@W1; each of 3 rounds: L9-classes#c4db@W1(7.2s)
+
+[P2] P2b-L9reuse: 6 cells x K 6 = 36 timed processes + 2 warm-ups; per round 75 s; per pass 6.3 min; block 12.6 min; 09:26 -> 09:38 fits
+  pass 0: idle rule; warm-up L9-JA-off#b4db@W8; each of 3 rounds: L9-JA-off#b4db@W1(9.9s), L9-JA-on#b4db@W1(8.9s), L9-JA-a-off#b4db@W1(9.9s), L9-JA-a-on#b4db@W1(9.1s), L9-JA-off#b4db@W8(3.8s), L9-JA-on#b4db@W8(3.6s)
+  pass 1: idle rule; warm-up L9-JA-off#b4db@W8; each of 3 rounds: L9-JA-on#b4db@W8(3.6s), L9-JA-off#b4db@W8(3.8s), L9-JA-a-on#b4db@W1(9.1s), L9-JA-a-off#b4db@W1(9.9s), L9-JA-on#b4db@W1(8.9s), L9-JA-off#b4db@W1(9.9s)
+
+[P3] P3-C3b: 8 cells x K 6 = 48 timed processes + 2 warm-ups; per round 76 s; per pass 6.3 min; block 12.7 min; 09:38 -> 09:51 fits
+  pass 0: idle rule; warm-up C3b-TD-tree#tip@W8; each of 3 rounds: C3b-TA-armed#par@W1(9.6s), C3b-TA-armed#tip@W1(9.3s), C3b-TD-tree#par@W1(4.0s), C3b-TD-tree#tip@W1(4.1s), C3b-TA-armed#par@W8(3.0s), C3b-TA-armed#tip@W8(2.8s), C3b-TD-tree#par@W8(1.8s), C3b-TD-tree#tip@W8(1.7s)
+  pass 1: idle rule; warm-up C3b-TD-tree#tip@W8; each of 3 rounds: C3b-TD-tree#tip@W8(1.7s), C3b-TD-tree#par@W8(1.8s), C3b-TA-armed#tip@W8(2.8s), C3b-TA-armed#par@W8(3.0s), C3b-TD-tree#tip@W1(4.1s), C3b-TD-tree#par@W1(4.0s), C3b-TA-armed#tip@W1(9.3s), C3b-TA-armed#par@W1(9.6s)
+
+[P4] P4-G9: 24 cells x K 6 = 144 timed processes + 2 warm-ups; per round 252 s; per pass 15.2 min; block 30.4 min; 09:51 -> 10:21 fits
+  pass 0: idle rule; warm-up G9-JA#g9t@W8; each of 3 rounds: G9-JA#g9p@W1(10.3s), G9-JA#g9t@W1(10.2s), G9-R#g9p@W1(13.8s), G9-R#g9t@W1(13.1s), G9-RS#g9p@W1(7.0s), G9-RS#g9t@W1(6.9s), G9-S16#g9p@W1(0.5s), G9-S16#g9t@W1(0.5s), G9-JAs-a#g9p@W1(5.2s), G9-JAs-a#g9t@W1(4.8s), G9-JC#g9p@W1(5.2s), G9-JC#g9t@W1(5.1s), G9-JAs-mid#g9p@W2(3.8s), G9-JAs-mid#g9t@W2(3.7s), G9-JAs-mid#g9p@W4(3.2s), G9-JAs-mid#g9t@W4(3.1s), G9-JA#g9p@W8(3.8s), G9-JA#g9t@W8(3.8s), G9-R#g9p@W8(7.5s), G9-R#g9t@W8(7.1s), G9-RS#g9p@W8(4.0s), G9-RS#g9t@W8(3.9s), G9-JAs-mid#g9p@W16(3.1s), G9-JAs-mid#g9t@W16(2.9s)
+  pass 1: idle rule; warm-up G9-JA#g9t@W8; each of 3 rounds: G9-JAs-mid#g9t@W16(2.9s), G9-JAs-mid#g9p@W16(3.1s), G9-RS#g9t@W8(3.9s), G9-RS#g9p@W8(4.0s), G9-R#g9t@W8(7.1s), G9-R#g9p@W8(7.5s), G9-JA#g9t@W8(3.8s), G9-JA#g9p@W8(3.8s), G9-JAs-mid#g9t@W4(3.1s), G9-JAs-mid#g9p@W4(3.2s), G9-JAs-mid#g9t@W2(3.7s), G9-JAs-mid#g9p@W2(3.8s), G9-JC#g9t@W1(5.1s), G9-JC#g9p@W1(5.2s), G9-JAs-a#g9t@W1(4.8s), G9-JAs-a#g9p@W1(5.2s), G9-S16#g9t@W1(0.5s), G9-S16#g9p@W1(0.5s), G9-RS#g9t@W1(6.9s), G9-RS#g9p@W1(7.0s), G9-R#g9t@W1(13.1s), G9-R#g9p@W1(13.8s), G9-JA#g9t@W1(10.2s), G9-JA#g9p@W1(10.3s)
+
+[P5] P5a-bridge2: 4 cells x K 6 = 24 timed processes + 2 warm-ups; per round 36 s; per pass 4.4 min; block 8.7 min; 10:21 -> 10:30 fits
+  pass 0: idle rule; warm-up B2-JAs#g9p@W8; each of 3 rounds: B2-JAs#w4bt@W1(5.0s), B2-JAs#g9p@W1(5.3s), B2-JAs#w4bt@W8(2.9s), B2-JAs#g9p@W8(2.9s)
+  pass 1: idle rule; warm-up B2-JAs#g9p@W8; each of 3 rounds: B2-JAs#g9p@W8(2.9s), B2-JAs#w4bt@W8(2.9s), B2-JAs#g9p@W1(5.3s), B2-JAs#w4bt@W1(5.0s)
+
+[P5] P5b-L10spans: 6 cells x K 6 = 36 timed processes + 2 warm-ups; per round 54 s; per pass 5.4 min; block 10.7 min; 10:30 -> 10:41 fits
+  pass 0: idle rule; warm-up L10-Son#b4db@W8; each of 3 rounds: L10-RS-Offp#b4db@W1(3.2s), L10-RS#b4db@W1(7.3s), L10-Offp8#b4db@W8(2.6s), L10-Son8#b4db@W8(4.6s), L10-RS-Offp#b4db@W8(2.0s), L10-RS#b4db@W8(4.2s)
+  pass 1: idle rule; warm-up L10-Son#b4db@W8; each of 3 rounds: L10-RS#b4db@W8(4.2s), L10-RS-Offp#b4db@W8(2.0s), L10-Son8#b4db@W8(4.6s), L10-Offp8#b4db@W8(2.6s), L10-RS#b4db@W1(7.3s), L10-RS-Offp#b4db@W1(3.2s)
+
+[P5] P5g-C3bG5: 8 cells x K 6 = 48 timed processes + 2 warm-ups; per round 79 s; per pass 6.5 min; block 12.9 min; 10:41 -> 10:54 fits
+  pass 0: idle rule; warm-up G5-TD-tree#tip@W8; each of 3 rounds: G5-TA-tree-a#tip@W1(9.3s), G5-TA-ap-a#tip@W1(10.1s), G5-TD-tree#tip@W1(3.9s), G5-TD-ap#tip@W1(4.9s), G5-TA-tree-a#tip@W8(2.7s), G5-TA-ap-a#tip@W8(3.7s), G5-TD-tree#tip@W8(1.7s), G5-TD-ap#tip@W8(2.7s)
+  pass 1: idle rule; warm-up G5-TD-tree#tip@W8; each of 3 rounds: G5-TD-ap#tip@W8(2.7s), G5-TD-tree#tip@W8(1.7s), G5-TA-ap-a#tip@W8(3.7s), G5-TA-tree-a#tip@W8(2.7s), G5-TD-ap#tip@W1(4.9s), G5-TD-tree#tip@W1(3.9s), G5-TA-ap-a#tip@W1(10.1s), G5-TA-tree-a#tip@W1(9.3s)
+
+[P5] P5d-L9reuseJD: 4 cells x K 6 = 24 timed processes + 2 warm-ups; per round 34 s; per pass 4.2 min; block 8.5 min; 10:54 -> 11:02 fits
+  pass 0: idle rule; warm-up L9-JD-off#b4db@W8; each of 3 rounds: L9-JD-off#b4db@W1(4.6s), L9-JD-on#b4db@W1(3.7s), L9-JD-off#b4db@W8(2.7s), L9-JD-on#b4db@W8(2.6s)
+  pass 1: idle rule; warm-up L9-JD-off#b4db@W8; each of 3 rounds: L9-JD-on#b4db@W8(2.6s), L9-JD-off#b4db@W8(2.7s), L9-JD-on#b4db@W1(3.7s), L9-JD-off#b4db@W1(4.6s)
+
+[P5] P5e-L9reuseR: 4 cells x K 6 = 24 timed processes + 2 warm-ups; per round 56 s; per pass 5.4 min; block 10.8 min; 11:02 -> 11:13 fits
+  pass 0: idle rule; warm-up L9-R-off#b4db@W8; each of 3 rounds: L9-R-off#b4db@W1(12.6s), L9-R-on#b4db@W1(9.9s), L9-R-off#b4db@W8(6.9s), L9-R-on#b4db@W8(6.4s)
+  pass 1: idle rule; warm-up L9-R-off#b4db@W8; each of 3 rounds: L9-R-on#b4db@W8(6.4s), L9-R-off#b4db@W8(6.9s), L9-R-on#b4db@W1(9.9s), L9-R-off#b4db@W1(12.6s)
+
+[P5] P5f-L9reuseJAmid: 6 cells x K 6 = 36 timed processes + 2 warm-ups; per round 58 s; per pass 5.5 min; block 10.9 min; 11:13 -> 11:24 fits
+  pass 0: idle rule; warm-up L9-JA-off#b4db@W8; each of 3 rounds: L9-JA-off-mid#b4db@W2(6.3s), L9-JA-on-mid#b4db@W2(5.8s), L9-JA-off-mid#b4db@W4(4.5s), L9-JA-on-mid#b4db@W4(4.3s), L9-JA-off-mid#b4db@W16(3.7s), L9-JA-on-mid#b4db@W16(3.6s)
+  pass 1: idle rule; warm-up L9-JA-off#b4db@W8; each of 3 rounds: L9-JA-on-mid#b4db@W16(3.6s), L9-JA-off-mid#b4db@W16(3.7s), L9-JA-on-mid#b4db@W4(4.3s), L9-JA-off-mid#b4db@W4(4.5s), L9-JA-on-mid#b4db@W2(5.8s), L9-JA-off-mid#b4db@W2(6.3s)
+
+[P5] P5c-C3bG4: 1 cells x K 6 = 6 timed processes + 2 warm-ups; per round 276 s; per pass 20.8 min; block 41.7 min; 11:24 -> 12:06 fits
+  pass 0: idle rule; warm-up C3b-G4#bpb@W1; each of 3 rounds: C3b-G4#bpb@W1(271.4s)
+  pass 1: idle rule; warm-up C3b-G4#bpb@W1; each of 3 rounds: C3b-G4#bpb@W1(271.4s)
+
+TOTAL 174.2 min if every block runs; the cutoff stops starting processes at 12:45

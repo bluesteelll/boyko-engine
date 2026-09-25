@@ -49,7 +49,8 @@
 //! `ContactPairs`, the broadphase counter from `ContactPairs`. The three narrowphase class counters
 //! (L9: reused, separated-axis hits, full) are the narrowphase's public `pair_classes`, which must
 //! close over the step: their non-box count equals the one recomputed here from the pairs' shapes,
-//! the four classes sum to the pairs, and with contact reuse off (the harness) nothing is reused.
+//! and the four classes sum to the pairs. The harness keeps the shipped contact reuse, on since L9
+//! C4, and some step must reuse a record, so the reused counter is checked against a live count.
 //!
 //! The narrowphase's chunk count is recomputed from the pair count, the pool's worker count and the
 //! exported `NP_*` constants — with the `lanes < 2` term, as the engine's rule has it — and the
@@ -236,6 +237,7 @@ fn physics_zones_count_exactly() {
     );
 
     let mut literal = [0u64; 6]; // build, gravity, warm, integrate, biased, relax over STEPS_OFF
+    let mut reused_total = 0u64;
 
     for step in 0..STEPS {
         let sleeping = step >= STEPS_OFF;
@@ -327,10 +329,11 @@ fn physics_zones_count_exactly() {
                 .count() as u64
         };
         assert_eq!(
-            (classes.pairs, classes.non_box, classes.reused),
-            (shape.pairs, non_box, 0),
-            "step {step}: the pair classes' pairs and non-box pairs are the step's, and with              contact reuse off nothing is reused ({classes:?})"
+            (classes.pairs, classes.non_box),
+            (shape.pairs, non_box),
+            "step {step}: the pair classes' pairs and non-box pairs are the step's ({classes:?})"
         );
+        reused_total += classes.reused;
         assert_eq!(
             classes.full + classes.reused + classes.sep_hits + classes.non_box,
             shape.pairs,
@@ -444,6 +447,11 @@ fn physics_zones_count_exactly() {
     // build, gravity, warm, integrate, biased, relax.
     let want = if ZONES_COMPILED { [3, 12, 12, 12, 12, 24] } else { [0; 6] };
     assert_eq!(literal, want, "the plan's 3-step literals");
+    assert!(
+        reused_total > 0,
+        "no step reused a contact record (contact reuse is on by default since L9 C4), so the \
+         reused counter was only ever checked against zero"
+    );
     // The whole session since the arm, not a sum of diffs: nothing reached the store before the
     // first step or between the per-step snapshots.
     assert_eq!(

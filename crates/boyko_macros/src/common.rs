@@ -25,3 +25,17 @@ impl FieldAccess {
         }
     }
 }
+
+/// `syn::parse2::<T>(tokens)`, or an early `return` of the parse error as `compile_error!` tokens:
+/// the `proc_macro2` form of `syn::parse_macro_input!`. Its error arm returns
+/// `err.to_compile_error()`, which is what `parse_macro_input!` returned wrapped in a
+/// `proc_macro::TokenStream`, so an entry point's wrapper emits the same tokens as before the twins.
+macro_rules! parse2_or_compile_error {
+    ($tokens:ident as $ty:ty) => {
+        match ::syn::parse2::<$ty>($tokens) {
+            Ok(parsed) => parsed,
+            Err(err) => return err.to_compile_error(),
+        }
+    };
+}
+pub(crate) use parse2_or_compile_error;

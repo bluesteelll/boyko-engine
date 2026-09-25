@@ -1,13 +1,13 @@
 //! `#[derive(SystemSet)]` implementation.
 
-use proc_macro::TokenStream;
+use proc_macro2::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, Ident, parse_macro_input};
+use syn::{Data, DeriveInput, Fields, Ident};
 
 /// Implementation of `#[derive(SystemSet)]` (see the public entry in `lib.rs`).
-pub(crate) fn expand(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
+pub(crate) fn system_set_macro_impl(input: TokenStream) -> TokenStream {
+    let input = crate::common::parse2_or_compile_error!(input as DeriveInput);
     let name = input.ident.clone();
     let name_span = name.span();
 
@@ -19,8 +19,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             name_span,
             "SystemSet derive does not support generics (Phase 9 scope)",
         )
-        .to_compile_error()
-        .into();
+        .to_compile_error();
     }
 
     // Body: the `set_discriminant` / `set_name` overrides (if any). Unit
@@ -34,23 +33,21 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                     name_span,
                     "SystemSet derive requires a unit struct (no fields)",
                 )
-                .to_compile_error()
-                .into();
+                .to_compile_error();
             }
             // Unit struct → no override; trait defaults (disc 0, type name).
             TokenStream2::new()
         }
         Data::Enum(e) => match system_set_enum_body(&name, e) {
             Ok(tokens) => tokens,
-            Err(err) => return err.to_compile_error().into(),
+            Err(err) => return err.to_compile_error(),
         },
         Data::Union(_) => {
             return syn::Error::new(
                 name_span,
                 "SystemSet can only be derived for unit structs or fieldless enums",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
     };
 
@@ -60,7 +57,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         }
     };
 
-    expanded.into()
+    expanded
 }
 
 /// Generates the `set_discriminant` + `set_name` method bodies for an enum

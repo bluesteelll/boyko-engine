@@ -425,7 +425,7 @@ fn setup_minimal_scene(
 /// `--features hwrt`, the SAME run additionally arms `ShadowDenoiseConfig::Both`
 /// (C1 hwrt completeness) before `app.run()` — one `cfg`-gated line, no second App.
 #[test]
-#[ignore = "needs a real windowed GPU device (do NOT set BOYKO_DISABLE_VALIDATION \
+#[ignore = "gpu-windowed: needs a real windowed GPU device (do NOT set BOYKO_DISABLE_VALIDATION \
             requirements beyond this file's doc); run with --test-threads=1, once \
             default-features and once --features hwrt"]
 fn f7_grow_and_defer_old_phased_headless() {

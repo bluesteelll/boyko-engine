@@ -1763,7 +1763,7 @@ fn dump_row(row: VbRow, prefix: &str) {
 /// two-generator split exists to prevent — so if the prediction is not already written down, do not
 /// run this.
 #[test]
-#[ignore = "generator, not a gate: prints the four baselines as Rust source; the orchestrator runs it"]
+#[ignore = "generator: generator, not a gate: prints the four baselines as Rust source; the orchestrator runs it"]
 fn dump_vb_unsplit_barrier_streams() {
     println!("// ===== BEGIN dump_vb_unsplit_barrier_streams =====");
     println!("// Replace each `const U?_EXPECTED_…` array in tests/vb_barrier_stream_baseline.rs");
@@ -1791,7 +1791,7 @@ fn dump_vb_unsplit_barrier_streams() {
 /// behaviour). Two generators keep "re-measure the split rows" from silently also re-measuring the
 /// four rows the split is being compared against.
 #[test]
-#[ignore = "generator, not a gate: prints the four SPLIT streams as Rust source; the orchestrator runs it"]
+#[ignore = "generator: generator, not a gate: prints the four SPLIT streams as Rust source; the orchestrator runs it"]
 fn dump_vb_split_barrier_streams() {
     println!("// ===== BEGIN dump_vb_split_barrier_streams =====");
     println!("// Replace each `const S?_EXPECTED_…` array in tests/vb_barrier_stream_baseline.rs");

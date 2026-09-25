@@ -641,7 +641,7 @@ fn leak_parent_of(children: &[&'static TypeInfo]) -> &'static TypeInfo {
 #[test]
 #[cfg_attr(
     miri,
-    ignore = "builds its fixture with `Box::leak` (a 33-deep chain of hand-written \
+    ignore = "miri-unsupported: builds its fixture with `Box::leak` (a 33-deep chain of hand-written \
               statics is 66 declarations); Miri's leak checker reports the deliberate \
               leak. No `unsafe` is involved -- the Miri-relevant paths here are the \
               cursor tests and the static cyclic fixtures, which do run."
@@ -672,7 +672,7 @@ fn a_chain_deeper_than_the_walk_is_refused_rather_than_truncated() {
 #[test]
 #[cfg_attr(
     miri,
-    ignore = "builds 257 leaked descriptors (see the depth test's reason); Miri's leak \
+    ignore = "miri-unsupported: builds 257 leaked descriptors (see the depth test's reason); Miri's leak \
               checker reports them. No `unsafe` is involved."
 )]
 fn a_graph_wider_than_the_finished_set_is_refused() {

@@ -1,0 +1,141 @@
+# UG-08 at B3: key lines of every Miri invocation (full logs in the B3 scratch, ug08/*.log)
+# target dir D:/wt/_targets/b3-miri-msvc, deleted afterwards (deleted D:/wt/_targets/b3-miri-msvc (464M per du -sh before deletion))
+# "N uncommitted" in a header = boyko_symcensus tool edits, committed right after; no engine source differed from c1e9f1db
+
+## tb
+== Wed Sep 23 07:05:01 RTZST 2026
+tree: f574778fb7d9074c233ce1e2fb08ca20e18a4d82 (0 uncommitted)
+toolchain: miri 0.1.0 (a36d05efab 2026-09-09)
+MIRIFLAGS=-Zmiri-tree-borrows -Zmiri-ignore-leaks -Zmiri-strict-provenance
+command: RUSTFLAGS=-Zrandomize-layout timeout 1200 cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_entity_store
+running 1 test
+test m2_entity_churn_on_fallback_arm ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.18s
+exit=0
+== Wed Sep 23 07:06:44 RTZST 2026
+
+## sb
+== Wed Sep 23 07:14:15 RTZST 2026
+tree: f574778fb7d9074c233ce1e2fb08ca20e18a4d82 (3 uncommitted)
+toolchain: miri 0.1.0 (a36d05efab 2026-09-09)
+MIRIFLAGS=-Zmiri-ignore-leaks -Zmiri-strict-provenance
+command: RUSTFLAGS=-Zrandomize-layout timeout 1200 cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-ecs --test miri_entity_store
+running 1 test
+test m2_entity_churn_on_fallback_arm ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.18s
+exit=0
+== Wed Sep 23 07:14:26 RTZST 2026
+
+## tb-joined
+== Wed Sep 23 07:18:45 RTZST 2026
+tree: f574778fb7d9074c233ce1e2fb08ca20e18a4d82 (3 uncommitted)
+toolchain: miri 0.1.0 (a36d05efab 2026-09-09)
+MIRIFLAGS=-Zmiri-tree-borrows -Zmiri-ignore-leaks -Zmiri-strict-provenance
+command: timeout 1200 cargo +nightly-x86_64-pc-windows-msvc miri test --config 'target."cfg(windows)".rustflags=["-Zrandomize-layout"]' -p boyko-ecs --test miri_entity_store
+running 1 test
+test m2_entity_churn_on_fallback_arm ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.18s
+exit=0
+== Wed Sep 23 07:19:17 RTZST 2026
+
+## sb-joined
+== Wed Sep 23 07:19:18 RTZST 2026
+tree: f574778fb7d9074c233ce1e2fb08ca20e18a4d82 (3 uncommitted)
+toolchain: miri 0.1.0 (a36d05efab 2026-09-09)
+MIRIFLAGS=-Zmiri-ignore-leaks -Zmiri-strict-provenance
+command: timeout 1200 cargo +nightly-x86_64-pc-windows-msvc miri test --config 'target."cfg(windows)".rustflags=["-Zrandomize-layout"]' -p boyko-ecs --test miri_entity_store
+running 1 test
+test m2_entity_churn_on_fallback_arm ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.18s
+exit=0
+== Wed Sep 23 07:19:25 RTZST 2026
+
+## armA
+== Wed Sep 23 07:14:47 RTZST 2026
+tree: f574778fb7d9074c233ce1e2fb08ca20e18a4d82 (3 uncommitted)
+toolchain: miri 0.1.0 (a36d05efab 2026-09-09)
+MIRIFLAGS=-Zmiri-tree-borrows -Zmiri-strict-provenance
+command: RUSTFLAGS=-Zrandomize-layout timeout 1200 cargo +nightly-x86_64-pc-windows-msvc miri test -v -p boyko-engine --test isa_baseline_census -- --exact the_declared_isa_baseline_actually_reached_the_compiler
+running 1 test
+test the_declared_isa_baseline_actually_reached_the_compiler ... FAILED
+thread 'the_declared_isa_baseline_actually_reached_the_compiler' (1) panicked at tests\isa_baseline_census.rs:80:5:
+the x86-64-v3 baseline did not reach rustc: 5 of 5 features are absent.
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.36s
+exit=101
+== Wed Sep 23 07:15:21 RTZST 2026
+
+## armB
+== Wed Sep 23 07:15:33 RTZST 2026
+tree: f574778fb7d9074c233ce1e2fb08ca20e18a4d82 (3 uncommitted)
+toolchain: miri 0.1.0 (a36d05efab 2026-09-09)
+MIRIFLAGS=-Zmiri-tree-borrows -Zmiri-strict-provenance
+command: timeout 1200 cargo +nightly-x86_64-pc-windows-msvc miri test --config 'target."cfg(windows)".rustflags=["-Zrandomize-layout"]' -v -p boyko-engine --test isa_baseline_census -- --exact the_declared_isa_baseline_actually_reached_the_compiler
+running 1 test
+test the_declared_isa_baseline_actually_reached_the_compiler ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.22s
+exit=0
+== Wed Sep 23 07:15:36 RTZST 2026
+
+## armA2
+== Wed Sep 23 07:15:21 RTZST 2026
+tree: f574778fb7d9074c233ce1e2fb08ca20e18a4d82 (3 uncommitted)
+toolchain: miri 0.1.0 (a36d05efab 2026-09-09)
+MIRIFLAGS=-Zmiri-tree-borrows -Zmiri-strict-provenance
+command: RUSTFLAGS=-Zrandomize-layout timeout 1200 cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-physics --lib -- --exact sdf_simd::o9_kernel_tests::x8_empty_list_is_far_all_lanes
+error[E0080]: evaluation panicked: WarmSeedStats is six u32 counters and one u64, with no padding
+   --> crates\boyko_physics\src\row_identity.rs:346:15
+exit=1
+== Wed Sep 23 07:15:33 RTZST 2026
+
+## armB2
+== Wed Sep 23 07:15:37 RTZST 2026
+tree: f574778fb7d9074c233ce1e2fb08ca20e18a4d82 (3 uncommitted)
+toolchain: miri 0.1.0 (a36d05efab 2026-09-09)
+MIRIFLAGS=-Zmiri-tree-borrows -Zmiri-strict-provenance
+command: timeout 1200 cargo +nightly-x86_64-pc-windows-msvc miri test --config 'target."cfg(windows)".rustflags=["-Zrandomize-layout"]' -p boyko-physics --lib -- --exact sdf_simd::o9_kernel_tests::x8_empty_list_is_far_all_lanes
+error[E0080]: evaluation panicked: WarmSeedStats is six u32 counters and one u64, with no padding
+   --> crates\boyko_physics\src\row_identity.rs:346:15
+exit=1
+== Wed Sep 23 07:15:52 RTZST 2026
+
+## armB3
+== Wed Sep 23 07:15:52 RTZST 2026
+tree: f574778fb7d9074c233ce1e2fb08ca20e18a4d82 (3 uncommitted)
+toolchain: miri 0.1.0 (a36d05efab 2026-09-09)
+MIRIFLAGS=-Zmiri-tree-borrows -Zmiri-strict-provenance
+command: timeout 1200 cargo +nightly-x86_64-pc-windows-msvc miri test --config 'target."cfg(windows)".rustflags=["-Zrandomize-layout"]' -p boyko-physics --lib -- --exact sdf_simd::o9_kernel_tests::x8_inert_lanes_do_not_leak
+error[E0080]: evaluation panicked: WarmSeedStats is six u32 counters and one u64, with no padding
+   --> crates\boyko_physics\src\row_identity.rs:346:15
+exit=1
+== Wed Sep 23 07:15:56 RTZST 2026
+
+## armC1
+== Wed Sep 23 07:17:54 RTZST 2026
+tree: f574778fb7d9074c233ce1e2fb08ca20e18a4d82 (3 uncommitted)
+toolchain: miri 0.1.0 (a36d05efab 2026-09-09)
+MIRIFLAGS=-Zmiri-tree-borrows -Zmiri-strict-provenance
+command: timeout 1200 cargo +nightly-x86_64-pc-windows-msvc miri test -v -p boyko-physics --lib -- --exact sdf_simd::o9_kernel_tests::x8_empty_list_is_far_all_lanes   (no RUSTFLAGS, no --config: .cargo/config.toml's target rustflags alone)
+    --> crates\boyko_physics\src\solver\colored.rs:1572:19
+running 1 test
+test sdf_simd::o9_kernel_tests::x8_empty_list_is_far_all_lanes ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 225 filtered out; finished in 0.26s
+exit=0
+== Wed Sep 23 07:18:11 RTZST 2026
+
+## armC2
+== Wed Sep 23 07:18:11 RTZST 2026
+tree: f574778fb7d9074c233ce1e2fb08ca20e18a4d82 (3 uncommitted)
+toolchain: miri 0.1.0 (a36d05efab 2026-09-09)
+MIRIFLAGS=-Zmiri-tree-borrows -Zmiri-strict-provenance
+command: timeout 1200 cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-physics --lib -- --exact sdf_simd::o9_kernel_tests::x8_inert_lanes_do_not_leak   (no RUSTFLAGS, no --config: .cargo/config.toml's target rustflags alone)
+    --> crates\boyko_physics\src\solver\colored.rs:1572:19
+running 1 test
+test sdf_simd::o9_kernel_tests::x8_inert_lanes_do_not_leak ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 225 filtered out; finished in 10.25s
+exit=0
+== Wed Sep 23 07:18:29 RTZST 2026
+
+## rustc flags of the census unit (arm A vs arm B, from -v)
+armA: -Zrandomize-layout 
+armB: -C target-cpu=x86-64-v3 -Zrandomize-layout 
+armC1 (boyko_physics): -C target-cpu=x86-64-v3 

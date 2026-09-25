@@ -1,0 +1,76 @@
+== leg (2) capture
+tree         D:\wt\lighttable (HEAD a6a97c55ccca0a02774b4f6b961a20e4f1dbf9e1, 0 uncommitted path(s))
+target dir   D:/wt/_targets/vkval-msvc
+host         x86_64-pc-windows-msvc (msvc)
+rustc -vV    rustc 1.98.1 (48a229cea 2026-09-01)
+rustc -vV    binary: rustc
+rustc -vV    commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
+rustc -vV    commit-date: 2026-09-01
+rustc -vV    host: x86_64-pc-windows-msvc
+rustc -vV    release: 1.98.1
+rustc -vV    LLVM version: 22.1.8
+llvm-nm          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-nm.exe
+llvm-objdump     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-objdump.exe
+llvm-readobj     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-readobj.exe
+llvm-size        LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-size.exe
+llvm-ar          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-ar.exe
+boyko_demo P29-1: PINNED <boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows size=412 copies=1 sha=6d1f39c203ae3ae9
+boyko_demo P29-2: PINNED <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion size=93 copies=1 sha=8365a5d6b84ad3f3
+boyko_demo P29-3: PINNED boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan size=1163 copies=1 sha=270ce025c9d0df16
+boyko_demo P29-4: PINNED <boyko_threadpool::block::ScopeBlock>::grow size=207 copies=1 sha=5d6330778d5586c7
+boyko_demo D-2: PINNED boyko_ecs::ecs::core::iters::query::query_type_registry::register_new size=143 copies=1 sha=16a34425c52375ec
+boyko_demo D-3: PINNED boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new size=102 copies=1 sha=3d9d9328638bc8b9
+boyko_demo D-4: PINNED boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid> size=651 copies=1 sha=e2cacac095a7312f
+boyko_demo D-5: ABSENT
+boyko_demo H-3: ABSENT
+boyko_demo: 7 pin(s) -> D:\wt\lighttable\crates\boyko_symcensus\ug15\pins\leg2-boyko_demo.pins
+clear P29-1: PINNED <boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows size=412 copies=1 sha=6d1f39c203ae3ae9
+clear P29-2: PINNED <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion size=93 copies=1 sha=8365a5d6b84ad3f3
+clear P29-3: PINNED boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan size=1163 copies=1 sha=270ce025c9d0df16
+clear P29-4: PINNED <boyko_threadpool::block::ScopeBlock>::grow size=207 copies=1 sha=5d6330778d5586c7
+clear R-1: PINNED boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform> size=439 copies=3 sha=04c8c1e8e39895cc
+clear R-2: PINNED <boyko_scene::transform::Transform as boyko_ecs::ecs::core::component::component::Component>::component_id size=43 copies=3 sha=2a4ba09075f65ea6
+clear D-2: PINNED boyko_ecs::ecs::core::iters::query::query_type_registry::register_new size=143 copies=1 sha=8ebd64c85b1fdc60
+clear D-3: PINNED boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new size=102 copies=1 sha=f6b801649e20fbf2
+clear D-4: PINNED boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_app::occlusion_force::OcclusionForce> size=648 copies=1 sha=069120729b00276c
+clear D-5: ABSENT
+clear R-3: ABSENT
+clear S-1: ABSENT
+clear H-3: PINNED <boyko_ecs::ecs::core::schedule::schedule::Schedule>::run size=13789 copies=1 sha=c6d02edcc5992c7d
+clear: 10 pin(s) -> D:\wt\lighttable\crates\boyko_symcensus\ug15\pins\leg2-clear.pins
+swap_remove R-4: ABSENT
+swap_remove H-2: PINNED <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity size=2195 copies=1 sha=1ee9ec205980725c
+swap_remove H-2: PINNED <criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}> size=19788 copies=1 sha=a25d1e0763faa34c
+swap_remove H-2: PINNED <criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench size=403 copies=1 sha=aa8f34a272573941
+swap_remove H-2: PINNED <criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::warm_up size=319 copies=1 sha=dd872ed5c018fad3
+swap_remove H-2: PINNED swap_remove::bench_swap_remove::{closure#0}::{closure#0} size=8476 copies=1 sha=f857fac1afd2fa0d
+swap_remove: 5 pin(s) -> D:\wt\lighttable\crates\boyko_symcensus\ug15\pins\leg2-swap_remove.pins
+query_dsl R-4: PINNED boyko_ecs::ecs::core::component::component_registry::register_layout::<query_dsl::Tag> size=376 copies=1 sha=f010ad75ee62a86f
+query_dsl H-1: PINNED <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()> size=1184 copies=1 sha=ac7105c2c6b4a6fc
+query_dsl H-1: PINNED <criterion::bencher::Bencher>::iter::<(), query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}> size=119 copies=1 sha=e602b850ff6c5044
+query_dsl H-1: PINNED <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench size=419 copies=1 sha=d6e9dd58824ce0cc
+query_dsl H-1: PINNED <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample size=6092 copies=1 sha=3273b4e0c5c09b5b
+query_dsl H-1: PINNED <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up size=342 copies=1 sha=f50360bac98bf319
+query_dsl: 6 pin(s) -> D:\wt\lighttable\crates\boyko_symcensus\ug15\pins\leg2-query_dsl.pins
+phase9_scheduler H-3: PINNED <boyko_ecs::ecs::core::schedule::schedule::Schedule>::run size=11626 copies=1 sha=d26fc7683a37e10c
+phase9_scheduler H-3: PINNED <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::apply size=1 copies=1 sha=bfb4f2a33b98810a
+phase9_scheduler H-3: PINNED <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::check_change_tick size=64 copies=1 sha=1f80893059b2e50a
+phase9_scheduler H-3: PINNED <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::has_deferred size=3 copies=1 sha=4180e57ab6de6ea7
+phase9_scheduler H-3: PINNED <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize size=204 copies=1 sha=bcf4c1a7a5740da6
+phase9_scheduler H-3: PINNED <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::meta size=4 copies=1 sha=814105ff4f73389b
+phase9_scheduler H-3: PINNED <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::name size=15 copies=1 sha=44472b443f47b70d
+phase9_scheduler H-3: PINNED <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher size=52 copies=1 sha=68d2fe4a980d35fa
+phase9_scheduler H-3: PINNED <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe size=52 copies=1 sha=a691fa490291547d
+phase9_scheduler H-3: PINNED <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::set_change_ticks size=14 copies=1 sha=028671234b512837
+phase9_scheduler H-3: PINNED <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::set_zone size=8 copies=1 sha=f94977ccfffa6549
+phase9_scheduler H-3: PINNED <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher size=52 copies=1 sha=b43bc7aa5a703334
+phase9_scheduler H-3: PINNED <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe size=52 copies=1 sha=13d7157385f8b041
+phase9_scheduler H-3: PINNED core::ptr::drop_glue::<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()>> size=49 copies=1 sha=1ce506ef77ea2541
+phase9_scheduler: 14 pin(s) -> D:\wt\lighttable\crates\boyko_symcensus\ug15\pins\leg2-phase9_scheduler.pins
+absent candidates: 6
+  D-5 in boyko_demo: no defined code symbol matches [FirstWithPrefix("boyko_ecs::ecs::core::events::event_registry::register_event_new::<")] in the post-LTO object: every instantiation was inlined into its callers or removed by fat LTO
+  D-5 in clear: no defined code symbol matches [FirstWithPrefix("boyko_ecs::ecs::core::events::event_registry::register_event_new::<")] in the post-LTO object: every instantiation was inlined into its callers or removed by fat LTO
+  H-3 in boyko_demo: no defined code symbol matches [Exact("<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run"), Contains("bench_schedule_two_disjoint")] in the post-LTO object: every instantiation was inlined into its callers or removed by fat LTO
+  R-3 in clear: no defined code symbol matches [Exact("boyko_ecs::ecs::core::component::component_registry::try_register_dynamic")] in the post-LTO object: every instantiation was inlined into its callers or removed by fat LTO
+  R-4 in swap_remove: no defined code symbol matches [FirstWithPrefix("boyko_ecs::ecs::core::component::component_registry::register_layout::<")] in the post-LTO object: every instantiation was inlined into its callers or removed by fat LTO
+  S-1 in clear: no defined code symbol matches [FirstWithPrefix("<boyko_ecs::ecs::core::schedule::schedule_builder::ScheduleBuilder>::add_system::<")] in the post-LTO object: every instantiation was inlined into its callers or removed by fat LTO

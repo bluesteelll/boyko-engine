@@ -1,0 +1,4 @@
+exit 3
+STOP before P1A-jolt-p1: idle rule not met in 30 min (wait_idle exit 1); last finished: P1A-jolt-p0 r2 H-trk-ap#trk@W16
+2026-09-25T01:59:50.948+03:00
+reduction exit 0 (raw/tables.md)

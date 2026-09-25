@@ -197,7 +197,7 @@ fn setup_fixture(
 /// Driven entirely by env so the driver can spawn it; run directly it needs [`ENV_FIXTURE`],
 /// [`ENV_RUNG`] and `BOYKO_VG_CENSUS`.
 #[test]
-#[ignore = "needs a real windowed GPU device; the census driver spawns it once per (fixture, ladder rung)"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the census driver spawns it once per (fixture, ladder rung)"]
 fn vg_census_rung_dump() {
     // The worker is meaningless without the `(fixture, rung)` pair the gate hands it, and
     // `--ignored` runs EVERY test in this binary — so a direct invocation lands here with nothing
@@ -507,7 +507,7 @@ fn the_oracle_reproduces_the_fixture_analytic_coverage() {
 /// [`the_a_domain_is_exactly_the_vb_pins_that_were_measured`]; part (e) is R0d's, measured on the
 /// corpus at the top rung where it can actually fail.
 #[test]
-#[ignore = "needs a real windowed GPU device; drives one worker process per ladder rung"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; drives one worker process per ladder rung"]
 fn vg_density_census_gate() {
     let src = read_thresholds();
     let ladder = resolution_ladder(&src);

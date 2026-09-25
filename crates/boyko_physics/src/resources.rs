@@ -369,7 +369,7 @@ pub struct PhysicsConfig {
     /// blocks), pinned by the frame allocation census. Toggling it changes performance,
     /// never the result.
     pub parallel_narrowphase: bool,
-    /// L9b CONTACT REUSE (default `false`, commit C3 of
+    /// L9b CONTACT REUSE (default `true` since commit C4, built in commit C3 of
     /// `docs/physics/perf-campaign/levers/L9-contact-reuse/02-DESIGN-REV1.md`).
     ///
     /// When `true`, a touching box-box pair that is slow (its relative motion over a step
@@ -388,10 +388,10 @@ pub struct PhysicsConfig {
     /// it just built, lemma L9-L1), and the serial loop and any partition of the parallel
     /// narrowphase produce the same bits for any worker count.
     ///
-    /// **Default OFF** (commit C3: the machinery is dormant, every trajectory is the one
-    /// the engine produced before it). Toggling it at runtime needs no epoch: off, the
-    /// records are ignored and not written; on, the next full collision of a slow pair
-    /// builds one.
+    /// **Default ON** since L9 C4 (window 6's decision). `false` is the exact narrowphase:
+    /// the trajectories from before contact reuse, and the arm cross-window bridges run.
+    /// Toggling it at runtime needs no epoch: off, the records are ignored and not written;
+    /// on, the next full collision of a slow pair builds one.
     pub contact_reuse: bool,
     /// τ, the reuse distance in metres (default [`DEFAULT_CONTACT_REUSE_DISTANCE`], 1 mm);
     /// only meaningful when [`contact_reuse`](Self::contact_reuse) is `true`. Must be finite
@@ -636,9 +636,9 @@ impl Default for PhysicsConfig {
             // chunks below two lanes, so W=1 opens no scope. The serial loop stays the
             // same-binary A/B (`parallel_narrowphase = false`).
             parallel_narrowphase: true,
-            // Default OFF at L9 C3 (the dormant commit): every trajectory is the one the
-            // engine produced before contact reuse existed. C4 is the commit that turns it on.
-            contact_reuse: false,
+            // Default ON since L9 C4 (window 6's decision). `false` is the exact narrowphase,
+            // every trajectory the engine produced before contact reuse existed.
+            contact_reuse: true,
             contact_reuse_distance: DEFAULT_CONTACT_REUSE_DISTANCE,
             // Default OFF so an un-opted colored world is BYTE-IDENTICAL to the O6/O7
             // colored solve (the campaign 0%-gate); sleeping is a pure opt-in.

@@ -164,7 +164,7 @@ fn setup(
 /// probe is the third, and it is here because `draw_batches == 2` must come from the HOST's own
 /// `[host]` table rather than from a number this file re-derives.
 #[test]
-#[ignore = "needs a real windowed GPU device; the G-P3-B/C drivers spawn it with all three capture knobs set"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the G-P3-B/C drivers spawn it with all three capture knobs set"]
 fn vb_occ_mixed_capture_worker() {
     // A worker booted without the knobs arms no capture, so the host loop has nothing to complete
     // and `app.run()` never returns — a hang, the worst failure mode a sweep can have.
@@ -847,7 +847,7 @@ fn the_mixed_fixture_is_internally_consistent() {
 /// The load-bearing gate of piece 3. See the module header for the eight clauses, for what it cannot
 /// claim, and for the corruption table.
 #[test]
-#[ignore = "live GPU gate (spawns one windowed worker); the orchestrator runs it with --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU gate (spawns one windowed worker); the orchestrator runs it with --test-threads=1"]
 fn vb_occ_mixed_partition_matches_the_oracle() {
     let cap = run_capture(Regime::Unforced);
     assert_partition(&cap, Regime::Unforced);
@@ -876,7 +876,7 @@ fn vb_occ_mixed_partition_matches_the_oracle() {
 /// depth entirely — every texel the reverse-Z far plane — which trips the SHIPPED non-vacuity
 /// clauses in `hzb_engine_pyramid_gate.rs`. The unmarked filler exists precisely to populate it.
 #[test]
-#[ignore = "live GPU gate (spawns one windowed worker); the orchestrator runs it with --test-threads=1"]
+#[ignore = "gpu-windowed: live GPU gate (spawns one windowed worker); the orchestrator runs it with --test-threads=1"]
 fn vb_occ_mixed_force_late_rasterises() {
     let cap = run_capture(Regime::ForceLate);
     assert_partition(&cap, Regime::ForceLate);

@@ -512,7 +512,7 @@ struct ModuleReport {
 
 /// **The occupancy figure for the three sim modules.** See the module doc.
 #[test]
-#[ignore = "needs a real GPU exposing VK_KHR_pipeline_executable_properties; rung P1b deliverable 2"]
+#[ignore = "gpu-cap: needs a real GPU exposing VK_KHR_pipeline_executable_properties; rung P1b deliverable 2"]
 fn particle_sim_modules_report_their_register_footprint() {
     let Some(probe) = VulkanProbe::open() else {
         return;

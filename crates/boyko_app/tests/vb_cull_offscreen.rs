@@ -188,7 +188,7 @@ fn setup(
 /// transfer copy of the buffers exactly as they ship, so this proves the cull in the configuration
 /// that renders rather than in one built for the test.
 #[test]
-#[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU to read the batch cull's visible count"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator runs it on the GPU to read the batch cull's visible count"]
 fn vb_cull_rejects_the_offscreen_batch() {
     let out = std::env::temp_dir().join("boyko_vb_cull_readback.txt");
     let _ = std::fs::remove_file(&out);

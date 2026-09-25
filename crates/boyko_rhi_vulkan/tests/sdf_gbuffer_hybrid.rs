@@ -4024,7 +4024,7 @@ fn a3g_nondefault_light_dir_matches_host_lit_literal() {
 /// (a developer increment), so a true on-device marcher-only timing is deferred; this wall A/B
 /// is the available proxy. `#[ignore]` by default (a perf observation, run explicitly).
 #[test]
-#[ignore = "perf observation — run explicitly with --ignored"]
+#[ignore = "gpu: perf observation — run explicitly with --ignored"]
 fn a5_gpu_off_vs_on_wall_clock_ab() {
     let Some(ctx) = boot_render_or_skip("a5_gpu_off_vs_on_wall_clock_ab") else {
         return;
@@ -6664,7 +6664,7 @@ fn bake_brick_grid(edits: &[SdfEdit]) -> (boyko_sdf_math::brick::PointerGrid, Ve
 /// (i) within ±2/255 of `golden_composite_pixel_brick(brick_enabled = true)` and (ii) within
 /// ±2/255 of the brick-OFF GPU image (the on-device hit-set == analytic gate). Validation-clean.
 #[test]
-#[ignore = "GPU offscreen gate — requires a Vulkan device (the owner's RTX); run with --ignored"]
+#[ignore = "gpu: GPU offscreen gate — requires a Vulkan device (the owner's RTX); run with --ignored"]
 fn sdf_m1_brick_offscreen_matches_golden_and_analytic() {
     let Some(ctx) = boot_or_skip("sdf_m1_brick_offscreen_matches_golden_and_analytic") else {
         return;
@@ -6781,7 +6781,7 @@ fn gpu_is_hit(viewt: &[f32], px: u32, py: u32) -> bool {
 /// cubic SURFACE path ENGAGES on-device, finds crossings the analytic marcher misses, agrees with
 /// the host cubic's hit-set + surface-`t`, and keeps EXACT CSG (every hit on the true surface).
 #[test]
-#[ignore = "GPU offscreen gate — requires a Vulkan device (the owner's RTX); run with --ignored"]
+#[ignore = "gpu: GPU offscreen gate — requires a Vulkan device (the owner's RTX); run with --ignored"]
 fn sdf_m2_brick_trilinear_offscreen_engages_and_matches_host() {
     let Some(ctx) = boot_or_skip("sdf_m2_brick_trilinear_offscreen_engages_and_matches_host") else {
         return;
@@ -7257,7 +7257,7 @@ fn sdf_m4_level0_ubo_block_byte_identical_to_m2() {
 /// M2 render (`brick_levels = 1`): level 0 wins by containment, so the coarser levels never engage. The
 /// host pre-flight (CPU) proves the goldens agree; the RTX run proves the GPU `gViewT`/LIT agree.
 #[test]
-#[ignore = "GPU offscreen gate — requires a Vulkan device (the owner's RTX); run with --ignored"]
+#[ignore = "gpu: GPU offscreen gate — requires a Vulkan device (the owner's RTX); run with --ignored"]
 fn sdf_m4_clipmap_near_field_matches_single_level() {
     let Some(ctx) = boot_or_skip("sdf_m4_clipmap_near_field_matches_single_level") else {
         return;
@@ -7324,7 +7324,7 @@ fn sdf_m4_clipmap_near_field_matches_single_level() {
 /// selects level 1 and renders the surface via the level-1 bricks. The GPU hit agrees with the analytic
 /// field within `M2_CREASE_EPS` (the exact-CSG residual). This is the M4 far-reach proof.
 #[test]
-#[ignore = "GPU offscreen gate — requires a Vulkan device (the owner's RTX); run with --ignored"]
+#[ignore = "gpu: GPU offscreen gate — requires a Vulkan device (the owner's RTX); run with --ignored"]
 fn sdf_m4_clipmap_far_field_renders() {
     let Some(ctx) = boot_or_skip("sdf_m4_clipmap_far_field_renders") else {
         return;
@@ -7398,7 +7398,7 @@ fn sdf_m4_clipmap_far_field_renders() {
 /// SDF M4 clip-map OFFSCREEN SCREENSHOT DUMP (`#[ignore]`, RTX) — the owner's visual sign-off. Renders
 /// the far-field sphere with the N-level clip-map and writes the LIT image to a BMP the owner opens.
 #[test]
-#[ignore = "GPU offscreen screenshot dump — the owner runs it on the RTX for visual sign-off"]
+#[ignore = "gpu: GPU offscreen screenshot dump — the owner runs it on the RTX for visual sign-off"]
 fn sdf_m4_clipmap_far_field_screenshot_dump() {
     let Some(ctx) = boot_or_skip("sdf_m4_clipmap_far_field_screenshot_dump") else {
         return;
@@ -7446,7 +7446,7 @@ fn sdf_m4_clipmap_far_field_screenshot_dump() {
 /// Writes the LIT image to `D:/tmp/p5_mesh_sdf.bmp` (created if absent). `#[ignore]` because
 /// it needs the RTX (no CPU oracle assert — it is a visual dump).
 #[test]
-#[ignore = "GPU offscreen screenshot dump — the owner runs it on the RTX for visual sign-off"]
+#[ignore = "gpu: GPU offscreen screenshot dump — the owner runs it on the RTX for visual sign-off"]
 fn p5_mesh_sdf_pbr_screenshot_dump() {
     let Some(ctx) = boot_or_skip("p5_mesh_sdf_pbr_screenshot_dump") else {
         return;
@@ -7534,7 +7534,7 @@ fn upscale_rgba_nn(src: &[u8], w: u32, h: u32, scale: u32) -> Vec<u8> {
 /// occluded by the near sphere. `#[ignore]` (no CPU assert beyond non-empty — it is a visual
 /// dump; the GPU/oracle agreement is the load-bearing `p6_r1_multi_light_sdf_shadows_match_oracle`).
 #[test]
-#[ignore = "GPU offscreen screenshot dump — the owner runs it on the RTX for visual sign-off"]
+#[ignore = "gpu: GPU offscreen screenshot dump — the owner runs it on the RTX for visual sign-off"]
 fn p6_multilight_shadows_screenshot_dump() {
     let Some(ctx) = boot_or_skip("p6_multilight_shadows_screenshot_dump") else {
         return;

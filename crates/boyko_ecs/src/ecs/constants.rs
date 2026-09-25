@@ -6,6 +6,32 @@
 /// frontier commit can never overrun the kernel's page-rounded mapping.
 pub const COMMIT_GRANULE: usize = 64 * 1024;
 
+/// OS commit page (packing plan D1,
+/// `docs/ecs/POOL-SUBGRANULAR-PACKING-PLAN.md`): `MEM_COMMIT` inside an
+/// existing reservation and `mprotect` are page-granular; only `MEM_RESERVE`
+/// is bound by the 64 KiB allocation granularity ([`COMMIT_GRANULE`]).
+///
+/// 4 KiB on `x86_64`, the stated target platform on both OSes.
+///
+/// It is the commit quantum: `ComponentPool`'s page-floor ladder,
+/// `VmColumn::grow_to` and [`POOL_MIN_SLAB`] step by it, while every
+/// reservation (`os_len`, `pool_byte_layout`, `VmReservation::reserve`) stays
+/// granule-rounded. A constant rather than a runtime query because
+/// `pool_byte_layout`, `pool_commit_step` and the `const _` proofs are
+/// `const fn`; a debug-only belt in `VmReservation::reserve` checks the OS page
+/// divides it.
+#[cfg(target_arch = "x86_64")]
+pub const COMMIT_PAGE: usize = 4096;
+/// Every other architecture keeps the granule as its commit page, so a
+/// 16 KiB- or 64 KiB-page kernel is never handed a page-misaligned `mprotect`
+/// base (packing plan D1).
+#[cfg(not(target_arch = "x86_64"))]
+pub const COMMIT_PAGE: usize = COMMIT_GRANULE;
+
+// A granule is a whole number of commit pages on every arm, so every
+// granule-rounded reservation length ends on a page boundary.
+const _: () = assert!(COMMIT_GRANULE.is_multiple_of(COMMIT_PAGE));
+
 /// Typical CPU cache line size in bytes
 /// Used for memory alignment to optimize cache usage
 pub const CACHE_LINE_SIZE: usize = 64;
@@ -52,7 +78,10 @@ pub const SIMD_BUFFER_ALIGN: usize = 32;
 /// is +125 GiB VA — noise against the 3.4 TiB pool budget — plus ≤ 2
 /// VMAs/VADs per MATERIALIZED column (committed prefix + `PROT_NONE` tail)
 /// ⇒ +2,000, still ≥ 3× headroom under `vm.max_map_count`. Resident floor:
-/// one `POOL_MIN_SLAB` (64 KiB) commit per NON-EMPTY column — empty
+/// one `POOL_MIN_SLAB` (one `COMMIT_PAGE`, 4 KiB) commit per NON-EMPTY
+/// `VmColumn`, and one page per sub-region of a non-empty `ComponentPool` —
+/// 12 KiB tracked, 4 KiB untracked (packing plan D2; before it, 64 KiB per
+/// `VmColumn` and 192 / 384 KiB per tracked pool at σ = 0 / σ ≠ 0) — empty
 /// archetypes/stores commit nothing. The dense bookkeeping arrays stay small
 /// heap `Vec`s (F4: floor + amortized growth), so none of this eagerly
 /// commits resident memory on the syscall arms.
@@ -96,11 +125,17 @@ const _: () = assert!(POOL_MAX_ROWS < u32::MAX as usize);
 // representable on every arm.
 const _: () = assert!(POOL_MIN_ROWS <= POOL_MAX_ROWS && POOL_MIN_ROWS > 0);
 
-/// Minimum pool data-commit slab (Phase X.I D4): 64 KiB = one commit
-/// granule — the floor that keeps sparse archetypes cheap (a 1-row
-/// archetype commits 3 × 64 KiB per pool, not megabytes). Doubling from
-/// here reaches any real population in ≤ a dozen µs-scale events.
-pub const POOL_MIN_SLAB: usize = 64 * 1024;
+/// Minimum pool commit step (Phase X.I D4, retargeted by packing plan D2):
+/// one [`COMMIT_PAGE`], the first rung of the `ComponentPool` and `VmColumn`
+/// commit ladders — the floor that keeps sparse archetypes cheap. The ladder
+/// doubles from here (×2, not ×4, plan D3), so on `x86_64` a one-row-at-a-time
+/// fill of a 40 B column to 1 M rows is 15 growth events; a batch request is
+/// one.
+pub const POOL_MIN_SLAB: usize = COMMIT_PAGE;
+
+// One knob, not two (packing plan D2): the first ladder rung IS the commit
+// page. Removing this assert is half of the recorded G2(c) mutation.
+const _: () = assert!(POOL_MIN_SLAB == COMMIT_PAGE);
 
 /// Maximum pool data-commit step (Phase X.I D4): 64 MiB — bounds
 /// commit-charge overshoot by one slab (the X.F overshoot-honesty bound);
@@ -121,6 +156,16 @@ pub(crate) const fn pool_align_up_granule(value: usize) -> usize {
     match value.checked_add(COMMIT_GRANULE - 1) {
         Some(v) => v & !(COMMIT_GRANULE - 1),
         None => panic!("pool_align_up_granule: overflow (value too close to usize::MAX)"),
+    }
+}
+
+/// Checked page round-up — the twin of [`pool_align_up_granule`] for the
+/// commit ladders (packing plan D2): reservations round to the granule,
+/// commit frontiers to the page. Overflow panics loudly, like its twin.
+pub(crate) const fn pool_align_up_page(value: usize) -> usize {
+    match value.checked_add(COMMIT_PAGE - 1) {
+        Some(v) => v & !(COMMIT_PAGE - 1),
+        None => panic!("pool_align_up_page: overflow (value too close to usize::MAX)"),
     }
 }
 
@@ -165,6 +210,19 @@ pub const fn pool_reserve_rows(stride: usize) -> usize {
 /// 64 different L2 sets too).
 pub const POOL_STAGGER_LINES: usize = 64;
 
+/// The span the per-pool stagger cycles through: 64 lines × 64 B = 4 KiB,
+/// the L1 set-index span (packing plan D4). A cache property, NOT the commit
+/// quantum — `pool_byte_layout` bounds the stagger by this, never by
+/// [`COMMIT_PAGE`], which only coincides with it on `x86_64`.
+pub const POOL_STAGGER_SPAN: usize = POOL_STAGGER_LINES * CACHE_LINE_SIZE;
+
+// Packing plan D4: the page-floor ladder (D2) takes each sub-region's floor
+// as `offset - stagger`, which is a page multiple only while the stagger stays
+// below one commit page. The quantum must be AT LEAST the cache-set span; it
+// must never define it. Raising `POOL_STAGGER_LINES` past 64 is therefore a
+// compile error on `x86_64` and still a valid layout on a granule-page arm.
+const _: () = assert!(POOL_STAGGER_SPAN <= COMMIT_PAGE);
+
 // The stagger granule must preserve the SIMD data-base alignment guarantee:
 // each step is a whole `CACHE_LINE_SIZE` (64 B) and the data sub-region starts
 // at `stagger`, so the data base is `reservation_base + stagger`. A 64 KiB-
@@ -191,8 +249,11 @@ const _: () = assert!(
 /// The result is always a multiple of [`CACHE_LINE_SIZE`] (64 B), hence a
 /// multiple of [`SIMD_BUFFER_ALIGN`] (the const assert above pins this), so the
 /// staggered data base preserves the AVX2 alignment contract. It is strictly
-/// less than one page (`< 64 × 64 = 4096`), so it costs at most one extra
-/// lazily-committed page per pool.
+/// less than one page (`< POOL_STAGGER_SPAN = 64 × 64 = 4096 <= COMMIT_PAGE`),
+/// and it costs no extra committed page: the commit ladder measures every
+/// frontier from the sub-region's absolute page floor, so the pad sits inside
+/// the sub-region's first page (packing plan D2, D4). On the granule ladder
+/// this sentence was false — the pad cost a whole extra granule per sub-region.
 /// # Contract for a COHORT of columns (why this is `pub`)
 ///
 /// The stagger is a pure function of `component_id % POOL_STAGGER_LINES`, so
@@ -284,8 +345,12 @@ pub(crate) const fn pool_byte_layout(
     // P2-CACHE-FIX: the stagger is a SIMD-aligned leading pad strictly below
     // one page; a value above it would defeat the per-page cost bound and
     // signal a caller computing it outside `pool_base_stagger`.
+    // The bound is the cache-set span (`POOL_STAGGER_SPAN`, 4096), named
+    // rather than literal. The message text is unchanged on purpose: an
+    // inlined panic passes its length as an immediate, which the UG-15
+    // codegen pins of the bodies this layout math inlines into would see.
     assert!(
-        stagger < 4096 && stagger.is_multiple_of(SIMD_BUFFER_ALIGN),
+        stagger < POOL_STAGGER_SPAN && stagger.is_multiple_of(SIMD_BUFFER_ALIGN),
         "pool_byte_layout: stagger must be SIMD-aligned and < one page"
     );
 
@@ -669,10 +734,27 @@ mod tests {
 
     /// U-P1 — D4 step policy table: MIN floor, in-band doubling, MAX clamp,
     /// request-dominant, and the saturating belt.
+    ///
+    /// Packing plan S2 re-derivation of the first row (cut PC-3): it read
+    /// `pool_commit_step(0, G) == POOL_MIN_SLAB`, which held only while
+    /// `POOL_MIN_SLAB` WAS `G`. With `POOL_MIN_SLAB == COMMIT_PAGE` a first
+    /// request of one page is the floor case, and a first request of one
+    /// granule is request-dominant (`max(page, G) == G`); both are pinned.
     #[test]
     fn pool_commit_step_policy_table() {
         // Fresh pool (data_committed = 0): the MIN_SLAB floor.
-        assert_eq!(pool_commit_step(0, G), POOL_MIN_SLAB, "first grow = one granule");
+        assert_eq!(
+            pool_commit_step(0, COMMIT_PAGE),
+            POOL_MIN_SLAB,
+            "first grow of one page = the MIN_SLAB floor"
+        );
+        assert_eq!(pool_commit_step(0, G), G, "a first request of one granule is request-dominant");
+        // Plan D3: the ladder doubles (×2, not ×4) below the granule as well.
+        assert_eq!(
+            pool_commit_step(COMMIT_PAGE, 2 * COMMIT_PAGE),
+            COMMIT_PAGE,
+            "doubling below the granule"
+        );
         // In-band doubling: step equals the committed size.
         assert_eq!(pool_commit_step(4 * G, 5 * G), 4 * G, "doubling inside the band");
         assert_eq!(pool_commit_step(8 * MIB, 8 * MIB + G), 8 * MIB, "doubling at 8 MiB");

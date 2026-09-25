@@ -588,48 +588,84 @@ struct RawCommandQueue {
 ///
 /// Mirrors Bevy's `command_queue.rs` local-cursor pattern: the hot loop in
 /// [`RawCommandQueue::apply_or_drop_queued_no_catch`] reads / writes a
-/// stack-local `local_cursor` (cheap register access; no per-iteration
-/// `NonNull::as_ref` dereference on a heap-resident cursor field). This
-/// guard's `Drop` writes the local back into the queue's persistent
-/// cursor on EITHER normal completion OR unwind — so the Phase 12.5
-/// Opt-A1 panic-recovery semantics survive:
+/// stack-local `local_cursor` (no per-iteration `NonNull::as_ref`
+/// dereference on the queue's persistent cursor field), and does so only
+/// through this guard's `local` borrow. This guard's `Drop` writes the
+/// local back into the queue's persistent cursor on EITHER normal
+/// completion OR unwind — so the Phase 12.5 Opt-A1 panic-recovery
+/// semantics survive:
 ///
 ///   * `handle_panic_recovery` reads `*self.cursor` to identify the
 ///     survivor range `[cursor..bytes.len())`. The guard's `Drop` must
 ///     fire BEFORE `handle_panic_recovery` so the queue's cursor reflects
 ///     `consume_and_drop_glue`'s W3' advance past the panicker.
-///   * Rust drops locals in reverse declaration order; since the guard is
-///     declared AFTER `local_cursor` inside the apply function, it drops
-///     FIRST on unwind, while `local_cursor` is still alive on the stack.
+///   * The guard borrows `local_cursor`, so the borrow checker orders the
+///     guard's drop before the local's on every exit, unwind included.
 ///   * The outer `catch_unwind` in [`CommandQueue::apply`] runs
 ///     `handle_panic_recovery` only on the Err branch, AFTER unwinding
 ///     has dropped the guard.
-struct CursorSync {
-    /// Persistent queue cursor (heap-resident inside `CommandQueue::cursor`).
+///
+/// # Why `local` is a `&mut`, not a raw pointer (UG-08, both borrow models)
+///
+/// Every access to the walk's cursor goes through `guard.local`: the loop's
+/// reads and header advance, the `&mut *guard.local` reborrow handed to the
+/// glue (which ends when the glue returns), and this guard's final read. The
+/// borrow checker rejects any direct use of `local_cursor` while the guard
+/// lives, so no access can come from a path that bypasses the guard's
+/// borrow, under either model.
+///
+/// The field used to be `local_ptr: *const usize`, taken with `&raw const`
+/// before a loop that then wrote `local_cursor` directly. That was UB under
+/// Stacked Borrows. There, a raw pointer to a local carries its own
+/// `SharedReadOnly` tag, and a write through the local's own tag "pop[s]
+/// all blocks above the one containing the granting item" (UCG
+/// `wip/stacked-borrows.md`, "Accessing memory"). So the loop's first
+/// `local_cursor += …` removed the guard's tag, and the guard's read then
+/// used a tag that no longer existed. Tree Borrows accepted the same code,
+/// because a raw pointer taken directly to a local inherits the local's
+/// tag: R. Jung, "From Stacked Borrows to Tree Borrows" (2023-06-02), the
+/// `addr_of_mut!(x); x = 1; ptr.read()` example.
+///
+/// The local stays a separate stack slot from this guard, not a field of
+/// it. `&mut *guard.local` escapes into the glue, and an escaped pointer to
+/// one field would make the whole guard, including the `self`-derived
+/// `cursor_ptr`, reachable from the glue as far as LLVM can tell. That cost
+/// the drop-only walk its hoisted `bytes.as_ptr()` load when it was tried.
+/// `tests/miri_command_queue_cursor.rs` pins the three exits under both
+/// models.
+struct CursorSync<'a> {
+    /// Persistent queue cursor (`CommandQueue::cursor`, reached through the
+    /// raw twin's `&raw mut`-minted pointer).
     cursor_ptr: NonNull<usize>,
-    /// Pointer to the stack-local `local_cursor` in the apply walk.
-    /// Valid for as long as the apply walk's stack frame is live; the
-    /// guard's drop position guarantees the frame is still live when
-    /// this read fires.
-    local_ptr: *const usize,
+    /// The walk's stack-local cursor, advanced by the loop (meta header) and
+    /// by `consume_and_drop_glue` through `&mut *guard.local` (payload, W3').
+    local: &'a mut usize,
 }
 
-impl Drop for CursorSync {
+impl Drop for CursorSync<'_> {
     #[inline]
     fn drop(&mut self) {
         // SAFETY:
-        //   - `self.local_ptr` points at a `usize` stack-local in the
-        //     apply walk's frame. The guard is declared AFTER that local
-        //     so Rust's reverse-declaration drop order guarantees the
-        //     local is still alive when this read runs (true for both
-        //     normal exit and panic unwinding).
-        //   - `self.cursor_ptr` is the queue's persistent cursor field.
-        //     The apply walk holds exclusive access for the duration of
-        //     the call; no other reader/writer is touching that slot.
-        //   - The write is one `usize` store; no surrounding state needs
-        //     synchronisation here (single-threaded queue access).
+        //   - `self.cursor_ptr` is the raw twin's `cursor` pointer, minted in
+        //     `CommandQueue::raw` with `&raw mut self.cursor` from the live
+        //     `&mut CommandQueue` (a `SharedReadWrite` tag under Stacked
+        //     Borrows; the parent's own tag under Tree Borrows). The queue's
+        //     owner does not touch the struct between that mint and this
+        //     write, because the raw twin is the sole accessor for the walk
+        //     (see `raw`). The only earlier access to the cursor field is the
+        //     walk's `as_ref` read of `start` through that same twin, a
+        //     reborrow that is dead by now. So the pointer can still write
+        //     under both models.
+        //   - The guard is alive for the whole walk (declared before the loop,
+        //     dropped on the success path or during unwind), so the queue and
+        //     its `cursor` field outlive this store.
+        //   - `*self.local` is read through the guard's own `&mut` borrow of
+        //     the walk's local: a safe read, and the same borrow every other
+        //     access in the walk derived from.
+        //   - One `usize` store, single-threaded queue access (CQ5): no
+        //     synchronisation is needed.
         unsafe {
-            *self.cursor_ptr.as_ptr() = *self.local_ptr;
+            *self.cursor_ptr.as_ptr() = *self.local;
         }
     }
 }
@@ -666,25 +702,25 @@ impl RawCommandQueue {
 
         // Phase 12.6 — hybrid cursor pattern (mirrors Bevy's `command_queue.rs:240`):
         //
-        // The hot loop reads / writes a stack-local `local_cursor` (cheap
-        // register access). A scope-guard `CursorSync` writes the local
-        // back into `*self.cursor` on EITHER normal completion OR unwind
-        // (the guard's `Drop` impl fires during stack unwinding too).
+        // The hot loop reads / writes a stack-local `local_cursor`, and
+        // reaches it ONLY through the scope guard's `&mut` borrow
+        // (`*guard.local`; see `CursorSync`'s "Why `local` is a `&mut`").
+        // The guard's `Drop` writes the local back into `*self.cursor` on
+        // EITHER normal completion OR unwind (the `Drop` impl fires during
+        // stack unwinding too).
         //
         // Why this preserves Phase 12.5 Opt-A1 panic-recovery semantics:
         //
         //   * `consume_and_drop_glue` advances `*cursor_ref += sizeof::<C>()`
         //     BEFORE `cmd.apply` runs (W3' discipline). The `cursor_ref`
-        //     passed in is `&mut local_cursor` — the advance lands on the
+        //     passed in is `&mut *guard.local` — the advance lands on the
         //     stack-local.
-        //   * On panic mid-apply, unwind drops `_guard` BEFORE dropping
-        //     `local_cursor` (declared after `local_cursor` ⇒ dropped
-        //     before in LIFO order). The guard's `Drop` reads
-        //     `*self.local_ptr` (the up-to-date local) and writes it into
+        //   * On panic mid-apply, unwind drops `guard`, whose `Drop` reads
+        //     the up-to-date local through its borrow and writes it into
         //     `*self.cursor_ptr` (the queue's persistent cursor) — exactly
         //     what `handle_panic_recovery` needs to identify the survivor
-        //     range `[local_cursor..bytes.len())`.
-        //   * On normal completion, the loop exits with `local_cursor ==
+        //     range `[cursor..bytes.len())`.
+        //   * On normal completion, the loop exits with `*guard.local ==
         //     stop_snapshot`; the success-path block writes
         //     `*self.cursor.as_mut() = start` overriding the guard's
         //     write, which is fine — both happen under exclusive access.
@@ -693,57 +729,51 @@ impl RawCommandQueue {
         // enqueued by command-during-apply (pushing past `stop_snapshot`)
         // are NOT re-entered into the current walk (Q-A1.1 case 4 fix
         // happens in the post-loop compaction block below).
+        //
+        // `cursor_ptr` is `self.cursor` — a `NonNull<usize>` into the queue's
+        // `cursor` field, valid for the duration of the call (the caller holds
+        // exclusive access to the queue; see the guard's `Drop` SAFETY).
         let mut local_cursor: usize = start;
-
-        // SAFETY: `local_cursor` lives on this stack frame until the
-        //   function returns or unwinds. The guard reads its value via
-        //   raw pointer in its `Drop` impl; since the guard is declared
-        //   AFTER `local_cursor`, Rust's reverse-declaration drop order
-        //   fires the guard's Drop FIRST during unwind, while
-        //   `local_cursor` is still alive on the stack. The `cursor_ptr`
-        //   is `self.cursor` — a `NonNull<usize>` valid for the duration
-        //   of the function call (the underlying field lives on the heap
-        //   via the queue's owner, and we hold exclusive access).
-        let _guard = CursorSync {
+        let guard = CursorSync {
             cursor_ptr: self.cursor,
-            local_ptr: &raw const local_cursor,
+            local: &mut local_cursor,
         };
 
-        while local_cursor < stop_snapshot {
+        while *guard.local < stop_snapshot {
             // Read meta at the current cursor.
             //
             // SAFETY (CQ2):
-            //   - The bytes at `local_cursor` were populated by
+            //   - The bytes at `*guard.local` were populated by
             //     `CommandQueue::push<C>`, which wrote a `CommandMeta` via
             //     `write_unaligned`.
             //   - `read_unaligned` requires no alignment and creates no
             //     intermediate reference.
-            //   - `local_cursor + COMMAND_PAYLOAD_OFFSET <= stop_snapshot`
+            //   - `*guard.local + COMMAND_PAYLOAD_OFFSET <= stop_snapshot`
             //     holds because every pushed command writes a full
             //     `meta + payload` block.
             let meta = unsafe {
                 self.bytes
                     .as_mut()
                     .as_mut_ptr()
-                    .add(local_cursor)
+                    .add(*guard.local)
                     .cast::<CommandMeta>()
                     .read_unaligned()
             };
 
             // Advance the local cursor past the meta header. The guard
             // will sync this to `*self.cursor` on Drop.
-            local_cursor += COMMAND_PAYLOAD_OFFSET;
+            *guard.local += COMMAND_PAYLOAD_OFFSET;
 
             // Pointer to the command's payload bytes.
             //
             // SAFETY:
-            //   - `local_cursor < bytes.len()` (`push` wrote the payload
+            //   - `*guard.local < bytes.len()` (`push` wrote the payload
             //     immediately after the meta header).
             //   - The resulting pointer is for `consume_and_drop_glue` to
             //     `read_unaligned::<C>` from; no reference is created here.
-            let cmd_ptr = unsafe { self.bytes.as_mut().as_mut_ptr().add(local_cursor) };
+            let cmd_ptr = unsafe { self.bytes.as_mut().as_mut_ptr().add(*guard.local) };
 
-            // Pass `&mut local_cursor` to the glue — when
+            // Pass `&mut *guard.local` to the glue — when
             // `consume_and_drop_glue` advances `*cursor += sizeof::<C>()`
             // (W3'), it advances our stack-local. The guard's Drop
             // mirrors that advance into `*self.cursor` on either normal
@@ -754,9 +784,13 @@ impl RawCommandQueue {
             //     `push<C>::write_unaligned` and has not been read out
             //     since.
             //   - We hold exclusive access to the bytes (caller's
-            //     invariant). `&mut local_cursor` is a unique borrow of
-            //     the stack-local — no other reference into it lives
-            //     across this call.
+            //     invariant). `&mut *guard.local` is a unique reborrow of
+            //     the guard's borrow of the stack-local, and it ends when
+            //     the glue returns. The loop's next access goes through
+            //     `guard.local` itself, the reborrow's parent, so under
+            //     both borrow models that access only retires the dead
+            //     child. No pointer that the guard's final read depends on
+            //     is invalidated.
             //   - `world` is a live exclusive `&mut EcsMaster` if Some.
             //   - W3' (`consume_and_drop_glue`) advances the cursor by
             //     `sizeof::<C>()` BEFORE running `cmd.apply`. On panic,
@@ -768,17 +802,17 @@ impl RawCommandQueue {
             //     into `cmd: C` by `ptr::read_unaligned` and dropped via
             //     local unwind).
             unsafe {
-                (meta.consume_and_drop)(cmd_ptr, world, &mut local_cursor);
+                (meta.consume_and_drop)(cmd_ptr, world, &mut *guard.local);
             }
         }
 
         // Reached the success path: drop the guard NOW so it cannot
         // overwrite the `*self.cursor = start` reset below. (The guard
-        // exists to sync `local_cursor` into `*self.cursor` on unwind;
+        // exists to sync the local cursor into `*self.cursor` on unwind;
         // on normal completion the success-path block writes `start`
         // directly, and the guard's last-second write of
         // `local_cursor == stop_snapshot` would clobber it.)
-        drop(_guard);
+        drop(guard);
 
         // Success path. Three sub-cases:
         //   (A) `bytes.len() == stop_snapshot` — no command-during-apply
@@ -853,8 +887,9 @@ impl RawCommandQueue {
         );
 
         // `*self.cursor` was advanced past the panicker by W3' inside
-        // `consume_and_drop_glue` (which now mutates the queue's own cursor
-        // field directly — see `apply_or_drop_queued_no_catch`). The
+        // `consume_and_drop_glue` (which advances the walk's stack-local
+        // cursor; `CursorSync::drop` published it into `*self.cursor` during
+        // the unwind — see `apply_or_drop_queued_no_catch`). The
         // survivor range is everything from there to `current_stop`
         // (= `bytes.len()` AT panic time, which already includes any
         // commands the panicker pushed before panicking — Q-A1.1 case 1).

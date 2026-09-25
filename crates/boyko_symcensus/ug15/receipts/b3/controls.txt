@@ -1,0 +1,179 @@
+# UG-15 controls at B3 (cut section 6; 03 section 6 "Controls"), run at B3 stage 3.
+# Parent of every control branch: u/b3 @ 4eab96d7 (the stage-3 trunk sync over d63209f7). Each control is
+# one local commit on u/b3-ctl-<n>, cut from 4eab96d7 and never merged; the worktree returned to u/b3 with
+# `git status --porcelain` empty after each. The full logs and the diffs are in the B3 scratch (s3/), with
+# the write-up in controls.md there. `$UG15` is `$CARGO_TARGET_DIR/debug/ug15.exe`, run with RECIPES.md's
+# prefix; "leg1" is `cargo test -p boyko-symcensus --test ug15_leg1_source_census -- --nocapture`; "M-b" is
+# `cargo test -p boyko-macros --lib ug15_corpus -- --nocapture`.
+#
+# Parent, 4eab96d7: leg (2) `checked 42 pin(s): 0 absent, 0 moved unnamed, 0 moved named`; leg (7) boyko_demo
+# and clear `(a), (b) and (c) identical` to stage 2's final snapshots; leg (1) `0 counted, 0 allowlisted`
+# (327 files, 11645 items, 5796 macro bodies); M-b `counted 0, allowlisted 0`; leg (3) EcsMaster 5056/64,
+# ComponentPool 128/8, Scope 384/64 (dev and release).
+
+== (i) as written - RED required on leg (2) - u/b3-ctl-1 @ dfe37550
+mutation: component_registry/mod.rs register_new<T>: `if raw >= MAX_COMPONENTS { UG15_CTL_I.store(1, Ordering::Relaxed); }` before its assert!, on a new `pub static UG15_CTL_I: AtomicUsize`
+command:  $UG15 leg2 check                                                              exit 1
+MOVED clear R-1 `boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform>`: pinned ["04c8c1e8e398:439B×3"] → now ["ed93721e57d7:423B×3"]
+checked 42 pin(s): 0 absent, 1 moved unnamed, 0 moved named
+verdict:  RED on R-1 only, every other pin identical (the plan's condition); the one moved pin lists
+          component_registry/mod.rs in map (a) (critique O5). BUT the store is not in the fresh body: nothing
+          loads the static, so fat LTO deletes the store; the red is the reordered exhaustion block (panic
+          block 0xcc -> 0x153, 439 -> 423 B). Proves "an edit to the arm moves the pin", not "a relaxed store
+          is seen" -> redesigned as (i-b), kept as written.
+
+== (i-b) redesign - RED required on leg (2) - u/b3-ctl-1b @ 154b96be
+mutation: as (i), with the store written `core::hint::black_box(&UG15_CTL_I).store(1, Ordering::Relaxed);` so it cannot be deleted
+command:  $UG15 leg2 check                                                              exit 1
+MOVED clear R-1 `boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform>`: pinned ["04c8c1e8e398:439B×3"] → now ["cdce3674e241:482B×3"]
+    22: lea rax, [rip] ; REL32 boyko_ecs::ecs::core::component::component_registry::UG15_CTL_I
+    38: mov qword ptr [rax], 0x1
+checked 42 pin(s): 0 absent, 1 moved unnamed, 0 moved named
+verdict:  PASS - the relaxed store in the failing arm is in the frozen body and leg (2) sees it; O5 holds.
+
+== (ii) - RED required on leg (1) - u/b3-ctl-2 @ 50c0f54f
+mutation: boyko_ecs/src/lib.rs `pub extern "C" fn ug15_ctl_ii() -> u32 { 0x0C71_0002 }` (no attribute)
+command:  leg1                                                                          exit 101
+UG-15 leg (1): 1 counted, 0 allowlisted
+  counted: crates/boyko_ecs/src/lib.rs | ug15_ctl_ii | extern "C" fn | SynItem
+verdict:  PASS - count 1, file and item named.
+
+== (iii) - RED required on leg (1) - u/b3-ctl-3 @ 12d7ed1b
+mutation: boyko_threadpool/src/lib.rs `#[unsafe(no_mangle)] #[allow(dead_code)] fn ug15_ctl_iii() -> u32 { 0x0C71_0003 }` (private)
+command:  leg1                                                                          exit 101
+UG-15 leg (1): 1 counted, 0 allowlisted
+  counted: crates/boyko_threadpool/src/lib.rs | ug15_ctl_iii | #[no_mangle] | SynItem
+verdict:  PASS - the 2024 unsafe(...) form is matched.
+
+== (iv) - RED required on leg (1) - u/b3-ctl-4 @ a332fa07 (retargeted to boyko_utils: boyko_memory does not exist before C1; C1 re-runs it there)
+mutation: boyko_utils/src/lib.rs `#[allow(dead_code)] extern "system" fn ug15_ctl_iv() -> u32 { 0x0C71_0004 }`
+command:  leg1                                                                          exit 101
+UG-15 leg (1): 1 counted, 0 allowlisted
+  counted: crates/boyko_utils/src/lib.rs | ug15_ctl_iv | extern "system" fn | SynItem
+verdict:  PASS - the match is not on "C".
+
+== (v) - RED required on leg (1) through M-a AND M-b - u/b3-ctl-5 @ 0aa3c072
+mutation: component.rs, the always-emitted `expanded` template: `const _: () = { #[used] static UG15_CTL_V: u8 = 5; };`
+command:  leg1                                                                          exit 101
+UG-15 leg (1): 1 counted, 0 allowlisted
+  counted: crates/boyko_macros/src/component.rs | component_macro_impl | #[used] | MacroTokens
+command:  M-b                                                                           exit 101
+M-b read: 73 fixture(s) over 11 entry point(s), 1357 item(s), 120 macro bod(ies) in the expansions; counted 34, allowlisted 0
+test ug15_corpus::every_fixture_expands_to_zero_counted_forms ... FAILED
+verdict:  PASS - M-a 1, M-b 34 (one per Component fixture).
+
+== (vi) - RED required on leg (1) through M-b ONLY - u/b3-ctl-6 @ ef932721
+mutation: component.rs `let a = format_ident!("used");` outside every template; `const _: () = { #[#a] static UG15_CTL_VI: u8 = 6; };` in the template
+command:  leg1                                                                          exit 0
+UG-15 leg (1) read: 6 crate(s), 327 file(s), 11645 item(s), 5797 macro bod(ies) (73 macro_rules!), 160 build.rs string(s)
+UG-15 leg (1): 0 counted, 0 allowlisted
+command:  M-b                                                                           exit 101
+M-b read: 73 fixture(s) over 11 entry point(s), 1357 item(s), 120 macro bod(ies) in the expansions; counted 34, allowlisted 0
+verdict:  PASS - M-a 0 (the format_ident! body was read: 5797 = 5796 + 1), M-b 34; M-b is not redundant with M-a.
+
+== (vii) - RED required on leg (7) boyko_demo, (a) and (b); leg (1) GREEN - u/b3-ctl-7 @ 0dba7fac
+mutation: boyko_ecs `#[inline(never)] pub fn ug15_ctl_vii(x: u64) -> u64 { x.rotate_left(7) ^ 0x9E37_79B9_7F4A_7C15 }`; boyko_demo main: `core::hint::black_box(boyko_ecs::ug15_ctl_vii(core::hint::black_box(0x0C71_0007)));`
+command:  $UG15 leg7 snapshot --subject boyko_demo; $UG15 leg7 compare <parent> <child>  exit 1
+  (a) sections: parent [(".text", 8546242), (".rdata", 3384572), (".data", 272384), (".pdata", 234552), (".reloc", 26504), ("Total", 12464254)] / child [(".text", 8546306), (".rdata", 3384572), (".data", 272384), (".pdata", 234552), (".reloc", 26512), ("Total", 12464326)]
+  (b) child only ×1: t 20 boyko_ecs::ug15_ctl_vii
+command:  $UG15 leg7 compare <parent> <child> --expect boyko_ecs::ug15_ctl_vii           exit 0
+control: leg (7) RED on the named survivor(s) ["boyko_ecs::ug15_ctl_vii"] — the control PASSES
+command:  leg1                                                                          exit 0 (0 counted)
+verdict:  PASS.
+
+== (viii) form (b') - RED required on leg (7) clear, named reading; leg (1) GREEN - u/b3-ctl-8 @ 3ef5bc23
+form:     as written (no reader) both names are absent from the post-LTO object (probe (v), probe-v.txt), so it
+          cannot go red; (b') per probe (v): the static is read by black_box(&..) in EcsMaster::new, its pointee is
+          never called; subject clear (boyko_demo never reaches EcsMaster::new)
+mutation: boyko_ecs `fn ug15_ctl_viii_target(x: u64) -> u64 {..}`, `pub static UG15_CTL_VIII: fn(u64) -> u64 = ug15_ctl_viii_target;`; EcsMaster::new: `core::hint::black_box(&crate::UG15_CTL_VIII);`
+command:  $UG15 leg7 snapshot --subject clear; $UG15 leg7 compare <parent> <child> --expect boyko_ecs::UG15_CTL_VIII --expect boyko_ecs::ug15_ctl_viii_target   exit 0
+  (b) child only ×1: r 8 boyko_ecs::UG15_CTL_VIII
+  (b) child only ×1: t 30 boyko_ecs::ug15_ctl_viii_target
+control: leg (7) RED on the named survivor(s) ["boyko_ecs::UG15_CTL_VIII", "boyko_ecs::ug15_ctl_viii_target"] — the control PASSES
+command:  $UG15 leg7 compare <parent> <child> (strict)                                  exit 1 (9 differences)
+command:  leg1                                                                          exit 0 (0 counted)
+verdict:  PASS - leg (7) names the attribute-less survivor, leg (1) does not count it.
+
+== (ix) - GREEN required on legs (2) and (3), with anti-vacuity - u/b3-ctl-9 @ ba03a321
+mutation: vm_column.rs, one comment line above VmColumn::swap_remove's release assert! (281 -> 282)
+command:  $UG15 leg2 check                                                              exit 0
+checked 42 pin(s): 0 absent, 0 moved unnamed, 0 moved named
+command:  leg (3) dev and --release                                                     exit 0, 0
+  EcsMaster 5056 64 / ComponentPool 128 8 / Scope 384 64 (boyko-ecs recompiled)
+anti-vacuity: $UG15 probe i --subjects swap_remove, parent vs child: object sha c6fead8d.. -> 48299b6e..; the only per-body difference:
+<      Location crates\boyko_ecs\src\ecs\memory\vm_column.rs:281:9 via anon.d942e55fefdd14610d579d30fde3626d.8
+>      Location crates\boyko_ecs\src\ecs\memory\vm_column.rs:282:9 via anon.d942e55fefdd14610d579d30fde3626d.8
+verdict:  PASS - the raw .rdata a pinned body references moved, the normalised body did not.
+
+== (x) - GREEN with the rename list, RED without - u/b3-ctl-10 @ 32fd2aec
+mutation: drain_runaway_panic moved unchanged (doc, #[cold] #[inline(never)]) to ecs_master/drain_runaway.rs as pub(super)
+rename:   boyko_ecs::ecs::core::ecs_master::ecs_master::drain_runaway_panic -> boyko_ecs::ecs::core::ecs_master::drain_runaway::drain_runaway_panic
+command:  $UG15 leg2 check --rename <list>                                              exit 0
+checked 42 pin(s): 0 absent, 0 moved unnamed, 0 moved named
+command:  $UG15 leg2 check                                                              exit 1
+MOVED clear H-3 `<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run`: pinned ["c6d02edcc599:13789B×1"] → now ["454fef9161df:13789B×1"]
+MOVED swap_remove H-2 `<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity`: pinned ["1ee9ec205980:2195B×1"] → now ["66d80be92ce3:2195B×1"]
+MOVED swap_remove H-2 `swap_remove::bench_swap_remove::{closure#0}::{closure#0}`: pinned ["f857fac1afd2:8476B×1"] → now ["b8116b90b818:8476B×1"]
+MOVED phase9_scheduler H-3 `<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run`: pinned ["d26fc7683a37:11626B×1"] → now ["8eb9858d0ec1:11626B×1"]
+checked 42 pin(s): 0 absent, 4 moved unnamed, 0 moved named
+verdict:  PASS, two-sided - exactly probe (i)'s four callers move, sizes unchanged; (2-RF) N/A at B3; leg (7) not part of (x).
+
+== A (critique W1) - RED `symbol absent` required on leg (2) - u/b3-ctl-a @ 6e7bf220
+mutation: ComponentPool::grow_rows (P29-1) renamed grow_rows_ug15_ctl_a at its 25 `grow_rows(` sites in boyko_ecs
+command:  $UG15 leg2 check                                                              exit 1
+boyko_demo P29-1: ABSENT <boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows
+clear P29-1: ABSENT <boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows
+checked 42 pin(s): 2 absent, 0 moved unnamed, 0 moved named
+verdict:  PASS - RED [symbol absent], never "moved".
+
+== K - RED required on M-b (keys_are_the_parsers_own) - u/b3-ctl-k @ 850f41f8
+mutation: component.rs parse_component_hooks: `if meta.path.is_ident("zzz_ug15_ctl_k") { return Ok(()); }`, no table row
+command:  M-b                                                                           exit 101
+  component.rs: the parser compares against `zzz_ug15_ctl_k`, which is in no key table and not a NON_KEY_LITERALS row
+verdict:  PASS.
+
+== F - RED required on M-b (corpus_covers_every_key) - u/b3-ctl-f @ b58cb06d
+mutation: the parser key zzz_ug15_ctl_f AND its COMPONENT_KEYS row, no fixture
+command:  M-b                                                                           exit 101
+M-b RED: key table rows without a fixture: ["COMPONENT_KEYS::zzz_ug15_ctl_f"]
+verdict:  PASS - keys_are_the_parsers_own stays ok, so the red is the missing fixture alone.
+
+== S - RED required on leg (5) - u/b3-ctl-s @ 4bb055b2
+mutation: `/// MOD-SEAM MS-08: ...` on EcsMaster::new
+command:  cargo test -p boyko-symcensus --test ug15_leg5_seam_inventory -- --nocapture   exit 101
+markers found: 5 (inventory: 4)
+  marked but not in SEAM_INVENTORY: MS-08 EcsMaster::new
+verdict:  PASS.
+
+== N - RED required on the legs (4)/(6) N/A test - u/b3-ctl-n @ a4309425
+mutation: workspace member crates/boyko_mod_probe (package boyko-mod-probe)
+command:  cargo test -p boyko-symcensus --test ug15_legs_4_6_na -- --nocapture          exit 101
+legs (4)/(6) are no longer N/A: modding crate(s) ["boyko-mod-probe"] exist, so the startup-equality and two-arm linked-size legs must be written (03 §6)
+verdict:  PASS.
+
+== T - RED `tool absent` required (no branch)
+command:  env BOYKO_UG15_LLVM_BIN=Z:/nonexistent $UG15 tools                            exit 1
+RED [tool absent]: llvm-nm: BOYKO_UG15_LLVM_BIN=Z:/nonexistent is set and holds no llvm-nm.exe. The override is the only place searched when set, so this is RED rather than a fallback.
+command:  env BOYKO_UG15_SYMBOLIZER=Z:/none.exe $UG15 tools                             exit 1
+RED [tool absent]: llvm-symbolizer: BOYKO_UG15_SYMBOLIZER=Z:/none.exe names no file. No fallback: the sensitivity map's file map must come from the tool the receipt names.
+verdict:  PASS (positive: `$UG15 tools` unset resolves both, exit 0).
+
+== E - RED `no symbols` required (no branch)
+command:  $UG15 nm D:/wt/_targets/vkval-msvc/release/boyko_demo.exe                     exit 1
+RED [empty census]: llvm-nm reported `no symbols` for D:/wt/_targets/vkval-msvc/release/boyko_demo.exe: the tool CENSUSED NOTHING, which is not the answer `no symbol matches` and must never be recorded as that number.
+verdict:  PASS (positive: the object reads `55177 defined, 279 undefined symbols`).
+
+== O - RED from the pair guard required (no branch)
+command:  $UG15 build --subject clear; then $UG15 build --subject clear --control-drop-emit-obj   exit 0; exit 1
+RED [pair guard]: the object D:/wt/_targets/vkval-msvc\release\examples\clear.o was not written by this build (its modification time precedes the bump of D:\wt\lighttable\crates\boyko_app\examples\clear.rs).
+verdict:  PASS.
+
+== P - RED FRESH required (no branch)
+command:  $UG15 build --subject clear --control-no-touch, twice                         exit 0; exit 1
+RED [pair guard]: cargo reports clear FRESH although D:\wt\lighttable\crates\boyko_app\examples\clear.rs was touched before the build, so rustc did not run and neither the object nor the image can be attributed to this invocation.
+verdict:  PASS (the first run rebuilt because O had changed the unit's rustc args).
+
+== M (critique W1) - RED `member count` required (no branch)
+command:  $UG15 members <archive holding only lib.rmeta, llvm-ar x/rc from release/deps/libboyko_utils-51889ff239bec636.rlib>   exit 1
+RED [member count]: <archive> has zero object members once `lib.rmeta` is skipped
+verdict:  PASS (positive: the real rlib reads 3 members, lib.rmeta Metadata / lib.rmeta-link Coff 180 B / cgu.0.rcgu.o Bitcode 2156 B).

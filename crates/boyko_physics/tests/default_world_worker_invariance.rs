@@ -40,6 +40,12 @@
 //!   one-worker flag-on arm it does not move (the `lanes < 2` term; the twin of G-L4-1 for
 //!   the narrowphase is `narrowphase_parallel_equivalence.rs`'s
 //!   `one_worker_parallel_narrowphase_runs_the_serial_loop`).
+//! - L9 C4: `contact_reuse` is on in the same built resource, with the same twin on
+//!   `PhysicsConfig::default()`, and [`run`] leaves it alone, so every one of the seventeen arms
+//!   runs the shipped reuse default and the invariance above covers it. And the flag reaches the
+//!   narrowphase: the reference run reuses a record on some frame (`Manifolds::pair_classes`,
+//!   summed over its frames), so an arm that silently took the full collision everywhere cannot
+//!   pass as "invariant with reuse on".
 //!
 //! # G-L4-1 — one lane never opens a scope
 //!
@@ -219,6 +225,9 @@ struct Run {
     min_pairs: usize,
     /// How far `Manifolds::narrowphase_dispatches` moved over the [`FRAMES`] frames.
     np_dispatches: u64,
+    /// Box pairs served from a contact-reuse record, summed over the [`FRAMES`] frames
+    /// (`Manifolds::pair_classes`).
+    reused: u64,
     /// The state hash of the spawn state, before any frame.
     spawn_hash: u64,
     /// The last frame's gathered snapshot and manifolds, for the dispatch witness.
@@ -251,11 +260,13 @@ fn run(workers: usize, parallel_solve: bool, parallel_narrowphase: bool, simd_so
     let mut hashes = Vec::with_capacity(FRAMES);
     let mut min_widest = usize::MAX;
     let mut min_pairs = usize::MAX;
+    let mut reused = 0;
     for _ in 0..FRAMES {
         schedule.run(&mut world);
         hashes.push(state_hash(&mut world));
         min_widest = min_widest.min(widest_color_slots(&world));
         min_pairs = min_pairs.min(world.resource::<ContactPairs>().pairs().len());
+        reused += world.resource::<Manifolds>().pair_classes().reused;
     }
     let np_dispatches = world.resource::<Manifolds>().narrowphase_dispatches() - np_before;
     let last = (
@@ -267,6 +278,7 @@ fn run(workers: usize, parallel_solve: bool, parallel_narrowphase: bool, simd_so
         min_widest,
         min_pairs,
         np_dispatches,
+        reused,
         spawn_hash,
         last,
         built_config,
@@ -303,8 +315,27 @@ fn default_world_is_worker_count_invariant() {
         "G-L5-4 (twin): `PhysicsConfig::default()` must carry `parallel_narrowphase` (L5 C4); \
          a host that builds its config from the default inherits this value, not the plugin's"
     );
+    assert!(
+        PhysicsConfig::default().contact_reuse,
+        "L9 C4 (twin): `PhysicsConfig::default()` must carry `contact_reuse`; a host that builds \
+         its config from the default inherits this value, not the plugin's"
+    );
 
     let reference = run(1, false, false, true);
+    assert!(
+        reference.built_config.contact_reuse,
+        "L9 C4: the world `add_physics_systems` built must reuse contacts (`contact_reuse` on by \
+         default); its `PhysicsConfig` resource has it off"
+    );
+    println!(
+        "reference (1w, both off): {} box pairs served from a reuse record over {FRAMES} frames",
+        reference.reused
+    );
+    assert!(
+        reference.reused > 0,
+        "L9 C4: the reference run served no box pair from a contact-reuse record over {FRAMES} \
+         frames, so the arms below would compare the full collision only"
+    );
     // G-L4-2: the config resource of the world the plugin built, which this test steps, so a
     // plugin-side override of the flag reds here, not only a change to the default.
     assert!(

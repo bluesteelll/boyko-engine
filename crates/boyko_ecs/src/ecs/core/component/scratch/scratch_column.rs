@@ -15,8 +15,9 @@
 //! scratch, refilled every step, and the backing is `ComponentPool` in its
 //! UNTRACKED mode so the two tick sub-regions are reserved but never committed.
 //! That is not a micro-optimisation: a tracked column pays 8 B/row of ticks on
-//! top of the datum and a 192 KiB resident floor, so the unread ticks were
-//! two thirds of this type's storage cost across the solver's live columns.
+//! top of the datum and three commit pages (12 KiB) of resident floor where an
+//! untracked one pays one (4 KiB), so the unread ticks were two thirds of this
+//! type's storage cost across the solver's live columns.
 
 use std::marker::PhantomData;
 
@@ -67,10 +68,11 @@ impl<T: Copy> ScratchColumn<T> {
     /// `grow_rows` and writes through `row_ptr`. The pool is a private field and
     /// is never handed out, so no caller can reach a tick either.
     ///
-    /// A tracked pool commits TWO tick sub-regions alongside the data at 64 KiB
-    /// granularity, i.e. 8 B/row of change detection the scratch path never
-    /// reads: a 192 KiB resident floor per column and 3.0x the commit charge of
-    /// the equivalent `Vec<u32>`. Untracked reserves those sub-regions and never
+    /// A tracked pool commits TWO tick sub-regions alongside the data, i.e.
+    /// 8 B/row of change detection the scratch path never reads: a 12 KiB
+    /// resident floor per column instead of 4 KiB (one `COMMIT_PAGE` per
+    /// committed sub-region, packing plan D2) and 3.0x the commit charge of the
+    /// equivalent `Vec<u32>`. Untracked reserves those sub-regions and never
     /// commits them, so the cost is the data region alone. Every tick accessor
     /// on `ComponentPool` carries a `debug_assert!(self.is_tracked())`, so a
     /// future edit that reaches for a tick here fails loudly in debug and under

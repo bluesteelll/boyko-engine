@@ -166,7 +166,7 @@ fn setup(
 /// `#[ignore]`: needs a real windowed GPU device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
 /// orchestrator runs it on the GPU to dump the screenshot.
 #[test]
-#[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the ForwardPlus v1 mesh-only screenshot"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the ForwardPlus v1 mesh-only screenshot"]
 fn forwardplus_mesh_screenshot_dump() {
     let mut app = App::new();
     let plugins = EnginePlugins::window("boyko_engine forwardplus mesh-only", 512, 512);

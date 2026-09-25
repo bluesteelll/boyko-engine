@@ -182,6 +182,9 @@ struct Rig {
 }
 
 impl Rig {
+    /// The churned scene with contact reuse OFF, an explicit override since L9 C4 turned it on by
+    /// default: G-L5-3's subject is the exact narrowphase, the full collision of every pair; the
+    /// reuse-on matrix is G-L9b-3's ([`with_reuse`](Self::with_reuse)).
     fn new(workers: usize, parallel_np: bool) -> Self {
         Self::with_reuse(workers, parallel_np, false)
     }
@@ -207,7 +210,11 @@ impl Rig {
              of this gate are the override, not the default"
         );
         cfg.parallel_narrowphase = parallel_np;
-        assert!(!cfg.contact_reuse, "L9 C3: contact reuse is off by default");
+        assert!(
+            cfg.contact_reuse,
+            "L9 C4: the default world must have contact reuse on; the reuse-off arms of this gate \
+             are the override, not the default"
+        );
         cfg.contact_reuse = reuse;
         let mut rig =
             Self { world, physics, archetypes, live: Vec::new(), pile: Vec::new(), spawned: 0 };
@@ -705,13 +712,33 @@ fn run_pyramid(workers: usize, parallel_np: bool, reuse: bool) -> (Vec<StepHashe
         });
     }
     let dispatches = world.resource::<Manifolds>().narrowphase_dispatches();
+    #[cfg(feature = "narrowphase-counts")]
+    fallback_census_epilogue(workers, parallel_np, reuse);
     (hashes, dispatches, reused)
+}
+
+/// The box-box fallback census of one pyramid run (`narrowphase-counts` only; the `thinbox` lane,
+/// `design_rev2.md` §6.2 (iii)): printed, and asserted to hold no event that changes the kernel's
+/// output — no phantom answer, no capped hint. It runs before the caller compares the run, so a
+/// broken bit identity is read beside the census that names or clears the face bound as its cause.
+/// The counters are process-wide; this test is `--ignored`, run on its own.
+#[cfg(feature = "narrowphase-counts")]
+fn fallback_census_epilogue(workers: usize, parallel_np: bool, reuse: bool) {
+    let s = boyko_physics::narrowphase::box_box::fallback_census::take();
+    println!(
+        "pyramid W={workers} parallel_narrowphase {parallel_np} contact_reuse {reuse}: box-box \
+         fallback census {s:?}"
+    );
+    assert!(
+        s.phantom == 0 && s.hint_capped == 0,
+        "pyramid W={workers}: the box-box fallback's face bound fired: {s:?}"
+    );
 }
 
 #[test]
 #[ignore = "slow: Jolt's 1240-box pyramid for 600 steps on four worlds; run in release with -- --ignored"]
 fn jolt_pyramid_parallel_narrowphase_is_bit_identical() {
-    // With contact reuse off (the default), then forced on (L9b G-L9b-3): each against its own
+    // With contact reuse off (G-L5-3), then on (L9b G-L9b-3; the default): each against its own
     // one-worker flag-off oracle.
     for reuse in [false, true] {
         let (oracle, none, oracle_reused) = run_pyramid(1, false, reuse);

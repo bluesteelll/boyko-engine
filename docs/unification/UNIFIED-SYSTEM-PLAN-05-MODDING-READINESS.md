@@ -57,7 +57,7 @@ remarks, `:2423-2517`) and with the owner's hard requirement H-1 (§1). It chang
 - **The rule.** Every modding item that adds code to a kernel crate (a function body, a type with
   methods, a trait impl) is generic over `ModSeam` (01 KC-19b). `ModSeam` is a `#[doc(hidden)]
   pub unsafe trait` with no methods and **no implementor in any kernel crate**. Its implementors
-  live in `boyko_mod_host`, `boyko_mod_api`, `boyko_mod_registry` and census test crates.
+  live in `boyko_mod_host`, `boyko_mod_api`, `boyko_mod_registry` and census test crates. ⚠ *2026-09-24 (AP9 W4; `ALLOCATOR-DESIGN-SPACE.md` rev 2.7 P58.4): a proc-macro crate "must only export procedural macros" (Rust Reference, linkage), so none of these three can hold one. If Stage 3 makes an SDK macro procedural (MS-02a's registration macro, the trampoline, a `stable_name` derive), it lives in a fourth crate of its own, never `boyko_macros`, and that crate joins the modding crates of UG-15's ban on runtime-invoked code (03 `:192`).*
 - **Why it holds at every profile.** A generic function is compiled only where its type arguments
   are known ("the compiler can only compile a generic function when it knows the specific type
   arguments it is instantiated with", matklad, the source cited at
@@ -161,7 +161,7 @@ route 2 unplaced pending MD:M-C5, and A third. No head is measured (R3-3, §5).
 | MS-05 | Config-phase load slot | all | none | A′, A: `ModLoaderPlugin` → `boyko_mod_host`. C: the boot walk → `boyko_mod_registry` | 0 | — | Stage 3 |
 | MS-06 | `Result` on register / load / attribution; param-fetch panic policy **unchanged** | all | none | host / registry | 0 | — | Stage 3 |
 | MS-07 | Load-only ruling: no `FreeLibrary`; every world dropped before the image | all (C: by construction) | none | host | 0 | written rule | Stage 3 |
-| MS-08 | By-id structural ops: consume KF-47 (KC-21), marked `MOD-SEAM` | A | doc lines only | — | 0 (engine clients exist) | UG-15 (5) | markers with A6, as 02 schedules (no code) |
+| MS-08 | By-id structural ops: consume KF-47 (KC-21), marked `MOD-SEAM` | A | doc lines only | — | 0 (engine clients exist) | UG-15 (5) | ~~markers with A6, as 02 schedules~~ ⚠ *2026-09-24, B3 PC-5: A6 landed none (the tree held 0 `MOD-SEAM` markers). B3 added the four as doc lines (`ecs_master/seam_by_id.rs:201`, `:511`, `:630`; `component_registry/tags.rs:226`), and leg (5) reads `markers found: 4 (inventory: 4)`. Leg (7b) exempts them as leg (5) does (PC-6; 03 §6)* (no code) |
 | MS-09 | Mod components are POD in v1: `drop_fn` and `clone_fn` refused at the seam; `map_entities_fn` and the SerPod blit allowed | A | none | seam assert → host | 0 | `mod_seam_pins` (P26.2 rows ii–iii) | Stage 3 |
 | MS-10 | By-stable-name `QueryTypeId` mint + slot installer (`#[doc(hidden)]`) | A | 2 `unsafe fn`s generic over `ModSeam` | `ModQuery` `SystemParam` → `boyko_mod_api` | nothing compiled | UG-15 with (7) and (7b); MD:M-A4 (d) | Stage 3 |
 | MS-11 | Counter probe: address accessors under a hidden `unsafe` seam; exported probe in `boyko_mod_api`. The value readers are MS-03's | A | 5 address accessors generic over `ModSeam` | probe → api | nothing compiled | UG-15 (1), (2), (7), (7b) | Stage 3 |
@@ -310,7 +310,7 @@ This is UG-15 (03 §6).
 | Stage | When | Content |
 |---|---|---|
 | 0 | done 2026-09-17 | Q-1 and Q-2 answered (00 §7); RM-4, A′'s launcher rule, is the one Stage-0 item left |
-| 1 | inside Phase D | **Only the common set.** D-S1(ii) lands `ModSeam` and MS-03's four readers (01 KC-19b) under strict UG-15, including legs (7) and (7b). Its parent is D-S1(ii)'s cut commit, which contains D-S1(i), the bug-fix commit (P39, P40's tag path, 32.2, NW4). MS-08's markers land with A6 (doc lines, no code). RM-2's fix is an engine rung, placed by the architect. Nothing else is built for modding in Phase D |
+| 1 | inside Phase D | **Only the common set.** D-S1(ii) lands `ModSeam` and MS-03's four readers (01 KC-19b) under strict UG-15, including legs (7) and (7b). Its parent is D-S1(ii)'s cut commit, which contains D-S1(i), the bug-fix commit (P39, P40's tag path, 32.2, NW4). MS-08's markers ~~land with A6~~ landed with B3 (doc lines, no code; ⚠ *2026-09-24, B3 PC-5*). RM-2's fix is an engine rung, placed by the architect. Nothing else is built for modding in Phase D |
 | 2 | quiet windows; structural checks any time | MQ-09, plus the timing legs of MD:M-F1 (c) and MD:M-C0b. Structural: MD:M-F1 (a), (b) and the size legs of (c) and M-C0b; MD:M-C4, MD:M-C5, MD:M-K3 |
 | 3 | after Phase-D exit | **Only the chosen option's items**, behind the modding crates, gated by UG-15: A′ → MS-14; C → MS-15; A → MS-01, MS-02b, MS-09..MS-13 and RM-1's item. Every option → MS-02a's SDK half and MS-04..MS-07. Waiting for D-exit means Stage 3 is not fighting a moving kernel |
 | 4 | after Stage 3 | one real mod end to end (modding §9) |

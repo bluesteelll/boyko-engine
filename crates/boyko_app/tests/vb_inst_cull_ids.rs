@@ -79,7 +79,7 @@ fn expected_onscreen_ids() -> Vec<u32> {
 
 /// **The gate.** Reads the census row's distinct-instance set off a real raster.
 #[test]
-#[ignore = "needs a real windowed GPU device; the orchestrator runs it to read the exported instance ids"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator runs it to read the exported instance ids"]
 fn vb_inst_cull_ids_are_the_global_ring_indices() {
     let out = std::env::temp_dir().join("boyko_vb_inst_cull_ids.toml");
     let _ = std::fs::remove_file(&out);

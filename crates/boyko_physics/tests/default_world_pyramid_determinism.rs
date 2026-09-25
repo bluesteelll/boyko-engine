@@ -5,8 +5,9 @@
 //!
 //! The default world (`add_physics_systems::<DefaultRigidSolver>`, default
 //! `PhysicsConfig`: the colored solve with the O7 AVX2 cohort kernel on, `AllPairs`
-//! broadphase, sleeping off) runs Jolt's `PyramidScene` through the real schedule. The
-//! per-frame FNV-1a hash of every `RigidBody` bit must be identical across:
+//! broadphase, sleeping off, contact reuse on since L9 C4) runs Jolt's `PyramidScene` through
+//! the real schedule. The per-frame FNV-1a hash of every `RigidBody` bit must be identical
+//! across:
 //!
 //! - **run to run**: the reference configuration (1 worker, `parallel_solve` off) run
 //!   twice in fresh worlds, and the most parallel configuration (8 workers,
@@ -25,6 +26,11 @@
 //! and a scratch mutation that turned contact reuse on by default moved it (release
 //! `0xa38620b38cbca8d3` -> `0xb583189fa681f3a6`) while the test stayed green. The pin's
 //! doc carries its re-pin rule.
+//!
+//! **The exact-narrowphase arm (L9 C4).** Contact reuse is on by default since L9 C4, so the
+//! reference and every arm above run it. One more run, the reference configuration with
+//! `contact_reuse = false`, must end in [`PINNED_FINAL_HASH_REUSE_OFF`]: the pre-C4 trajectory,
+//! which every later lane's reuse-off mode has to reproduce bit for bit.
 //!
 //! # Scene size per profile
 //!
@@ -84,16 +90,31 @@ const FRAMES: usize = if cfg!(debug_assertions) { 60 } else { 120 };
 const DT: f32 = 1.0 / 60.0;
 
 /// The reference run's final hash, per profile: release (height 15, 120 frames)
-/// `0xa386_20b3_8cbc_a8d3`, debug (height 10, 60 frames) `0xc7eb_531b_1e1a_c19b`. Both were
-/// read on msvc at L9 C3 (`aef7dda4`), where contact reuse is off by default.
+/// `0xb583_189f_a681_f3a6`, debug (height 10, 60 frames) `0x839d_9426_8d67_b09f`. Both were
+/// read on msvc at L9 C4 (contact reuse on by default, 2026-09-24), which re-pinned them from
+/// release `0xa386_20b3_8cbc_a8d3` and debug `0xc7eb_531b_1e1a_c19b`, read at L9 C3
+/// (`aef7dda4`) when the default had reuse off; those are now
+/// [`PINNED_FINAL_HASH_REUSE_OFF`].
 ///
 /// **Re-pin rule.** The value moves only with a commit that changes values by design (a
 /// value-changing lever). That commit re-reads BOTH profiles from this test's own
 /// `reference final hash` line, re-pins both here in the same commit, and names the lever
 /// and the old values in this doc. In a commit that claims bit identity, a change is a
-/// defect, never a re-pin. L9 C4 (contact reuse on by default) is such a lever and
-/// re-pins it.
+/// defect, never a re-pin.
 const PINNED_FINAL_HASH: u64 = if cfg!(debug_assertions) {
+    0x839d_9426_8d67_b09f
+} else {
+    0xb583_189f_a681_f3a6
+};
+
+/// The reference configuration's final hash with contact reuse OFF (the exact narrowphase),
+/// per profile: release `0xa386_20b3_8cbc_a8d3`, debug `0xc7eb_531b_1e1a_c19b`. Read on msvc
+/// at L9 C3 (`aef7dda4`) as the default's, and again at L9 C4 from this test's `reuse off`
+/// line.
+///
+/// **Re-pin rule.** [`PINNED_FINAL_HASH`]'s, read from the `reuse off` line, except that no
+/// contact-reuse change may move it: with reuse off no reuse code runs.
+const PINNED_FINAL_HASH_REUSE_OFF: u64 = if cfg!(debug_assertions) {
     0xc7eb_531b_1e1a_c19b
 } else {
     0xa386_20b3_8cbc_a8d3
@@ -246,6 +267,16 @@ struct Run {
 
 /// Runs the default world on a `workers`-wide pool with the given flags.
 fn run(workers: usize, parallel_solve: bool, simd_solve: bool) -> Run {
+    run_with_reuse(workers, parallel_solve, simd_solve, None)
+}
+
+/// [`run`], with `contact_reuse` set to `reuse` when it is `Some` (the default's otherwise).
+fn run_with_reuse(
+    workers: usize,
+    parallel_solve: bool,
+    simd_solve: bool,
+    reuse: Option<bool>,
+) -> Run {
     let mut world = EcsMaster::new();
     let n = spawn_pyramid(&mut world);
     assert!(n > 0, "construction: the pyramid has dynamic boxes");
@@ -260,6 +291,9 @@ fn run(workers: usize, parallel_solve: bool, simd_solve: bool) -> Run {
         cfg.dt = DT;
         cfg.parallel_solve = parallel_solve;
         cfg.simd_solve = simd_solve;
+        if let Some(reuse) = reuse {
+            cfg.contact_reuse = reuse;
+        }
     }
 
     let spawn_hash = state_hash(&mut world);
@@ -335,6 +369,15 @@ fn default_world_pyramid_is_run_to_run_worker_count_and_scalar_identical() {
         "scalar oracle: 8w parallel_solve=true simd_solve=false".to_owned(),
         run(8, true, false),
     ));
+    // The exact narrowphase: not an arm of the comparison below (its trajectory is another one by
+    // design), but pinned on its own.
+    let reuse_off = run_with_reuse(1, false, true, Some(false));
+    let reuse_off_final = reuse_off.hashes.last().copied().unwrap_or(0);
+    println!("  reuse off (1w parallel_solve=false): final hash {reuse_off_final:#018x}");
+    // Before the value gates, so a moved pin is read beside the census that names or clears the
+    // face bound as its cause.
+    #[cfg(feature = "narrowphase-counts")]
+    fallback_census_epilogue();
 
     let mut diverged = Vec::new();
     for (label, r) in &arms {
@@ -362,5 +405,27 @@ fn default_world_pyramid_is_run_to_run_worker_count_and_scalar_identical() {
          still agrees with the reference, so this is a value change, not a determinism defect. In \
          a commit that claims bit identity it is a defect; only a value-changing lever re-pins, \
          under `PINNED_FINAL_HASH`'s rule"
+    );
+    assert_eq!(
+        reuse_off_final, PINNED_FINAL_HASH_REUSE_OFF,
+        "the default world's pyramid with contact reuse OFF moved: final hash \
+         {reuse_off_final:#018x}, pinned {PINNED_FINAL_HASH_REUSE_OFF:#018x} (height \
+         {PYRAMID_HEIGHT}, {FRAMES} frames). This is the exact narrowphase's trajectory, which no \
+         contact-reuse change may move; only a value-changing lever outside contact reuse re-pins, \
+         under `PINNED_FINAL_HASH_REUSE_OFF`'s rule"
+    );
+}
+
+/// The box-box fallback census of every run above (`narrowphase-counts` only; the `thinbox`
+/// lane, `design_rev2.md` §6.2 (iii)): printed, and asserted to hold no event that changes the
+/// kernel's output — no phantom answer, no capped hint. The fix changes a run only when one fires,
+/// so with both at zero a moved pin here is not its doing.
+#[cfg(feature = "narrowphase-counts")]
+fn fallback_census_epilogue() {
+    let s = boyko_physics::narrowphase::box_box::fallback_census::take();
+    println!("pyramid: box-box fallback census {s:?}");
+    assert!(
+        s.phantom == 0 && s.hint_capped == 0,
+        "pyramid: the box-box fallback's face bound fired: {s:?}"
     );
 }

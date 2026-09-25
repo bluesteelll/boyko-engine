@@ -73,7 +73,7 @@ Every row was read in this worktree on 2026-08-21. The anchors are load-bearing:
 | F25 | `proptest` is a workspace dependency ([`Cargo.toml`](../Cargo.toml):70~) already used by six crates. | `crates/boyko_ecs/Cargo.toml:93~` and five siblings |
 | F26 | Package names use hyphens: `boyko-ecs`, `boyko-scene`. The new crate is therefore `boyko-reflect` in `crates/boyko_reflect/`. | `crates/boyko_ecs/Cargo.toml:2~` |
 | F27 | 🔴 **`register_enable_tag(name)` MINTS A NEW ID for any name not already in `TAG_NAMES`, and a derived `#[component(storage = "bitset")]` type never interns its name there.** Traced end to end: `EcsMaster::register_enable_tag` → `try_register_enable_tag_by_name` → `try_register_tag_by_name`, whose table is `TAG_NAMES` and whose miss path calls `try_register_dynamic(ComponentLayout::new_dynamic_tag(leaked))`. A derived bitset component's id came from `register_new::<Self>()` (`component_registry/mod.rs:920`, a monotonic `NEXT_ID.fetch_add`) and its name was never interned. | `enable_tag_api.rs:61`, `component_registry/tags.rs:134`, `:155`, `:182-196`, `component_registry/mod.rs:920` |
-| F28 | `NEXT_ID` is a monotonic `AtomicUsize` with `fetch_add`; **ids are never recycled**, and `component_id()` is a per-type `static ID: OnceLock<ComponentId>` resolved once per process. So *"the id re-registered to a different type"* is not a state this process can reach. | `component_registry/mod.rs:214, :920`; `boyko_macros/src/component.rs:454-456` |
+| F28 | `NEXT_ID` is a monotonic `AtomicUsize` with `fetch_add`; **ids are never recycled**, and `component_id()` is a per-type `static ID: OnceLock<ComponentId>` resolved once per process. So *"the id re-registered to a different type"* is not a state this process can reach. | `component_registry/mod.rs:214, :920`; `boyko_macros/src/component.rs:453-455` |
 | F29 | `try_register_tag_by_name` returns `None` when `NEXT_ID >= MAX_COMPONENTS` and `name` was never minted; `register_enable_tag` turns that `None` into `register_enable_tag_exhausted_panic`. Dynamic tags and typed components share the one 512-id budget. | `component_registry/tags.rs:189-192~`, `enable_tag_api.rs:60-66~` |
 
 ### The five contradictions, named
@@ -565,7 +565,7 @@ D9 requires EG2 to duplicate and the arms §4 requires it to write:
 | the duplicated `migrate_entity_attach_ids` body | **7** | `&mut *source_ptr`; `&mut *target_ptr`; `slice::from_raw_parts` over the retained row; `read_added_tick`; `read_changed_tick`; the four-call retained write block; `(*target_ptr).flags` (`migration_helpers.rs:1962~`) |
 | **U5**, new | 1 | the added ids' byte write |
 | S1's and S2's `add_tag`-shaped presence read | 2 | `&*inland.archetype_ptr()`, one each (`tag_api.rs:130`) |
-| S3 | 3 | the `addr_of!((*p).component_pools)` projection and `write_changed_tick` on the table arm (`component_pool.rs:1879`), and the dense arm's store through `changed_ticks_ptr` (`component/dense/dense_store.rs:782`) |
+| S3 | 3 | the `addr_of!((*p).component_pools)` projection and `write_changed_tick` on the table arm (`component_pool.rs:1992`), and the dense arm's store through `changed_ticks_ptr` (`component/dense/dense_store.rs:782`) |
 
 The seven duplicated **`unsafe`** blocks land with their **original** `// SAFETY:` comments, which
 remain true verbatim — that is a property of D9's duplication, not an exemption from principle 8.
@@ -1365,7 +1365,7 @@ learned that lesson — which is why the instruction is to take the list from th
     `g18_a_dense_caller_with_require_seeds_the_target_archetypes_presence_bit`
     (`tests/seam_by_id.rs:2440`); written into this enumeration only at round 5, which is the defect
     the banner above now records. FORK A calls `dense_insert_only` BEFORE the migration
-    (`ecs_master/seam_by_id.rs:460~`), so the archetype id passed there is the one
+    (`ecs_master/seam_by_id.rs:463~`), so the archetype id passed there is the one
     `mark_arch_present` records — and passing the SOURCE marks an archetype the entity no longer
     occupies. **Three things make it a gate rather than a restatement of 13b.**
     * **The discriminator is a pure-dense `Query<&T>`**, whose candidate set comes from
@@ -1392,10 +1392,10 @@ learned that lesson — which is why the instruction is to take the list from th
   the partially-uninitialised row (and the release test reds without Miri).~~ **STRUCK (D26): the
   predicted artifact does not exist in EITHER profile, and this is a red whose subject was not what
   it named.** `write_at_unchecked_initialized` copies `self.component_layout.size()` bytes, **not**
-  `bytes.len()` (`component_pool.rs:2055~`), so the destination row is always FULLY initialised; the
+  `bytes.len()` (`component_pool.rs:2168~`), so the destination row is always FULLY initialised; the
   fault is an out-of-bounds **read** past the caller's slice. And in debug — which is how
   `cargo miri test` builds — the pool's own
-  `debug_assert_eq!(bytes.len(), self.component_layout.size(), …)` (`component_pool.rs:2041~`) fires
+  `debug_assert_eq!(bytes.len(), self.component_layout.size(), …)` (`component_pool.rs:2154~`) fires
   first, so Miri never reaches the copy. **The repaired mutation:** delete S1's length check *and*
   the pool's `debug_assert_eq!`, and run gate 10's Miri leg → Miri reds on the OOB read of the
   caller's slice. Both deletions restored under `cmp`. *(A one-line mutation cannot express this
@@ -1480,7 +1480,7 @@ than appended to the six is that the six above were RUN by round 3 and this one 
 round 5.** Round 4 landed the gate and left the ledger at *"fourteen"* with the reds it named
 unchanged; the mutation below is the entire subject of that gate and appeared in no list.
 * **Swap the seed: `dense_insert_only(entity, target_archetype_id, …)` →
-  `source_archetype_id`** in `add_by_id_expanding_requires` (`ecs_master/seam_by_id.rs:460~`) — a
+  `source_archetype_id`** in `add_by_id_expanding_requires` (`ecs_master/seam_by_id.rs:463~`) — a
   ONE-TOKEN edit, and the only mutation in this rung that is a single identifier. → **gate 18 alone
   reds, in BOTH profiles**, at `tests/seam_by_id.rs:2524~`, `left: 1  right: 2` on the pure-dense
   query's member count, with the assertion's own message naming the mechanism. Transcribed, not
@@ -1863,7 +1863,7 @@ an empty binary, not fail).
 | needed | by rung | note |
 |---|---|---|
 | `TypeInfo`, `FieldInfo { offset, kind, get, set }`, `Scalar`, `ValueKind`, `TypeKind`, `FieldValue`, `NestedCursor` / ~~`NestedCursorMut`~~ | EG4, EG5 | the whole value model. ⚠️ **`NestedCursorMut` is scheduled by NO CORE rung, and EG5 gate 6 is written around it** — verified 2026-08-26: zero hits in `crates/`, zero in `docs/REFLECTION-PLAN-CORE.md`; CORE's C6 is *"the recursion contract, **read side**"* and its two remaining rungs are C10 (enums) and C11 (`Str`). The type is specified only in `docs/REFLECTION-ANALYSIS.md` A.4 (FIX W1), which also names the escape hatch — *"if TB proves troublesome, nested-leaf write slips to v2"*. This is the **C7 defect class inside the dependency table**: ECS must put it to CORE **before** EG5, not discover it halfway through EG5 (D17) |
-| `type_info_of(id) -> Option<&'static TypeInfo>` | EG1 | EG1 needs it only to classify `Table` vs. `TableOpaque`; ~~a stub returning `None` unblocks EG1 if CORE is behind~~ **STRUCK 2026-08-26 (D23): CORE LANDED the real one, so the escape hatch is stale — and TAKING it now makes EG1 gate 2 unsatisfiable**, because a `None`-returning stub classifies *every* citizen `TableOpaque` and the gate's `Table` arm reds for a reason unrelated to the code under test. `pub fn type_info_of(component_id: usize) -> Option<&'static TypeInfo>` is live at `crates/boyko_reflect/src/registry.rs:54`, re-exported at `crates/boyko_reflect/src/lib.rs:72`, and the derive emits the matching install call at `crates/boyko_macros/src/component.rs:394~`. Same class D17 struck for the row below; this row was left behind in that pass |
+| `type_info_of(id) -> Option<&'static TypeInfo>` | EG1 | EG1 needs it only to classify `Table` vs. `TableOpaque`; ~~a stub returning `None` unblocks EG1 if CORE is behind~~ **STRUCK 2026-08-26 (D23): CORE LANDED the real one, so the escape hatch is stale — and TAKING it now makes EG1 gate 2 unsatisfiable**, because a `None`-returning stub classifies *every* citizen `TableOpaque` and the gate's `Table` arm reds for a reason unrelated to the code under test. `pub fn type_info_of(component_id: usize) -> Option<&'static TypeInfo>` is live at `crates/boyko_reflect/src/registry.rs:54`, re-exported at `crates/boyko_reflect/src/lib.rs:72`, and the derive emits the matching install call at `crates/boyko_macros/src/component.rs:393~`. Same class D17 struck for the row below; this row was left behind in that pass |
 | `install_type_info` carrying the **release `assert!(storage_kind(id) != Bitset)`** | ~~EG3~~ **CORE C9 — LANDED** | the runtime half of D5. ~~If CORE declines it, EG3 must add the check on its own read path and say so~~ **STRUCK 2026-08-26 (D17): CORE did not decline, so this conditional is DISCHARGED.** `crates/boyko_reflect/src/registry.rs:87` carries the plain release `assert!(storage_kind(component_id) != StorageKind::Bitset, …)` today — verified in tree at the EG0 audit. CORE recorded the obligation to strike it here (its §7.4 item 4: *"must be struck when ECS is next edited, or EG3 builds the same check twice"*), and this edit discharges it. The live edge is now **EG3 → CORE C9**, which §11 also lacked |
 | `TypeInfo::default_in_place` and `drop_in_place` | EG6 | D8's scratch fill; `drop_in_place` is used only by the drop-count gate, never by the glue |
 | `ValueKind::Array` (offset + stride + count) | EG4, EG8 | without it `GpuTransform3D` is a hard error and gate EG8-2 cannot exist (B.8) |
@@ -2562,7 +2562,7 @@ kernel commit; it did exactly that here. Every `migration_helpers.rs`, `componen
   call graph; the duplication is uncalled code. The number that CHANGED is the review cost, not the
   image cost — see the `unsafe` census correction in §6, which was under-counting by twelve.
 * 🟢 **S3 needs no new pool-layer mechanism.** Table: `get_component_changed_tick`'s prologue
-  (`component_api.rs:367`) plus `ComponentPool::write_changed_tick` (`component_pool.rs:1879`),
+  (`component_api.rs:367`) plus `ComponentPool::write_changed_tick` (`component_pool.rs:1992`),
   whose receiver is `&self`. Dense: a store through `changed_ticks_ptr`
   (`component/dense/dense_store.rs:782`). *(`stamp_slot_ticks` is NOT the one: it stamps `added` too,
   and S3 must preserve it.)*
@@ -2930,10 +2930,10 @@ figure is written beside it instead.
 | `g1` | FAILED | FAILED | `tests/seam_by_id.rs:251~` — *"a fresh attach stamps the changed tick at current_tick"*, `left: None  right: Some(Tick(0))` |
 | `g1c` | FAILED | FAILED | `tests/seam_by_id.rs:307~` — *"the size-0 column got a committed row with a tick, exactly like a data column"* |
 | `g14` | FAILED | FAILED | `tests/seam_by_id.rs:1647~` — *"exactly one drop, performed by the world at teardown"*, `left: 0  right: 1` |
-| `g13b` | FAILED | **ok** | `component_pool.rs:2169~` — *"commit_units: start_row 2 != current count 1 (rows must extend the tail)"*, `left: 2  right: 1` |
+| `g13b` | FAILED | **ok** | `component_pool.rs:2282~` — *"commit_units: start_row 2 != current count 1 (rows must extend the tail)"*, `left: 2  right: 1` |
 | `g16` | FAILED | **ok** | same assertion, same numbers |
 | `g18` | FAILED | **ok** | same assertion, same numbers |
-| `g15b` (in-`src` unit gate) | FAILED | **ok** | `component_pool.rs:1592~` — *"unit_ptr: idx out of bounds"* |
+| `g15b` (in-`src` unit gate) | FAILED | **ok** | `component_pool.rs:1705~` — *"unit_ptr: idx out of bounds"* |
 | `g13` | **ok** | **ok** | — |
 
 1. **`--release` is NOT load-bearing for gate 14.** The struck sentence said the lockstep

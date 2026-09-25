@@ -100,7 +100,7 @@ fn setup(
 /// `#[ignore]`: needs a real windowed GPU device. Run with `BOYKO_DISABLE_VALIDATION=1` and
 /// `--test-threads=1`.
 #[test]
-#[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU for the DP6-0 split baseline cells"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator runs it on the GPU for the DP6-0 split baseline cells"]
 fn vb_both_ssao_screenshot_dump() {
     let mut app = App::new();
     let plugins = EnginePlugins::window(

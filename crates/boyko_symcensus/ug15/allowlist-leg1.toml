@@ -1,0 +1,22 @@
+# UG-15 leg (1) allowlist (03 §6 leg (1), "Pass condition").
+#
+# EDITED ONLY IN AN OWNER-SIGNED COMMIT. Leg (1) is green when the counted findings of the six
+# census crates (boyko_ecs, boyko_utils, boyko_threadpool, boyko_log, boyko_diag, boyko_macros)
+# equal the entries below exactly; an entry that no longer matches a finding is as RED as a
+# finding with no entry.
+#
+# Counted: an attribute `no_mangle` / `export_name` / `link_section` / `used` / `linkage` (plain,
+# inside `unsafe(...)`, or inside `cfg_attr`); a fn definition with an explicit ABI other than
+# "Rust", or a bare `extern fn`; `global_asm!`, `naked_asm!`, `#[naked]` — in source, in every
+# macro body (M-a), in build.rs string literals, and in every `boyko_macros` fixture's expansion
+# (M-b).
+#
+# Entry form (the values are exactly what the census prints for the finding):
+#
+#   [[allow]]
+#   file = "crates/<crate>/src/<path>.rs"
+#   item = "<Type>::<fn>"
+#   kind = "#[no_mangle]"
+#   reason = "<why the owner accepts it>"
+#
+# Empty at B3: the census counts nothing on the trunk, and KC-04 needs no entry (01 §6, item 5).

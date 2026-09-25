@@ -1,0 +1,588 @@
+== probe (i) anonymous-data forms + (ii) symbol-size source
+tree         D:\wt\lighttable (HEAD 6e9f25570266d546e9f3936d7dc7f46eee433593, 0 uncommitted path(s))
+target dir   D:/wt/_targets/vkval-msvc
+host         x86_64-pc-windows-msvc (msvc)
+rustc -vV    rustc 1.98.1 (48a229cea 2026-09-01)
+rustc -vV    binary: rustc
+rustc -vV    commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985
+rustc -vV    commit-date: 2026-09-01
+rustc -vV    host: x86_64-pc-windows-msvc
+rustc -vV    release: 1.98.1
+rustc -vV    LLVM version: 22.1.8
+llvm-nm          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-nm.exe
+llvm-objdump     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-objdump.exe
+llvm-readobj     LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-readobj.exe
+llvm-size        LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-size.exe
+llvm-ar          LLVM version 22.1.8-rust-1.98.1-stable [rustup sysroot] C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\bin\llvm-ar.exe
+subject      swap_remove (boyko-ecs --bench swap_remove)
+profile      release
+object       D:/wt/_targets/vkval-msvc\release\deps\swap_remove-57785ab048fb4a4b.o
+object sha   c6fead8df54be9b2cf8e6123640583a7e9fe1f0a9032dde1014b3e1bf90e9df1
+image        D:/wt/_targets/vkval-msvc\release\deps\swap_remove-57785ab048fb4a4b.exe
+image sha    8fcbefa1770fcd97cca002ef4a7a9e85e6f10d257f920fd2954841e8a930436d
+pdb          D:/wt/_targets/vkval-msvc\release\deps\swap_remove-57785ab048fb4a4b.pdb
+link args    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "D:/wt/_targets/vkval-msvc\\release\\deps\\swap_remove-57785ab048fb4a4b.swap_remove.2254c6ad442a4ab5-cgu.0.rcgu.o" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcjHNXGS\\libwindows_sys-04007b6cdfc72af3.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcjHNXGS\\libstd-44a584f44bc3dd65.rlib" "C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib\\libcompiler_builtins-d2ba6b5d33df79c1.rlib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/OUT:D:/wt/_targets/vkval-msvc\\release\\deps\\swap_remove-57785ab048fb4a4b.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libstd.natvis"
+defined symbols 18357 ; by raw prefix {"SEH ($… / ?…)": 7169, "_R (v0)": 2720, "anon.": 8106, "other": 362}
+demangled sample: <criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>  <=  _RINvMNtCsaw1WIxcChNI_9criterion7bencherNtB3_7Bencher12iter_batchedTNtNtNtNtNtCs72QlCdEtGol_9boyko_ecs3ecs4core10ecs_master10ecs_master9EcsMasterINtNtCsfQUUnEvlYZE_5alloc3vec3VecNtNtNtB19_6entity6entity6EntityEEuNCNCNvCs2WK7HVEAfoD_11swap_remove17bench_swap_remove00NCB3p_s_0EB3t_
+llvm-nm -S: 18357 lines, 0 with a non-zero size field
+-- R-4 in swap_remove: ABSENT (no defined code symbol matches [FirstWithPrefix("boyko_ecs::ecs::core::component::component_registry::register_layout::<")])
+-- H-2 swap_remove | <criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}> | sec 4 `.text` sel=NoDuplicates raw=19788 aux=Some(19788) | members=7 main@0 next@19216 → main-only=19216 section=19788 | sha a25d1e0763faa34c
+     member @0: <criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>
+     member @19216: ?dtor$14@?0?<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>@4HA
+     member @19344: ?dtor$29@?0?<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>@4HA
+     member @19424: ?dtor$55@?0?<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>@4HA
+     member @19552: ?dtor$64@?0?<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>@4HA
+     member @19632: ?dtor$66@?0?<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>@4HA
+     member @19712: ?dtor$72@?0?<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>@4HA
+     ref ×10: __imp_* (import)
+     ref ×6: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×24: defined code, mangled
+     ref ×1: undefined C name (__chkstk)
+     ref ×5: undefined C name (memcpy)
+     Location C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\time.rs:1257:31 via anon.2ce0942084eae145052dc5d9dbbc0086.18
+     Location C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\criterion-0.5.1\src\bencher.rs:243:9 via anon.8d6a1c40fe79ab4c173d9602c725fb02.8
+     code ref <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity
+     code ref core::ptr::drop_glue::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>)>
+     code ref core::ptr::drop_glue::<alloc::vec::Vec<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>)>>
+     code ref core::ptr::drop_glue::<alloc::vec::into_iter::IntoIter<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>)>>
+     code ref core::ptr::drop_glue::<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>
+-- H-2 swap_remove | swap_remove::bench_swap_remove::{closure#0}::{closure#0} | sec 175 `.text$unlikely` sel=NoDuplicates raw=8476 aux=Some(8476) | members=10 main@0 next@7712 → main-only=7712 section=8476 | sha e0273257a92df18a
+     member @0: swap_remove::bench_swap_remove::{closure#0}::{closure#0}
+     member @7712: ?dtor$300@?0?swap_remove::bench_swap_remove::{closure#0}::{closure#0}@4HA
+     member @7808: ?dtor$301@?0?swap_remove::bench_swap_remove::{closure#0}::{closure#0}@4HA
+     member @7888: ?dtor$302@?0?swap_remove::bench_swap_remove::{closure#0}::{closure#0}@4HA
+     member @7968: ?dtor$305@?0?swap_remove::bench_swap_remove::{closure#0}::{closure#0}@4HA
+     member @8048: ?dtor$306@?0?swap_remove::bench_swap_remove::{closure#0}::{closure#0}@4HA
+     member @8128: ?dtor$307@?0?swap_remove::bench_swap_remove::{closure#0}::{closure#0}@4HA
+     member @8208: ?dtor$308@?0?swap_remove::bench_swap_remove::{closure#0}::{closure#0}@4HA
+     member @8288: ?dtor$311@?0?swap_remove::bench_swap_remove::{closure#0}::{closure#0}@4HA
+     member @8400: ?dtor$314@?0?swap_remove::bench_swap_remove::{closure#0}::{closure#0}@4HA
+     ref ×6: __imp_* (import)
+     ref ×1: __real@/__xmm@/__ymm@ (content-named constant)
+     ref ×30: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×69: defined code, mangled
+     ref ×2: defined data class b, mangled
+     ref ×8: defined data class d, mangled
+     ref ×1: undefined C name (__chkstk)
+     ref ×1: undefined C name (_tls_index)
+     ref ×1: undefined C name (memcpy)
+     ref ×1: undefined C name (memset)
+     Location crates\boyko_utils\src\sparse_map\sparse_map.rs:52:26 via anon.47fb76c1db3e3a152e57b771219bdac6.34
+     Location crates\boyko_utils\src\sparse_map\sparse_map.rs:63:28 via anon.47fb76c1db3e3a152e57b771219bdac6.35
+     Location crates\boyko_utils\src\sparse_map\sparse_map.rs:55:60 via anon.47fb76c1db3e3a152e57b771219bdac6.36
+     Location crates\boyko_ecs\src\ecs\core\component\component_pool_bundle.rs:84:29 via anon.47fb76c1db3e3a152e57b771219bdac6.40
+     Location crates\boyko_ecs\src\ecs\core\component\component_pool_bundle.rs:78:25 via anon.47fb76c1db3e3a152e57b771219bdac6.48
+     Location crates\boyko_ecs\src\ecs\core\ecs_master\enable_tag_api.rs:244:32 via anon.7ad4e213b4c56725d350f8bc49849a42.46
+     Location crates\boyko_ecs\src\ecs\core\entity\entity_master.rs:350:9 via anon.7ad4e213b4c56725d350f8bc49849a42.63
+     Location crates\boyko_ecs\benches\swap_remove.rs:86:14 via anon.8d6a1c40fe79ab4c173d9602c725fb02.142
+     Location crates\boyko_ecs\src\ecs\core\archetype\archetype_bundle.rs:602:14 via anon.d942e55fefdd14610d579d30fde3626d.11
+     Location crates\boyko_ecs\src\ecs\core\archetype\archetype_master.rs:216:18 via anon.d942e55fefdd14610d579d30fde3626d.14
+     Location crates\boyko_ecs\src\ecs\core\archetype\archetype_bundle.rs:575:9 via anon.d942e55fefdd14610d579d30fde3626d.26
+     Location crates\boyko_ecs\src\ecs\core\archetype\archetype_bundle.rs:582:24 via anon.d942e55fefdd14610d579d30fde3626d.27
+     Location crates\boyko_ecs\src\ecs\core\archetype\archetype.rs:806:17 via anon.d942e55fefdd14610d579d30fde3626d.51
+     Location crates\boyko_ecs\src\ecs\core\archetype\archetype.rs:799:17 via anon.d942e55fefdd14610d579d30fde3626d.52
+     Location crates\boyko_ecs\src\ecs\memory\component_pool.rs:538:14 via anon.f55ada37fef61ae978b52fb9e85d4803.54
+     code ref <alloc::raw_vec::RawVec<(boyko_ecs::ecs::identifiers::primitives::ArchetypeId, boyko_ecs::ecs::core::archetype::archetype_signature::ArchetypeSignature)>>::grow_one
+     code ref <alloc::raw_vec::RawVec<alloc::vec::Vec<(boyko_ecs::ecs::identifiers::primitives::ArchetypeId, boyko_ecs::ecs::core::archetype::archetype_signature::ArchetypeSignature)>>>::grow_one
+     code ref <alloc::raw_vec::RawVec<boyko_ecs::ecs::core::entity::entity::Entity>>::grow_one
+     code ref <alloc::raw_vec::RawVec<boyko_ecs::ecs::identifiers::primitives::ArchetypeId>>::grow_one
+     code ref <alloc::raw_vec::RawVec<boyko_ecs::ecs::memory::component_pool::ComponentPool>>::grow_one
+     code ref <boyko_ecs::ecs::core::archetype::archetype_signature::ArchetypeSignature>::new
+     code ref <boyko_ecs::ecs::core::commands::command_queue::CommandQueue>::apply_via_raw_twin
+     code ref <boyko_ecs::ecs::core::component::component_pool_bundle::ComponentPoolBundle>::can_push_entity_components
+     code ref <boyko_ecs::ecs::core::component::component_pool_bundle::ComponentPoolBundle>::push_entity_components
+     code ref <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::new
+     code ref <boyko_ecs::ecs::core::entity::entity_master::EntityMaster>::rewind_allocate
+     code ref <boyko_ecs::ecs::core::entity::inland_store::InlandStore>::grow_to
+     code ref <boyko_ecs::ecs::memory::component_pool::ComponentPool>::new
+     code ref <boyko_ecs::ecs::memory::vm_column::VmColumn<boyko_ecs::ecs::identifiers::primitives::EntityId>>::grow_to
+     code ref boyko_ecs::ecs::core::component::hooks::dispatch::trigger_on_add
+     code ref boyko_ecs::ecs::core::component::hooks::dispatch::trigger_on_insert
+     code ref boyko_ecs::ecs::core::component::observers::dispatch::fire_on_add_observers
+     code ref boyko_ecs::ecs::core::component::observers::dispatch::fire_on_insert_observers
+     code ref boyko_ecs::ecs::core::ecs_master::ecs_master::drain_runaway_panic
+     code ref boyko_ecs::ecs::core::ecs_master::enable_tag_api::flags_target_is_not_a_flag_panic
+     code ref core::ptr::drop_glue::<alloc::vec::Vec<(boyko_ecs::ecs::identifiers::primitives::ArchetypeId, boyko_ecs::ecs::core::archetype::archetype_signature::ArchetypeSignature)>>
+     code ref core::ptr::drop_glue::<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>
+     code ref core::ptr::drop_glue::<boyko_ecs::ecs::memory::component_pool::ComponentPool>
+-- H-2 swap_remove | <criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench | sec 261 `.text` sel=NoDuplicates raw=403 aux=Some(403) | members=2 main@0 next@336 → main-only=336 section=403 | sha aa8f34a272573941
+     member @0: <criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench
+     member @336: ?dtor$9@?0?<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench@4HA
+     ref ×2: __imp_* (import)
+     ref ×2: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×4: defined code, mangled
+     ref ×1: undefined C name (__floattidf)
+     Location C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\criterion-0.5.1\src\bencher.rs:374:9 via anon.8d6a1c40fe79ab4c173d9602c725fb02.136
+     code ref <criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>
+-- H-2 swap_remove | <criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::warm_up | sec 262 `.text` sel=NoDuplicates raw=319 aux=Some(319) | members=1 main@0 next@319 → main-only=319 section=319 | sha dd872ed5c018fad3
+     ref ×4: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×4: defined code, mangled
+     Location C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\time.rs:1257:31 via anon.2ce0942084eae145052dc5d9dbbc0086.18
+     Location C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\criterion-0.5.1\src\bencher.rs:374:9 via anon.8d6a1c40fe79ab4c173d9602c725fb02.136
+     code ref <criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>
+-- H-2 swap_remove | <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity | sec 403 `.text` sel=NoDuplicates raw=2195 aux=Some(2195) | members=3 main@0 next@2080 → main-only=2080 section=2195 | sha 1ee9ec205980725c
+     member @0: <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity
+     member @2080: ?dtor$99@?0?<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity@4HA
+     member @2144: ?dtor$101@?0?<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity@4HA
+     ref ×2: __imp_* (import)
+     ref ×11: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×22: defined code, mangled
+     ref ×3: defined data class d, mangled
+     ref ×1: undefined C name (_tls_index)
+     ref ×1: undefined C name (memcpy)
+     Location crates\boyko_ecs\src\ecs\core\ecs_master\entity_api.rs:1000:14 via anon.7ad4e213b4c56725d350f8bc49849a42.20
+     Location crates\boyko_ecs\src\ecs\core\component\observers\entity_store.rs:354:40 via anon.c2591af74cb279b12ea456a6f5aa640b.31
+     Location crates\boyko_utils\src\sparse_map\sparse_map.rs:93:50 via anon.c2591af74cb279b12ea456a6f5aa640b.37
+     Location crates\boyko_utils\src\sparse_map\sparse_map.rs:98:24 via anon.c2591af74cb279b12ea456a6f5aa640b.38
+     Location crates\boyko_ecs\src\ecs\core\archetype\archetype.rs:1404:14 via anon.d942e55fefdd14610d579d30fde3626d.50
+     Location crates\boyko_ecs\src\ecs\memory\vm_column.rs:281:9 via anon.d942e55fefdd14610d579d30fde3626d.8
+     code ref <boyko_ecs::ecs::core::commands::command_queue::CommandQueue>::apply_via_raw_twin
+     code ref <boyko_ecs::ecs::core::component::enable::enable_store::EnableStore>::swap_remove_row
+     code ref <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::dense_despawn_fire_and_tombstone
+     code ref <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::fire_despawn_hooks
+     code ref <boyko_ecs::ecs::memory::vm_column::VmColumn<boyko_ecs::ecs::core::entity::entity::Entity>>::grow_to
+     code ref boyko_ecs::ecs::core::ecs_master::ecs_master::drain_runaway_panic
+subject      boyko_demo (boyko_demo --bin boyko_demo)
+profile      release
+object       D:/wt/_targets/vkval-msvc\release\deps\boyko_demo.o
+object sha   3f91d946be687c2583c8b742a6759bd2d2b105ad951865e777f7f7c1e94157bf
+image        D:/wt/_targets/vkval-msvc\release\deps\boyko_demo.exe
+image sha    ed60b51de86152e688b2591ca58262c6439e37d33df3aa678b4e0b68f447396b
+pdb          D:/wt/_targets/vkval-msvc\release\deps\boyko_demo.pdb
+link args    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "D:/wt/_targets/vkval-msvc\\release\\deps\\boyko_demo.boyko_demo.8595b65b38f0f039-cgu.0.rcgu.o" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcROU69v\\libgetrandom-5c5bfbeeb531b711.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcROU69v\\libwindows_sys-580135e73d930774.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcROU69v\\liblibloading-1e4c9da494d1298e.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcROU69v\\libwindows-c19e306b3672b7ac.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcROU69v\\libwindows_numerics-090b778de29f40e5.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcROU69v\\libwindows_core-325392be9da29609.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcROU69v\\libwindows_strings-9a201cfed9e48952.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcROU69v\\libwindows_result-2af2fbf16144a430.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcROU69v\\libparking_lot_core-ae66d183fa563878.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcROU69v\\libstd-44a584f44bc3dd65.rlib" "C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib\\libcompiler_builtins-d2ba6b5d33df79c1.rlib" "shlwapi.lib" "kernel32.lib" "user32.lib" "shell32.lib" "gdi32.lib" "advapi32.lib" "C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.53.1\\lib\\windows.0.53.0.lib" "C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "opengl32.lib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/LIBPATH:C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib" "/LIBPATH:C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.53.1\\lib" "/OUT:D:/wt/_targets/vkval-msvc\\release\\deps\\boyko_demo.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libstd.natvis" "/NATVIS:D:/wt/_targets/vkval-msvc\\release\\deps\\rustcROU69v\\boyko_demo-0.natvis" "/NATVIS:D:/wt/_targets/vkval-msvc\\release\\deps\\rustcROU69v\\boyko_demo-1.natvis" "/NATVIS:D:/wt/_targets/vkval-msvc\\release\\deps\\rustcROU69v\\boyko_demo-2.natvis"
+defined symbols 55177 ; by raw prefix {"SEH ($… / ?…)": 22286, "_R (v0)": 9651, "anon.": 20213, "other": 3027}
+demangled sample: <std::sync::once_lock::OnceLock<alloc::boxed::Box<[u8]>>>::initialize::<<std::sync::once_lock::OnceLock<alloc::boxed::Box<[u8]>>>::get_or_init<<ecolor::color32::Color32>::from_rgba_unmultiplied::{closure#0}>::{closure#0}, !>  <=  _RINvMNtNtCse0R8cuyqEa_3std4sync9once_lockINtB3_8OnceLockINtNtCsfQUUnEvlYZE_5alloc5boxed3BoxShEE10initializeNCINvB2_11get_or_initNCNvMs1_NtCsgZUW49vKvxY_6ecolor7color32NtB2a_7Color3222from_rgba_unmultiplied0E0zECsbt4gzVFkfmn_10boyko_demo
+llvm-nm -S: 55177 lines, 0 with a non-zero size field
+-- P29-1 boyko_demo | <boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows | sec 1265 `.text$unlikely` sel=NoDuplicates raw=412 aux=Some(412) | members=1 main@0 next@412 → main-only=412 section=412 | sha 6d1f39c203ae3ae9
+     ref ×2: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×6: defined code, mangled
+     Location crates\boyko_ecs\src\ecs\constants.rs:123:17 via anon.a76ac4076740f023136037a8728a333a.33
+     code ref <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion
+     code ref <boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows_zst
+     code ref boyko_ecs::ecs::constants::pool_byte_layout
+-- P29-2 boyko_demo | <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion | sec 1267 `.text$unlikely` sel=NoDuplicates raw=93 aux=Some(93) | members=1 main@0 next@93 → main-only=93 section=93 | sha 8365a5d6b84ad3f3
+     ref ×2: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×3: defined code, mangled
+     Location crates\boyko_ecs\src\ecs\constants.rs:123:17 via anon.a76ac4076740f023136037a8728a333a.33
+     code ref <boyko_ecs::ecs::memory::component_pool::PoolBacking>::grow_is_host_only
+     code ref <boyko_ecs::ecs::memory::vm::VmReservation>::commit
+-- P29-3 boyko_demo | boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan | sec 1329 `.text$unlikely` sel=NoDuplicates raw=1163 aux=Some(1163) | members=2 main@0 next@1104 → main-only=1104 section=1163 | sha 270ce025c9d0df16
+     member @0: boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+     member @1104: ?dtor$55@?0?boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan@4HA
+     ref ×2: __imp_* (import)
+     ref ×1: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×4: defined code, mangled
+     ref ×1: undefined C name (memcpy)
+     Location crates\boyko_ecs\src\ecs\core\component\component_pool_bundle.rs:84:29 via anon.bd3de8ed900a4d034532a8bedda66df8.40
+     code ref <alloc::vec::into_iter::IntoIter<boyko_ecs::ecs::identifiers::primitives::ComponentId> as core::ops::drop::Drop>::drop
+-- P29-4 boyko_demo | <boyko_threadpool::block::ScopeBlock>::grow | sec 1420 `.text` sel=NoDuplicates raw=207 aux=Some(207) | members=1 main@0 next@207 → main-only=207 section=207 | sha 5d6330778d5586c7
+     ref ×4: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×5: defined code, mangled
+     Location crates\boyko_threadpool\src\block.rs:475:14 via anon.56d820d09c8e507dd94ae9d019d682a2.5
+     Location crates\boyko_threadpool\src\block.rs:486:9 via anon.56d820d09c8e507dd94ae9d019d682a2.6
+     code ref boyko_threadpool::block::chunk_table_exhausted
+-- D-2 boyko_demo | boyko_ecs::ecs::core::iters::query::query_type_registry::register_new | sec 1359 `.text$unlikely` sel=NoDuplicates raw=143 aux=Some(143) | members=1 main@0 next@143 → main-only=143 section=143 | sha 16a34425c52375ec
+     ref ×4: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×4: defined code, mangled
+     ref ×2: defined data class b, mangled
+     Location crates\boyko_ecs\src\ecs\core\iters\query\query_type_registry.rs:148:9 via anon.80ee679811eb002f0c9b3b717c81e7bd.70
+     code ref <boyko_log::codes::PanicCode as core::fmt::Display>::fmt
+     code ref boyko_ecs::ecs::core::iters::query::query_type_registry::report_query_table_filling
+-- D-3 boyko_demo | boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new | sec 1358 `.text$unlikely` sel=NoDuplicates raw=102 aux=Some(102) | members=1 main@0 next@102 → main-only=102 section=102 | sha 3d9d9328638bc8b9
+     ref ×3: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×2: defined code, mangled
+     ref ×2: defined data class b, mangled
+     Location crates\boyko_ecs\src\ecs\core\bundle\bundle_type_registry.rs:129:9 via anon.80ee679811eb002f0c9b3b717c81e7bd.66
+-- D-4 boyko_demo | boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid> | sec 1052 `.text` sel=NoDuplicates raw=651 aux=Some(651) | members=1 main@0 next@651 → main-only=651 section=651 | sha e2cacac095a7312f
+     ref ×2: __real@/__xmm@/__ymm@ (content-named constant)
+     ref ×13: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×11: defined code, mangled
+     ref ×1: defined data class b, mangled
+     ref ×2: defined data class d, mangled
+     Location crates\boyko_ecs\src\ecs\core\resources\resource_registry.rs:176:5 via anon.2c3d2ea6f97166248119c8686f59995d.11
+     Location crates\boyko_ecs\src\ecs\core\resources\resource_registry.rs:185:28 via anon.2c3d2ea6f97166248119c8686f59995d.13
+     Location crates\boyko_ecs\src\ecs\core\resources\resource_registry.rs:191:17 via anon.2c3d2ea6f97166248119c8686f59995d.15
+     Location crates\boyko_ecs\src\ecs\core\resources\resource_registry.rs:187:18 via anon.2c3d2ea6f97166248119c8686f59995d.17
+     Location crates\boyko_ecs\src\ecs\core\resources\resource_registry.rs:167:9 via anon.2c3d2ea6f97166248119c8686f59995d.19
+     code ref <std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::resources::resource_registry::ResourceInfo>>::initialize::<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::resources::resource_registry::ResourceInfo>>::get_or_init<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::resources::resource_registry::ResourceInfo>>::try_insert::{closure#0}>::{closure#0}, !>
+     code ref boyko_ecs::ecs::core::resources::resource_registry::resource_drop_in_place_glue::<boyko_demo::sim::grid::SpatialGrid>
+-- D-5 in boyko_demo: ABSENT (no defined code symbol matches [FirstWithPrefix("boyko_ecs::ecs::core::events::event_registry::register_event_new::<")])
+-- H-3 in boyko_demo: ABSENT (no defined code symbol matches [Exact("<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run"), Contains("bench_schedule_two_disjoint")])
+subject      clear (boyko-app --example clear)
+profile      release
+object       D:/wt/_targets/vkval-msvc\release\examples\clear.o
+object sha   5c516d98162dda9a5108223cc2208db8928a3d732e0cef43954aff6872d8fe47
+image        D:/wt/_targets/vkval-msvc\release\examples\clear.exe
+image sha    71b17c53d5c9dd6e58c681780b70e1198052c2d00944739b88714c1ee2057cce
+pdb          D:/wt/_targets/vkval-msvc\release\examples\clear.pdb
+link args    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "D:/wt/_targets/vkval-msvc\\release\\examples\\clear.clear.e44d60cb4f5a059a-cgu.0.rcgu.o" "D:/wt/_targets/vkval-msvc\\release\\examples\\rustc0Ee97Q\\libwindows_sys-438931091cde2c45.rlib" "D:/wt/_targets/vkval-msvc\\release\\examples\\rustc0Ee97Q\\libstd-44a584f44bc3dd65.rlib" "C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib\\libcompiler_builtins-d2ba6b5d33df79c1.rlib" "winmm.lib" "user32.lib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/OUT:D:/wt/_targets/vkval-msvc\\release\\examples\\clear.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libstd.natvis"
+defined symbols 12183 ; by raw prefix {"SEH ($… / ?…)": 3418, "_R (v0)": 3495, "anon.": 4477, "other": 793}
+demangled sample: core::ptr::drop_glue::<core::option::Option<alloc::boxed::Box<dyn for<'a> core::ops::function::FnOnce<(&'a mut boyko_ecs::ecs::core::app::app::App,), Output = boyko_ecs::ecs::core::app::app_exit::AppExit>>>>  <=  _RINvNtCs8xEFJqa6dYS_4core3ptr9drop_glueINtNtB4_6option6OptionINtNtCsfQUUnEvlYZE_5alloc5boxed3BoxDG_INtNtNtB4_3ops8function6FnOnceTQL0_NtNtNtNtNtCs72QlCdEtGol_9boyko_ecs3ecs4core3app3app3AppEEp6OutputNtNtB2c_8app_exit7AppExitEL_EEECsjBflDhdgC2k_5clear
+llvm-nm -S: 12183 lines, 0 with a non-zero size field
+-- P29-1 clear | <boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows | sec 1734 `.text$unlikely` sel=NoDuplicates raw=412 aux=Some(412) | members=1 main@0 next@412 → main-only=412 section=412 | sha 6d1f39c203ae3ae9
+     ref ×2: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×6: defined code, mangled
+     Location crates\boyko_ecs\src\ecs\constants.rs:123:17 via anon.e483c9bded0fdeea74b23b03c801e911.36
+     code ref <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion
+     code ref <boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows_zst
+     code ref boyko_ecs::ecs::constants::pool_byte_layout
+-- P29-2 clear | <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion | sec 1738 `.text$unlikely` sel=NoDuplicates raw=93 aux=Some(93) | members=1 main@0 next@93 → main-only=93 section=93 | sha 8365a5d6b84ad3f3
+     ref ×2: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×3: defined code, mangled
+     Location crates\boyko_ecs\src\ecs\constants.rs:123:17 via anon.e483c9bded0fdeea74b23b03c801e911.36
+     code ref <boyko_ecs::ecs::memory::component_pool::PoolBacking>::grow_is_host_only
+     code ref <boyko_ecs::ecs::memory::vm::VmReservation>::commit
+-- P29-3 clear | boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan | sec 1374 `.text$unlikely` sel=NoDuplicates raw=1163 aux=Some(1163) | members=2 main@0 next@1104 → main-only=1104 section=1163 | sha 270ce025c9d0df16
+     member @0: boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+     member @1104: ?dtor$55@?0?boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan@4HA
+     ref ×2: __imp_* (import)
+     ref ×1: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×4: defined code, mangled
+     ref ×1: undefined C name (memcpy)
+     Location crates\boyko_ecs\src\ecs\core\component\component_pool_bundle.rs:84:29 via anon.47fb76c1db3e3a152e57b771219bdac6.40
+     code ref <alloc::vec::into_iter::IntoIter<boyko_ecs::ecs::identifiers::primitives::ComponentId> as core::ops::drop::Drop>::drop
+-- P29-4 clear | <boyko_threadpool::block::ScopeBlock>::grow | sec 3303 `.text` sel=NoDuplicates raw=207 aux=Some(207) | members=1 main@0 next@207 → main-only=207 section=207 | sha 5d6330778d5586c7
+     ref ×4: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×5: defined code, mangled
+     Location crates\boyko_threadpool\src\block.rs:475:14 via anon.5a7ffc78e21df0c5c2c7ec98ba4f9a33.5
+     Location crates\boyko_threadpool\src\block.rs:486:9 via anon.5a7ffc78e21df0c5c2c7ec98ba4f9a33.6
+     code ref boyko_threadpool::block::chunk_table_exhausted
+-- R-1 clear | boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform> | sec 825 `.text` sel=NoDuplicates raw=439 aux=Some(439) | members=1 main@0 next@439 → main-only=439 section=439 | sha 04c8c1e8e39895cc
+     ref ×1: __real@/__xmm@/__ymm@ (content-named constant)
+     ref ×10: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×8: defined code, mangled
+     ref ×1: defined data class b, mangled
+     ref ×1: defined data class d, mangled
+     Location crates\boyko_ecs\src\ecs\core\component\component_registry\mod.rs:938:17 via anon.43f3b83507dc6813a97581cb56ac2c2a.10
+     Location crates\boyko_ecs\src\ecs\core\component\component_registry\mod.rs:934:18 via anon.43f3b83507dc6813a97581cb56ac2c2a.12
+     Location crates\boyko_ecs\src\ecs\core\component\component_registry\mod.rs:922:5 via anon.43f3b83507dc6813a97581cb56ac2c2a.5
+     Location crates\boyko_ecs\src\ecs\core\component\component_registry\mod.rs:932:28 via anon.43f3b83507dc6813a97581cb56ac2c2a.8
+     code ref <std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::component::component_registry::ComponentLayout>>::initialize::<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::component::component_registry::ComponentLayout>>::get_or_init<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::component::component_registry::ComponentLayout>>::try_insert::{closure#0}>::{closure#0}, !>
+-- R-1 clear | boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform> | sec 2162 `.text` sel=NoDuplicates raw=439 aux=Some(439) | members=1 main@0 next@439 → main-only=439 section=439 | sha 04c8c1e8e39895cc
+     ref ×1: __real@/__xmm@/__ymm@ (content-named constant)
+     ref ×10: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×8: defined code, mangled
+     ref ×1: defined data class b, mangled
+     ref ×1: defined data class d, mangled
+     Location crates\boyko_ecs\src\ecs\core\component\component_registry\mod.rs:938:17 via anon.43f3b83507dc6813a97581cb56ac2c2a.10
+     Location crates\boyko_ecs\src\ecs\core\component\component_registry\mod.rs:934:18 via anon.43f3b83507dc6813a97581cb56ac2c2a.12
+     Location crates\boyko_ecs\src\ecs\core\component\component_registry\mod.rs:922:5 via anon.43f3b83507dc6813a97581cb56ac2c2a.5
+     Location crates\boyko_ecs\src\ecs\core\component\component_registry\mod.rs:932:28 via anon.43f3b83507dc6813a97581cb56ac2c2a.8
+     code ref <std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::component::component_registry::ComponentLayout>>::initialize::<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::component::component_registry::ComponentLayout>>::get_or_init<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::component::component_registry::ComponentLayout>>::try_insert::{closure#0}>::{closure#0}, !>
+-- R-1 clear | boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform> | sec 3180 `.text` sel=NoDuplicates raw=439 aux=Some(439) | members=1 main@0 next@439 → main-only=439 section=439 | sha 04c8c1e8e39895cc
+     ref ×1: __real@/__xmm@/__ymm@ (content-named constant)
+     ref ×10: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×8: defined code, mangled
+     ref ×1: defined data class b, mangled
+     ref ×1: defined data class d, mangled
+     Location crates\boyko_ecs\src\ecs\core\component\component_registry\mod.rs:938:17 via anon.43f3b83507dc6813a97581cb56ac2c2a.10
+     Location crates\boyko_ecs\src\ecs\core\component\component_registry\mod.rs:934:18 via anon.43f3b83507dc6813a97581cb56ac2c2a.12
+     Location crates\boyko_ecs\src\ecs\core\component\component_registry\mod.rs:922:5 via anon.43f3b83507dc6813a97581cb56ac2c2a.5
+     Location crates\boyko_ecs\src\ecs\core\component\component_registry\mod.rs:932:28 via anon.43f3b83507dc6813a97581cb56ac2c2a.8
+     code ref <std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::component::component_registry::ComponentLayout>>::initialize::<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::component::component_registry::ComponentLayout>>::get_or_init<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::component::component_registry::ComponentLayout>>::try_insert::{closure#0}>::{closure#0}, !>
+-- R-2 clear | <boyko_scene::transform::Transform as boyko_ecs::ecs::core::component::component::Component>::component_id | sec 668 `.text` sel=NoDuplicates raw=43 aux=Some(43) | members=1 main@0 next@43 → main-only=43 section=43 | sha 2a4ba09075f65ea6
+     ref ×1: defined code, mangled
+     ref ×3: defined data class d, mangled
+     code ref <std::sync::once_lock::OnceLock<boyko_ecs::ecs::identifiers::primitives::ComponentId>>::initialize::<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::identifiers::primitives::ComponentId>>::get_or_init<<boyko_scene::transform::Transform as boyko_ecs::ecs::core::component::component::Component>::component_id::{closure#0}>::{closure#0}, !>
+-- D-2 clear | boyko_ecs::ecs::core::iters::query::query_type_registry::register_new | sec 1534 `.text$unlikely` sel=NoDuplicates raw=143 aux=Some(143) | members=1 main@0 next@143 → main-only=143 section=143 | sha 8ebd64c85b1fdc60
+     ref ×4: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×4: defined code, mangled
+     ref ×2: defined data class b, mangled
+     Location crates\boyko_ecs\src\ecs\core\iters\query\query_type_registry.rs:148:9 via anon.262a2cf247722a37d11661b14eda6c8e.83
+     code ref <boyko_log::codes::PanicCode as core::fmt::Display>::fmt
+     code ref boyko_ecs::ecs::core::iters::query::query_type_registry::report_query_table_filling
+-- D-3 clear | boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new | sec 1532 `.text$unlikely` sel=NoDuplicates raw=102 aux=Some(102) | members=1 main@0 next@102 → main-only=102 section=102 | sha f6b801649e20fbf2
+     ref ×3: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×2: defined code, mangled
+     ref ×2: defined data class b, mangled
+     Location crates\boyko_ecs\src\ecs\core\bundle\bundle_type_registry.rs:129:9 via anon.262a2cf247722a37d11661b14eda6c8e.74
+-- D-4 clear | boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_app::occlusion_force::OcclusionForce> | sec 288 `.text` sel=NoDuplicates raw=648 aux=Some(648) | members=1 main@0 next@648 → main-only=648 section=648 | sha 069120729b00276c
+     ref ×2: __real@/__xmm@/__ymm@ (content-named constant)
+     ref ×13: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×10: defined code, mangled
+     ref ×1: defined data class b, mangled
+     ref ×2: defined data class d, mangled
+     Location crates\boyko_ecs\src\ecs\core\resources\resource_registry.rs:176:5 via anon.43f3b83507dc6813a97581cb56ac2c2a.45
+     Location crates\boyko_ecs\src\ecs\core\resources\resource_registry.rs:185:28 via anon.43f3b83507dc6813a97581cb56ac2c2a.47
+     Location crates\boyko_ecs\src\ecs\core\resources\resource_registry.rs:191:17 via anon.43f3b83507dc6813a97581cb56ac2c2a.49
+     Location crates\boyko_ecs\src\ecs\core\resources\resource_registry.rs:187:18 via anon.43f3b83507dc6813a97581cb56ac2c2a.50
+     Location crates\boyko_ecs\src\ecs\core\resources\resource_registry.rs:167:9 via anon.43f3b83507dc6813a97581cb56ac2c2a.52
+     code ref <std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::resources::resource_registry::ResourceInfo>>::initialize::<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::resources::resource_registry::ResourceInfo>>::get_or_init<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::resources::resource_registry::ResourceInfo>>::try_insert::{closure#0}>::{closure#0}, !>
+-- D-5 in clear: ABSENT (no defined code symbol matches [FirstWithPrefix("boyko_ecs::ecs::core::events::event_registry::register_event_new::<")])
+-- R-3 in clear: ABSENT (no defined code symbol matches [Exact("boyko_ecs::ecs::core::component::component_registry::try_register_dynamic")])
+-- S-1 in clear: ABSENT (no defined code symbol matches [FirstWithPrefix("<boyko_ecs::ecs::core::schedule::schedule_builder::ScheduleBuilder>::add_system::<")])
+-- H-3 clear | <boyko_ecs::ecs::core::schedule::schedule::Schedule>::run | sec 1517 `.text` sel=NoDuplicates raw=13789 aux=Some(13789) | members=15 main@0 next@11088 → main-only=11088 section=13789 | sha c6d02edcc5992c7d
+     member @0: <boyko_ecs::ecs::core::schedule::schedule::Schedule>::run
+     member @11088: ?dtor$390@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @11248: ?dtor$391@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @11408: ?dtor$394@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @11552: ?dtor$395@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @11696: ?dtor$396@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @11856: ?dtor$397@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @12016: ?dtor$398@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @12176: ?dtor$399@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @12320: ?dtor$400@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @12816: ?dtor$422@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @12976: ?dtor$423@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @13216: ?dtor$428@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @13424: ?dtor$431@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @13632: ?dtor$432@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     ref ×16: __imp_* (import)
+     ref ×4: __real@/__xmm@/__ymm@ (content-named constant)
+     ref ×45: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×76: defined code, mangled
+     ref ×8: defined data class b, mangled
+     ref ×17: defined data class d, mangled
+     ref ×2: undefined C name (_tls_index)
+     ref ×1: undefined C name (memcpy)
+     ref ×6: undefined C name (memset)
+     Location crates\boyko_threadpool\src\worker.rs:529:17 via anon.250879e62affbf94ddf105362c747526.6
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1171:27 via anon.262a2cf247722a37d11661b14eda6c8e.36
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1178:13 via anon.262a2cf247722a37d11661b14eda6c8e.37
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:912:29 via anon.262a2cf247722a37d11661b14eda6c8e.39
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:926:31 via anon.262a2cf247722a37d11661b14eda6c8e.40
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:933:17 via anon.262a2cf247722a37d11661b14eda6c8e.41
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1295:16 via anon.262a2cf247722a37d11661b14eda6c8e.43
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1303:18 via anon.262a2cf247722a37d11661b14eda6c8e.44
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1309:28 via anon.262a2cf247722a37d11661b14eda6c8e.45
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1381:40 via anon.262a2cf247722a37d11661b14eda6c8e.46
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1382:29 via anon.262a2cf247722a37d11661b14eda6c8e.47
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1421:33 via anon.262a2cf247722a37d11661b14eda6c8e.48
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1424:33 via anon.262a2cf247722a37d11661b14eda6c8e.49
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1446:29 via anon.262a2cf247722a37d11661b14eda6c8e.50
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1454:26 via anon.262a2cf247722a37d11661b14eda6c8e.51
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1461:17 via anon.262a2cf247722a37d11661b14eda6c8e.52
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1521:40 via anon.262a2cf247722a37d11661b14eda6c8e.53
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1522:29 via anon.262a2cf247722a37d11661b14eda6c8e.54
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1113:16 via anon.262a2cf247722a37d11661b14eda6c8e.55
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1136:49 via anon.262a2cf247722a37d11661b14eda6c8e.56
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1146:53 via anon.262a2cf247722a37d11661b14eda6c8e.57
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1148:30 via anon.262a2cf247722a37d11661b14eda6c8e.58
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1138:53 via anon.262a2cf247722a37d11661b14eda6c8e.59
+     Location C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\fixedbitset-0.5.7\src\lib.rs:547:9 via anon.262a2cf247722a37d11661b14eda6c8e.61
+     Location C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\fixedbitset-0.5.7\src\lib.rs:426:9 via anon.262a2cf247722a37d11661b14eda6c8e.63
+     Location C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\crossbeam-deque-0.8.8\src\deque.rs:1438:67 via anon.6630c08c5f33addcea69b5c03f02d10d.6
+     Location crates\boyko_threadpool\src\thread_pool.rs:203:18 via anon.d942e55fefdd14610d579d30fde3626d.29
+     code ref <alloc::raw_vec::RawVec<boyko_ecs::ecs::core::schedule::conflict_graph::SystemIndex>>::grow_one
+     code ref <alloc::sync::Arc<boyko_threadpool::thread_pool::ThreadPool>>::drop_slow
+     code ref <boyko_ecs::ecs::core::commands::command_queue::CommandQueue>::apply_via_raw_twin
+     code ref <boyko_ecs::ecs::core::schedule::schedule::Schedule>::cancel_after_panic
+     code ref <boyko_ecs::ecs::core::schedule::schedule::Schedule>::check_change_ticks
+     code ref <boyko_threadpool::block::ScopeBlock>::grow
+     code ref <boyko_threadpool::scope::Scope as core::ops::drop::Drop>::drop
+     code ref <crossbeam_deque::deque::Worker<boyko_threadpool::task::Task>>::resize
+     code ref boyko_diag::profiling_abi::mint_cold
+     code ref boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+     code ref boyko_ecs::ecs::core::ecs_master::ecs_master::drain_runaway_panic
+     code ref boyko_ecs::ecs::core::schedule::schedule::schedule_world_mismatch_panic
+     code ref boyko_threadpool::task::scoped::drop_unrun_scoped::<<boyko_ecs::ecs::core::schedule::schedule::Schedule>::try_dispatch_ready::{closure#0}>
+     code ref boyko_threadpool::task::scoped::run_scoped::<<boyko_ecs::ecs::core::schedule::schedule::Schedule>::try_dispatch_ready::{closure#0}>
+     code ref core::ptr::drop_glue::<boyko_threadpool::scope::ScopeShared>
+     code ref core::ptr::drop_glue::<core::option::Option<boyko_ecs::ecs::core::profiling::zones::SystemSpan>>
+subject      query_dsl (boyko-ecs --bench query_dsl)
+profile      release
+object       D:/wt/_targets/vkval-msvc\release\deps\query_dsl-edb2d7fd551dc4e0.o
+object sha   89a3b8e44643db19e05d37027a11ed11aa8f08b6de9149723738574be77ab03d
+image        D:/wt/_targets/vkval-msvc\release\deps\query_dsl-edb2d7fd551dc4e0.exe
+image sha    84207de35ea680026cc22320f0955c323b09ee752a4cdcf75af68e53f82a0728
+pdb          D:/wt/_targets/vkval-msvc\release\deps\query_dsl-edb2d7fd551dc4e0.pdb
+link args    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "D:/wt/_targets/vkval-msvc\\release\\deps\\query_dsl-edb2d7fd551dc4e0.query_dsl.a9d60259b1c44575-cgu.0.rcgu.o" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcytwAfb\\libwindows_sys-04007b6cdfc72af3.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcytwAfb\\libstd-44a584f44bc3dd65.rlib" "C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib\\libcompiler_builtins-d2ba6b5d33df79c1.rlib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/OUT:D:/wt/_targets/vkval-msvc\\release\\deps\\query_dsl-edb2d7fd551dc4e0.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libstd.natvis"
+defined symbols 18690 ; by raw prefix {"SEH ($… / ?…)": 7426, "_R (v0)": 2775, "anon.": 8124, "other": 365}
+demangled sample: <criterion::bencher::Bencher>::iter_batched::<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, (), query_dsl::bench_query_cold_construction::{closure#0}::{closure#0}, query_dsl::bench_query_cold_construction::{closure#0}::{closure#1}>  <=  _RINvMNtCsaw1WIxcChNI_9criterion7bencherNtB3_7Bencher12iter_batchedNtNtNtNtNtCs72QlCdEtGol_9boyko_ecs3ecs4core10ecs_master10ecs_master9EcsMasteruNCNCNvCseA22teqhu1B_9query_dsl29bench_query_cold_construction00NCB2k_s_0EB2o_
+llvm-nm -S: 18690 lines, 0 with a non-zero size field
+-- R-4 query_dsl | boyko_ecs::ecs::core::component::component_registry::register_layout::<query_dsl::Tag> | sec 135 `.text` sel=NoDuplicates raw=376 aux=Some(376) | members=1 main@0 next@376 → main-only=376 section=376 | sha f010ad75ee62a86f
+     ref ×1: __real@/__xmm@/__ymm@ (content-named constant)
+     ref ×9: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×7: defined code, mangled
+     ref ×1: defined data class d, mangled
+     Location crates\boyko_ecs\src\ecs\core\component\component_registry\mod.rs:1032:5 via anon.53a3d22b889fb0825a09cd057615e8f4.65
+     Location crates\boyko_ecs\src\ecs\core\component\component_registry\mod.rs:1046:17 via anon.53a3d22b889fb0825a09cd057615e8f4.69
+     Location crates\boyko_ecs\src\ecs\core\component\component_registry\mod.rs:1044:18 via anon.53a3d22b889fb0825a09cd057615e8f4.71
+     code ref <std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::component::component_registry::ComponentLayout>>::initialize::<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::component::component_registry::ComponentLayout>>::get_or_init<<std::sync::once_lock::OnceLock<boyko_ecs::ecs::core::component::component_registry::ComponentLayout>>::try_insert::{closure#0}>::{closure#0}, !>
+-- H-1 query_dsl | <criterion::bencher::Bencher>::iter::<(), query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}> | sec 7 `.text` sel=NoDuplicates raw=119 aux=Some(119) | members=1 main@0 next@119 → main-only=119 section=119 | sha e602b850ff6c5044
+     ref ×5: defined code, mangled
+     code ref <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>
+-- H-1 query_dsl | <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()> | sec 14 `.text$unlikely` sel=NoDuplicates raw=1184 aux=Some(1184) | members=4 main@0 next@976 → main-only=976 section=1184 | sha ac7105c2c6b4a6fc
+     member @0: <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>
+     member @976: ?dtor$20@?0?<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>@4HA
+     member @1056: ?dtor$21@?0?<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>@4HA
+     member @1120: ?dtor$23@?0?<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>@4HA
+     ref ×4: __imp_* (import)
+     ref ×6: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×13: defined code, mangled
+     ref ×1: undefined C name (memcpy)
+     Location crates\boyko_ecs\src\ecs\core\component\component_mask.rs:59:9 via anon.4bbd736f86b0573b0d3a40c055c78f95.62
+     Location crates\boyko_ecs\src\ecs\core\system\function_system.rs:252:14 via anon.53a3d22b889fb0825a09cd057615e8f4.398
+     code ref <boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::drain_deferred_hook_queue
+     code ref <boyko_ecs::ecs::core::iters::query::iter::QueryIter<&query_dsl::Position, ()> as core::iter::traits::iterator::Iterator>::next
+     code ref <boyko_ecs::ecs::core::iters::query::state::QueryDataState<&mut query_dsl::Position, ()>>::post_filter_matched
+     code ref <boyko_ecs::ecs::core::iters::query::state::QueryDataState<&query_dsl::Position, ()>>::new
+     code ref <boyko_ecs::ecs::core::iters::query::term_list::TermScratch>::reclaim_retired_slow
+     code ref <boyko_ecs::ecs::core::iters::query_state::QueryState>::update_archetypes
+     code ref <boyko_ecs::ecs::core::system::filtered_access_set::FilteredAccessSet>::new
+     code ref boyko_ecs::ecs::core::system::params::diagnostics::intra_system_conflict_panic
+     code ref core::ptr::drop_glue::<(boyko_ecs::ecs::core::iters::query::state::QueryDataState<&mut query_dsl::Position, ()>,)>
+     code ref core::ptr::drop_glue::<boyko_ecs::ecs::core::system::function_system::FunctionSystem<query_dsl::bench_query_mut_iter::{closure#0}::{closure#0}::{closure#0}, fn(boyko_ecs::ecs::core::iters::query::query::Query<&mut query_dsl::Position>)>>
+-- H-1 query_dsl | <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench | sec 263 `.text` sel=NoDuplicates raw=419 aux=Some(419) | members=2 main@0 next@352 → main-only=352 section=419 | sha d6e9dd58824ce0cc
+     member @0: <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench
+     member @352: ?dtor$9@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench@4HA
+     ref ×2: __imp_* (import)
+     ref ×2: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×4: defined code, mangled
+     ref ×1: undefined C name (__floattidf)
+     Location C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\criterion-0.5.1\src\bencher.rs:374:9 via anon.53a3d22b889fb0825a09cd057615e8f4.142
+-- H-1 query_dsl | <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::warm_up | sec 264 `.text` sel=NoDuplicates raw=342 aux=Some(342) | members=1 main@0 next@342 → main-only=342 section=342 | sha f50360bac98bf319
+     ref ×4: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×4: defined code, mangled
+     Location C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\lib/rustlib/src/rust\library\core\src\time.rs:1257:31 via anon.2ce0942084eae145052dc5d9dbbc0086.18
+     Location C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\criterion-0.5.1\src\bencher.rs:374:9 via anon.53a3d22b889fb0825a09cd057615e8f4.142
+-- H-1 query_dsl | <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample | sec 312 `.text` sel=NoDuplicates raw=6092 aux=Some(6092) | members=12 main@0 next@4048 → main-only=4048 section=6092 | sha 3273b4e0c5c09b5b
+     member @0: <criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample
+     member @4048: ?dtor$13@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA
+     member @4208: ?dtor$14@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA
+     member @4368: ?dtor$29@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA
+     member @4560: ?dtor$86@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA
+     member @4784: ?dtor$93@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA
+     member @5040: ?dtor$106@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA
+     member @5232: ?dtor$122@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA
+     member @5424: ?dtor$125@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA
+     member @5600: ?dtor$128@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA
+     member @5776: ?dtor$130@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA
+     member @5936: ?dtor$131@?0?<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::sample@4HA
+     ref ×26: __imp_* (import)
+     ref ×30: __real@/__xmm@/__ymm@ (content-named constant)
+     ref ×9: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×38: defined code, mangled
+     ref ×3: defined data class d, mangled
+     ref ×2: undefined C name (__floattidf)
+     Location C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\criterion-0.5.1\src\routine.rs:144:14 via anon.53a3d22b889fb0825a09cd057615e8f4.421
+     Location C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\criterion-0.5.1\src\routine.rs:191:14 via anon.53a3d22b889fb0825a09cd057615e8f4.423
+     Location C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\criterion-0.5.1\src\routine.rs:101:80 via anon.53a3d22b889fb0825a09cd057615e8f4.424
+     Location C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\criterion-0.5.1\src\routine.rs:116:22 via anon.53a3d22b889fb0825a09cd057615e8f4.425
+subject      phase9_scheduler (boyko-ecs --bench phase9_scheduler)
+profile      release
+object       D:/wt/_targets/vkval-msvc\release\deps\phase9_scheduler-9be91b8d38f7a4ef.o
+object sha   7d7a5f2b070e38c190e2f430fd3a1b02d6fc83eb4432544cab3f4e4f58d39f55
+image        D:/wt/_targets/vkval-msvc\release\deps\phase9_scheduler-9be91b8d38f7a4ef.exe
+image sha    82dfa86f055d83d3af65ffa16bd83c24360d5812d881c1d9b900061821bbf932
+pdb          D:/wt/_targets/vkval-msvc\release\deps\phase9_scheduler-9be91b8d38f7a4ef.pdb
+link args    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "D:/wt/_targets/vkval-msvc\\release\\deps\\phase9_scheduler-9be91b8d38f7a4ef.phase9_scheduler.c722b92bc2b87835-cgu.0.rcgu.o" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcUDyOoy\\libwindows_sys-04007b6cdfc72af3.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcUDyOoy\\libstd-44a584f44bc3dd65.rlib" "C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib\\libcompiler_builtins-d2ba6b5d33df79c1.rlib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/OUT:D:/wt/_targets/vkval-msvc\\release\\deps\\phase9_scheduler-9be91b8d38f7a4ef.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libstd.natvis"
+defined symbols 19449 ; by raw prefix {"SEH ($… / ?…)": 7889, "_R (v0)": 2959, "anon.": 8233, "other": 368}
+demangled sample: <criterion::bencher::Bencher>::iter::<(), phase9_scheduler::bench_schedule_empty::{closure#0}::{closure#0}>  <=  _RINvMNtCsaw1WIxcChNI_9criterion7bencherNtB3_7Bencher4iteruNCNCNvCsh5ZEcgD95gn_16phase9_scheduler20bench_schedule_empty00EB10_
+llvm-nm -S: 19449 lines, 0 with a non-zero size field
+-- H-3 phase9_scheduler | <boyko_ecs::ecs::core::schedule::schedule::Schedule>::run | sec 472 `.text` sel=NoDuplicates raw=11626 aux=Some(11626) | members=14 main@0 next@9136 → main-only=9136 section=11626 | sha d26fc7683a37e10c
+     member @0: <boyko_ecs::ecs::core::schedule::schedule::Schedule>::run
+     member @9136: ?dtor$327@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @9296: ?dtor$330@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @9440: ?dtor$331@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @9600: ?dtor$332@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @9744: ?dtor$333@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @9888: ?dtor$334@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @10048: ?dtor$335@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @10192: ?dtor$336@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @10688: ?dtor$358@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @10832: ?dtor$359@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @11056: ?dtor$364@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @11264: ?dtor$367@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     member @11472: ?dtor$368@?0?<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run@4HA
+     ref ×13: __imp_* (import)
+     ref ×2: __real@/__xmm@/__ymm@ (content-named constant)
+     ref ×43: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×69: defined code, mangled
+     ref ×11: defined data class d, mangled
+     ref ×2: undefined C name (_tls_index)
+     ref ×1: undefined C name (memcpy)
+     ref ×1: undefined C name (memmove)
+     ref ×6: undefined C name (memset)
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1171:27 via anon.262a2cf247722a37d11661b14eda6c8e.36
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1178:13 via anon.262a2cf247722a37d11661b14eda6c8e.37
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:912:29 via anon.262a2cf247722a37d11661b14eda6c8e.39
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:926:31 via anon.262a2cf247722a37d11661b14eda6c8e.40
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:933:17 via anon.262a2cf247722a37d11661b14eda6c8e.41
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1295:16 via anon.262a2cf247722a37d11661b14eda6c8e.43
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1303:18 via anon.262a2cf247722a37d11661b14eda6c8e.44
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1309:28 via anon.262a2cf247722a37d11661b14eda6c8e.45
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1381:40 via anon.262a2cf247722a37d11661b14eda6c8e.46
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1382:29 via anon.262a2cf247722a37d11661b14eda6c8e.47
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1421:33 via anon.262a2cf247722a37d11661b14eda6c8e.48
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1424:33 via anon.262a2cf247722a37d11661b14eda6c8e.49
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1446:29 via anon.262a2cf247722a37d11661b14eda6c8e.50
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1454:26 via anon.262a2cf247722a37d11661b14eda6c8e.51
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1461:17 via anon.262a2cf247722a37d11661b14eda6c8e.52
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1521:40 via anon.262a2cf247722a37d11661b14eda6c8e.53
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1522:29 via anon.262a2cf247722a37d11661b14eda6c8e.54
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1113:16 via anon.262a2cf247722a37d11661b14eda6c8e.55
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1136:49 via anon.262a2cf247722a37d11661b14eda6c8e.56
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1146:53 via anon.262a2cf247722a37d11661b14eda6c8e.57
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1148:30 via anon.262a2cf247722a37d11661b14eda6c8e.58
+     Location crates\boyko_ecs\src\ecs\core\schedule\schedule.rs:1138:53 via anon.262a2cf247722a37d11661b14eda6c8e.59
+     Location C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\fixedbitset-0.5.7\src\lib.rs:547:9 via anon.262a2cf247722a37d11661b14eda6c8e.61
+     Location C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\fixedbitset-0.5.7\src\lib.rs:426:9 via anon.262a2cf247722a37d11661b14eda6c8e.63
+     Location crates\boyko_threadpool\src\thread_pool.rs:203:18 via anon.d942e55fefdd14610d579d30fde3626d.29
+     code ref <alloc::raw_vec::RawVec<boyko_ecs::ecs::core::schedule::conflict_graph::SystemIndex>>::grow_one
+     code ref <alloc::sync::Arc<boyko_threadpool::thread_pool::ThreadPool>>::drop_slow
+     code ref <alloc::vec::drain::Drain<boyko_ecs::ecs::core::schedule::conflict_graph::SystemIndex> as core::ops::drop::Drop>::drop
+     code ref <boyko_ecs::ecs::core::commands::command_queue::CommandQueue>::apply_via_raw_twin
+     code ref <boyko_ecs::ecs::core::schedule::schedule::Schedule>::cancel_after_panic
+     code ref <boyko_ecs::ecs::core::schedule::schedule::Schedule>::check_change_ticks
+     code ref <boyko_threadpool::block::ScopeBlock>::grow
+     code ref <boyko_threadpool::scope::Scope as core::ops::drop::Drop>::drop
+     code ref boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan
+     code ref boyko_ecs::ecs::core::ecs_master::ecs_master::drain_runaway_panic
+     code ref boyko_ecs::ecs::core::schedule::schedule::schedule_world_mismatch_panic
+     code ref boyko_threadpool::task::scoped::drop_unrun_scoped::<boyko_ecs::ecs::core::iters::query::par_iter::for_each_impl<&phase9_scheduler::Val, (), phase9_scheduler::bench_par_iter_4096_entities::{closure#0}::{closure#0}>::{closure#0}::{closure#0}::{closure#0}::{closure#0}>
+     code ref boyko_threadpool::task::scoped::run_scoped::<<boyko_ecs::ecs::core::schedule::schedule::Schedule>::try_dispatch_ready::{closure#0}>
+     code ref boyko_threadpool::worker::push_task
+     code ref core::ptr::drop_glue::<boyko_threadpool::scope::ScopeShared>
+     code ref core::ptr::drop_glue::<core::option::Option<boyko_ecs::ecs::core::profiling::zones::SystemSpan>>
+-- H-3 phase9_scheduler | core::ptr::drop_glue::<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()>> | sec 79 `.text` sel=NoDuplicates raw=49 aux=Some(49) | members=1 main@0 next@49 → main-only=49 section=49 | sha 1ce506ef77ea2541
+     ref ×2: __imp_* (import)
+-- H-3 phase9_scheduler | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize | sec 267 `.text` sel=NoDuplicates raw=204 aux=Some(204) | members=1 main@0 next@204 → main-only=204 section=204 | sha bcf4c1a7a5740da6
+     ref ×2: __imp_* (import)
+     ref ×1: defined code, mangled
+     code ref <boyko_ecs::ecs::core::system::filtered_access_set::FilteredAccessSet>::new
+-- H-3 phase9_scheduler | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe | sec 268 `.text` sel=NoDuplicates raw=52 aux=Some(52) | members=1 main@0 next@52 → main-only=52 section=52 | sha a691fa490291547d
+     ref ×2: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×1: defined code, mangled
+     ref ×1: defined data class b, mangled
+     Location crates\boyko_ecs\src\ecs\core\system\function_system.rs:252:14 via anon.c40f03a5ddd52873be9f743d06646dfb.384
+-- H-3 phase9_scheduler | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::has_deferred | sec 269 `.text` sel=NoDuplicates raw=3 aux=Some(3) | members=1 main@0 next@3 → main-only=3 section=3 | sha 4180e57ab6de6ea7
+-- H-3 phase9_scheduler | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::set_change_ticks | sec 270 `.text` sel=NoDuplicates raw=14 aux=Some(14) | members=1 main@0 next@14 → main-only=14 section=14 | sha 028671234b512837
+-- H-3 phase9_scheduler | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::check_change_tick | sec 271 `.text` sel=NoDuplicates raw=64 aux=Some(64) | members=1 main@0 next@64 → main-only=64 section=64 | sha 1f80893059b2e50a
+-- H-3 phase9_scheduler | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::meta | sec 272 `.text` sel=NoDuplicates raw=4 aux=Some(4) | members=1 main@0 next@4 → main-only=4 section=4 | sha 814105ff4f73389b
+-- H-3 phase9_scheduler | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::name | sec 273 `.text` sel=NoDuplicates raw=15 aux=Some(15) | members=1 main@0 next@15 → main-only=15 section=15 | sha 44472b443f47b70d
+-- H-3 phase9_scheduler | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::apply | sec 274 `.text` sel=NoDuplicates raw=1 aux=Some(1) | members=1 main@0 next@1 → main-only=1 section=1 | sha bfb4f2a33b98810a
+-- H-3 phase9_scheduler | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::set_zone | sec 275 `.text` sel=NoDuplicates raw=8 aux=Some(8) | members=1 main@0 next@8 → main-only=8 section=8 | sha f94977ccfffa6549
+-- H-3 phase9_scheduler | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_unsafe | sec 276 `.text` sel=NoDuplicates raw=52 aux=Some(52) | members=1 main@0 next@52 → main-only=52 section=52 | sha 13d7157385f8b041
+     ref ×2: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×1: defined code, mangled
+     ref ×1: defined data class b, mangled
+     Location crates\boyko_ecs\src\ecs\core\system\function_system.rs:252:14 via anon.c40f03a5ddd52873be9f743d06646dfb.384
+-- H-3 phase9_scheduler | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher | sec 324 `.text` sel=NoDuplicates raw=52 aux=Some(52) | members=1 main@0 next@52 → main-only=52 section=52 | sha 68d2fe4a980d35fa
+     ref ×2: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×1: defined code, mangled
+     ref ×1: defined data class b, mangled
+     Location crates\boyko_ecs\src\ecs\core\system\function_system.rs:252:14 via anon.c40f03a5ddd52873be9f743d06646dfb.384
+-- H-3 phase9_scheduler | <boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#1}, fn()> as boyko_ecs::ecs::core::system::system::System>::run_dispatcher | sec 325 `.text` sel=NoDuplicates raw=52 aux=Some(52) | members=1 main@0 next@52 → main-only=52 section=52 | sha b43bc7aa5a703334
+     ref ×2: anon.<hash>.<n> (anonymous; <anon-data>)
+     ref ×1: defined code, mangled
+     ref ×1: defined data class b, mangled
+     Location crates\boyko_ecs\src\ecs\core\system\function_system.rs:252:14 via anon.c40f03a5ddd52873be9f743d06646dfb.384
+
+== form histogram over every candidate body
+     89  __imp_* (import)
+     45  __real@/__xmm@/__ymm@ (content-named constant)
+    267  anon.<hash>.<n> (anonymous; <anon-data>)
+    438  defined code, mangled
+     27  defined data class b, mangled
+     53  defined data class d, mangled
+      2  undefined C name (__chkstk)
+      4  undefined C name (__floattidf)
+      6  undefined C name (_tls_index)
+     12  undefined C name (memcpy)
+      1  undefined C name (memmove)
+     13  undefined C name (memset)
+UNKNOWN forms: none
+ABSENT candidates: ["R-4 in swap_remove", "D-5 in boyko_demo", "H-3 in boyko_demo", "D-5 in clear", "R-3 in clear", "S-1 in clear"]
+DECISION (ii): every candidate at offset 0 of its section: true; alone in its section: false; aux Length == RawDataSize: true
+DECISION (ii): pin size = the section's RawDataSize, and the pinned body = every symbol of that section (the function plus its SEH funclets), so the disassembly ends at the section end

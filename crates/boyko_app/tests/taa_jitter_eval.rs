@@ -441,7 +441,7 @@ fn pin_jitter_phase(target: Res<ForcedJitterPhase>, mut jitter: ResMut<JitterSta
 /// **The A0 jitter-reach falsification dump** (owner/orchestrator-facing, NOT a golden — no
 /// `PINS.toml` entry). See the module doc for the env-var contract and how to read the result.
 #[test]
-#[ignore = "needs a real windowed GPU device; orchestrator-run TAA jitter-reach falsification (A0) / dormant in-motion scaffolding (E2)"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; orchestrator-run TAA jitter-reach falsification (A0) / dormant in-motion scaffolding (E2)"]
 fn taa_jitter_eval_screenshot_dump() {
     let win: u32 = std::env::var("BOYKO_WIN").ok().and_then(|s| s.parse().ok()).unwrap_or(900);
 
@@ -837,7 +837,7 @@ fn write_numbers(out_dir: &std::path::Path, gate: &str, body: &str) {
 /// receipt); a phase-INDEPENDENT origin error.
 #[cfg(feature = "hwrt")]
 #[test]
-#[ignore = "gpu-windowed: hwrt leg (--features hwrt); spawns three taa_jitter_eval_screenshot_dump workers on a real RT device; --test-threads=1"]
+#[ignore = "feature+gpu-windowed+gpu-cap: hwrt leg (--features hwrt); spawns three taa_jitter_eval_screenshot_dump workers on a real RT device; --test-threads=1"]
 fn hwrt_shadow_origin_phase7() {
     /// Band F's phase-0 mean luminance on the UNFIXED tree (the red-first receipt: 159.958
     /// LSB, `mean_phase0` in the gate's numbers file, 2026-09-21; phase 7 read 117.811 there,
@@ -897,7 +897,7 @@ fn hwrt_shadow_origin_phase7() {
 /// match to the software leg.
 #[cfg(feature = "hwrt")]
 #[test]
-#[ignore = "gpu-windowed: hwrt leg (--features hwrt); spawns eight taa_jitter_eval_screenshot_dump workers on a real RT device; --test-threads=1"]
+#[ignore = "feature+gpu-windowed+gpu-cap: hwrt leg (--features hwrt); spawns eight taa_jitter_eval_screenshot_dump workers on a real RT device; --test-threads=1"]
 fn hwrt_shadow_origin_all_phases() {
     const PAIR_TOL_PX: usize = 1_000;
 
@@ -944,7 +944,7 @@ fn hwrt_shadow_origin_all_phases() {
 /// Cannot claim: which phase caused a change; a false shadow that is constant across frames.
 #[cfg(feature = "hwrt")]
 #[test]
-#[ignore = "gpu-windowed: hwrt leg (--features hwrt); spawns one taa_jitter_eval_screenshot_dump worker with an 8-frame burst dump on a real RT device; --test-threads=1"]
+#[ignore = "feature+gpu-windowed+gpu-cap: hwrt leg (--features hwrt); spawns one taa_jitter_eval_screenshot_dump worker with an 8-frame burst dump on a real RT device; --test-threads=1"]
 fn hwrt_shadow_origin_consecutive_frames() {
     const PAIR_TOL_PX: usize = 300;
     const FIRST: u32 = 30;

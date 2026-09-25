@@ -1,0 +1,20 @@
+{
+ "start": "2026-09-24T09:09:49.786+03:00",
+ "test": false,
+ "placement": "P-none (no affinity call)",
+ "voids": [],
+ "machine_before": {
+  "time": "2026-09-24T09:09:49.799+03:00",
+  "powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)"
+ },
+ "last": "P5c-C3bG4-p1 r2 C3b-G4#bpb@W1",
+ "rounds_done": 3,
+ "end": "2026-09-24T12:27:54.347+03:00",
+ "status": "complete",
+ "exit": 0,
+ "timed": 505,
+ "rerun": 61,
+ "warm": 24,
+ "voided_processes": 0,
+ "binaries_after": "all match"
+}

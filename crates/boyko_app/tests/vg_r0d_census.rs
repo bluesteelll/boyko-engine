@@ -153,7 +153,7 @@ fn setup_corpus(
 
 /// **The corpus census WORKER** — one process, one `(camera path, ladder rung)` pair, one row.
 #[test]
-#[ignore = "needs a real windowed GPU device and the fetched corpus payload; the R0d driver spawns it per (path, rung)"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device and the fetched corpus payload; the R0d driver spawns it per (path, rung)"]
 fn vg_r0d_rung_dump() {
     // The worker is meaningless without the `(camera path, rung)` pair the gate hands it, and
     // `--ignored` runs EVERY test in this binary — so a direct invocation lands here with nothing
@@ -276,7 +276,7 @@ fn d_est(rows: &[(String, usize, Row)], path: &str, decision: usize, top: usize)
 
 /// **R0d's gate, all four parts, plus K1's adjudication.**
 #[test]
-#[ignore = "needs a real windowed GPU device and the fetched corpus payload; drives |paths| x |ladder| worker processes"]
+#[ignore = "gpu-windowed: needs a real windowed GPU device and the fetched corpus payload; drives |paths| x |ladder| worker processes"]
 fn vg_r0d_census_gate() {
     if !vg_corpus_scene::payload_present() {
         eprintln!(

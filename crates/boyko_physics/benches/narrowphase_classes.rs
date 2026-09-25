@@ -418,6 +418,12 @@ fn snapshot(spec: &SceneSpec) -> Snapshot {
         cfg.sleeping = false;
         cfg.broadphase_select = BroadphaseSelectMode::Manual;
         cfg.broadphase = BroadphaseKind::AllPairs;
+        // Off although it is on by default since L9 C4: this bench prices the full collision of
+        // each class on the exact narrowphase's trajectory (C0's snapshots), and its structural
+        // assert `touching == manifolds` holds only there: with reuse on, a slow pair's manifold
+        // is its record's refresh, which can exist where the full collision finds none (a kept
+        // point at a knife edge) or vanish where it finds one (every kept point lifted).
+        cfg.contact_reuse = false;
     }
     let mut physics = builder.build(&mut world);
     assert!(spec.steps > 0, "construction: a snapshot needs at least one step");
