@@ -24,10 +24,32 @@
 //! `EcsMaster` is `!Send + !Sync`; the cell inherits the discipline. Phase 9
 //! will introduce `Send/Sync` impls bound to an explicit scheduler-aliasing
 //! contract; Phase 8a does not.
+//!
+//! # W0 — phase-frozen world bytes (PC-24)
+//!
+//! While any system body may be running on a worker, the only writes into the
+//! `EcsMaster` allocation are atomic RMWs on `UnsafeCell`-backed fields (today
+//! `EntityReservoir::{free_top, next_entity_id}`; by design
+//! `ArchetypeMaster::enable_generation`), and no thread forms a `&mut` to
+//! `EcsMaster` or to any of its inline sub-structures. Every `&mut EcsMaster` is
+//! formed on the dispatcher with no worker live (`schedule.rs` apply-window /
+//! EXC2 / condition gates, `exclusive_function_system.rs`, `DispatcherToken`).
+//! Hence any number of workers may hold shared world references concurrently
+//! with those RMWs: a shared retag reads only frozen bytes and never an
+//! `UnsafeCell` byte, under Stacked Borrows (`nonfreeze_access: None`) and Tree
+//! Borrows (`Cell`: no associated access) alike.
+//!
+//! A `&mut` retag, by contrast, covers its whole pointee, `UnsafeCell` bytes
+//! included: a retag read of every byte under Tree Borrows, a retag write under
+//! Stacked Borrows. A worker-side `&mut EcsMaster` therefore races the reservoir
+//! RMWs of any concurrent `Commands` system, and under Stacked Borrows every
+//! other worker's world retag too, even when the path writes nothing. That is
+//! why the worker accessors below (`archetype_ptr_mut`, `resource_ptr_mut`)
+//! reach their target through shared paths and hand out raw pointers instead.
 
 // Phase 8a Step 5: the remaining `pub(crate)` cell accessors are wired by
 // Step 8 (`EcsMaster::run_system_once`). Step 7 (`Res::get_param`,
-// `ResMut::get_param`) consumes `resources()` / `resources_mut()`; the other
+// `ResMut::get_param`) consumes `resources()` / `resource_ptr_mut()`; the other
 // accessors (`world()`, `world_mut()`, `archetype_ptr*`) remain unused until
 // Step 8 lands.
 #![allow(dead_code)]
@@ -40,7 +62,7 @@ use crate::ecs::core::resources::nonsend_resources::NonSendResources;
 use crate::ecs::core::resources::resources::Resources;
 use crate::ecs::core::system::params::entities::Entities;
 use crate::ecs::core::system::params::entity_counter::EntityCounter;
-use crate::ecs::identifiers::primitives::ArchetypeId;
+use crate::ecs::identifiers::primitives::{ArchetypeId, ResourceId};
 
 /// Copy-on-call interior-mutability handle on an `EcsMaster`.
 ///
@@ -50,9 +72,10 @@ use crate::ecs::identifiers::primitives::ArchetypeId;
 ///
 /// The cell is `Copy`, so tuple impls of `SystemParam::get_param` can hand
 /// out one copy per param without contortions. Aliasing discipline between
-/// the copies is enforced upstream by
-/// [`FilteredAccessSet`] at `init_access` time
-/// and the Phase 9 scheduler at run time — never by the cell itself.
+/// the copies' component and resource views is enforced upstream by
+/// [`FilteredAccessSet`] at `init_access` time and the Phase 9 scheduler at
+/// run time. The world object itself is shared by every copy: no accessor
+/// reachable from a worker forms a `&mut` over it (invariant W0, module docs).
 ///
 /// [`FilteredAccessSet`]: super::FilteredAccessSet
 #[derive(Clone, Copy)]
@@ -72,7 +95,7 @@ pub struct UnsafeEcsCell<'w> {
     _marker: PhantomData<(&'w EcsMaster, &'w core::cell::UnsafeCell<EcsMaster>)>,
     /// Debug-only sentinel: `true` for cells minted via `new_mutable`,
     /// `false` for cells minted via `new_readonly`. `world_mut`,
-    /// `resources_mut`, and `archetype_ptr_mut` `debug_assert!` on this.
+    /// `resource_ptr_mut`, and `archetype_ptr_mut` `debug_assert!` on this.
     ///
     /// [`new_mutable`]: UnsafeEcsCell::new_mutable
     /// [`new_readonly`]: UnsafeEcsCell::new_readonly
@@ -102,7 +125,7 @@ impl<'w> UnsafeEcsCell<'w> {
 
     /// Mints a read-only cell from `&EcsMaster`.
     ///
-    /// Methods that require write capability (`world_mut`, `resources_mut`,
+    /// Methods that require write capability (`world_mut`, `resource_ptr_mut`,
     /// `archetype_ptr_mut`) will `debug_assert!` on a cell minted via this
     /// constructor and panic in debug builds.
     ///
@@ -134,9 +157,13 @@ impl<'w> UnsafeEcsCell<'w> {
     ///   retag occurs and the raw pointer's provenance is preserved.
     #[inline]
     pub(crate) unsafe fn world(self) -> &'w EcsMaster {
-        // SAFETY (U_C2): caller upholds the access contract; the raw
+        // SAFETY (U_C2, W0): caller upholds the access contract; the raw
         //   pointer was produced by `new_mutable` / `new_readonly` from a
-        //   live borrow scoped to `'w`. The by-value receiver consumes a
+        //   live borrow scoped to `'w`. The shared retag reads only the
+        //   world's frozen bytes, which nothing writes while a system body may
+        //   run: the concurrent writes are atomic RMWs on `UnsafeCell` bytes,
+        //   which a shared retag does not access, and no thread holds a `&mut`
+        //   over the world meanwhile (W0). The by-value receiver consumes a
         //   Copy of the cell, so no `&self` borrow on the cell exists that
         //   could downgrade `ptr`'s provenance to SharedReadOnly.
         unsafe { &*self.ptr }
@@ -180,9 +207,12 @@ impl<'w> UnsafeEcsCell<'w> {
     ///   alias is live through any cell copy.
     #[inline]
     pub(crate) unsafe fn archetype_ptr(self, id: ArchetypeId) -> Option<*const Archetype> {
-        // SAFETY (U_C2): by-value receiver — `self.world()` is a self-by-value
-        //   call so the raw pointer is not retagged. The returned reference
-        //   is scoped to `'w` (Phase 7 U1/U2 slab stability).
+        // SAFETY (U_C2, W0): by-value receiver — `self.world()` is a
+        //   self-by-value call so the raw pointer is not retagged. The shared
+        //   `&EcsMaster` / `&ArchetypeMaster` / `&ArchetypeBundle` retags on the
+        //   way read only frozen bytes, which nothing writes during a phase
+        //   (W0). The returned pointer is valid for `'w` (Phase 7 U1/U2 slab
+        //   stability).
         unsafe { self.world().archetype_master().get_archetype_ptr(id) }
     }
 
@@ -196,8 +226,13 @@ impl<'w> UnsafeEcsCell<'w> {
     ///   declared a write to the archetype's columns; no other reference
     ///   aliases.
     /// * The cell was minted via `new_mutable` (debug-asserted).
-    /// * The by-value receiver keeps the raw pointer's write-capable
-    ///   provenance intact — the C1 fix for Round 1's `&self` retag bug.
+    /// * Rides the shared [`archetype_ptr`](UnsafeEcsCell::archetype_ptr)
+    ///   route and forms no `&mut` over the world (PC-24, W0): this runs on
+    ///   workers, where a whole-world `&mut` retag races the reservoir RMWs of
+    ///   any concurrent `Commands` system. The read route mints the SAME
+    ///   write-capable provenance (`archetype_bundle.rs`'s F4 notes on
+    ///   `get_archetype_ptr_mut` / `get_archetype_ptr`), so the cast back to
+    ///   `*mut` restores the type and nothing else.
     ///
     /// [`new_mutable`]: UnsafeEcsCell::new_mutable
     #[inline]
@@ -210,12 +245,25 @@ impl<'w> UnsafeEcsCell<'w> {
             self.allows_mutable_access,
             "invariant U_C3: archetype_ptr_mut() called on a read-only UnsafeEcsCell"
         );
-        // SAFETY (U_C3): by-value `self.world_mut()` consumes the cell
-        //   Copy; the underlying raw pointer keeps write-capable provenance
-        //   and is reborrowed as `&mut EcsMaster` inside the call. The
-        //   minted `*mut Archetype` follows Phase 7's U14 raw-provenance
-        //   recipe (`archetype_ptr_for` under `&mut`).
-        unsafe { self.world_mut().archetype_master_mut().archetype_ptr_for(id) }
+        // SAFETY (U_C3, W0 — PC-24):
+        //   - No `&mut` to `EcsMaster`, `ArchetypeMaster` or `ArchetypeBundle`
+        //     is formed. This runs on workers, and a `&mut` retag covers its
+        //     whole pointee, `UnsafeCell` bytes included (Tree Borrows: a retag
+        //     read of every byte; Stacked Borrows: a retag write). The
+        //     reservoir that a concurrent `Commands` system RMWs lives inline
+        //     in the world (`EntityMaster::reservoir`), so such a retag is a
+        //     data race even though this path writes nothing.
+        //   - `archetype_ptr` reaches the slot through
+        //     `ArchetypeBundle::get_archetype_ptr`, i.e. `slot_ptr_mut`'s
+        //     `UnsafeCell::raw_get` over the slab's own allocation. That is the
+        //     SAME write-capable provenance `get_archetype_ptr_mut` mints (F4:
+        //     the read/write split is a caller contract, not a provenance
+        //     one), so the cast restores the type and nothing else.
+        //   - The shared retags on the way read only frozen bytes, which
+        //     nothing writes during a phase (W0).
+        //   - Writing through the result stays exclusive by the caller's
+        //     declared column write (U_C3), as before.
+        unsafe { self.archetype_ptr(id) }.map(<*const Archetype>::cast_mut)
     }
 
     /// Direct read-only access to the resources subsystem. Hot path for
@@ -262,7 +310,8 @@ impl<'w> UnsafeEcsCell<'w> {
     ///   are RMW'd from any thread, and the stack entries a claim reads are
     ///   immutable for the phase because every write to them takes
     ///   `&mut EntityMaster`, which runs dispatcher-solo in the apply window
-    ///   (SCH7 / EM2′-K).
+    ///   (SCH7 / EM2′-K), and no worker forms a `&mut` over the world or any
+    ///   of its sub-structures at all (W0).
     /// * The by-value receiver preserves the raw pointer's provenance: no
     ///   `&self` retag downgrades the carried `*mut EcsMaster` before the
     ///   field projection.
@@ -286,7 +335,8 @@ impl<'w> UnsafeEcsCell<'w> {
         //     projection (EM6′).
         //   * No `&mut EntityMaster` is used while the counter lives: the
         //     counter is dropped with its `Commands<'s>` at system-body end,
-        //     and SCH7 keeps every `&mut` world op out of the phase (EM2′-K).
+        //     and W0 keeps every `&mut` over the world, dispatcher's or
+        //     worker's, out of the phase (SCH7, EM2′-K).
         unsafe { EntityCounter::from_ptr(reservoir) }
     }
 
@@ -338,14 +388,16 @@ impl<'w> UnsafeEcsCell<'w> {
         unsafe { Entities::from_store_ptr(store_ptr) }
     }
 
-    /// Direct mutable access to the resources subsystem. Hot path for
-    /// [`ResMut<R>::get_param`].
+    /// Write-capable pointer to resource `id`'s value, or `None` if it is
+    /// absent. Hot path for [`ResMut<R>::get_param`]. Deliberately not a
+    /// `&mut Resources` (PC-24 / W0): that retag would alias the `Resources`
+    /// view of any other worker running a `Res` / `ResMut` of another id.
     ///
     /// # Safety (U_C3)
     /// * The caller asserts that the active `SystemParam::init_access`
-    ///   declared a resource write that does not conflict with sibling
-    ///   params or other systems; no other access through any cell copy
-    ///   aliases this borrow for the returned reference's scope.
+    ///   declared a write of resource `id` that does not conflict with
+    ///   sibling params or other systems; the `&mut R` it mints from the
+    ///   returned pointer is exclusive by that declaration.
     /// * The cell was minted via `new_mutable` (debug-asserted).
     /// * The by-value receiver consumes a `Copy` of the cell — no `&self`
     ///   retag occurs.
@@ -353,20 +405,31 @@ impl<'w> UnsafeEcsCell<'w> {
     /// [`ResMut<R>::get_param`]: super::params::resmut::ResMut
     /// [`new_mutable`]: UnsafeEcsCell::new_mutable
     #[inline]
-    pub(crate) unsafe fn resources_mut(self) -> &'w mut Resources {
+    pub(crate) unsafe fn resource_ptr_mut(self, id: ResourceId) -> Option<*mut u8> {
         #[cfg(debug_assertions)]
         debug_assert!(
             self.allows_mutable_access,
-            "invariant U_C3: resources_mut() called on a read-only UnsafeEcsCell \
+            "invariant U_C3: resource_ptr_mut() called on a read-only UnsafeEcsCell \
              minted via new_readonly"
         );
-        // SAFETY (U_C3): by-value receiver; raw pointer carries write-capable
-        //   provenance (minted from `&mut EcsMaster` in `new_mutable`). The
-        //   `&mut` operator projects directly through `*self.ptr` onto the
-        //   `resources` field — no intermediate `&mut EcsMaster` reborrow
-        //   that could downgrade the tag stack. Aliasing is the caller's
-        //   responsibility per the SystemParam protocol.
-        unsafe { &mut (*self.ptr).resources }
+        // SAFETY (U_C3, W0 — PC-24):
+        //   - `resources()` projects the field without forming a world
+        //     reference. Its shared retag reads only the field's frozen bytes
+        //     (the slab `Box` pointer and `registered_mask`), which nothing
+        //     writes during a phase: `insert` / `remove` take `&mut EcsMaster`
+        //     in apply windows (SCH7, W0).
+        //   - A `&mut Resources` here would be a retag write under Stacked
+        //     Borrows and would alias the `Resources` view of any other worker
+        //     running a `Res` / `ResMut` of another id, which the conflict
+        //     graph allows.
+        //   - `get_ptr_by_id` returns the slot's stored `*mut u8`
+        //     (`Box::into_raw` of the value) by value, so the pointer keeps the
+        //     value's own allocation's provenance; `cast_mut` restores the type
+        //     only. It stays valid for `'w`: the value is replaced or removed
+        //     only under `&mut EcsMaster`.
+        //   - Exclusivity of the `&mut R` the caller mints is the declared
+        //     resource write (SP1 / SP2), unchanged.
+        unsafe { self.resources() }.get_ptr_by_id(id).map(<*const u8>::cast_mut)
     }
 
     /// Direct read-only access to the **non-`Send`** resource slab, or `None`
@@ -445,8 +508,10 @@ impl<'w> UnsafeEcsCell<'w> {
 //   - `FilteredAccessSet` accumulation at `SystemParam::init_access` time
 //     (intra-system aliasing).
 //   - The scheduler's `ConflictGraph` (SCH3) at run time (cross-system
-//     aliasing — no two concurrent systems hold overlapping `&/&mut` views
-//     through their cell copies).
+//     aliasing — no two concurrent systems hold overlapping `&mut` views of
+//     component columns or resource values through their cell copies; no
+//     worker holds a `&mut` view of the world at all, W0; shared views of
+//     the world overlap freely).
 //   - The apply-window barrier (SCH7) — the only context in which the
 //     dispatcher reborrows `&mut EcsMaster` is gated on `running == 0`, so
 //     no live worker cell aliases the dispatcher reborrow.
