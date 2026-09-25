@@ -1642,9 +1642,18 @@ fn s3_cross_pairs_restored_x_then_y_then_both() {
 /// * jumper: an unrelated far cube spawned before Y is despawned, and `yr` — the last row — takes
 ///   its row: Y's members read `[y0, y1, jumper]`.
 ///
-/// Either way a binary search of Y's members misses `y1`, which is present and rests: X would move
-/// in without the separated pair on `y1` that `Off` still carries, so its held slot's kept tag
-/// would differ from `Off`'s, and a later restore would compute the pair with no state.
+/// Either way the pre-W2 lookup, a binary search of Y's members, misses `y1`, which is present and
+/// rests: X would move in without the separated pair on `y1` that `Off` still carries, so its held
+/// slot's kept tag would differ from `Off`'s, and a later restore would compute the pair with no
+/// state. The two layouts do not miss for the same reason:
+///
+/// * vanished: any binary search misses, one that returns on its first equal probe included: its
+///   middle probe reads `NONE` (`u32::MAX`), which sends it to the half before `y1`;
+/// * jumper: only std's `slice::binary_search` as it stands (rustc 1.98.1) is known to miss. It
+///   runs a fixed number of halvings with no early exit on a match: it probes `y1` at index 1,
+///   keeps halving, and ends on the jumper's row. A search that returns on its first equal probe
+///   finds `y1` there. So if std ever returns to an early exit, this layout alone stops guarding
+///   W2, and the vanished layout still does.
 #[test]
 fn s3_move_in_copies_from_a_record_restored_on_its_step() {
     let x_tower = tower(4, 0.0, 0.0, 0.5);
