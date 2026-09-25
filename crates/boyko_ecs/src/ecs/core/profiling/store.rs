@@ -892,9 +892,9 @@ impl Profiler {
         }
 
         let vm = VmReservation::reserve(layout.bytes());
-        vm.commit(0, vm.os_len());
+        // SAFETY: `0 < os_len`: `reserve` panics on a zero length and only rounds it up.
+        unsafe { vm.commit(0, vm.os_len()) };
         let base = vm.base();
-
         match VM_BASE.compare_exchange(
             core::ptr::null_mut(),
             base.as_ptr(),

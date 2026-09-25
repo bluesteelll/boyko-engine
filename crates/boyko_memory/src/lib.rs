@@ -18,12 +18,14 @@
 //!
 //! # The public surface is the soundness boundary
 //!
-//! Inside `boyko_ecs` these types were `pub(crate)`, and `VmReservation::commit` checked its range
-//! only with `debug_assert!`: every caller was in the crate and held to its invariants. Across a
-//! crate boundary that no longer holds, so the range check that keeps the syscall inside the
-//! reservation is a release `assert!` on the cold commit path, and the one route that skips it,
-//! `raw::commit_at`, is an `unsafe fn`. Every other safe entry point was already release-checked
-//! (`VmColumn`'s bounds and ceiling asserts) or cannot reach memory at all (`base`, `os_len`).
+//! Inside `boyko_ecs` these types were `pub(crate)`, and `VmReservation::commit` was a safe fn
+//! that checked its range only with `debug_assert!`: every caller was in the crate and held to its
+//! invariants. Across a crate boundary that no longer holds, so both commit routes,
+//! `VmReservation::commit` and `raw::commit_at`, are `unsafe fn`s, and each caller proves the range
+//! at its own site. A release range check in `commit` was the alternative. It was measured to move
+//! the codegen of the pinned callers (UG-15 P29-1, P29-2), and it was not taken. Every safe entry
+//! point is release-checked (`reserve`'s length asserts, `VmColumn`'s bounds and ceiling asserts)
+//! or cannot reach memory at all (`base`, `os_len`).
 
 pub mod constants;
 mod owner;

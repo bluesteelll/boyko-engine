@@ -260,38 +260,46 @@ impl VmReservation {
     /// Commits (makes readable/writable, zero-filled) the byte range
     /// `[old, new)` of the reservation, counted under [`ColumnOwner`]: the
     /// route of every `ComponentPool`, `InlandStore` and the profiling store. A
-    /// store owned by another owner calls [`commit_at`] directly. Non-empty and
-    /// in-bounds (release-asserted), page-aligned (`COMMIT_PAGE`) and
-    /// monotonic-frontier use only (debug-asserted in `commit_at`). `MEM_COMMIT`
-    /// inside a reservation and `mprotect` are page-granular; only the
-    /// reservation itself is bound by the 64 KiB granularity (packing plan
-    /// D1). Page alignment plus `new <= os_len` is what keeps a frontier commit
-    /// inside the kernel's mapping: `os_len` is granule-rounded and a granule
-    /// is a whole number of pages. No-op on the fallback arm (the whole
-    /// reservation is eagerly RW + zeroed).
+    /// store owned by another owner calls [`commit_at`] directly. Page-aligned
+    /// (`COMMIT_PAGE`) and monotonic-frontier use only (debug-asserted in
+    /// `commit_at`). `MEM_COMMIT` inside a reservation and `mprotect` are
+    /// page-granular; only the reservation itself is bound by the 64 KiB
+    /// granularity (packing plan D1). Page alignment plus `new <= os_len` is
+    /// what keeps a frontier commit inside the kernel's mapping: `os_len` is
+    /// granule-rounded and a granule is a whole number of pages. No-op on the
+    /// fallback arm (the whole reservation is eagerly RW + zeroed).
     ///
     /// Never inlined: the Column route stays one out-of-line cold call, so the
     /// callers' bodies (`ComponentPool::commit_subregion` jumps here) do not
     /// change with what the commit path counts.
     ///
+    /// # Safety
+    /// `old < new` and `new <= self.os_len()` (debug-asserted). The syscall
+    /// arms offset the base by `old` and change the protection of `new - old`
+    /// bytes from there, which is sound only inside the reservation.
+    ///
+    /// The fn is `unsafe` since rung C1 made it public in another crate. Inside
+    /// `boyko_ecs` it was a safe `pub(crate)` fn whose range was checked only in
+    /// debug builds, sound because every caller was in the crate. A release
+    /// range check instead would move the pinned callers' codegen (UG-15
+    /// P29-1, P29-2: reading `os_len` here stops LLVM promoting `&self` to its
+    /// `base`), so each caller proves the range at its own site.
+    ///
     /// # Panics
-    /// * `old >= new` or `new > os_len()`. A release check since rung C1 made
-    ///   this fn public in another crate: the range is what keeps the syscall
-    ///   inside the reservation, so a safe caller must not be able to hand it a
-    ///   wrong one.
-    /// * The OS refuses the commit (commit charge or overcommit exhausted).
+    /// The OS refuses the commit (commit charge or overcommit exhausted).
     #[cold]
     #[inline(never)]
     #[doc(hidden)]
-    pub fn commit(&self, old: usize, new: usize) {
-        assert!(
+    pub unsafe fn commit(&self, old: usize, new: usize) {
+        debug_assert!(
             old < new && new <= self.os_len,
             "VmReservation::commit: range [{old}, {new}) is empty, backwards or overruns the \
              reservation ({})",
             self.os_len
         );
-        // SAFETY: the release assert above is `commit_at`'s whole contract:
-        // `old + (new - old) = new` cannot overflow and is `<= os_len`.
+        // SAFETY: the caller upholds this fn's `# Safety`, `old < new <= os_len`,
+        // so `new - old` does not wrap and `old + (new - old) = new <= os_len`:
+        // exactly `commit_at`'s contract.
         unsafe { commit_at::<ColumnOwner>(self, old, new - old) }
     }
 }
@@ -447,9 +455,11 @@ mod tests {
         for i in 0..50 {
             let vm = VmReservation::reserve(4 * G);
             if i % 2 == 0 {
-                vm.commit(0, G);
+                // SAFETY: `0 < G <= 4 * G = os_len` (`4 * G` is a granule multiple).
+                unsafe { vm.commit(0, G) };
                 if i % 4 == 0 {
-                    vm.commit(G, 3 * G);
+                    // SAFETY: `G < 3 * G <= 4 * G = os_len`.
+                    unsafe { vm.commit(G, 3 * G) };
                 }
             }
             // Drop releases partially-committed reservations in full.
@@ -461,7 +471,8 @@ mod tests {
     #[test]
     fn committed_memory_reads_zero() {
         let vm = VmReservation::reserve(2 * G);
-        vm.commit(0, 2 * G);
+        // SAFETY: `0 < 2 * G = os_len` (`2 * G` is a granule multiple).
+        unsafe { vm.commit(0, 2 * G) };
         // SAFETY: [0, 2G) was just committed RW on every arm; head/tail are
         // in-bounds; u8 reads of zero-fill memory per the module contract.
         unsafe {
@@ -476,12 +487,14 @@ mod tests {
     #[test]
     fn committed_writes_survive_further_commits() {
         let vm = VmReservation::reserve(4 * G);
-        vm.commit(0, G);
+        // SAFETY: `0 < G <= 4 * G = os_len` (`4 * G` is a granule multiple).
+        unsafe { vm.commit(0, G) };
         // SAFETY: [0, G) committed RW; in-bounds write/read.
         unsafe {
             *vm.base().as_ptr().add(100) = 0xAB;
         }
-        vm.commit(G, 4 * G);
+        // SAFETY: `G < 4 * G = os_len`.
+        unsafe { vm.commit(G, 4 * G) };
         // SAFETY: still committed; the X.F idempotent-commit/W-CMT contract
         // says earlier contents are untouched by later frontier commits.
         unsafe {
@@ -509,7 +522,8 @@ mod tests {
     fn small_reserve_round_trip() {
         let vm = VmReservation::reserve(1);
         assert_eq!(vm.os_len(), G, "1-byte request rounds to one granule");
-        vm.commit(0, G);
+        // SAFETY: `0 < G = os_len`, asserted on the line above.
+        unsafe { vm.commit(0, G) };
         // SAFETY: committed above; single in-bounds byte.
         unsafe {
             assert_eq!(*vm.base().as_ptr(), 0);

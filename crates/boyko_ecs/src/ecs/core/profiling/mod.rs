@@ -4,8 +4,8 @@
 //!
 //! The same reason [`log`](crate::ecs::core::log) does: the durable store is backed by
 //! [`VmReservation`](crate::ecs::memory::vm::VmReservation), the engine's own reservation
-//! primitive (in `boyko_memory` since rung C1, whose public contract keeps it sound: a
-//! release-checked commit range, a write-once `base`, no decommit). Putting the store here is
+//! primitive (in `boyko_memory` since rung C1, whose public contract keeps it sound: an `unsafe`,
+//! caller-proven commit range, a write-once `base`, no decommit). Putting the store here is
 //! what makes it engine storage rather than a `Box<[u8]>` side-store, which Principle 0 forbids
 //! **even inside a `Resource`**.
 //!

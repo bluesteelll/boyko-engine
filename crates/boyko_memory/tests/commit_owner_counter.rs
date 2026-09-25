@@ -54,7 +54,9 @@ fn every_commit_route_counts_under_its_own_owner() {
 
     let s = snapshot();
     let reservation = VmReservation::reserve(2 * COMMIT_GRANULE);
-    reservation.commit(0, COMMIT_PAGE);
+    // SAFETY: `0 < COMMIT_PAGE <= COMMIT_GRANULE < 2 * COMMIT_GRANULE <= os_len()`: a granule is
+    // a whole number of pages, and the reservation was asked for two granules.
+    unsafe { reservation.commit(0, COMMIT_PAGE) };
     assert_eq!(since(s), [COMMIT_PAGE, 0, 0], "step 3: VmReservation::commit is the Column route");
 
     let s = snapshot();
