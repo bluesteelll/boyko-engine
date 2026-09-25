@@ -453,8 +453,11 @@ collide_box_pair(k):                           // pure in (bodies, frames, T0 hi
     layer 14: the "confirms" band). Both files gained a reuse-off pin that reads the C3 values exactly (A7-R1's in the
     same test fn). The S1c census release pin moved its floor from 134 to 122 (ten dispatched colours on 4,340 of
     4,352 long-run frames; the same binary with reuse off reads the L11 C2 long run digit for digit). It costs that
-    gate power: the fan-out regression it exists for now reds in release only on the census window's 12
-    eleven-colour frames, and the debug arm no longer reds on it (its window holds no nine-colour frame).
+    pin power, measured by re-running the fan-out mutation: in release it reds only on the census window's 12
+    eleven-colour frames, and in debug not at all (its window holds no nine-colour frame). Review round 1 (W1) closed
+    that with a reuse-off census arm, S1d, pinned at S1c's L11 C2 envelope (release 134..=134, dispatch 269; debug
+    98..=110, 221). The same mutation reds S1d on all 256 release frames and on the debug window's 12 nine-colour
+    frames. The census asserts that S1c's last step reuses records (5,098 in release) and S1d's reuses none.
   - Setups adapted: GOLDEN sets reuse off (its contract allows only that); G4 sets reuse off (with reuse on no layer-0
     mover's reference box swaps, because a flipped pair keeps its record, ruling W2; with reuse off mover 13 swaps
     as before); the class bench sets reuse off; `profiling_zone_counts` asserts `reused > 0` on some step instead of 0.
