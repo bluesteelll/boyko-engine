@@ -15,7 +15,7 @@
 //! per-row orientation frames a box pair reads instead of converting two quaternions (D2),
 //! filled once per step at the entry of either path, and the reuse records — build, criterion,
 //! refresh — through which a slow touching box pair keeps its last full collision's features
-//! within a tolerance (L9b, off by default); `carry` holds the per-pair tags and records each
+//! within a tolerance (L9b, on by default); `carry` holds the per-pair tags and records each
 //! step writes and the next step joins by the two bodies' rows (D9), which carry a separated box
 //! pair's separating axis so the SAT runs only once it stops separating (L9a (ii)), and a slow
 //! pair's record. Neither has `unsafe`; the chunks' tag and record writes are `dispatch`'s.

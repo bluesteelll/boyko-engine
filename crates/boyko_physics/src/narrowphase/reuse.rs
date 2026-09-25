@@ -31,7 +31,7 @@
 //!
 //! A touching box pair whose relative pose moved less than τ_eff since its last full collision
 //! reuses that collision's contact features. [`PhysicsConfig::contact_reuse`] turns it on; it is
-//! off by default, and then no function below runs.
+//! on by default since L9 C4, and with it off no function below runs.
 //!
 //! * **Who (D3, D8).** Both shapes boxes, neither body a sensor, τ_eff positive, and the pair slow
 //!   ([`is_fast`] false). Every other pair takes today's path.
