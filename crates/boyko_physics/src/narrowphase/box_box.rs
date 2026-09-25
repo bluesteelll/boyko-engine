@@ -3953,8 +3953,12 @@ mod tests {
 
     /// T4's pinned witnesses (`tests/box_box_fallback_depth.rs`) and the seed's two poses: a1 (a
     /// unit box yawed ~45° on the floor, where hint 8 is an edge held within 1.05 of the best edge
-    /// but past the bound — the hint cap's witness), a2, a3, c1, c2, and G-L9b-1's seed.
-    const T8_PINNED: [PoseBits; 7] = [
+    /// but past the bound — the hint cap's witness), a2, a3, c1, c2, and G-L9b-1's seed; then the
+    /// held-hint witness, the first family pose whose edge hint is HELD within the bound (hint 12
+    /// against the best edge 8: 5.23e-4 deep, bound 4.51e-3, in both orders). The family does not
+    /// run under Miri and a1's hint is capped, not held, so without this pose T8's `held > 0`
+    /// clause has no witness there and T8 is red under Miri (`held: 0`).
+    const T8_PINNED: [PoseBits; 8] = [
         (
             [0x0000_0000, 0xbf80_0000, 0x0000_0000],
             [0x0000_0000, 0x0000_0000, 0x0000_0000, 0x3f80_0000],
@@ -4010,6 +4014,14 @@ mod tests {
             [0x3fe1_aff9, 0x418d_694a, 0x409f_8713],
             [0x3e81_4d3a, 0x3ecc_4676, 0xbf1b_de2e, 0x3f23_2f68],
             [0x3b87_b37a, 0x3b44_e355, 0x3c67_4a94],
+        ),
+        (
+            [0x41b6_3b82, 0x3f9b_185c, 0x410c_4134],
+            [0x0000_0000, 0x0000_0000, 0x0000_0000, 0x3f80_0000],
+            [0x4248_0000, 0x3f80_0000, 0x4248_0000],
+            [0xc1cf_e426, 0x4010_132a, 0xc223_3853],
+            [0xb5eb_78cd, 0x3a03_126f, 0x369d_1af2, 0x3f7f_fffe],
+            [0x3d4c_cccd, 0x3d23_d70b, 0x3d85_1eb8],
         ),
     ];
 
@@ -4069,8 +4081,9 @@ mod tests {
     }
 
     /// T8: the fallback never emits an edge past its bound, and answers with the best face only
-    /// when every edge axis is past it — over T4's pinned witnesses and the seed (both A/B orders,
-    /// cold and every hint), then a thin/tilted family on the 50×1×50 floor (not under Miri). It
+    /// when every edge axis is past it — over T4's pinned witnesses, the seed and one held-hint
+    /// witness of the family (both A/B orders, cold and every hint), then a thin/tilted family on
+    /// the 50×1×50 floor (not under Miri). It
     /// asks [`edge_fallback`] directly on every overlapping SAT, which is why it lives in the lib.
     ///
     /// Mutation M-Cap (the hint cap removed) turns it red on a1 under hint 8: the held edge is
