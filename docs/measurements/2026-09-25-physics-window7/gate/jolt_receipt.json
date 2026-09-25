@@ -1,0 +1,38 @@
+{
+ "W1": {
+  "hash": "0xb8522b4e3fc62cfe",
+  "threads": 1,
+  "manifolds_mean_100_500": 8489.0,
+  "manifolds_mean_0_100": 7042.23,
+  "manifolds_mean_0_500": 8199.646,
+  "manifolds_final": 8489.0,
+  "points_mean_100_500": 31111.9575,
+  "active_bodies_min": 1240.0,
+  "frames": 500,
+  "args": [
+   "-s=Pyramid",
+   "-q=Discrete",
+   "-receipt",
+   "-t=1",
+   "-i=500"
+  ]
+ },
+ "W8": {
+  "hash": "0xb8522b4e3fc62cfe",
+  "threads": 8,
+  "manifolds_mean_100_500": 8489.0,
+  "manifolds_mean_0_100": 7042.23,
+  "manifolds_mean_0_500": 8199.646,
+  "manifolds_final": 8489.0,
+  "points_mean_100_500": 31111.9575,
+  "active_bodies_min": 1240.0,
+  "frames": 500,
+  "args": [
+   "-s=Pyramid",
+   "-q=Discrete",
+   "-receipt",
+   "-t=8",
+   "-i=500"
+  ]
+ }
+}

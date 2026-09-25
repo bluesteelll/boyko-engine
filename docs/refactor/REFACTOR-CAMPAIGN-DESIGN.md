@@ -346,7 +346,7 @@ Every site needs a row in `identity-observers.toml` (file, owner, kind, class, a
 |---|---|---|
 | `persist` | outlives the process | the default `Component::stable_name` (F11) |
 | `key` | an in-process key that affects control flow | none in census files; `asset/server.rs:376` recorded |
-| `display` | text only | `Component::debug_type_name`, `Resource::debug_type_name`, `Plugin::name`, `SystemSet::set_name`, registry panic text, every `boyko_log` site, panic hooks (`boyko_log/src/sink/crash.rs:160`, `lifecycle.rs:625`), silencing hooks (`command_queue.rs:1538`, `rhi_vulkan/device.rs:4000`) |
+| `display` | text only | `Component::debug_type_name`, `Resource::debug_type_name`, `Plugin::name`, `SystemSet::set_name`, registry panic text, every `boyko_log` site, panic hooks (`boyko_log/src/sink/crash.rs:160`, `lifecycle.rs:625`), silencing hooks (`command_queue.rs:1573`, `rhi_vulkan/device.rs:4000`) |
 | `unstable-by-contract` | depends on `TypeId` order | none found |
 
 **O-T reach.**

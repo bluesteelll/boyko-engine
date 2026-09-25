@@ -1,0 +1,124 @@
+== base 00:41:09
+OK  base/trk_J-default-tree_W1                     exit 0 pose 0x32d5e235342b4143 expect none void 0 bp Tree reuse False wall 3.289s win 6.546 
+OK  base/trk_J-default-allpairs_W1                 exit 0 pose 0x32d5e235342b4143 expect none void 0 bp AllPairs reuse False wall 4.141s win 8.2528 
+OK  base/trk_R-default_W1                          exit 0 pose 0xee2a67a98434919a expect none void 0 bp AllPairs reuse False wall 5.718s win 11.4052 
+OK  base/trk_J-default-tree_W8                     exit 0 pose 0x32d5e235342b4143 expect none void 0 bp Tree reuse False wall 1.267s win 2.5053 
+OK  base/trk_J-default-allpairs_W8                 exit 0 pose 0x32d5e235342b4143 expect none void 0 bp AllPairs reuse False wall 2.265s win 4.5 
+OK  base/trk_R-default_W8                          exit 0 pose 0xee2a67a98434919a expect none void 0 bp AllPairs reuse False wall 2.935s win 5.8391 
+OK  base/c4_J-default-tree-reuseoff_W1             exit 0 pose 0x32d5e235342b4143 expect none void 0 bp Tree reuse False wall 3.276s win 6.5001 
+OK  base/c4_J-default-allpairs-reuseoff_W1         exit 0 pose 0x32d5e235342b4143 expect none void 0 bp AllPairs reuse False wall 4.14s win 8.2408 
+OK  base/c4_R-default-reuseoff_W1                  exit 0 pose 0xee2a67a98434919a expect none void 0 bp AllPairs reuse False wall 5.862s win 11.6672 
+OK  base/c4_J-default-tree-noflag_W1               exit 0 pose 0x30c5438bc6ad9ffa expect none void 0 bp Tree reuse True wall 2.421s win 4.7987 
+OK  base/c4_J-default-tree-reuseoff_W8             exit 0 pose 0x32d5e235342b4143 expect none void 0 bp Tree reuse False wall 1.302s win 2.5594 
+OK  base/c4_J-default-allpairs-reuseoff_W8         exit 0 pose 0x32d5e235342b4143 expect none void 0 bp AllPairs reuse False wall 2.302s win 4.5601 
+OK  base/c4_R-default-reuseoff_W8                  exit 0 pose 0xee2a67a98434919a expect none void 0 bp AllPairs reuse False wall 2.975s win 5.9023 
+OK  base/c4_J-default-tree-noflag_W8               exit 0 pose 0x30c5438bc6ad9ffa expect none void 0 bp Tree reuse True wall 1.199s win 2.3548 
+OK  base/g9p_J-default-tree_W1                     exit 0 pose 0x32d5e235342b4143 expect none void 0 bp Tree reuse None wall 3.808s win 7.575 
+OK  base/g9p_J-default-allpairs_W1                 exit 0 pose 0x32d5e235342b4143 expect none void 0 bp AllPairs reuse None wall 4.771s win 9.5135 
+OK  base/g9p_R-default_W1                          exit 0 pose 0xee2a67a98434919a expect none void 0 bp AllPairs reuse None wall 6.166s win 12.3039 
+OK  base/g9p_J-default-tree_W8                     exit 0 pose 0x32d5e235342b4143 expect none void 0 bp Tree reuse None wall 1.63s win 3.2273 
+OK  base/g9p_J-default-allpairs_W8                 exit 0 pose 0x32d5e235342b4143 expect none void 0 bp AllPairs reuse None wall 2.52s win 5.0097 
+OK  base/g9p_R-default_W8                          exit 0 pose 0xee2a67a98434919a expect none void 0 bp AllPairs reuse None wall 3.066s win 6.0996 
+OK  base/g9t_J-default-tree_W1                     exit 0 pose 0x32d5e235342b4143 expect none void 0 bp Tree reuse None wall 3.708s win 7.3738 
+OK  base/g9t_J-default-allpairs_W1                 exit 0 pose 0x32d5e235342b4143 expect none void 0 bp AllPairs reuse None wall 4.49s win 8.9504 
+OK  base/g9t_R-default_W1                          exit 0 pose 0xee2a67a98434919a expect none void 0 bp AllPairs reuse None wall 5.738s win 11.4461 
+OK  base/g9t_J-default-tree_W8                     exit 0 pose 0x32d5e235342b4143 expect none void 0 bp Tree reuse None wall 1.423s win 2.8139 
+OK  base/g9t_J-default-allpairs_W8                 exit 0 pose 0x32d5e235342b4143 expect none void 0 bp AllPairs reuse None wall 2.282s win 4.5308 
+OK  base/g9t_R-default_W8                          exit 0 pose 0xee2a67a98434919a expect none void 0 bp AllPairs reuse None wall 2.913s win 5.7941 
+== l9fix 00:42:34
+OK  l9fix/c4_J-A_W1                                exit 0 pose 0x49a5ed10875958d7 expect match void 0 bp AllPairs reuse False wall 11.396s win 18.9549 
+OK  l9fix/c4_J-A_W8                                exit 0 pose 0x49a5ed10875958d7 expect match void 0 bp AllPairs reuse False wall 3.914s win 6.4876 
+OK  l9fix/c4_J-D_W1                                exit 0 pose 0x49a5ed10875958d7 expect match void 0 bp AllPairs reuse False wall 5.012s win 8.3184 
+OK  l9fix/c4_J-D_W8                                exit 0 pose 0x49a5ed10875958d7 expect match void 0 bp AllPairs reuse False wall 2.743s win 4.5362 
+OK  l9fix/c4_R_W1                                  exit 0 pose 0xa945b866513aab84 expect match void 0 bp AllPairs reuse False wall 6.808s win 11.3056 
+OK  l9fix/c4_R_W8                                  exit 0 pose 0xa945b866513aab84 expect match void 0 bp AllPairs reuse False wall 3.63s win 6.0079 
+OK  l9fix/c4_R-S_W1                                exit 0 pose 0x2a2b7926a48aab00 expect match void 0 bp AllPairs reuse False wall 5.107s win 8.4675 
+OK  l9fix/c4_R-S_W8                                exit 0 pose 0x2a2b7926a48aab00 expect match void 0 bp AllPairs reuse False wall 2.729s win 4.5047 
+OK  l9fix/c4_J-Son_W1                              exit 0 pose 0xcc2a5400c66eecce expect match void 0 bp AllPairs reuse False wall 6.736s win 11.1866 
+OK  l9fix/c4_J-Son_W8                              exit 0 pose 0xcc2a5400c66eecce expect match void 0 bp AllPairs reuse False wall 3.021s win 4.9937 
+OK  l9fix/trk_J-A_W1                               exit 0 pose 0x49a5ed10875958d7 expect match void 0 bp AllPairs reuse False wall 11.32s win 18.8429 
+OK  l9fix/trk_J-A_W8                               exit 0 pose 0x49a5ed10875958d7 expect match void 0 bp AllPairs reuse False wall 3.954s win 6.5651 
+OK  l9fix/trk_J-D_W1                               exit 0 pose 0x49a5ed10875958d7 expect match void 0 bp AllPairs reuse False wall 5.104s win 8.4821 
+OK  l9fix/trk_J-D_W8                               exit 0 pose 0x49a5ed10875958d7 expect match void 0 bp AllPairs reuse False wall 2.785s win 4.6194 
+OK  l9fix/trk_R_W1                                 exit 0 pose 0xa945b866513aab84 expect match void 0 bp AllPairs reuse False wall 6.804s win 11.3148 
+OK  l9fix/trk_R_W8                                 exit 0 pose 0xa945b866513aab84 expect match void 0 bp AllPairs reuse False wall 3.536s win 5.8676 
+OK  l9fix/trk_R-S_W1                               exit 0 pose 0x2a2b7926a48aab00 expect match void 0 bp AllPairs reuse False wall 5.108s win 8.4869 
+OK  l9fix/trk_R-S_W8                               exit 0 pose 0x2a2b7926a48aab00 expect match void 0 bp AllPairs reuse False wall 2.758s win 4.569 
+OK  l9fix/trk_J-Son_W1                             exit 0 pose 0xcc2a5400c66eecce expect match void 0 bp AllPairs reuse False wall 6.781s win 11.2728 
+OK  l9fix/trk_J-Son_W8                             exit 0 pose 0xcc2a5400c66eecce expect match void 0 bp AllPairs reuse False wall 2.886s win 4.7828 
+== cells 00:44:16
+OK  cells/H-trk-tree_trk_W1                        exit 0 pose 0x32d5e235342b4143 expect none void 0 bp Tree reuse False wall 3.29s win 6.5479 
+   fixture J500 = 0x32d5e235342b4143 recorded from cells/H-trk-tree_trk_W1 (earlier window: None)
+OK  cells/H-trk-tree_trk_W2                        exit 0 pose 0x32d5e235342b4143 expect match void 0 bp Tree reuse False wall 2.261s win 4.4926 
+OK  cells/H-trk-tree_trk_W4                        exit 0 pose 0x32d5e235342b4143 expect match void 0 bp Tree reuse False wall 1.596s win 3.1623 
+OK  cells/H-trk-tree_trk_W8                        exit 0 pose 0x32d5e235342b4143 expect match void 0 bp Tree reuse False wall 1.304s win 2.5779 
+OK  cells/H-trk-tree_trk_W16                       exit 0 pose 0x32d5e235342b4143 expect match void 0 bp Tree reuse False wall 1.428s win 2.8266 
+OK  cells/H-trk-ap_trk_W1                          exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 4.185s win 8.3387 
+OK  cells/H-trk-ap_trk_W2                          exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 3.173s win 6.3131 
+OK  cells/H-trk-ap_trk_W4                          exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 2.551s win 5.071 
+OK  cells/H-trk-ap_trk_W8                          exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 2.367s win 4.7029 
+OK  cells/H-trk-ap_trk_W16                         exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 2.472s win 4.912 
+OK  cells/L9-JA-off_c4_W1                          exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 9.559s win 19.0706 
+OK  cells/L9-JA-off_c4_W2                          exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 6.083s win 12.1221 
+OK  cells/L9-JA-off_c4_W4                          exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 4.244s win 8.4395 
+OK  cells/L9-JA-off_c4_W8                          exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 3.307s win 6.5713 
+OK  cells/L9-JA-off_c4_W16                         exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 3.42s win 6.7985 
+OK  cells/L9-JA-on_c4_W1                           exit 0 pose 0x30c5438bc6ad9ffa expect none void 0 bp AllPairs reuse True wall 8.681s win 17.317 
+   fixture JAon500c4 = 0x30c5438bc6ad9ffa recorded from cells/L9-JA-on_c4_W1 (earlier window: 0x30c5438bc6ad9ffa)
+OK  cells/L9-JA-on_c4_W2                           exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs reuse True wall 5.56s win 11.0781 
+OK  cells/L9-JA-on_c4_W4                           exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs reuse True wall 4.036s win 8.0243 
+OK  cells/L9-JA-on_c4_W8                           exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs reuse True wall 3.189s win 6.3372 
+OK  cells/L9-JA-on_c4_W16                          exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs reuse True wall 3.379s win 6.7169 
+OK  cells/L9-JD-off_c4_W1                          exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 4.269s win 8.4935 
+OK  cells/L9-JD-off_c4_W2                          exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 3.18s win 6.317 
+OK  cells/L9-JD-off_c4_W4                          exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 2.57s win 5.0946 
+OK  cells/L9-JD-off_c4_W8                          exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 2.336s win 4.6279 
+OK  cells/L9-JD-off_c4_W16                         exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 2.689s win 5.318 
+OK  cells/L9-JD-on_c4_W1                           exit 0 pose 0x30c5438bc6ad9ffa expect none void 0 bp AllPairs reuse True wall 3.338s win 6.6333 
+   fixture JDon500c4 = 0x30c5438bc6ad9ffa recorded from cells/L9-JD-on_c4_W1 (earlier window: 0x30c5438bc6ad9ffa)
+OK  cells/L9-JD-on_c4_W2                           exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs reuse True wall 2.706s win 5.3667 
+OK  cells/L9-JD-on_c4_W4                           exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs reuse True wall 2.374s win 4.6994 
+OK  cells/L9-JD-on_c4_W8                           exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs reuse True wall 2.214s win 4.385 
+OK  cells/L9-JD-on_c4_W16                          exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs reuse True wall 2.435s win 4.8265 
+OK  cells/L9-R-off_c4_W1                           exit 0 pose 0x87e561d20589d4a5 expect none void 0 bp AllPairs reuse False wall 12.85s win 11.6113 
+   fixture R1100 = 0x87e561d20589d4a5 recorded from cells/L9-R-off_c4_W1 (earlier window: 0x87e561d20589d4a5)
+OK  cells/L9-R-off_c4_W2                           exit 0 pose 0x87e561d20589d4a5 expect match void 0 bp AllPairs reuse False wall 9.618s win 8.5784 
+OK  cells/L9-R-off_c4_W4                           exit 0 pose 0x87e561d20589d4a5 expect match void 0 bp AllPairs reuse False wall 7.469s win 6.7202 
+OK  cells/L9-R-off_c4_W8                           exit 0 pose 0x87e561d20589d4a5 expect match void 0 bp AllPairs reuse False wall 6.623s win 5.9867 
+OK  cells/L9-R-off_c4_W16                          exit 0 pose 0x87e561d20589d4a5 expect match void 0 bp AllPairs reuse False wall 7.127s win 6.4136 
+OK  cells/L9-R-on_c4_W1                            exit 0 pose 0xc8bbe34cf6a8afc6 expect none void 0 bp AllPairs reuse True wall 9.686s win 8.6417 
+   fixture Ron1100c4 = 0xc8bbe34cf6a8afc6 recorded from cells/L9-R-on_c4_W1 (earlier window: 0xc8bbe34cf6a8afc6)
+OK  cells/L9-R-on_c4_W2                            exit 0 pose 0xc8bbe34cf6a8afc6 expect match void 0 bp AllPairs reuse True wall 7.784s win 7.0531 
+OK  cells/L9-R-on_c4_W4                            exit 0 pose 0xc8bbe34cf6a8afc6 expect match void 0 bp AllPairs reuse True wall 6.818s win 6.1794 
+OK  cells/L9-R-on_c4_W8                            exit 0 pose 0xc8bbe34cf6a8afc6 expect match void 0 bp AllPairs reuse True wall 6.329s win 5.7188 
+OK  cells/L9-R-on_c4_W16                           exit 0 pose 0xc8bbe34cf6a8afc6 expect match void 0 bp AllPairs reuse True wall 7.13s win 6.4384 
+OK  cells/L9-JA-a-off_c4_W1                        exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 9.563s win 18.9505 
+OK  cells/L9-JA-a-off_c4_W8                        exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse False wall 3.382s win 6.614 
+OK  cells/L9-JA-a-on_c4_W1                         exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs reuse True wall 8.656s win 17.143 
+OK  cells/L9-JA-a-on_c4_W8                         exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs reuse True wall 3.281s win 6.4083 
+OK  cells/L9-JC_c4_W1                              exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs reuse True wall 8.985s win 17.7871 
+   canary_ns 450000
+OK  cells/G9-JA-mid_g9p_W2                         exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse None wall 6.287s win 12.5445 
+OK  cells/G9-JA-mid_g9p_W4                         exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse None wall 4.277s win 8.5231 
+OK  cells/G9-JA-mid_g9p_W16                        exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse None wall 3.466s win 6.8993 
+OK  cells/G9-JA-mid_g9t_W2                         exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse None wall 6.287s win 12.5423 
+OK  cells/G9-JA-mid_g9t_W4                         exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse None wall 4.294s win 8.5552 
+OK  cells/G9-JA-mid_g9t_W16                        exit 0 pose 0x32d5e235342b4143 expect match void 0 bp AllPairs reuse None wall 3.596s win 7.1597 
+OK  cells/S-trk-tree-a_trk_W1                      exit 0 pose 0x32d5e235342b4143 expect match void 0 bp Tree reuse False wall 3.364s win 6.5753 
+OK  cells/S-trk-tree-a_trk_W8                      exit 0 pose 0x32d5e235342b4143 expect match void 0 bp Tree reuse False wall 1.373s win 2.6089 
+== jolt 00:48:29
+OK  cells/H-jolt56_j56_W1                          exit 0 hash 0xb8522b4e3fc62cfe threads 1 wall 5.49s mean[0,500) 10.6937 [100,500) 10.5599  
+OK  cells/H-jolt56_j56_W2                          exit 0 hash 0xb8522b4e3fc62cfe threads 2 wall 3.166s mean[0,500) 6.2629 [100,500) 6.2715  
+OK  cells/H-jolt56_j56_W4                          exit 0 hash 0xb8522b4e3fc62cfe threads 4 wall 2.104s mean[0,500) 4.1479 [100,500) 4.1985  
+OK  cells/H-jolt56_j56_W8                          exit 0 hash 0xb8522b4e3fc62cfe threads 8 wall 1.579s mean[0,500) 3.0958 [100,500) 3.1766  
+OK  cells/H-jolt56_j56_W16                         exit 0 hash 0xb8522b4e3fc62cfe threads 16 wall 1.524s mean[0,500) 2.984 [100,500) 2.9817  
+OK  cells/P-jolt56-prof_j56p_W1                    exit 0 hash 0xb8522b4e3fc62cfe threads 1 wall 7.622s mean[0,500) 15.0165 [100,500) 15.0993 dumps 5 
+OK  cells/P-jolt56-prof_j56p_W8                    exit 0 hash 0xb8522b4e3fc62cfe threads 8 wall 2.068s mean[0,500) 3.9042 [100,500) 4.0857 dumps 5 
+OK  jolt_receipt/j56_W1                            hash 0xb8522b4e3fc62cfe manifolds [100,500) 8489.0 [0,100) 7042.23 final 8489.0 (window 3 v5.6.0: 8489.0 / 7042.23 / 8489)
+OK  jolt_receipt/j56_W8                            hash 0xb8522b4e3fc62cfe manifolds [100,500) 8489.0 [0,100) 7042.23 final 8489.0 (window 3 v5.6.0: 8489.0 / 7042.23 / 8489)
+== red 00:49:01
+OK  red/trk_J-A_501                                exit 4 pose 0x9336b30a06a7d8af expect mismatch: 64480 vs 64480 bytes, first differing body Some(0) void 0 bp AllPairs reuse False wall 9.47s win 18.8685 
+OK  red/c4_J-A_501                                 exit 4 pose 0x9336b30a06a7d8af expect mismatch: 64480 vs 64480 bytes, first differing body Some(0) void 0 bp AllPairs reuse False wall 9.583s win 19.0747 
+OK  red/g9p_J-A_501                                exit 4 pose 0x9336b30a06a7d8af expect mismatch: 64480 vs 64480 bytes, first differing body Some(0) void 0 bp AllPairs reuse None wall 9.853s win 19.6373 
+OK  red/g9t_J-A_501                                exit 4 pose 0x9336b30a06a7d8af expect mismatch: 64480 vs 64480 bytes, first differing body Some(0) void 0 bp AllPairs reuse None wall 9.779s win 19.4897 
+== done 00:49:39: 112 processes, 0 failing: []

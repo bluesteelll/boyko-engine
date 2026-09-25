@@ -1,0 +1,156 @@
+{
+ "generated": "2026-09-25T06:07:48.315+03:00",
+ "rows_json": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\\scratchpad\\win7b\\rows7b.json",
+ "binaries": {
+  "trk": {
+   "exe": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7/bin/runner_93b2615b.exe",
+   "commit": "93b2615bcea4873e2d3af6b560c6e7997740f67f",
+   "kind": "runner",
+   "note": "window 7's trunk runner, run in place (same exe path as blocks A and B)",
+   "sha256_earlier_window": "24d52719c5f86635312bb69d9f04af09565ce397432ddf5b7442482381534bb4",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\\scratchpad\\win7\\bin\\runner_93b2615b.exe",
+   "sha256": "24d52719c5f86635312bb69d9f04af09565ce397432ddf5b7442482381534bb4"
+  },
+  "j56": {
+   "exe": "D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe",
+   "commit": "Jolt v5.6.0 (P0 build 918fd2b7)",
+   "kind": "jolt",
+   "note": "P0's Distribution build, run in place as windows 3 and 7",
+   "sha256_earlier_window": "918fd2b70ecc634cc0574cb676c56a3c929a46a51173cf9aa76fdd628e2ef0ad",
+   "path": "D:\\tmp\\jolt\\build-v5.6.0-dist\\PerformanceTest.exe",
+   "sha256": "918fd2b70ecc634cc0574cb676c56a3c929a46a51173cf9aa76fdd628e2ef0ad"
+  },
+  "par": {
+   "exe": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win6/bin/runner_6dd1f916.exe",
+   "commit": "6dd1f916d5399b7bbe80429bdfde4e5c0bd63848",
+   "kind": "runner",
+   "note": "window 6's C3b parent (RowWalk), run in place (same exe path as window 6)",
+   "sha256_earlier_window": "228f35140b1c207d04764f76df5cb1867de39c9b89c5e0db56fce60d55672c33",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\\scratchpad\\win6\\bin\\runner_6dd1f916.exe",
+   "sha256": "228f35140b1c207d04764f76df5cb1867de39c9b89c5e0db56fce60d55672c33"
+  },
+  "tip": {
+   "exe": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win6/bin/runner_983480a9.exe",
+   "commit": "983480a9a1aaf1d28e9c17b08c0c06821176cacf",
+   "kind": "runner",
+   "note": "window 6's C3b tip (LeafList), run in place (same exe path as window 6)",
+   "sha256_earlier_window": "f93e5fec1c1ec176bd86c1db21b4020ff2dbbda7bd7e0d12a0f8040c29821ebd",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\\scratchpad\\win6\\bin\\runner_983480a9.exe",
+   "sha256": "f93e5fec1c1ec176bd86c1db21b4020ff2dbbda7bd7e0d12a0f8040c29821ebd"
+  },
+  "c4": {
+   "exe": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7/bin/runner_989ca0f0.exe",
+   "commit": "989ca0f0575e054b89bb9c288ad95569ce493734",
+   "kind": "runner",
+   "note": "window 7's L9 C4 runner, run in place",
+   "sha256_earlier_window": "c4a75f82bac71fc69f4a75f2cc9f7dfa2655fbef11b1ab46fcbdcafd54a01b57",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\\scratchpad\\win7\\bin\\runner_989ca0f0.exe",
+   "sha256": "c4a75f82bac71fc69f4a75f2cc9f7dfa2655fbef11b1ab46fcbdcafd54a01b57"
+  },
+  "g4r": {
+   "exe": "bin/bpbench_g4ref_93b2615b.exe",
+   "commit": "93b2615bcea4873e2d3af6b560c6e7997740f67f + G4_SIZES",
+   "kind": "criterion",
+   "note": "INSTRUMENT: benches/broadphase.rs of 93b2615b with only G4_SIZES changed (variant/g4ref.diff), bench profile; never committed",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\7dc37fc3-7b1e-46f1-89da-ccd0dba7c788\\scratchpad\\win7b\\bin\\bpbench_g4ref_93b2615b.exe",
+   "sha256": "f96a9c11ebd72d4d581784cf37728fd6da15bc63b28414d7e895667753033fd4"
+  }
+ },
+ "fixtures": {
+  "J500": {
+   "hash": "0x32d5e235342b4143",
+   "file": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7/gate/fixtures/J500.pose",
+   "also": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win6/gate/fixtures/J500.pose",
+   "sha256": "eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f",
+   "sha256_win6": "eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f"
+  },
+  "JAon500c4": {
+   "hash": "0x30c5438bc6ad9ffa",
+   "file": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7/gate/fixtures/JAon500c4.pose",
+   "sha256": "e268d7a5e9ffc4c6b25d403601e119d20b490cbaed5cec4a910e3159f28a5b89",
+   "recorded_by": "window 7's gate7.py (win7/gate/fixtures/fixtures.json)"
+  }
+ },
+ "protocol": {
+  "k_per_cell": 6,
+  "passes": 2,
+  "rounds_per_pass": 3,
+  "receipt_s_between_processes": 5.0,
+  "receipt_s_before_pass": 10.0,
+  "busy_pct_limit": 5.0,
+  "rerun_contaminated_once_at_end_of_pass": true,
+  "void_pass_on_build_process": true,
+  "placement": "P-none",
+  "idle_rule": "tools/wait_idle7.ps1 (window 7's, verbatim): 0 build procs AND 0 procs under D:/wt/_targets or D:/wt/mq-* on 3 consecutive 60-s polls, 10-s cpu < 5 %; up to 30 polls per wait; a timeout STOPS the window",
+  "hard_stop_local": "11:45",
+  "stop_flag": "win7b/STOP",
+  "q3_k": 3,
+  "canary": {
+   "R_gtw": 0.07542383708085926,
+   "rise_over_injected": 1.0608500059192614
+  }
+ },
+ "blocks": [
+  {
+   "name": "Q1C",
+   "item": "Q1",
+   "priority": 1,
+   "warmup": [
+    "H-trk-tree",
+    "trk",
+    8
+   ]
+  },
+  {
+   "name": "Q2C",
+   "item": "Q2",
+   "priority": 2,
+   "warmup": [
+    "C3b-TA-armed",
+    "tip",
+    1
+   ]
+  },
+  {
+   "name": "Q3",
+   "item": "Q3",
+   "priority": 3,
+   "warmup": null,
+   "passes": 1,
+   "rounds": 3
+  },
+  {
+   "name": "Q4",
+   "item": "Q4",
+   "priority": 4,
+   "warmup": [
+    "L9-JA-on",
+    "c4",
+    1
+   ]
+  },
+  {
+   "name": "Q2D",
+   "item": "Q2",
+   "priority": 2,
+   "warmup": [
+    "C3b-TA-armed",
+    "tip",
+    1
+   ]
+  },
+  {
+   "name": "Q1D",
+   "item": "Q1",
+   "priority": 1,
+   "warmup": [
+    "H-trk-tree",
+    "trk",
+    8
+   ]
+  }
+ ],
+ "cutoff": "2026-09-25T11:45:00",
+ "test": false,
+ "resume": false
+}
