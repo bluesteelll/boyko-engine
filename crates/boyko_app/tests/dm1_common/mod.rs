@@ -29,6 +29,7 @@
 #![allow(dead_code)] // each DM1 binary uses a subset of this fixture
 
 pub mod edit_reaches_gpu;
+pub mod grow_repoint;
 pub mod pm_falling_edge;
 
 use std::path::{Path, PathBuf};
