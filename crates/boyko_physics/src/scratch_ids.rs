@@ -17,7 +17,7 @@
 //! that ascending production range, the scratch ids occupy a fixed region at
 //! the TOP of `[0, MAX_COMPONENTS)` (`MAX_COMPONENTS == 512`), floored at
 //! [`SCRATCH_REGION_MIN_ID`] — reaching that floor from the production counter
-//! takes 384 distinct component types against a measured ~142 (see the constant's
+//! takes 352 distinct component types against a measured ~150 (see the constant's
 //! docs for the census). If a production type ever DID climb into the region, the
 //! `register_layout` collision check panics loudly (a wrong-type slot is never
 //! silently aliased) — fail-fast, not silent corruption. The floor is the margin
