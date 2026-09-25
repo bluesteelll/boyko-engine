@@ -57,7 +57,7 @@ remarks, `:2423-2517`) and with the owner's hard requirement H-1 (§1). It chang
 - **The rule.** Every modding item that adds code to a kernel crate (a function body, a type with
   methods, a trait impl) is generic over `ModSeam` (01 KC-19b). `ModSeam` is a `#[doc(hidden)]
   pub unsafe trait` with no methods and **no implementor in any kernel crate**. Its implementors
-  live in `boyko_mod_host`, `boyko_mod_api`, `boyko_mod_registry` and census test crates. ⚠ *2026-09-24 (AP9 W4; `ALLOCATOR-DESIGN-SPACE.md` rev 2.7 P58.4): a proc-macro crate "must only export procedural macros" (Rust Reference, linkage), so none of these three can hold one. If Stage 3 makes an SDK macro procedural (MS-02a's registration macro, the trampoline, a `stable_name` derive), it lives in a fourth crate of its own, never `boyko_macros`, and that crate joins the modding crates of UG-15's ban on runtime-invoked code (03 `:184`).*
+  live in `boyko_mod_host`, `boyko_mod_api`, `boyko_mod_registry` and census test crates. ⚠ *2026-09-24 (AP9 W4; `ALLOCATOR-DESIGN-SPACE.md` rev 2.7 P58.4): a proc-macro crate "must only export procedural macros" (Rust Reference, linkage), so none of these three can hold one. If Stage 3 makes an SDK macro procedural (MS-02a's registration macro, the trampoline, a `stable_name` derive), it lives in a fourth crate of its own, never `boyko_macros`, and that crate joins the modding crates of UG-15's ban on runtime-invoked code (03 `:192`).*
 - **Why it holds at every profile.** A generic function is compiled only where its type arguments
   are known ("the compiler can only compile a generic function when it knows the specific type
   arguments it is instantiated with", matklad, the source cited at

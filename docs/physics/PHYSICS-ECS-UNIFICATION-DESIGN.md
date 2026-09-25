@@ -3806,7 +3806,7 @@ The critic's NB1 fix is "one erratum line, appended with this log". This file is
 
 ## How to read Erratum E2
 
-- **What it is.** The unified system plan (rev 6.2) owes this design one erratum, E2, as its step DOC-2 (`docs/unification/UNIFIED-SYSTEM-PLAN-00-OVERVIEW.md` §5, the rows at `:155` and `:161`; `UNIFIED-SYSTEM-PLAN-02-ORDER-OF-WORK.md` §2, "Document steps", `:97`). E2 applies the plan's rulings U-2, U-3, U-17, U-20 and U-28 (00 §3), the kernel contract's KC-10, KC-12, KC-13, KC-15 and KC-36 (01 §2), and hazards H-03 and H-16 (01 §2.1). It adds no mechanism of its own. Each item restates a ruling the plan has already made, at the place where this design states the text the ruling supersedes.
+- **What it is.** The unified system plan (rev 6.2) owes this design one erratum, E2, as its step DOC-2 (`docs/unification/UNIFIED-SYSTEM-PLAN-00-OVERVIEW.md` §5, the rows at `:155` and `:161`; `UNIFIED-SYSTEM-PLAN-02-ORDER-OF-WORK.md` §2, "Document steps", `:123`). E2 applies the plan's rulings U-2, U-3, U-17, U-20 and U-28 (00 §3), the kernel contract's KC-10, KC-12, KC-13, KC-15 and KC-36 (01 §2), and hazards H-03 and H-16 (01 §2.1). It adds no mechanism of its own. Each item restates a ruling the plan has already made, at the place where this design states the text the ruling supersedes.
 - **Append-only, as before.** Nothing above is rewritten. The only lines edited in place are the two header lines at the top of the file (`:5`, `:7`); each keeps its old text, struck through, on the same line. So no line number cited anywhere in this file, or in the plan, moves. Where E2 supersedes a passage, the passage is named below by its line on this tree and left where it is.
 - **Reading order:** rev 2 → `P-§…` → `P4-§…` → `P5-§…` → Erratum E1 → **Erratum E2**. Where E2 and earlier text disagree, E2 rules.
 - **Review.** E2 is reviewed by engine critique pass 3 (EP3), together with the engine design's rev-3 patch and rev 4 (02 §2). EP3 must close before D-S3(iii), AS2 and every engine-sourced D-E rung.
@@ -3814,7 +3814,7 @@ The critic's NB1 fix is "one erratum line, appended with this log". This file is
   - **[J]** = `D:/wt/joltab` @ `d552be05`, the plan's tree;
   - **[I]** = `integ/unified` @ `c33d786d`, the trunk line on 2026-09-23.
 
-  Plan documents are cited at `49f2fcfb`. Every citation below was re-located by content on the tree it names, with read-only `git show` / `git grep`; none is copied from the plan without that check. Neither this file nor the engine design changed between the plan's `b716a5dc` and `49f2fcfb` (`git log b716a5dc..49f2fcfb` on both paths is empty), so the plan's citations into them hold here.
+  Plan documents are cited at `49f2fcfb`. Every citation below was re-located by content on the tree it names, with read-only `git show` / `git grep`; none is copied from the plan without that check. Neither this file nor the engine design changed between the plan's `b716a5dc` and `49f2fcfb` (`git log b716a5dc..49f2fcfb` on both paths is empty), so the plan's citations into them hold here. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in E2 now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
 - Nothing was built, run or timed for this erratum.
 
 ## E2-1. `Release` is an associated type with markers `Immediate`, `Chained` and `Stamped` (U-3; 01 KC-12, KC-13)
@@ -4078,7 +4078,7 @@ EP3 is the unified plan's engine critique pass 3. It reviewed Erratum E2 togethe
 - **What it is.** E3 adopts the two Optional remarks EP3 made on this file (the log above). It adds one type bound (E3-1) and rewords one heading (E3-2).
 - **Append-only, as before.** Only the header lines `:5` and `:7` are edited in place, each keeping its old text struck through. Every superseded passage is named below by its line on this tree and left where it is.
 - **Reading order:** rev 2 → `P-§…` → `P4-§…` → `P5-§…` → Erratum E1 → Erratum E2 → **Erratum E3**. Where E3 and earlier text disagree, E3 rules.
-- **Trees.** Line numbers are on `u/doc-1-2` (base `49f2fcfb`); E2 and E3 are appended after `:3803`, so no earlier line number moves.
+- **Trees.** Line numbers are on `u/doc-1-2` (base `49f2fcfb`); E2 and E3 are appended after `:3803`, so no earlier line number moves. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in E3 now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
 - Nothing was built, run or timed.
 
 ## E3-1. `open_chain` and `close_chain` are bounded to `Release = Chained` (EP3 O1; U-3; 01 KC-12)
@@ -4112,7 +4112,7 @@ impl<G: DenseGroup> GroupTail<'_, G> {
 
 **Cost.** 0. `PhysicsBody` is `Chained`, so S1's and S6's calls (`:3616`) compile unchanged, and the bound is checked before monomorphisation.
 
-**Gate.** Two UG-17 fixtures in D-S3(iii)'s E0271 family: `open_chain` on a `Stamped` group → E0271, and `close_chain` on a `Stamped` group → E0271. The plan's D-S3(iii) row (`02:143`) is patched on the same line (2026-09-23).
+**Gate.** Two UG-17 fixtures in D-S3(iii)'s E0271 family: `open_chain` on a `Stamped` group → E0271, and `close_chain` on a `Stamped` group → E0271. The plan's D-S3(iii) row (`02:169`) is patched on the same line (2026-09-23).
 
 **Rejected:** EP3's alternative, a census of zero `open_chain` call sites in `boyko_render`. It pins call sites in one crate, and it cannot see a generic caller instantiated elsewhere; the bound covers every caller at no cost.
 
@@ -4136,7 +4136,7 @@ E2-7's bullets (`:3998-4000`) and its replay paragraphs (`:4002-4008`) stand; th
 
 | Item | EP3 | Supersedes in this file (left in place) | Plan (same-line, 2026-09-23) | Plan rung |
 |---|---|---|---|---|
-| E3-1 chain methods bounded to `Chained` | O1 | `:3435`, `:3439`; the invariant at `:3881` | `02:143` | D-S3(iii) |
+| E3-1 chain methods bounded to `Chained` | O1 | `:3435`, `:3439`; the invariant at `:3881` | `02:169` | D-S3(iii) |
 | E3-2 E2-7 reworded | O3 | `:3995`; `:3997` (first sentence) | `00:161` | — |
 
 ## External sources (read 2026-09-23)
@@ -4147,9 +4147,9 @@ E2-7's bullets (`:3998-4000`) and its replay paragraphs (`:4002-4008`) stand; th
 
 - The design stays **closed at rev 5**. Errata E1 (2026-09-11), E2 and E3 (2026-09-23) apply on top of it, in that order.
 - **EP3 reviewed Erratum E2 on 2026-09-23.** It raised no Critical or Important remark against this file. Its two Optional remarks on this file are adopted by E3. Its verdict for the pass as a whole, CHANGES_REQUESTED, rests on engine-design remarks, which the engine's rev 4.1 resolves.
-- **What waits.** D-S3(iii)'s own content is untouched by EP3's remarks (EP3's map). It gains E3-1's two fixtures. Whether EP3 now counts as closed for D-S3(iii)'s prerequisite ("EP3 closed", `02:143`) is the orchestrator's call.
+- **What waits.** D-S3(iii)'s own content is untouched by EP3's remarks (EP3's map). It gains E3-1's two fixtures. Whether EP3 now counts as closed for D-S3(iii)'s prerequisite ("EP3 closed", `02:169`) is the orchestrator's call.
 - **Pass-5 non-blocking items:** unchanged since E2. NB1 is closed by E1, NB2 is closed as U-17 (E2-3), and NB3–NB5 are to be handled during implementation.
-- **Evidence.** This file and the plan at `49f2fcfb` plus this branch's commits. EP3's review is logged in the engine design. No cargo was run and nothing was timed.
+- **Evidence.** This file and the plan at `49f2fcfb` plus this branch's commits. EP3's review is logged in the engine design. No cargo was run and nothing was timed. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in this status block now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
 
 # Erratum E4 (2026-09-24): K3's edit policy (engine rev 4.2; EP4 W2′)
 
@@ -4161,7 +4161,7 @@ E2-7's bullets (`:3998-4000`) and its replay paragraphs (`:4002-4008`) stand; th
   - It changes nothing that physics runs.
 - **Append-only, as before.** Only the header lines `:5` and `:7` are edited in place, each keeping its old text struck through. Every superseded passage is named below by its line on this tree and left where it is.
 - **Reading order:** rev 2 → `P-§…` → `P4-§…` → `P5-§…` → Erratum E1 → Erratum E2 → Erratum E3 → **Erratum E4**. Where E4 and earlier text disagree, E4 rules.
-- **Trees.** Line numbers are on `u/doc-3-4` @ `4db26681`. This file there is byte-identical to `c1e9f1db`, where EP4 read it. E4 is appended after `:4152`, so no earlier line number moves. The K3 surface is not on that tree's code yet (`git grep` finds no `DenseColumnMut`, `GroupColumn`, `DenseGroup` or `GroupHead` under `crates/`), so everything below is design text.
+- **Trees.** Line numbers are on `u/doc-3-4` @ `4db26681`. This file there is byte-identical to `c1e9f1db`, where EP4 read it. E4 is appended after `:4152`, so no earlier line number moves. The K3 surface is not on that tree's code yet (`git grep` finds no `DenseColumnMut`, `GroupColumn`, `DenseGroup` or `GroupHead` under `crates/`), so everything below is design text. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in E4 now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
 - Nothing was built, run or timed.
 
 ## E4-1. `DenseGroup` gains `type Edits: EditPolicy`; `DenseColumnMut` and `GroupHead::view` are bounded to `Unlogged` (EP4 W2′; 01 KC-23)
@@ -4214,7 +4214,7 @@ impl<G: DenseGroup> GroupHead<'_, G> {
 
 | Item | EP4 | Supersedes in this file (left in place) | Plan (same-line; the plan's Close stage applies it) | Plan rung |
 |---|---|---|---|---|
-| E4-1 `type Edits`; `DenseColumnMut` and `GroupHead::view` bounded to `Unlogged`; `DenseColumn` read-only | W2′ | `:524`, `:2780`; E2-1's `DenseGroup` at `:3834-3839` (one item added) | `01:173` (KC-23), `01:99` (KC-12), `02:168` (D-E7) | D-E7 |
+| E4-1 `type Edits`; `DenseColumnMut` and `GroupHead::view` bounded to `Unlogged`; `DenseColumn` read-only | W2′ | `:524`, `:2780`; E2-1's `DenseGroup` at `:3834-3839` (one item added) | `01:173` (KC-23), `01:99` (KC-12), `02:196` (D-E7) | D-E7 |
 
 ## External sources (read 2026-09-24)
 
@@ -4241,7 +4241,7 @@ impl<G: DenseGroup> GroupHead<'_, G> {
   - Both are closed in the engine's rev-4.2 closure (`ENGINE-RUNTIME-ECS-DESIGN.md`, C-1 and C-4). E4-2 and E4-3 record what changes in K3's text here.
 - **Convention: no line moves.** The closure is appended after `:4232`, which was E4's last line. In place, only the header's `:5` and `:7` gain a clause, and a one-line marker is added at the end of each of three lines: `:4193`, `:4202` and `:4224`.
 - **Where E4-2 and E4-3 disagree with earlier text,** including E4-1, they rule.
-- **Trees.** As in E4: this file on `u/doc-3-4`, and code at `4db26681`. Nothing was built, run or timed.
+- **Trees.** As in E4: this file on `u/doc-3-4`, and code at `4db26681`. Nothing was built, run or timed. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in the E4 closure now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
 
 ## E4-2. `DenseColumn` holds a shared slice only; `SolverBodies` reads `BodyInertia` through one (EP5 W1)
 
@@ -4282,9 +4282,9 @@ pub struct SolverBodies<'a> {
 **Cost: 0.** A slice is a pointer and a length, as a view is. A lane indexes it under the bound it already proves for `row_ptr` (`slot < slot_bound ≤ len`), and may use `get_unchecked` under a `// SAFETY:` comment where a bounds check is measured to matter.
 
 **Gate: the engine's `DenseColumn` read-only census** (engine C-1).
-- Rules: (r0) the only field that is not zero-sized is `&'w [T]`; (r1) no `pub` fn returns `*mut`, `&mut`, `TypedDenseView`, `NonNull` or a `Cell`; (r2) no `DerefMut`, `AsMut`, `BorrowMut` or `IndexMut`; (r3) no `from_raw_parts_mut`, `as_mut_ptr`, `cast_mut` or `*mut` in its impls.
+- Rules: (r0) the only field that is not zero-sized is `&'w [T]`; (r1) no ~~`pub` fn returns `*mut`, `&mut`, `TypedDenseView`, `NonNull` or a `Cell`~~ fn of it, inherent `pub` or in any trait impl, returns a type that contains `*mut`, `&mut`, `TypedDenseView`, `NonNull`, `Cell` or `UnsafeCell` ⚠ *2026-09-24, doc fix-up W2: EP6 O1 (plan 02 `:175`), as engine C-1's (r1) now reads (`ENGINE-RUNTIME-ECS-DESIGN.md:4954`). "`pub` fn" never matches a trait impl's fns, which the census reads too (`SystemParam` included), and `UnsafeCell` is refused beside `Cell`; a `&mut` parameter is not refused, because `init_state`, `init_access` and `get_param` must spell `&mut`*; (r2) no `DerefMut`, `AsMut`, `BorrowMut` or `IndexMut`; (r3) no `from_raw_parts_mut`, `as_mut_ptr`, `cast_mut` or `*mut` in its impls.
 - Anti-vacuity, and red controls (c1) a `view()` → exactly {r1} and (c2) an `as_mut_slice()` → exactly {r1, r3}.
-- It is red-first at **D-S3(ii)**, which builds K3's params (plan `02:142`), and D-E7 re-runs it.
+- It is red-first at **D-S3(ii)**, which builds K3's params (plan `02:168`), and D-E7 re-runs it.
 - UG-08's Tree Borrows leg on D-S3(ii) reports a write through the slice as undefined behaviour.
 
 **Rungs.**
@@ -4316,8 +4316,8 @@ pub struct SolverBodies<'a> {
 
 | Item | EP5 | Supersedes in this file (left in place) | Plan (same-line, applied by the plan's Close step) | Plan rung |
 |---|---|---|---|---|
-| E4-2: `DenseColumn` is `{ &'w [T] }` with shared accessors; `SolverBodies` holds `&'a [BodyInertia]`; the read-only census | W1 | `:523` (form), `:555`, `:4193` (basis), `:4202-4205` | `02:142` (D-S3(ii)), `02:449` (U5), `02:168` (D-E7), `01:99` (KC-12) | D-S3(ii), U5, D-E7 |
-| E4-3: `anchor_transition` marks a `Logged` group's newly anchored slot through a `logged` byte | O3 | `:1377-1378` (one step added) | `02:168`, `01:99` | D-E7 |
+| E4-2: `DenseColumn` is `{ &'w [T] }` with shared accessors; `SolverBodies` holds `&'a [BodyInertia]`; the read-only census | W1 | `:523` (form), `:555`, `:4193` (basis), `:4202-4205` | `02:168` (D-S3(ii)), `02:485` (U5), `02:196` (D-E7), `01:99` (KC-12) | D-S3(ii), U5, D-E7 |
+| E4-3: `anchor_transition` marks a `Logged` group's newly anchored slot through a `logged` byte | O3 | `:1377-1378` (one step added) | `02:196`, `01:99` | D-E7 |
 
 ## External sources (read 2026-09-24)
 

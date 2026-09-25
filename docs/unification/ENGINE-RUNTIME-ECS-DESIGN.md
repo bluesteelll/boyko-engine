@@ -1038,7 +1038,7 @@ There is no `dyn` on any per-frame path.
   - Checks against `tests/ecs_form_ledger.toml`, where each row is `{form, rung, tag}`.
   - Fails on a new site, a stale row, or a total different from the recorded count (anti-vacuity).
   - **A row may change only its `form` label when a rung changes its index space or its gate without removing storage.** Such a row is not counted as removed (W5).
-- **G-LOOP.** Runner loop census; the allowlist only shrinks, 7 → 0.
+- **G-LOOP.** Runner loop census; the allowlist only shrinks, ~~7 → 0~~ 9 steps / 18 sites → 0. ⚠ *2026-09-24, doc fix-up O2: B2 PC1, pinned by G-LOOP at B2 (`crates/boyko_app/tests/g_loop_runner_world_writes.rs`): the seven steps of this design's G-LOOP row plus F9 and F14, as that row (`:120`) and plan 03 UG-14 (`UNIFIED-SYSTEM-PLAN-03-GATES.md:23`, `:35`) now read.*
 - **G-GRAPH.** A headless `EnginePlugins` app. Checks every §6 system, set and edge, including `UiBindSet` after `GameplaySet`. Main exclusive systems must equal `{ui_bind_apply}`. Each resource-column has one writer.
 - **G-ALLOC.** A counting allocator, steady frames 10..20. Budget only decreases, and the data path is 0. Anti-vacuity: UI nodes > 0 and instances > 0.
 - **G-RES (new, record-only).** Committed bytes of kernel ScratchColumns after boot, recorded per rung (O2). This is not a pass/fail gate.
@@ -2938,7 +2938,7 @@ Depends on: ED5, ED8, ED9, ED16–ED20, §17.
 
 ## How to read rev 4
 
-- **Why rev 4 exists.** Engine critique pass 3 never ran on rev 3 (unified plan risk RK-2, `docs/unification/UNIFIED-SYSTEM-PLAN-00-OVERVIEW.md:171`). Rev 3 was filed against physics rev 3, and physics rev 4 and rev 5 changed the part this design depends on (K6: `M:…PHYSICS…:2449-2463`, `:3330-3343`). The unified system plan, rev 6.2, makes the rulings, and its step DOC-2 writes rev 4 (00 §5, the rows at `:156` and `:162`). **Engine critique pass 3 (EP3)** reviews the rev-3 patch, rev 4 and physics Erratum E2 together (02 §2, `:98`).
+- **Why rev 4 exists.** Engine critique pass 3 never ran on rev 3 (unified plan risk RK-2, `docs/unification/UNIFIED-SYSTEM-PLAN-00-OVERVIEW.md:171`). Rev 3 was filed against physics rev 3, and physics rev 4 and rev 5 changed the part this design depends on (K6: `M:…PHYSICS…:2449-2463`, `:3330-3343`). The unified system plan, rev 6.2, makes the rulings, and its step DOC-2 writes rev 4 (00 §5, the rows at `:156` and `:162`). **Engine critique pass 3 (EP3)** reviews the rev-3 patch, rev 4 and physics Erratum E2 together (02 §2, `:124`).
 - **What rev 4 changes.** Each block names its ruling.
   1. K6′ is re-filed against physics rev 5 (U-3; 01 KC-12, KC-13): P4-ED16, with its consequences in P4-§0, P4-ED5, P4-ED15, P4-§5, P4-names, P4-§6, P4-§9, P4-§10, P4-§11, P4-§13, P4-§17 and P4-§18.
   2. EK1 is registry-free (U-2; 01 KC-10): P4-§0, P4-§9, P4-§10, P4-§13.
@@ -2949,7 +2949,7 @@ Depends on: ED5, ED8, ED9, ED16–ED20, §17.
 - **Reading order:** rev 2 body → the rev-3 patch (`P-…`) → the rev-4 patch (`P4-…`). A section that rev 4 does not name reads as rev 3 left it. As in rev 3, a **Removed** quote leaves the reading order, not the file: every quoted passage stays where it is, and each is named by its line on this tree.
 - **Edited in place:** only the header's two lines, `:4` and `:7`. Each keeps its old text, struck through, on the same line, so no line number moves; the plan cites this file by line (for example `:1883`, `:2080-2092`, `:2454`, `:2824`).
 - **Kernel names.** The kernel is now the plan's KC-01..KC-37 (`UNIFIED-SYSTEM-PLAN-01-KERNEL-CONTRACT.md` §2), mapped from this design's ids in 01 §3. Where rev 2 or rev 3 names a physics rung (U1, U2, U5b, S0) as the owner of a kernel feature, rev 4 names the KC and the plan rung that lands it (P4-§9, P4-§12).
-- **Trees.** Line numbers of this file, of the physics design and of the plan are on `u/doc-1-2` @ `49f2fcfb`. The physics design's lines up to `:3803` are unchanged by Erratum E2, which is appended at `:3805-4035`. Code is cited on two trees, each named at the citation: **[J]** = `D:/wt/joltab` @ `d552be05`, the plan's tree; **[I]** = `integ/unified` @ `c33d786d`, the trunk line on 2026-09-23. Rev 2 and rev 3 read J at `d11962a9`; their citations are re-derived only where rev 4 relies on one. External sources are listed at the end.
+- **Trees.** Line numbers of this file, of the physics design and of the plan are on `u/doc-1-2` @ `49f2fcfb`. The physics design's lines up to `:3803` are unchanged by Erratum E2, which is appended at `:3805-4035`. Code is cited on two trees, each named at the citation: **[J]** = `D:/wt/joltab` @ `d552be05`, the plan's tree; **[I]** = `integ/unified` @ `c33d786d`, the trunk line on 2026-09-23. Rev 2 and rev 3 read J at `d11962a9`; their citations are re-derived only where rev 4 relies on one. External sources are listed at the end. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in rev 4's text now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
 - Nothing was built, run or timed.
 
 ---
@@ -3645,18 +3645,18 @@ O-11, O-12 and O-13 are unchanged.
 
 | EP3 | Action | Where in rev 4.1 | Plan (same-line patches, dated 2026-09-23) |
 |---|---|---|---|
-| C1 (Critical) | FIX. `DESPAWN_AT_ZERO` is re-evaluated at two edges: the count reaching 0 (rev 3's edge), and `Pinned` leaving the entity (new: `Pinned`'s `on_remove`). Each edge enqueues `DespawnAtZeroCommand`, which despawns only if, at its apply, the entity is live, unpinned and at count 0. The redirect still enqueues `RemoveCommand::<Pinned>`. D-E2's red-first set gains both of EP3's orders, the reverse order, a user unpin at count 0, and a re-pin race, each with its mutation | P4.1-§9; P4.1-§17; AS4's cell (P4.1-§12) | 02 §4.4 step 3 (`02:724-726`); 02 §2 D-E2 (`02:282-284`) |
-| W1 | FIX. No absolute depth is asserted, because the drain applies every command inside its own bracket. The observable is a sequence witness, `["returned", "unpinned"]`, plus "no despawn hook or observer of E ran" | P4.1-§17 | `02:282-283`, `02:724-725` |
+| C1 (Critical) | FIX. `DESPAWN_AT_ZERO` is re-evaluated at two edges: the count reaching 0 (rev 3's edge), and `Pinned` leaving the entity (new: `Pinned`'s `on_remove`). Each edge enqueues `DespawnAtZeroCommand`, which despawns only if, at its apply, the entity is live, unpinned and at count 0. The redirect still enqueues `RemoveCommand::<Pinned>`. D-E2's red-first set gains both of EP3's orders, the reverse order, a user unpin at count 0, and a re-pin race, each with its mutation | P4.1-§9; P4.1-§17; AS4's cell (P4.1-§12) | 02 §4.4 step 3 (`02:777-779`); 02 §2 D-E2 (`02:316-318`) |
+| W1 | FIX. No absolute depth is asserted, because the drain applies every command inside its own bracket. The observable is a sequence witness, `["returned", "unpinned"]`, plus "no despawn hook or observer of E ran" | P4.1-§17 | `02:316-317`, `02:777-778` |
 | W2 | FIX. EP3's suggested form is refined: a sealed *supertrait* would still leak `Group`, because a trait bound gives access to its supertraits' associated items (the Rust Reference). So the group, the lane and the key ride on a separate sealed trait in a private module, not a supertrait of `GpuAssetKind`. The key accessor takes an unnameable token. Five UG-17 fixtures and a green arm land with AS2 | P4.1-ED16; P4.1-§10; AS2's cell (P4.1-§12) | — |
 | W3 | FIX. `EcsMaster::clear()` is refused with a coded panic, before any store is touched, while an `AssetSentinel` lives. `:2717` and `:2743` are superseded, and `:3497` is corrected | P4.1-ED5; P4.1-§12; P4.1-§13 | — |
-| W4 | FIX. G-ALLOC is UG-03's engine scenes: E1 (headless `EnginePlugins` + `UiPlugins`, lands in B2) and E1v (the VisibilityBuffer boot in the device leg, lands in HO2 as its red-first). HO2's cell is restated | P4.1-§12 | 03 UG-03 (`03:12`, `03:39`); 02 B2 (`02:72`) |
-| O1 | ADOPTED in physics Erratum E3-1: `open_chain` and `close_chain` are bounded to `Release = Chained` (E0271) | physics E3-1 | 02 D-S3(iii) (`02:143`) |
-| O2 | ADOPTED. The `every_tick` reader refusal covers every schedule other than Fixed | P4.1-ED7; P4.1-§17 | 02 D-E8 (`02:169`) |
+| W4 | FIX. G-ALLOC is UG-03's engine scenes: E1 (headless `EnginePlugins` + `UiPlugins`, lands in B2) and E1v (the VisibilityBuffer boot in the device leg, lands in HO2 as its red-first). HO2's cell is restated | P4.1-§12 | 03 UG-03 (`03:12`, `03:45`); 02 B2 (`02:72`) |
+| O1 | ADOPTED in physics Erratum E3-1: `open_chain` and `close_chain` are bounded to `Release = Chained` (E0271) | physics E3-1 | 02 D-S3(iii) (`02:169`) |
+| O2 | ADOPTED. The `every_tick` reader refusal covers every schedule other than Fixed | P4.1-ED7; P4.1-§17 | 02 D-E8 (`02:197`) |
 | O3 | ADOPTED in physics Erratum E3-2: E2-7's heading and fact line are reworded | physics E3-2 | 00 `:161` |
-| O4 | ADOPTED. [I] `boyko_ui/tests/ui_a0_clock.rs:421` joins D-E23's caller list | P4.1-§4.2 | 02 D-E23 (`02:184`) |
+| O4 | ADOPTED. [I] `boyko_ui/tests/ui_a0_clock.rs:421` joins D-E23's caller list | P4.1-§4.2 | 02 D-E23 (`02:212`) |
 | O5 | ADOPTED. `os_event_sink` takes `&mut self` and is setup-only. The rank-4 teardown callback takes each lane out of the world before the release | P4.1-ED7; P4.1-§5 | — |
 | Flags (a)–(e) | (a) and (c) accepted by EP3; (b) confirmed on [I] as well; (d) is W2's subject; (e) is W3's | P4.1-ED7; P4.1-ED16 | — |
-| Q1 | D-E20–D-E23 are plan-sourced (KC-37 (b), (c), (i), (j)), not engine-sourced. Like D-E0, D-E18 and D-E19, they do not wait for EP3; the plan's DAG already draws them so (02 `:550`) | P4.1-§12 | 00 `:156` |
+| Q1 | D-E20–D-E23 are plan-sourced (KC-37 (b), (c), (i), (j)), not engine-sourced. Like D-E0, D-E18 and D-E19, they do not wait for EP3; the plan's DAG already draws them so (02 `:590`) | P4.1-§12 | 00 `:156` |
 | Q2 | Intended, and now stated: the despawn at zero is a plain despawn, and it cascades | P4.1-§9 | — |
 
 The review follows verbatim.
@@ -3798,7 +3798,7 @@ Sources: [Rust error index E0446](https://doc.rust-lang.org/error_codes/E0446.ht
   - As before, a **Removed** quote takes a passage out of the reading order, not out of the file. Each quoted passage is named by its line on this tree.
 - **Edited in place:** only the header's two lines, `:4` and `:7`. Each keeps its old text struck through on the same line, so no line number moves.
 - **Trees.**
-  - Line numbers of this file, of the physics design and of the plan are on `u/doc-1-2`. Its base is `49f2fcfb`, and the allocator's commit `226894d9` sits beneath this patch; that commit touches no line cited here except in plan files 00, 02 and 03, and those edits are same-line.
+  - Line numbers of this file, of the physics design and of the plan are on `u/doc-1-2`. Its base is `49f2fcfb`, and the allocator's commit `226894d9` sits beneath this patch; that commit touches no line cited here except in plan files 00, 02 and 03, and those edits are same-line. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in rev 4.1's text, its action table in the pass-3 log included (`:3646-3660`), now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
   - Code is cited on **[I]** = `integ/unified` @ `c33d786d`, read with read-only `git show`, and on **[J]** = `d552be05` where rev 4 cited it.
   - EP3 cited the `D:/wt/joltab` working copy. Where its numbers differ from [I], both are given.
 - **Plan edits.** Every plan passage these remarks name is patched on its own line, dated 2026-09-23 and marked `⚠`. The changelog lists them.
@@ -3859,7 +3859,7 @@ Sources: [Rust error index E0446](https://doc.rust-lang.org/error_codes/E0446.ht
 > - **A re-pin between the unlink and the apply** (`[unlink I→A to 0, insert Pinned on A]` in one queue). The count edge's command finds `Pinned` and does nothing, so A stays alive, pinned, at count 0. Rev 3's plain despawn would have killed A. Rev 4.1 closes that window too.
 >
 > **What does not change.**
-> - The redirect, and the step order inside `delete_entity_core` (02 §4.4; 01 `:977`): the redirect still enqueues `RemoveCommand::<Pinned>`.
+> - The redirect, and the step order inside `delete_entity_core` (02 §4.4; 01 `:989`): the redirect still enqueues `RemoveCommand::<Pinned>`.
 > - An unpinned asset that was never linked is not despawned, because neither edge has fired. A loading asset may be unreferenced (ED5).
 > - **EP3 Q2:** the despawn at zero is a plain despawn, so it cascades to hierarchy children.
 >   - A deferred `despawn_without_children` records no per-request mode. Recording one would cost a component or a flag per deferred entity.
@@ -3878,7 +3878,7 @@ Sources: [Rust error index E0446](https://doc.rust-lang.org/error_codes/E0446.ht
 > - **Re-checking the count inside the unpin command only** (EP3's first option). It closes C1's order, but it leaves the same zombie for a user's `remove::<Pinned>()` at count 0, which rev 3 already had. That would fix the race and leave the class open.
 > - **A plain despawn from either edge.** A re-pin before the apply would be ignored.
 >
-> **Rung:** D-E2 (KC-29b). **Plan:** 02 §4.4 step 3's closing paragraph (`02:724-726`) and 02 §2's D-E2 red-first list (`02:282-284`) are patched on the same lines.
+> **Rung:** D-E2 (KC-29b). **Plan:** 02 §4.4 step 3's closing paragraph (`02:777-779`) and 02 §2's D-E2 red-first list (`02:316-318`) are patched on the same lines.
 
 ---
 
@@ -4050,7 +4050,7 @@ impl<K: sealed::AssetGroupKind> AssetWrite<'_, K> { pub fn get_mut(&mut self, h:
 
 ## P4.1-§4.2: D-E23's caller list (EP3 O4)
 
-**Added (to D-E23's caller list, P4-§4.2 `:3186` and 02 §2):** [I] `crates/boyko_ui/tests/ui_a0_clock.rs:421` calls `FixedTime::overstep()`. It is present on [I] `c33d786d` and absent at [J] `d552be05`, where 02's list was verified. It migrates to `Time::fixed_overstep()` with the other tests. 02 `:184` is patched on the same line.
+**Added (to D-E23's caller list, P4-§4.2 `:3186` and 02 §2):** [I] `crates/boyko_ui/tests/ui_a0_clock.rs:421` calls `FixedTime::overstep()`. It is present on [I] `c33d786d` and absent at [J] `d552be05`, where 02's list was verified. It migrates to `Time::fixed_overstep()` with the other tests. 02 `:212` is patched on the same line.
 
 ---
 
@@ -4088,7 +4088,7 @@ impl<K: sealed::AssetGroupKind> AssetWrite<'_, K> { pub fn get_mut(&mut self, h:
 >   - **Anti-vacuity:** the path reads VB, and VB instances > 0.
 >   - **The red-first.** At HO2's cut, E1v records at least 1 such allocation per VB frame. That is the `FilteredAccessSet::bit_owners` box ([J] and [I] `crates/boyko_ecs/src/ecs/core/system/filtered_access_set.rs:146`), which the runner's per-frame `run_system` of `sync_vb_instance_ring_system` allocates ([J] `crates/boyko_app/src/runner.rs:1625`; [I] `:1714`, through `guarded_run_system`). After HO2, the count is 0.
 >   - **Its first run is also a measurement.** The 24 KB claim is code-derived (`ENGINE-RUNTIME-ECS-RESEARCH.md:924`, `:937`), so E1v's first run at HO2's cut is the measurement the research asked for. A first run that records 0 is a finding to report before HO2 proceeds, not a green.
-> - **Plan:** 03's UG-03 row (`03:12`) and its per-rung list (`03:39`), and 02's B2 row (`02:72`), are patched on the same lines.
+> - **Plan:** 03's UG-03 row (`03:12`) and its per-rung list (`03:45`), and 02's B2 row (`02:72`), are patched on the same lines.
 
 **Removed (rev 2 §12, HO2's gate cell, `:1059`, fragment):**
 > the 24 KB/frame allocation gone (G-ALLOC)
@@ -4110,7 +4110,7 @@ impl<K: sealed::AssetGroupKind> AssetWrite<'_, K> { pub fn get_mut(&mut self, h:
 > - **Engine-sourced** means a D-E rung whose content this design defines, through the EK* features of P4-§9's table: D-E1–D-E17. It does not cover D-E0 (physics P-§14, KC-36), D-E18 or D-E19 (ledger KF-10 and KF-09), or D-E20–D-E23 (EP3 Q1).
 >   - D-E20–D-E23 are the plan's KC-37 (b), (c), (i) and (j): the replay contract, 01 §2.1.
 >   - Rev 4 applies D-E20's and D-E23's rulings to this design, and the design names neither D-E21 nor D-E22.
->   - The plan's DAG already gives all seven no EP3 edge (02 `:550`, `:555`), and EP3 raised nothing against the D-E20 or D-E23 text.
+>   - The plan's DAG already gives all seven no EP3 edge (02 `:590`, `:595`), and EP3 raised nothing against the D-E20 or D-E23 text.
 > - **Extra-gate cells.** They are unchanged, except the AS2, AS4, AS5 and HO2 cells, which rev 4.1 restates above. Rev 4 said P4-§17 restated the AS4 and K-EK15c cells; it restated neither (EP3 W3). K-EK15c's cell (`:2722`) stands as rev 3 wrote it.
 
 ---
@@ -4165,15 +4165,15 @@ The K7 and K6′ hand-offs (P4-§13) stand. The `EcsMaster::clear()` hand-off's 
 
 | EP3 | Change | Supersedes on this tree (left in place) | Sections | Plan (same-line, 2026-09-23) | Rung |
 |---|---|---|---|---|---|
-| C1 | `DESPAWN_AT_ZERO` at two edges (count and pin); `DespawnAtZeroCommand` re-checks liveness, `Pinned` and the count at its apply; the despawn at zero cascades (Q2) | `:2546` (fragment), `:3040`, `:3294` (first sentence) | P4.1-§9, §12 (AS4), §17 | `02:724-726`, `02:282-284` | D-E2 |
-| W1 | The redirect's observable is a sequence witness; no absolute depth | `:3554`, `:3581` | P4.1-§17 | `02:282-283`, `02:724-725` | D-E2 |
+| C1 | `DESPAWN_AT_ZERO` at two edges (count and pin); `DespawnAtZeroCommand` re-checks liveness, `Pinned` and the count at its apply; the despawn at zero cascades (Q2) | `:2546` (fragment), `:3040`, `:3294` (first sentence) | P4.1-§9, §12 (AS4), §17 | `02:777-779`, `02:316-318` | D-E2 |
+| W1 | The redirect's observable is a sequence witness; no absolute depth | `:3554`, `:3581` | P4.1-§17 | `02:316-317`, `02:777-778` | D-E2 |
 | W2 | Sealed, non-super `sealed::AssetGroupKind` carrying the group, the lane and the key (behind a token); `render_retire` is `pub(crate)`; five UG-17 fixtures and a green arm | `:1883` (2nd sentence), `:3016` (2nd sentence), `:3135`, `:3142`, `:3417-3419`, `:2633`, `:2635`, `:3543` (fragment) | P4.1-ED16, §10, §12 (AS2) | — | AS2 |
 | W3 | `clear()` refused while an `AssetSentinel` lives; the stale AS5 and hand-off cells superseded; `:3497` corrected | `:2717` (fragment), `:2743` (3rd cell), `:3582`, `:3497` | P4.1-ED5, §12, §13 | — | D-E2; AS5 |
-| W4 | G-ALLOC = UG-03 scenes E1 (B2) and E1v (HO2's red-first); HO2's cell restated | `:3449` (last two sentences), `:1059` (fragment) | P4.1-§12 | `03:12`, `03:39`, `02:72` | B2; HO2 |
-| O1 | `open_chain`/`close_chain` bounded to `Chained` | physics `:3435`, `:3439` | physics E3-1 | `02:143` | D-S3(iii) |
-| O2 | The `every_tick` refusal covers every non-Fixed schedule | `:3064` (sentence), `:3574` (fragment), `:3583` | P4.1-ED7, §17 | `02:169` | D-E8 |
+| W4 | G-ALLOC = UG-03 scenes E1 (B2) and E1v (HO2's red-first); HO2's cell restated | `:3449` (last two sentences), `:1059` (fragment) | P4.1-§12 | `03:12`, `03:45`, `02:72` | B2; HO2 |
+| O1 | `open_chain`/`close_chain` bounded to `Chained` | physics `:3435`, `:3439` | physics E3-1 | `02:169` | D-S3(iii) |
+| O2 | The `every_tick` refusal covers every non-Fixed schedule | `:3064` (sentence), `:3574` (fragment), `:3583` | P4.1-ED7, §17 | `02:197` | D-E8 |
 | O3 | E2-7's heading and fact line reworded | physics `:3995`, `:3997` | physics E3-2 | `00:161` | — |
-| O4 | D-E23's caller list gains [I] `ui_a0_clock.rs:421` | — (adds to `:3186`'s list) | P4.1-§4.2 | `02:184` | D-E23 |
+| O4 | D-E23's caller list gains [I] `ui_a0_clock.rs:421` | — (adds to `:3186`'s list) | P4.1-§4.2 | `02:212` | D-E23 |
 | O5 | `os_event_sink(&mut self)`, setup-only; rank 4 takes each lane out before the release | `:958`, `:3208` | P4.1-ED7, §5 | — | D-E20; D-E9 |
 | Q1 | D-E20–D-E23 are plan-sourced and do not wait for EP3 | `:2975` (status), `:3496` | P4.1-header, §12 | `00:156` (status) | — |
 
@@ -4221,12 +4221,12 @@ The K7 and K6′ hand-offs (P4-§13) stand. The `EcsMaster::clear()` hand-off's 
 
 | EP4 | Action | Where in rev 4.2 | Plan (same-line patches, listed for the plan's Close stage) | Rung |
 |---|---|---|---|---|
-| W2′ (Important) | FIX, for the class. **(a) Kernel:** `DenseGroup` gains `type Edits: EditPolicy`, with markers `Unlogged` and `Logged`; it replaces EK6g's `const EDIT_LOG: bool`. `DenseColumnMut` and `GroupHead::view` are bounded to `Edits = Unlogged`, and `GroupEdits`/`GroupEditsMut` to `Edits = Logged`, so misuse is E0271. A `Logged` group's columns are written only through the new `LoggedColumnMut<T>`, which marks the log on access. **(b) Render:** each asset group's column is a private `#[repr(transparent)]` newtype of the public value. So `GpuAssetKind::Value` is not a `GroupColumn`, and no projection from a public item reaches an asset group (E0277). `:3998` and `:4016` are corrected. There are fixtures for both projection routes, and kernel fixtures that hold inside the declaring crate | P4.2-EK6g; P4.2-ED16; P4.2-ED5; P4.2-§10; P4.2-§11; P4.2-§12; physics Erratum E4 | 01 KC-23 (`01:173`) and KC-12 (`01:99`); 02 D-E7 (`02:168`); 03 UG-17's rung list (`03:48`) | D-E7 (kernel half); AS2 (render half) |
-| N1 (Important) | FIX. The witness observes `Pinned`'s removal with a per-world **observer**. That is additive, and it runs right after the hook in the same window. It no longer uses a test hook on `Pinned`, whose one hook set the pin edge owns. The in-hook `group_get` read is replaced by reads that `DeferredEcsMaster` has, plus a `group_get` after the drain. Case 3's "despawn hooks" becomes an observer too | P4.2-§17 | 02 D-E2 (`02:283`, `02:284`) | D-E2 |
+| W2′ (Important) | FIX, for the class. **(a) Kernel:** `DenseGroup` gains `type Edits: EditPolicy`, with markers `Unlogged` and `Logged`; it replaces EK6g's `const EDIT_LOG: bool`. `DenseColumnMut` and `GroupHead::view` are bounded to `Edits = Unlogged`, and `GroupEdits`/`GroupEditsMut` to `Edits = Logged`, so misuse is E0271. A `Logged` group's columns are written only through the new `LoggedColumnMut<T>`, which marks the log on access. **(b) Render:** each asset group's column is a private `#[repr(transparent)]` newtype of the public value. So `GpuAssetKind::Value` is not a `GroupColumn`, and no projection from a public item reaches an asset group (E0277). `:3998` and `:4016` are corrected. There are fixtures for both projection routes, and kernel fixtures that hold inside the declaring crate | P4.2-EK6g; P4.2-ED16; P4.2-ED5; P4.2-§10; P4.2-§11; P4.2-§12; physics Erratum E4 | 01 KC-23 (`01:173`) and KC-12 (`01:99`); 02 D-E7 (`02:196`); 03 UG-17's rung list (`03:54`) | D-E7 (kernel half); AS2 (render half) |
+| N1 (Important) | FIX. The witness observes `Pinned`'s removal with a per-world **observer**. That is additive, and it runs right after the hook in the same window. It no longer uses a test hook on `Pinned`, whose one hook set the pin edge owns. The in-hook `group_get` read is replaced by reads that `DeferredEcsMaster` has, plus a `group_get` after the drain. Case 3's "despawn hooks" becomes an observer too | P4.2-§17 | 02 D-E2 (`02:317`, `02:318`) | D-E2 |
 | O-a | ADOPTED. `:3434`'s "at depth 0" is superseded | P4.2-§11 | — | — |
-| O-b | ADOPTED. `DespawnAtZeroCommand` gains condition (iv), the `DESPAWN_AT_ZERO` opt-in, read in the same cold walk as the count. D-E2 gains case 7 and its mutation | P4.2-§9; P4.2-§17 | 02 D-E2 (`02:284`); 02 §4.4 (`02:726`) | D-E2 |
-| O-c | ADOPTED (plan only). D-E2 joins the `ecs_master.rs` lock row | — | 02 §4.3 (`02:638`) | D-E2 |
-| O-d | ADOPTED (plan only). D-E20–D-E23 join the EP3 exemptions in RK-2 and in the lane-ENG text | — | 00 RK-2 (`00:171`); 02 lane ENG (`02:155-157`) | — |
+| O-b | ADOPTED. `DespawnAtZeroCommand` gains condition (iv), the `DESPAWN_AT_ZERO` opt-in, read in the same cold walk as the count. D-E2 gains case 7 and its mutation | P4.2-§9; P4.2-§17 | 02 D-E2 (`02:318`); 02 §4.4 (`02:779`) | D-E2 |
+| O-c | ADOPTED (plan only). D-E2 joins the `ecs_master.rs` lock row | — | 02 §4.3 (`02:689`) | D-E2 |
+| O-d | ADOPTED (plan only). D-E20–D-E23 join the EP3 exemptions in RK-2 and in the lane-ENG text | — | 00 RK-2 (`00:171`); 02 lane ENG (`02:183-185`) | — |
 
 The review follows verbatim.
 
@@ -4313,7 +4313,7 @@ Paths used below: engine = `D:/wt/docs/docs/unification/ENGINE-RUNTIME-ECS-DESIG
   - As before, a **Removed** quote takes a passage out of the reading order, not out of the file. Each quoted passage is named by its line on this tree.
 - **Edited in place:** only the header's two lines, `:4` and `:7`. Each keeps its old text struck through on the same line, so no line number moves.
 - **Trees.**
-  - Line numbers of this file, of the physics design and of the plan are on `u/doc-3-4`. Its base is **[T]** = `4db26681`, the `integ/unified` trunk. The design documents on [T] are byte-identical to `c1e9f1db`, where EP4 read them (`git diff c1e9f1db 4db26681` on the three design files is empty), so EP4's line numbers hold here.
+  - Line numbers of this file, of the physics design and of the plan are on `u/doc-3-4`. Its base is **[T]** = `4db26681`, the `integ/unified` trunk. The design documents on [T] are byte-identical to `c1e9f1db`, where EP4 read them (`git diff c1e9f1db 4db26681` on the three design files is empty), so EP4's line numbers hold here. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in rev 4.2's text, its action table in the pass-4 log included (`:4222-4229`), now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
   - Code is cited on [T], read with read-only `git show`. Rev 4.1 cited [I] = `c33d786d`. [I] is an ancestor of [T] (`git merge-base --is-ancestor`), and the files re-cited below are unchanged between the two (`git diff c33d786d 4db26681` is empty for `ecs_master/{ecs_master, entity_api, observer_api}.rs`, `component/hooks/**`, `commands/migration_helpers.rs`, `schedule/schedule.rs` and `relationship/**`). So every [I] line rev 4.1 gives holds on [T].
   - The K3 dense-group surface is not on [T] yet: `git grep` finds no `DenseColumnMut`, `GroupColumn`, `DenseGroup` or `GroupHead` under `crates/`. It lands in D-S3(ii) and D-S3(iii). Every K3 signature below is design text.
 - **Plan edits.** None is made in this step. The plan's same-line patches are listed in the step's report for the plan's Close stage, so that two document steps never edit one plan file at once.
@@ -4610,7 +4610,7 @@ The kernel's side (`EditPolicy`, the bounded `GroupEditsMut`/`GroupEdits`, `Logg
 >   - It adds no structure, and no instruction outside the command's cold apply.
 > - **Rejected:** "`Pinned` is valid only on opted-in targets" (EP4's second option). It needs a refusal at insert, and it still leaves a wrong despawn once the entity's components change after the pin.
 > - **Cost:** 0 on every path except the command's apply, which stays cold.
-> - **Rung:** D-E2, with case 7 of P4.2-§17. 02 §4.4's closing paragraph (`02:726`) and D-E2's case list (`02:284`) are patched by the Close stage.
+> - **Rung:** D-E2, with case 7 of P4.2-§17. 02 §4.4's closing paragraph (`02:779`) and D-E2's case list (`02:318`) are patched by the Close stage.
 
 ---
 
@@ -4644,8 +4644,8 @@ This supersedes the last "depth 0" in the section that describes the depth model
 
 **Added (rung map of rev 4.2):**
 > - **D-E2:** N1's witness and O-b's condition (iv) and case 7 (P4.2-§17, P4.2-§9). O-c puts D-E2 on the `ecs_master.rs` lock row (02 §4.3), for P4.1-ED5's refusal in `clear()`.
-> - **D-E7:** W2′'s kernel half (P4.2-EK6g; physics Erratum E4). Its prerequisites (D-E6, D-S3(iii); `02:168`) are unchanged.
-> - **AS2:** W2′'s render half (P4.2-ED16, ED5, §10). AS2 already waits for D-E7 (`02:487`), so the new param exists when AS2 cuts. 03's UG-17 rung list (`03:48`) does not name AS2, though rev 4.1 already gave AS2 five UG-17 fixtures; the Close stage adds it.
+> - **D-E7:** W2′'s kernel half (P4.2-EK6g; physics Erratum E4). Its prerequisites (D-E6, D-S3(iii); `02:196`) are unchanged.
+> - **AS2:** W2′'s render half (P4.2-ED16, ED5, §10). AS2 already waits for D-E7 (`02:523`), so the new param exists when AS2 cuts. 03's UG-17 rung list (`03:54`) does not name AS2, though rev 4.1 already gave AS2 five UG-17 fixtures; the Close stage adds it.
 > - No other rung's content changes. EP4's release of D-S3(iii), D-E1, D-E3–D-E6 and D-E8–D-E19 stands.
 
 ---
@@ -4722,13 +4722,13 @@ This supersedes the last "depth 0" in the section that describes the depth model
 
 | EP4 | Change | Supersedes on this tree (left in place) | Sections | Plan (same-line; the Close stage applies them) | Rung |
 |---|---|---|---|---|---|
-| W2′ (a) | `type Edits: EditPolicy` (`Unlogged`/`Logged`) on `DenseGroup` replaces `const EDIT_LOG`. `DenseColumnMut`, `GroupHead::view` are bounded to `Unlogged`; `GroupEdits`/`GroupEditsMut` to `Logged` (E0271). `LoggedColumnMut<T>`, which marks on access, is a `Logged` group's only write route. Kernel fixtures K1–K3 and a green arm | `:2538` (fragment), `:2599-2600`, `:2726` (fragment), `:3439` (last sentence) | P4.2-EK6g, §11, §12; physics E4-1 | `01:173`, `01:99`, `02:168` | D-E7 |
-| W2′ (b) | The asset columns are private `#[repr(transparent)]` newtypes of the public values. `AssetGroupKind` gains `Column`, `value`, `value_mut`. `AssetRead`/`AssetWrite` sit on `DenseColumn`/`LoggedColumnMut<K::Column>`. `:3998` and `:4016` corrected. Fixtures 6–9 | `:3998` (last sentence), `:4016`, the `sealed` module at `:3982-3992`, `:1879-1881`, `:1897` (2nd sentence), `:1900-1902` (names), `:2505` (fragment), `:3016` (fragment), `:3022`, `:3028`, `:4044-4046` | P4.2-ED16, ED5, §10, §12 | `03:48` | AS2 |
-| N1 | The sequence witness and the "nothing ran" checks use observers; no test hook on `Pinned`; no in-hook `group_get` | `:4129-4130`, `:4134` (case 3's result), `:4142` | P4.2-§17 | `02:283`, `02:284` | D-E2 |
+| W2′ (a) | `type Edits: EditPolicy` (`Unlogged`/`Logged`) on `DenseGroup` replaces `const EDIT_LOG`. `DenseColumnMut`, `GroupHead::view` are bounded to `Unlogged`; `GroupEdits`/`GroupEditsMut` to `Logged` (E0271). `LoggedColumnMut<T>`, which marks on access, is a `Logged` group's only write route. Kernel fixtures K1–K3 and a green arm | `:2538` (fragment), `:2599-2600`, `:2726` (fragment), `:3439` (last sentence) | P4.2-EK6g, §11, §12; physics E4-1 | `01:173`, `01:99`, `02:196` | D-E7 |
+| W2′ (b) | The asset columns are private `#[repr(transparent)]` newtypes of the public values. `AssetGroupKind` gains `Column`, `value`, `value_mut`. `AssetRead`/`AssetWrite` sit on `DenseColumn`/`LoggedColumnMut<K::Column>`. `:3998` and `:4016` corrected. Fixtures 6–9 | `:3998` (last sentence), `:4016`, the `sealed` module at `:3982-3992`, `:1879-1881`, `:1897` (2nd sentence), `:1900-1902` (names), `:2505` (fragment), `:3016` (fragment), `:3022`, `:3028`, `:4044-4046` | P4.2-ED16, ED5, §10, §12 | `03:54` | AS2 |
+| N1 | The sequence witness and the "nothing ran" checks use observers; no test hook on `Pinned`; no in-hook `group_get` | `:4129-4130`, `:4134` (case 3's result), `:4142` | P4.2-§17 | `02:317`, `02:318` | D-E2 |
 | O-a | `:3434`'s "depth 0" superseded | `:3434` (parenthesis) | P4.2-§11 | — | — |
-| O-b | `DespawnAtZeroCommand` gains condition (iv), the opt-in; case 7; its mutation | `:3839`, `:4139` | P4.2-§9, §17 | `02:284`, `02:726` | D-E2 |
-| O-c | D-E2 on the `ecs_master.rs` lock row | — | P4.2-§12 | `02:638` | D-E2 |
-| O-d | D-E20–D-E23 join the EP3 exemptions | — | — | `00:171`, `02:155-157` | — |
+| O-b | `DespawnAtZeroCommand` gains condition (iv), the opt-in; case 7; its mutation | `:3839`, `:4139` | P4.2-§9, §17 | `02:318`, `02:779` | D-E2 |
+| O-c | D-E2 on the `ecs_master.rs` lock row | — | P4.2-§12 | `02:689` | D-E2 |
+| O-d | D-E20–D-E23 join the EP3 exemptions | — | — | `00:171`, `02:183-185` | — |
 | — | O-14 opened (a finding, not an EP4 remark) | — | P4.2-§18 | — | AS2 or RE6 |
 
 ## External sources (read 2026-09-24)
@@ -4900,7 +4900,7 @@ I tried every route the brief lists. Only one is still open, and it is W1.
 - **Physics.** W1 and O3 change K3 text, which the physics design owns. They land there as Erratum E4's closure items, E4-2 and E4-3.
 - **Convention: no line moves.** Every rev-4.2 passage the closure supersedes is named by its line and left in place. Only three lines are edited in place: the header's `:4` and `:7`, and rev 4.2's status heading (`:4746`), which gains a pointer to the status after the closure.
 - **Plan edits.** Unlike DOC-3, this Close step applies the plan's same-line patches itself. Each carries the plan's `⚠ *2026-09-24 …*` marker. The list is at the end.
-- **Trees and scope.** As in P4.2: line numbers are on `u/doc-3-4`, and code is cited on [T] = `4db26681`. Nothing was compiled, built, run or timed. The UG-17 `.stderr` files and the census named below are the checks, at their rungs.
+- **Trees and scope.** As in P4.2: line numbers are on `u/doc-3-4`, and code is cited on [T] = `4db26681`. Nothing was compiled, built, run or timed. The UG-17 `.stderr` files and the census named below are the checks, at their rungs. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in the closure's text now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
 
 ---
 
@@ -4962,7 +4962,7 @@ So no column type contains an `UnsafeCell`, and a `&T` into a column is read-onl
 
 **Rung: D-S3(ii), which is bound by this** (EP5's last question).
 - The property is not about edit logs. A `*mut T` from a read param is an **undeclared write**: the scheduler runs it beside the column's other readers, which is a data race whatever the group's edit policy.
-- So read-only-ness is a soundness property of K3's access model from the rung that builds `DenseColumn`. That rung is D-S3(ii): its touch set holds `system/params/**` (`02:142`), and K3's params are part of it (physics `:480`).
+- So read-only-ness is a soundness property of K3's access model from the rung that builds `DenseColumn`. That rung is D-S3(ii): its touch set holds `system/params/**` (`02:168`), and K3's params are part of it (physics `:480`).
 - D-S3(ii)'s content does not change: physics rev 2 §9 never gave `DenseColumn` a view (`:523`). The rung gains the census as a red-first test.
 - D-E7 touches `system/params/**` again, so it re-runs the census.
 - U5 builds `SolverBodies` in E4-2's form.
@@ -4980,11 +4980,11 @@ So no column type contains an `UnsafeCell`, and a `&T` into a column is read-onl
 - **(g3, O1)** A system whose params include `GroupHead<'_, LG>` is added to a schedule and runs. It calls `live_count()` and `release_dying_before(&key, horizon, |_| {})`.
   - This pins R1's form, a `GroupHead` over a `Logged` group, as nameable and usable.
   - If the `Unlogged` bound drifted from the method (`:4409`) to the struct, the break would be red here, on D-E7's own lane, and not first at AS2.
-- **(g4)** `get_mut` on a despawned or never-anchored entity returns `None` and marks nothing. *(Unchanged.)*
+- **(g4)** `get_mut` on a despawned or never-anchored entity returns `None` and marks nothing. *(Unchanged.)* ⚠ *2026-09-24, doc fix-up W2: EP6 O2 (plan 02 `:215`) recomposes this "marks nothing" clause the way it recomposes (g6)'s precondition (`:5039`), because after C-4 the binder's own mark on a newly anchored slot can make the clause unobservable. Plan 02 `:215` is the statement D-E7 builds from (02 `:196`).*
 - **(g5, O4) Recycled index.**
   - Anchor `e1` in `LG`, despawn it, and release its slot.
   - Spawn `e2` so that it reuses `e1`'s index; the test asserts the same index and a different generation. Anchor `e2` in `LG`.
-  - Then `get_mut(e1)` returns `None` and marks nothing, and `get_mut(e2)` edits `e2`'s slot.
+  - Then `get_mut(e1)` returns `None` and marks nothing, and `get_mut(e2)` edits `e2`'s slot. ⚠ *2026-09-24, doc fix-up W2: EP6 O2 (plan 02 `:215`): after C-4 the binder marks `e2`'s slot when `e2` is anchored, so in a window that spans that anchor "marks nothing" is unobservable. The clause is recomposed the way (g6)'s precondition is (`:5039`).*
   - **Requirement:** `LoggedColumnMut`'s lookup checks `e`'s generation, as `is_alive` does, before it reads the slot map. A slot map keyed by index alone fails (g5).
 - **(g6, O3) Slot reuse** is C-4's red-first case.
 - The C-1 census is re-run.
@@ -5036,11 +5036,11 @@ The error codes for K1–K3 are unchanged.
 - Textures keep their own descriptor rule (`:1903`), which this does not change.
 
 **Owner: D-E7**, where EK6g's log lands.
-- **Red-first case (g6):**
+- **Red-first case (g6):** ⚠ *2026-09-24, doc fix-up W2: EP6 O2 (plan 02 `:215`): (g6) also states and asserts its precondition, that a window read after the release and before `e2` is anchored, at a tick above the install's tick, does not contain the slot. Without it the mutation below survives (`:5043`).*
   - Anchor `e1` in `LG` and install a value through `LoggedColumnMut`. Read the window.
   - Despawn `e1` and release its slot, which for a `Stamped` group means `release_dying_before` after the horizon.
   - Anchor `e2`, and assert it got the same slot. Then the next `GroupEdits<LG>` window contains that slot, and the column holds `LCol::DEAD` there.
-  - **Mutation:** deleting the binder's mark turns (g6) red.
+  - **Mutation:** deleting the binder's mark turns (g6) red. ⚠ *2026-09-24, doc fix-up W2: EP6 O2 (plan 02 `:215`): only with (g6)'s precondition asserted (`:5039`). The edit-log window is `[last_run, this_run]` inclusive and marks are deduplicated per tick. So when the installing writer and the reader run in one schedule run, or under `run_system_once`, which never bumps the tick, the post-anchor window holds the slot whether or not the binder marks it, and this mutation stays green.*
 - **The device side.** RE6's existing red-first test, "a material edit after boot reaches the GPU" (`:2712`), covers R2 uploading what the log names. No render rung gains a remedy.
 
 ---
@@ -5064,12 +5064,12 @@ The error codes for K1–K3 are unchanged.
 
 | EP5 | Change | Supersedes on this tree (left in place) | Sections | Plan (same-line, applied in this step) | Rung |
 |---|---|---|---|---|---|
-| W1 | `DenseColumn` holds a `&'w [T]` only and hands out shared references. `SolverBodies` holds `&'a [BodyInertia]`. There is a read-only census with (c1) and (c2). D-S3(ii) is bound by it | `:4413` (its basis); physics `:555`, `:4193`, `:4202-4205` | C-1; physics E4-2 | `02:142` (D-S3(ii)), `02:168` (D-E7), `02:449` (U5), `01:99` (KC-12) | D-S3(ii), U5, D-E7 |
-| O1, O4 | Green arm (g3) (`GroupHead<'_, LG>` is scheduled) and (g5) (recycled index; generation check) | `:4438-4441` | C-2 | `02:168` | D-E7 |
+| W1 | `DenseColumn` holds a `&'w [T]` only and hands out shared references. `SolverBodies` holds `&'a [BodyInertia]`. There is a read-only census with (c1) and (c2). D-S3(ii) is bound by it | `:4413` (its basis); physics `:555`, `:4193`, `:4202-4205` | C-1; physics E4-2 | `02:168` (D-S3(ii)), `02:196` (D-E7), `02:485` (U5), `01:99` (KC-12) | D-S3(ii), U5, D-E7 |
+| O1, O4 | Green arm (g3) (`GroupHead<'_, LG>` is scheduled) and (g5) (recycled index; generation check) | `:4438-4441` | C-2 | `02:196` | D-E7 |
 | O2 | One log-node param per `Logged` group per system (B0002). EK21 holds one of the two. O-15 is opened | — (added); `:4414` read as an alternative | C-3 | `01:173` (KC-23) | D-E7 |
-| O3 | The binder marks the anchor-time DEAD fill of a `Logged` group, through a `logged` byte read only in `anchor_transition`. The invariant is restated and O-14 is closed. Red-first (g6) | `:4416-4421`, `:4709-4717` | C-4; physics E4-3 | `02:168`, `01:99`, `01:173` | D-E7 |
-| Question: closure command | A test `Command` struct | `:4670`, `:4701` (wording) | C-5 | `02:283` | D-E2 |
-| Question: `TDrive` | Its own test binary, with registration before the first spawn | — (added) | C-5 | `02:284` | D-E2 |
+| O3 | The binder marks the anchor-time DEAD fill of a `Logged` group, through a `logged` byte read only in `anchor_transition`. The invariant is restated and O-14 is closed. Red-first (g6) | `:4416-4421`, `:4709-4717` | C-4; physics E4-3 | `02:196`, `01:99`, `01:173` | D-E7 |
+| Question: closure command | A test `Command` struct | `:4670`, `:4701` (wording) | C-5 | `02:317` | D-E2 |
+| Question: `TDrive` | Its own test binary, with registration before the first spawn | — (added) | C-5 | `02:318` | D-E2 |
 
 ## External sources (read 2026-09-24)
 
@@ -5086,7 +5086,7 @@ The error codes for K1–K3 are unchanged.
   - No remark needs an owner ruling.
 - **What waits on what.**
   - **Released by EP4** and untouched since: D-S3(iii), D-E1, D-E3–D-E6 and D-E8–D-E19.
-  - **Released by EP5:** D-E2, and AS2 on content. The DAG still puts AS2 after D-E7 (`02:487`). The closure changes only D-E2's wording (C-5).
+  - **Released by EP5:** D-E2, and AS2 on content. The DAG still puts AS2 after D-E7 (`02:523`). The closure changes only D-E2's wording (C-5).
   - **D-E7 was held by EP5 on W1 alone.** C-1 supplies both the text fix and the gate that EP5 asked for, and C-2–C-4 add D-E7 content that EP5 proposed. Releasing D-E7 on this closure is the orchestrator's call; a re-review scoped to C-1–C-4 and E4-2/E4-3 is the conservative route.
   - **D-S3(ii)** is bound by C-1 and gains the census as a red-first test. Its other content is unchanged.
   - **U5** builds `SolverBodies` in physics E4-2's form.
@@ -5097,6 +5097,6 @@ The error codes for K1–K3 are unchanged.
   - O-14 is closed (C-4).
   - O-15 is new, open and deferred (C-3).
 - **Evidence.**
-  - This file, the physics design and the plan on `u/doc-3-4` @ `4db26681`.
+  - This file, the physics design and the plan on `u/doc-3-4` @ `4db26681`. ⚠ *2026-09-24, doc fix-up 1 (orchestrator ruling Q1): the plan's line numbers (files 00–05) in this status block now read on `integ/unified` @ `68437dfe`: each live one that the three doc merges moved was re-derived by content to the line that holds its old text. A critic's own text (a verbatim review, or a remark as its log records it) and a citation that names its own tree (`at`/`@ <sha>`, [J], [I], [T]) keep the tree they name, and the other files' line numbers read as stated here.*
   - Code at [T] `4db26681`, read read-only.
   - External sources as listed here and in rev 4.2.
