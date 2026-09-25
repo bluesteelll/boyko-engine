@@ -59,6 +59,17 @@
 //! Each of 1, 4, 8 and 16 divides 4 096, and so also divides the 64 KiB
 //! commit page of the non-`x86_64` arm.
 //!
+//! `align_of::<T>()` must not exceed [`RESERVATION_BASE_ALIGN`] (4 096), the
+//! base alignment every arm of the reservation guarantees — also asserted in
+//! [`VmColumn::new`], and the pin every element access's alignment rests on
+//! (base aligned to the floor, the floor a multiple of `align_of::<T>()`, the
+//! stride `size_of::<T>()` a multiple of `align_of::<T>()`). On `x86_64` the
+//! size pin implies it. Off `x86_64` it does not: the 64 KiB commit page
+//! admits a type aligned to 8, 16, 32 or 64 KiB, and neither the unix arm's
+//! page-aligned `mmap` base nor the fallback arm's 4 096-aligned allocation
+//! satisfies one (C1 W1, measured under Miri for `aarch64-unknown-linux-gnu`).
+//! Every consumer above is aligned to 16 or less.
+//!
 //! The divisor is the commit quantum, which the packing plan (D1) lowered
 //! from the 64 KiB granule to the page, so the domain tightened from
 //! "divides 65 536" to "divides 4 096": the only sizes it newly refuses are
@@ -81,7 +92,7 @@
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-use crate::constants::{COMMIT_PAGE, POOL_MAX_SLAB, POOL_MIN_SLAB};
+use crate::constants::{COMMIT_PAGE, POOL_MAX_SLAB, POOL_MIN_SLAB, RESERVATION_BASE_ALIGN};
 use crate::owner::{ColumnOwner, CommitOwner};
 use crate::vm::{VmReservation, commit_at};
 
@@ -156,6 +167,9 @@ impl<T: Copy> VmColumn<T> {
     ///
     /// # Panics
     /// * `size_of::<T>() == 0` — a ZST column has no element-count math.
+    /// * `align_of::<T>() > RESERVATION_BASE_ALIGN` — the alignment pin
+    ///   (module doc): no arm guarantees a reservation base aligned above it,
+    ///   so every element write would be misaligned.
     /// * `COMMIT_PAGE % size_of::<T>() != 0` — the supported-domain pin
     ///   (review #4, module doc): a non-dividing size would misalign the
     ///   commit frontier and panic a later LEGAL growth on the unix arm.
@@ -163,6 +177,16 @@ impl<T: Copy> VmColumn<T> {
     /// * `reserve_elems * size_of::<T>()` overflows `usize`.
     pub fn new(label: &'static str, reserve_elems: usize) -> Self {
         assert!(Self::SIZE > 0, "VmColumn[{label}]: element type must not be a ZST");
+        // The alignment pin every element access's SAFETY rests on (C1 W1).
+        // Checked before the size pin, which on `x86_64` already refuses every
+        // type it refuses, so that a refusal names the alignment as its cause.
+        // A per-`T` constant, like the size pin: it folds away.
+        assert!(
+            align_of::<T>() <= RESERVATION_BASE_ALIGN,
+            "VmColumn[{label}]: align_of::<T>() = {} exceeds RESERVATION_BASE_ALIGN ({})",
+            align_of::<T>(),
+            RESERVATION_BASE_ALIGN
+        );
         // Review #4 — the page-divisibility domain pin (see the module doc's
         // "Supported element domain"): keeps `committed_elems * SIZE` exact, so
         // every `commit(old, new)` range stays page-aligned. The condition is
@@ -234,9 +258,9 @@ impl<T: Copy, O: CommitOwner> VmColumn<T, O> {
         debug_assert!(self.len < self.committed_elems);
         // SAFETY: `len < committed_elems` (the branch above grew the frontier
         //   when they were equal), so the slot at `len` lies in the committed
-        //   read/write prefix of the reservation and is 8-aligned (`base` is
-        //   granule-aligned on the syscall arms, ≥ 4096-aligned on the
-        //   fallback, and `T`'s align divides that). `T: Copy` ⇒ the slot needs
+        //   read/write prefix of the reservation and is `T`-aligned (`base` is
+        //   `RESERVATION_BASE_ALIGN`-aligned on every arm, and `new` asserted
+        //   `align_of::<T>()` does not exceed it). `T: Copy` ⇒ the slot needs
         //   no prior drop. `&mut self` ⇒ exclusive access. After the write the
         //   slot is owned by the column (len is bumped), so no reader observes
         //   uninitialized bytes at or above `len`.
@@ -284,8 +308,9 @@ impl<T: Copy, O: CommitOwner> VmColumn<T, O> {
         // SAFETY: `grow_to(target)` (or the pre-existing frontier) guarantees
         //   `target = len + additional <= committed_elems`, so every slot in
         //   `[len, len + additional)` lies in the committed read/write prefix
-        //   and is aligned. The write index is `len + count` with `count <
-        //   additional` enforced by the RELEASE assert INSIDE the loop — the
+        //   and is `T`-aligned (`new`'s alignment pin). The write index is
+        //   `len + count` with `count < additional` enforced by the RELEASE
+        //   assert INSIDE the loop — the
         //   bound is structural, NOT trusted from `ExactSizeIterator::len()`
         //   (review #1: a lying over-yielding iterator is safe code and panics
         //   here instead of writing past the frontier). `T: Copy` ⇒ no slot
@@ -343,8 +368,9 @@ impl<T: Copy, O: CommitOwner> VmColumn<T, O> {
         let last = self.len - 1;
         // SAFETY: `index < len` (release assert above) and `last = len - 1 <
         //   len <= committed_elems` (`len >= 1`, so the sub cannot wrap), so
-        //   both slots lie in the committed read/write prefix, are aligned, and
-        //   were initialized by `push`/`set`/`extend_exact`. `T: Copy` ⇒ `read`
+        //   both slots lie in the committed read/write prefix, are `T`-aligned
+        //   (`new`'s alignment pin), and were initialized by
+        //   `push`/`set`/`extend_exact`. `T: Copy` ⇒ `read`
         //   copies the value out without a move-out drop. The move is BRANCHED
         //   (review #9): when `index != last`, `last`'s value is copied into
         //   `index`, overwriting a `Copy` value (no old-value drop needed);
@@ -398,11 +424,11 @@ impl<T: Copy, O: CommitOwner> VmColumn<T, O> {
     pub fn as_slice(&self) -> &[T] {
         // SAFETY: before materialization `base` is `NonNull::dangling()` AND
         //   `len == 0` — `from_raw_parts(dangling, 0)` is explicitly valid.
-        //   After materialization `base` is non-null, `T`-aligned (page-aligned
-        //   on the syscall arms, ≥ 4096-aligned on the fallback, both ⊇
-        //   `align_of::<T>()`), its provenance spans the whole single-object
-        //   reservation, and `len * SIZE ≤ committed_bytes ≤ os_len ≤
-        //   isize::MAX`; every element in `[0, len)` was initialized by
+        //   After materialization `base` is non-null, `T`-aligned (aligned to
+        //   `RESERVATION_BASE_ALIGN` on every arm, and `new` asserted that
+        //   `align_of::<T>()` does not exceed it), its provenance spans the
+        //   whole single-object reservation, and `len * SIZE ≤ committed_bytes
+        //   ≤ os_len ≤ isize::MAX`; every element in `[0, len)` was initialized by
         //   `push`/`set` (nothing is read at or above `len`). No reference
         //   escapes the borrow.
         unsafe { std::slice::from_raw_parts(self.base.as_ptr(), self.len) }
@@ -438,8 +464,9 @@ impl<T: Copy, O: CommitOwner> VmColumn<T, O> {
     pub fn get(&self, index: usize) -> Option<T> {
         if index < self.len {
             // SAFETY: `index < len <= committed_elems`, so the slot is in the
-            //   committed prefix, aligned, and was initialized by `push`/`set`.
-            //   `T: Copy` ⇒ the read copies it out without disturbing the slot.
+            //   committed prefix, `T`-aligned (`new`'s alignment pin), and was
+            //   initialized by `push`/`set`. `T: Copy` ⇒ the read copies it out
+            //   without disturbing the slot.
             Some(unsafe { self.base.as_ptr().add(index).read() })
         } else {
             None
@@ -461,9 +488,9 @@ impl<T: Copy, O: CommitOwner> VmColumn<T, O> {
             self.len
         );
         // SAFETY: `index < len <= committed_elems` (release assert above), so
-        //   the slot is in the committed read/write prefix and aligned. `T:
-        //   Copy` ⇒ the old value needs no drop; the write overwrites it in
-        //   place. `&mut self` ⇒ exclusive access.
+        //   the slot is in the committed read/write prefix and `T`-aligned
+        //   (`new`'s alignment pin). `T: Copy` ⇒ the old value needs no drop;
+        //   the write overwrites it in place. `&mut self` ⇒ exclusive access.
         unsafe {
             self.base.as_ptr().add(index).write(value);
         }
@@ -832,6 +859,39 @@ mod tests {
             .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
             .unwrap_or_default();
         assert!(msg.contains("test"), "exhaustion panic must name the column label: {msg}");
+    }
+
+    /// C1 W1 — the alignment pin: `new` refuses an element type aligned above
+    /// every reservation base, and the refusal names the alignment. On
+    /// `x86_64` the size pin refuses this type too (8 192 does not divide the
+    /// 4 KiB commit page), so before the fix the panic named the size and this
+    /// test failed on its message. Off `x86_64` the size pin admitted it (8 192
+    /// divides the 64 KiB page) and the `push` below wrote to a misaligned
+    /// slot.
+    #[test]
+    #[should_panic(expected = "exceeds RESERVATION_BASE_ALIGN")]
+    fn new_refuses_alignment_above_the_base_floor() {
+        #[derive(Clone, Copy)]
+        #[repr(C, align(8192))]
+        struct Align8k(u8);
+        let mut c = VmColumn::<Align8k>::new("align8k", 1);
+        c.push(Align8k(1));
+        assert_eq!(c.get(0).map(|e| e.0), Some(1));
+    }
+
+    /// Boundary control for the alignment pin: an element aligned exactly to
+    /// the 4 096 B floor is accepted, and its elements land aligned through
+    /// both write paths (`push`, `extend_exact`).
+    #[test]
+    fn new_accepts_alignment_at_the_base_floor() {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[repr(C, align(4096))]
+        struct Align4k(u64);
+        let mut c = VmColumn::<Align4k>::new("align4k", 4);
+        c.push(Align4k(7));
+        c.extend_exact([Align4k(8), Align4k(9)].into_iter());
+        assert_eq!(c.as_slice(), &[Align4k(7), Align4k(8), Align4k(9)]);
+        assert!(c.as_ptr().addr().is_multiple_of(align_of::<Align4k>()), "base misaligned");
     }
 
     /// A never-materialized column (no push) has a valid empty slice and a

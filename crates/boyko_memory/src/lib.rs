@@ -4,8 +4,8 @@
 //!   primitive every kernel store is built on.
 //! - [`vm_column`]: [`VmColumn`](vm_column::VmColumn), a typed, address-stable, growable column
 //!   on one reservation.
-//! - [`constants`]: the commit granularity (`COMMIT_GRANULE`, `COMMIT_PAGE`) and the slab bounds
-//!   of the commit ladders.
+//! - [`constants`]: the commit granularity (`COMMIT_GRANULE`, `COMMIT_PAGE`), the alignment floor
+//!   of a reservation's base (`RESERVATION_BASE_ALIGN`) and the slab bounds of the commit ladders.
 //! - The commit owners ([`CommitOwner`]) and the per-owner committed-bytes counter
 //!   ([`committed_bytes`]) that gate UG-04 reads: every commit is counted at one choke point,
 //!   `raw::commit_at::<O>`, under the owner its store declares.
@@ -24,7 +24,8 @@
 //! `VmReservation::commit` and `raw::commit_at`, are `unsafe fn`s, and each caller proves the range
 //! at its own site. A release range check in `commit` was the alternative. It was measured to move
 //! the codegen of the pinned callers (UG-15 P29-1, P29-2), and it was not taken. Every safe entry
-//! point is release-checked (`reserve`'s length asserts, `VmColumn`'s bounds and ceiling asserts)
+//! point is release-checked (`reserve`'s length asserts; `VmColumn`'s element-domain, bounds and
+//! ceiling asserts, the domain including an alignment no arm's reservation base falls short of)
 //! or cannot reach memory at all (`base`, `os_len`).
 
 pub mod constants;

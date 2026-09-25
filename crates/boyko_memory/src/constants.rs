@@ -1,10 +1,11 @@
-//! Commit granularity of the virtual-memory primitives, and the slab bounds of the commit ladders
-//! that step by it.
+//! Commit granularity of the virtual-memory primitives, the alignment floor of a reservation's
+//! base, and the slab bounds of the commit ladders that step by the granularity.
 //!
 //! Moved here from `boyko_ecs::ecs::constants` at rung C1 (unified plan KC-01) together with the
-//! reservation primitive that interprets them; `boyko_ecs` re-exports every item under its old
-//! path. The pool policy built on them (the base stagger, `pool_byte_layout`, `pool_commit_step`)
-//! stays in `boyko_ecs`, beside the `ComponentPool` that owns it.
+//! reservation primitive that interprets them; `boyko_ecs` re-exports every moved item under its
+//! old path (`RESERVATION_BASE_ALIGN` was added here after the move and has none). The pool
+//! policy built on them (the base stagger, `pool_byte_layout`, `pool_commit_step`) stays in
+//! `boyko_ecs`, beside the `ComponentPool` that owns it.
 
 /// Virtual-memory commit granularity (Phase X.F, renamed from
 /// `ARENA_COMMIT_GRANULE` when Phase X.J retired the shared Arena): 64 KiB —
@@ -39,6 +40,21 @@ pub const COMMIT_PAGE: usize = COMMIT_GRANULE;
 // A granule is a whole number of commit pages on every arm, so every
 // granule-rounded reservation length ends on a page boundary.
 const _: () = assert!(COMMIT_GRANULE.is_multiple_of(COMMIT_PAGE));
+
+/// Alignment floor of every `VmReservation` base, on every arm. The Windows arm's base is aligned
+/// to the 64 KiB allocation granularity. The unix arm's is page-aligned (`mmap`), and every page
+/// size a supported kernel uses is a multiple of 4 KiB. Both syscall arms debug-check their base
+/// against the floor in `VmReservation::reserve`. The fallback arm (Miri, wasm) allocates with
+/// exactly this alignment, which the `GlobalAlloc` contract guarantees.
+///
+/// `VmColumn::new` refuses an element type aligned above it. The size pin alone does not: off
+/// `x86_64` the commit page is the 64 KiB granule, so the size pin admits a type aligned to 8, 16,
+/// 32 or 64 KiB, which neither a page-aligned `mmap` base nor the fallback allocation satisfies.
+pub const RESERVATION_BASE_ALIGN: usize = 4096;
+
+// `Layout` needs a power of two, and the Windows arm's granule-aligned base must meet the floor.
+const _: () = assert!(RESERVATION_BASE_ALIGN.is_power_of_two());
+const _: () = assert!(COMMIT_GRANULE.is_multiple_of(RESERVATION_BASE_ALIGN));
 
 /// Minimum pool commit step (Phase X.I D4, retargeted by packing plan D2):
 /// one [`COMMIT_PAGE`], the first rung of the `ComponentPool` and `VmColumn`

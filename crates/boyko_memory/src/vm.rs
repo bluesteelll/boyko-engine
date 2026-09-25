@@ -201,6 +201,16 @@ impl VmReservation {
             };
             let base = NonNull::new(raw as *mut u8)
                 .expect("VirtualAlloc failed to reserve address space");
+            // A reservation base is aligned to the allocation granularity
+            // (64 KiB on every Windows arch), above the floor `VmColumn`'s
+            // alignment proof rests on: checked here, where that claim is made.
+            debug_assert!(
+                base.as_ptr()
+                    .addr()
+                    .is_multiple_of(crate::constants::RESERVATION_BASE_ALIGN),
+                "VmReservation: VirtualAlloc base {base:p} is below the {} B alignment floor",
+                crate::constants::RESERVATION_BASE_ALIGN
+            );
             Self { base, os_len }
         }
 
@@ -228,12 +238,22 @@ impl VmReservation {
                 "mmap failed to reserve address space"
             );
             let base = NonNull::new(raw as *mut u8).expect("mmap returned null");
+            // `mmap` promises only page alignment, so the floor `VmColumn`'s
+            // alignment proof rests on is a claim about the kernel's page
+            // size: checked here, where that claim is made.
+            debug_assert!(
+                base.as_ptr()
+                    .addr()
+                    .is_multiple_of(crate::constants::RESERVATION_BASE_ALIGN),
+                "VmReservation: mmap base {base:p} is below the {} B alignment floor",
+                crate::constants::RESERVATION_BASE_ALIGN
+            );
             Self { base, os_len }
         }
 
         #[cfg(any(miri, not(any(windows, unix))))]
         {
-            let layout = Layout::from_size_align(os_len, COMMIT_GRANULE.min(4096))
+            let layout = Layout::from_size_align(os_len, crate::constants::RESERVATION_BASE_ALIGN)
                 .expect("VmReservation: invalid fallback layout");
             // SAFETY (V-RES-F, twin of arena F-RES + the X.G zero-fill
             // contract): non-zero size (asserted above), power-of-two align.
