@@ -520,6 +520,11 @@ fn face_vertices(obb: &Obb, axis: usize, positive: bool) -> [(Vec3, usize); 4] {
 /// reference side plane", which is what a reader of a dumped id needs.
 const PLANE_EDGE_BASE: u8 = 8;
 
+/// The slots of [`face_patch`]'s clip buffers: the incident face's 4 corners plus at most one
+/// vertex per reference side plane, since [`clip_against_plane`] emits at most `len + 1` vertices
+/// whatever its distances read. Four passes from a quad: 5, 6, 7, 8.
+const CLIP_CAPACITY: usize = 8;
+
 /// A clipped contact vertex carried through Sutherland-Hodgman (P2 W4 / A7a).
 #[derive(Clone, Copy)]
 struct ClipVertex {
@@ -546,7 +551,33 @@ struct ClipVertex {
 /// Clips the polygon `poly` (`len` vertices) against the half-space `{ x : (x −
 /// plane_point) · plane_normal ≤ 0 }` (keep the side the normal points AWAY from),
 /// writing the result into `out` and returning its length (Sutherland-Hodgman, P2
-/// W4). At most `len + 1` vertices are produced.
+/// W4). At most `len + 1` vertices are produced, whatever the distances read, so
+/// `out` needs `len + 1` slots.
+///
+/// # One outside run per pass, by construction
+///
+/// The loop emits `#inside + 2k` vertices, `k` the number of runs of outside vertices
+/// around the ring. The polygon is convex in exact arithmetic (the incident face cut by
+/// the earlier side planes), so `k ≤ 1` and the count is at most `len + 1`. Rounding
+/// breaks that where vertices lie ON the plane. When the incident outline coincides with
+/// the reference rectangle (two boxes at one pose, equal boxes stacked or side by side
+/// with a shared rotation), every corner is on two side planes and reads a distance of
+/// rounding noise of either sign; an entering cut whose vertex reads exactly `0.0` has
+/// `t = 1` and emits `prev + (cur − prev)`, a copy of the corner an ulp or two off, which
+/// the next plane through that corner can read on the other side of the corner itself.
+/// Two outside runs emit `len + 2`, and four passes from a quad reached 9 vertices.
+///
+/// So a pass that reads more than one outside run cuts only the run holding the
+/// farthest-out vertex, and keeps the vertices of every other outside run as inside.
+/// Those lie on the plane up to rounding. The exact distance around a convex ring rises
+/// to one maximum and falls again, so a vertex separated from the farthest-out one by a
+/// vertex that reads inside is no farther out than that inside-reading vertex, which is
+/// at most a rounding error out; and when the farthest-out vertex is itself only a
+/// rounding error out, so is every vertex that reads outside. A vertex on the plane is
+/// inside the exact clip, so keeping it is the exact answer, and no vertex that reads
+/// inside is ever dropped. The pass cuts at most two edges, which is the premise of
+/// [`feature_face_clip`]'s injectivity. NaN reads outside, as it always did. A pass that
+/// reads at most one outside run is the textbook loop, bit for bit.
 ///
 /// `ref_face` and `plane` (the reference side-plane index `0..4`) name the cut,
 /// so every emitted vertex carries an identity rather than an inherited ordinal.
@@ -574,17 +605,37 @@ fn clip_against_plane(
     out: &mut [ClipVertex],
 ) -> usize {
     let n = poly.len();
+    debug_assert!(
+        n < CLIP_CAPACITY && out.len() > n,
+        "invariant: a pass emits at most len + 1 vertices and `out` holds them"
+    );
     if n == 0 {
         return 0;
     }
+    // Every distance first, so the outside runs are counted before anything is emitted.
+    // Bit `i` of `outside`: vertex `i` reads outside.
+    let mut dist = [0.0f32; CLIP_CAPACITY];
+    let mut outside = 0u32;
+    for (i, v) in poly.iter().enumerate() {
+        let d = (v.pos - plane_point).dot(plane_normal);
+        dist[i] = d;
+        let inside = d <= 0.0;
+        outside |= u32::from(!inside) << i;
+    }
+    // One leaving edge `i → i + 1` per outside run: bit `i` of `next_outside` is vertex
+    // `(i + 1) mod n`'s.
+    let ring = (1u32 << n) - 1;
+    let next_outside = ((outside >> 1) | (outside << (n - 1))) & ring;
+    if (!outside & next_outside & ring).count_ones() > 1 {
+        outside = farthest_outside_run(&dist[..n], outside);
+    }
     let mut count = 0usize;
-    let dist = |p: Vec3| (p - plane_point).dot(plane_normal);
     let mut prev = poly[n - 1];
-    let mut prev_d = dist(prev.pos);
-    for &cur in poly.iter() {
-        let cur_d = dist(cur.pos);
-        let prev_in = prev_d <= 0.0;
-        let cur_in = cur_d <= 0.0;
+    let mut prev_d = dist[n - 1];
+    let mut prev_in = outside & (1 << (n - 1)) == 0;
+    for (i, &cur) in poly.iter().enumerate() {
+        let cur_d = dist[i];
+        let cur_in = outside & (1 << i) == 0;
         if cur_in {
             if !prev_in {
                 // Entering: emit the intersection, then the current vertex.
@@ -612,8 +663,51 @@ fn clip_against_plane(
         }
         prev = cur;
         prev_d = cur_d;
+        prev_in = cur_in;
     }
+    debug_assert!(
+        count <= n + 1,
+        "invariant: a pass cuts one outside run, so it adds at most one vertex"
+    );
     count
+}
+
+/// The outside-reading set of [`clip_against_plane`]'s pass, reduced to its one run holding the
+/// farthest-out vertex (the first of equals in ring order), when `outside` reads more than one
+/// run. Bit `i` of `outside` and of the result: vertex `i` is cut away. At least one vertex reads
+/// inside, since there are two runs, so both walks stop.
+///
+/// Cold: only a pass whose distances rounding has made inconsistent with a convex ring reaches
+/// it — vertices on the plane up to rounding, where the incident outline runs along a side plane.
+#[cold]
+#[inline(never)]
+fn farthest_outside_run(dist: &[f32], outside: u32) -> u32 {
+    let n = dist.len();
+    let is_out = |i: usize| outside & (1 << i) != 0;
+    let mut far = outside.trailing_zeros() as usize;
+    for i in far + 1..n {
+        if is_out(i) && dist[i] > dist[far] {
+            far = i;
+        }
+    }
+    let mut run = 1u32 << far;
+    let mut i = far;
+    loop {
+        i = (i + n - 1) % n;
+        if !is_out(i) {
+            break;
+        }
+        run |= 1 << i;
+    }
+    let mut i = far;
+    loop {
+        i = (i + 1) % n;
+        if !is_out(i) {
+            break;
+        }
+        run |= 1 << i;
+    }
+    run
 }
 
 /// A scored candidate contact point after clipping (P2 W4 reduction input).
@@ -1400,14 +1494,15 @@ fn face_patch<const SPECULATIVE: bool>(
     // Seed the clip polygon with the incident face. An original corner keeps the
     // id it has always had — only vertices the clip CREATES are relabelled (A7a).
     // `face_vertices` winds the ring, so the edge ENTERING ring position `i` is
-    // ring edge `i - 1`.
+    // ring edge `i - 1`. Each of the four passes adds at most one vertex to the
+    // four corners, so `CLIP_CAPACITY` slots hold every pass's output.
     let ref_face_id = ref_face_idx as u32;
     let mut buf_a = [ClipVertex {
         pos: Vec3::ZERO,
         tie_ord: 0,
         in_edge: 0,
         feature_id: 0,
-    }; 8];
+    }; CLIP_CAPACITY];
     let mut buf_b = buf_a;
     let mut poly_len = 4usize;
     for (i, &(pos, idx)) in inc_face.iter().enumerate() {
@@ -4067,6 +4162,188 @@ mod tests {
             n.edges > 0 && n.held > 0 && n.best_face > 0,
             "T8 must see edge answers, held edge hints and best-face answers: {n:?}"
         );
+    }
+
+    // ── The clip's bound: at most one vertex per side plane (the boxclip lane) ───────────────
+
+    /// A `Vec3` from its components' `f32` bits.
+    fn vec_of_bits(b: [u32; 3]) -> Vec3 {
+        Vec3::new(f32::from_bits(b[0]), f32::from_bits(b[1]), f32::from_bits(b[2]))
+    }
+
+    /// An [`Obb`] from its fields' `f32` bits — centre, the three world axes, half-extents — so a
+    /// dumped pose is taken exactly as the narrowphase saw it, with no rotation to rebuild it from.
+    fn obb_of_bits(center: [u32; 3], axes: [[u32; 3]; 3], half: [u32; 3]) -> Obb {
+        let h = vec_of_bits(half);
+        Obb {
+            center: vec_of_bits(center),
+            axes: [vec_of_bits(axes[0]), vec_of_bits(axes[1]), vec_of_bits(axes[2])],
+            half: [h.x, h.y, h.z],
+        }
+    }
+
+    /// Whether `p` lies on `obb`'s face on local `axis` (outward sign `positive`): on the face's
+    /// plane and inside its rectangle, both within `tol`.
+    fn on_face(p: Vec3, obb: &Obb, axis: usize, positive: bool, tol: f32) -> bool {
+        let r = p - obb.center;
+        let sign = if positive { 1.0 } else { -1.0 };
+        (r.dot(obb.axes[axis]) - sign * obb.half[axis]).abs() <= tol
+            && (0..3)
+                .filter(|&i| i != axis)
+                .all(|i| r.dot(obb.axes[i]).abs() <= obb.half[i] + tol)
+    }
+
+    /// The seed 12038791118432466487 of `parallel_chunks_equal_the_serial_loop_on_random_frames`
+    /// (`narrowphase/dispatch.rs`), bodies 0 and 12 of its second frame: two boxes at ONE pose,
+    /// every bit of centre, axes and half-extents equal. The SAT face is A's z axis (`2·h_z`, the
+    /// shallowest); the reference is A's +z face and the incident B's −z face, whose outline in the
+    /// reference face's frame is the reference rectangle itself. So every incident corner lies on
+    /// two side planes and reads a distance of rounding noise, of either sign, against each.
+    ///
+    /// The clip wrote past its 8 slots here (`index out of bounds: the len is 8 but the index is
+    /// 8`): 4 → 5 → 6 → 8 → 9. Pass 1 entered at a corner whose distance read exactly `+0.0`, so
+    /// `t = 1` and the cut `prev + (cur − prev)·1` landed 2 ulp off that corner; pass 2 read the
+    /// copy outside, the corner inside and the next corner outside — two outside runs, `len + 2`.
+    ///
+    /// The exact clip is the incident face unchanged, so the manifold is four points, one at each
+    /// of B's −z corners, each at separation `−2·h_z`, anchored on A's +z face.
+    #[test]
+    fn a_coincident_face_pair_clips_to_its_incident_face() {
+        let pose = obb_of_bits(
+            [0xbf95_39c6, 0x3eda_a114, 0x3ee3_304c],
+            [
+                [0x3ee1_be18, 0x3f30_31f6, 0x3f13_7bbd],
+                [0xbea2_fb9c, 0x3f38_54fd, 0xbf1d_d9cc],
+                [0xbf56_d671, 0x3db5_317c, 0x3f09_5c2e],
+            ],
+            [0x3f19_1f3a, 0x3f24_8180, 0x3ec5_fbe8],
+        );
+        let (a, b) = (pose, pose);
+        // About ten ulp at this scale: the rounding copies of a corner sit 1–2 ulp off it, while
+        // the nearest point of the clip that is not a corner is 0.4 m away.
+        const TOL: f32 = 1.0e-6;
+        let c = match box_box_classify(&a, &b, A, B, None) {
+            BoxBoxOutcome::Contact(c) => c,
+            _ => panic!("two boxes at one pose must be a face contact"),
+        };
+        let m = &c.manifold;
+        assert_eq!(c.reference_axis, 2, "the SAT face is A's z axis: {m:?}");
+        assert_eq!(m.normal, a.axes[2], "the normal is A's +z axis: {m:?}");
+        assert_eq!(m.count, 4, "the exact clip is the whole incident face: {m:?}");
+        let corners = face_vertices(&b, 2, false);
+        let depth = 2.0 * b.half[2];
+        let mut at_corner = [false; 4];
+        for p in &m.points[..4] {
+            let k = corners
+                .iter()
+                .position(|&(q, _)| (p.anchor_b - q).length() <= TOL)
+                .unwrap_or_else(|| panic!("{p:?} is at no corner of B's -z face: {m:?}"));
+            assert!(!at_corner[k], "two points at corner {k}: {m:?}");
+            at_corner[k] = true;
+            assert!(
+                (p.separation + depth).abs() <= TOL,
+                "separation {:e}, expected -2·h_z = {:e}: {m:?}",
+                p.separation,
+                -depth
+            );
+            assert!(on_face(p.anchor_a, &a, 2, true, TOL), "{p:?} is not on A's +z face: {m:?}");
+        }
+        for i in 0..4 {
+            for j in i + 1..4 {
+                assert_ne!(m.points[i].feature_id, m.points[j].feature_id, "{m:?}");
+            }
+        }
+    }
+
+    /// The same failure on a real trajectory: Jolt's height-15 pyramid (`default_world_pyramid_
+    /// determinism.rs`'s placement) under a global 30° yaw, release, default config, 1 worker —
+    /// frame 35, bodies 1171 and 1177, two neighbours of one layer whose facing side faces
+    /// coincide (the layer pitch is `2·half`), so the SAT face is A's x axis at depth 0. Pass 1
+    /// entered at a corner reading `+0.0` again (`t = 1`), and the clip grew 4 → 5 → 6 → 8 → 9.
+    ///
+    /// The exact clip is the incident face — four corners at separation 0, computed as rounding
+    /// noise of either sign — and the kernel keeps the points at or below the reference face. So
+    /// in both orders every point lies on both facing faces, at a separation of at most 0 and no
+    /// deeper than rounding, with distinct ids.
+    #[test]
+    fn touching_neighbours_of_a_yawed_pyramid_clip_to_their_shared_face() {
+        let a = obb_of_bits(
+            [0x31dd_c207, 0x41ae_8d59, 0x3259_3705],
+            [
+                [0x3f5d_b3d7, 0xb1a5_75fa, 0xbf00_0000],
+                [0x327b_a121, 0x3f80_0000, 0x3287_2fe2],
+                [0x3f00_0000, 0xb2b3_fb96, 0x3f5d_b3d7],
+            ],
+            [0x3f80_0000, 0x3f80_0000, 0x3f80_0000],
+        );
+        let b = obb_of_bits(
+            [0x3fdd_b3d7, 0x41ae_8d59, 0xbf80_0000],
+            [
+                [0x3f5d_b3d7, 0xb29b_7df4, 0xbf00_0000],
+                [0x32b3_3ea0, 0x3f80_0000, 0xae85_f280],
+                [0x3f00_0000, 0xb232_569e, 0x3f5d_b3d7],
+            ],
+            [0x3f80_0000, 0x3f80_0000, 0x3f80_0000],
+        );
+        // A few ulp at y ≈ 21.8 (one ulp is 1.9e-6).
+        const TOL: f32 = 1.0e-5;
+        // (first box, its facing face's sign, second box, its facing face's sign)
+        for (x, x_pos, y, y_pos, order) in [(&a, true, &b, false, "A/B"), (&b, false, &a, true, "B/A")] {
+            let c = match box_box_classify(x, y, A, B, None) {
+                BoxBoxOutcome::Contact(c) => c,
+                _ => panic!("{order}: two touching neighbours must be a face contact"),
+            };
+            let m = &c.manifold;
+            let n = usize::from(m.count);
+            assert!((1..=4).contains(&n), "{order}: {m:?}");
+            for p in &m.points[..n] {
+                assert!(
+                    on_face(p.anchor_a, x, 0, x_pos, TOL) && on_face(p.anchor_b, y, 0, y_pos, TOL),
+                    "{order}: {p:?} is not on both facing faces: {m:?}"
+                );
+                assert!(
+                    p.separation <= 0.0 && p.separation >= -TOL,
+                    "{order}: separation {:e} of a touching pair: {m:?}",
+                    p.separation
+                );
+            }
+            for i in 0..n {
+                for j in i + 1..n {
+                    assert_ne!(m.points[i].feature_id, m.points[j].feature_id, "{order}: {m:?}");
+                }
+            }
+        }
+    }
+
+    /// [`clip_against_plane`] adds at most one vertex per pass, whatever its distances read. This
+    /// ring reads three outside runs against the plane `x ≤ 0`: two vertices a rounding step
+    /// outside and one far out. The textbook loop emits `#inside + 2·runs = 4 + 6 = 10` vertices,
+    /// past the 8 slots `face_patch` gives it. The pass cuts the far-out run only and keeps the two
+    /// vertices a rounding step outside — the exact clip keeps a vertex on its plane — so the
+    /// result is `len + 1 = 8` vertices: every input vertex but the far one, and the two cuts on
+    /// the far one's edges, at `x = 0`.
+    #[test]
+    fn a_clip_pass_adds_at_most_one_vertex_whatever_its_signs_read() {
+        let xs = [1.0e-7f32, -1.0, 2.0e-7, -1.0, 5.0, -1.0, -1.0];
+        let poly: [ClipVertex; 7] = core::array::from_fn(|i| ClipVertex {
+            pos: Vec3::new(xs[i], i as f32, 0.0),
+            tie_ord: i as u8,
+            in_edge: (i % 4) as u8,
+            feature_id: i as u32,
+        });
+        let mut out = [poly[0]; CLIP_CAPACITY];
+        let n = clip_against_plane(&poly, Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0), 0, 0, &mut out);
+        assert_eq!(n, poly.len() + 1, "one run cut, one vertex added");
+        let ids: Vec<u32> = out[..n].iter().map(|v| v.feature_id).collect();
+        // The ring from vertex 0: 0..=3 kept, the leaving cut on 3 → 4, the entering cut on
+        // 4 → 5, then 5 and 6.
+        let leave = feature_face_clip(0, poly[4].in_edge as u32, 0);
+        let enter = feature_face_clip(0, poly[5].in_edge as u32, 0);
+        assert_eq!(ids, [0, 1, 2, 3, leave, enter, 5, 6], "the far run alone is cut");
+        assert_ne!(leave, enter, "the two cuts carry distinct ids");
+        for v in &out[4..6] {
+            assert!(v.pos.x.abs() <= 1.0e-6, "a cut lies on the plane: {:?}", v.pos);
+        }
     }
 
     impl ContactPoint {

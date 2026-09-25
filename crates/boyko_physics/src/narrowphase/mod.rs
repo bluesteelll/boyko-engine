@@ -142,7 +142,10 @@ pub fn feature_face_face(ref_face: u32, incident_vtx: u32) -> u32 {
 ///   convex polygon crosses a plane at most twice, on two DISTINCT edges, and
 ///   the working ring holds at most one edge per label (each original ring edge
 ///   survives as at most one segment, and a clip against plane `q` adds at most
-///   one new edge, labelled `8 + q` — none when the plane does not cut).
+///   one new edge, labelled `8 + q` — none when the plane does not cut). Rounding
+///   can make the computed ring read more than one outside run; the clip then
+///   cuts only one of them (`box_box::clip_against_plane`), so "at most twice"
+///   holds of the computed ring too, not only of the exact one.
 ///
 /// Distinct intersections therefore carry distinct ids under every clipping
 /// order, and bit 13 keeps them disjoint from the surviving corners' ids —
