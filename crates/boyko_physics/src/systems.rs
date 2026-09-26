@@ -465,8 +465,10 @@ struct BroadphaseStages<'a> {
     pairs: &'a mut ContactPairs,
     sets: &'a mut SleepSets,
     manifolds: &'a mut Manifolds,
-    /// The colored solver, whose warm store the sleep epoch reads and a D-H flush drains into;
-    /// `None` in the graph-only pipeline (another solver), where the sleep-skip never runs.
+    /// The colored solver, whose setup flag the sleep epoch reads — ANDed with the latched
+    /// `PhysicsConfig::warm_start` into the effective warm start (L10 D5b) — and a D-H flush
+    /// drains into; `None` in the graph-only pipeline (another solver), where the sleep-skip never
+    /// runs.
     solver: Option<&'a mut ColoredSoftStepSolver>,
 }
 
@@ -486,6 +488,9 @@ fn broadphase_sets(
 ) {
     let BroadphaseStages { grid, tree, pairs, sets, manifolds, solver } = stages;
     let cfg = inputs.config();
+    // L10 D5b: the step's effective warm start, once — the solver's setup flag AND the latched
+    // field. The epoch and the drain read it; `None` without the colored solver.
+    let warm = solver.as_deref().map(|s| s.warm_start_enabled() && cfg.warm_start);
     // L9 D9 and L10 C0: the prologue reads the jumper bitset the rotation builds.
     pairs.rotate(&scratch.rows);
     let plan = {
@@ -499,7 +504,7 @@ fn broadphase_sets(
             jumpers: pairs.jumper_bits(),
             jumpers_valid: pairs.jumper_seq() == scratch.rows.gather_seq(),
             carry: manifolds.pair_carry.peek(&scratch.rows),
-            warm: solver.as_deref().map(ColoredSoftStepSolver::warm_start_enabled),
+            warm,
             field: if sdf_epoch { inputs.sdf_field() } else { None },
         };
         sets.prologue(&prologue, &mut manifolds.held)
@@ -552,7 +557,7 @@ fn broadphase_sets(
     if let Some(solver) = solver
         && let Some(restore) = sets.take_drain()
     {
-        solver.drain_restore(restore);
+        solver.drain_restore(restore, warm.unwrap_or(false));
     }
 }
 

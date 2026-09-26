@@ -206,10 +206,11 @@ pub struct SoftStepSolver {
     /// This frame's converged impulses (W3) — freshly zeroed each frame, filled
     /// in manifold order after the solve, then swapped into `warm_read`.
     warm_write: WarmStartTable,
-    /// Whether warm-starting is active (W3). Production default is `true`; the
+    /// The warm-start SETUP flag (W3). Production default is `true`; the
     /// `false` mode (see [`with_warm_start`](Self::with_warm_start)) zero-seeds
     /// every contact each frame, used by the A/B convergence test to demonstrate
-    /// the warm-start payoff.
+    /// the warm-start payoff. A solve runs warm iff this AND the configuration's
+    /// [`PhysicsConfig::warm_start`] are both true (L10 D5b).
     warm_start_enabled: bool,
     /// The warm table's place in the gather sequence, stamped where `warm_read` is
     /// rebuilt (defect A, interim; U7 deletes it).
@@ -262,6 +263,11 @@ impl SoftStepSolver {
     /// which the `warm_start_improves_convergence` A/B test runs against to show
     /// the payoff. Pre-sizes nothing (the steady-state capacity grows on the
     /// first solve).
+    ///
+    /// A setup choice: a solve runs warm iff this flag AND the configuration's
+    /// [`PhysicsConfig::warm_start`] are both true (L10 D5b), so `false` here keeps the solver
+    /// cold whatever the configuration says. A direct-drive caller that never gathers rows
+    /// resumes after a cold step from the impulses its last warm solve stored.
     pub fn with_warm_start(enabled: bool) -> Self {
         Self {
             warm_start_enabled: enabled,
@@ -318,8 +324,9 @@ impl SoftStepSolver {
     /// or just-reformed point — e.g. a box manifold point whose feature id flipped)
     /// seeds zero, a one-frame convergence cost, no error. A box manifold's 4
     /// points therefore warm-start independently (the W3 limitation that left
-    /// points 1..count always cold). When `warm_start_enabled` is `false` (the A/B
-    /// test hook) every seed is zero (the W2 behavior). A W3 sphere-sphere manifold
+    /// points 1..count always cold). When the step is cold (`warm` false: the A/B
+    /// test hook, or `PhysicsConfig::warm_start` off) every seed is zero (the W2 behavior). A
+    /// W3 sphere-sphere manifold
     /// has one point with `feature_id == 0`, so its key equals the old per-manifold
     /// key — the sphere path is byte-identical.
     fn build_constraints(
@@ -328,6 +335,7 @@ impl SoftStepSolver {
         bodies: &[BodyState],
         vn_initial: &mut ScratchColumn<f32>,
         remap: RowRemap<'_>,
+        warm: bool,
     ) {
         if let RowRemap::Rows(prev_row) = remap {
             debug_assert_eq!(
@@ -344,7 +352,6 @@ impl SoftStepSolver {
             manifolds: out_manifolds,
             points: out_points,
             warm_read,
-            warm_start_enabled,
             warm_cursor,
             warm_stats,
             ..
@@ -361,7 +368,7 @@ impl SoftStepSolver {
         vn.clear();
         // Warm-seed diagnostic (defect A): the carried count is taken only on a step whose
         // rows changed; the unchanged step does no per-manifold work for it.
-        let carried_rows = *warm_start_enabled && matches!(remap, RowRemap::Rows(_));
+        let carried_rows = warm && matches!(remap, RowRemap::Rows(_));
         let (mut seeded, mut carried, mut point_hits) = (0u32, 0u32, 0u32);
 
         for m in manifolds {
@@ -434,7 +441,7 @@ impl SoftStepSolver {
                 } else {
                     warm_start::pack(m.body_a, m.body_b, cp.feature_id)
                 };
-                let seed = if *warm_start_enabled
+                let seed = if warm
                     && let Some((la, lb)) = lookup
                 {
                     warm_read.get(if b_is_sentinel {
@@ -475,7 +482,7 @@ impl SoftStepSolver {
         }
 
         let translated = match remap {
-            _ if !*warm_start_enabled => 0,
+            _ if !warm => 0,
             RowRemap::Identity => seeded,
             RowRemap::Rows(_) => carried,
             RowRemap::Reset => 0,
@@ -544,17 +551,17 @@ impl SoftStepSolver {
     /// deterministic flattened order `points[]` already holds (manifold order,
     /// then point index `0..count`). The resulting occupancy is a pure function of
     /// this frame's key set (order-independent, no carried history), so the
-    /// swapped-in `read` table is bit-deterministic next frame. When warm-starting
-    /// is disabled the store is skipped (the `read` table stays empty, so every
-    /// seed misses).
+    /// swapped-in `read` table is bit-deterministic next frame. On a cold step (`warm` false,
+    /// L10 D5b) the store is skipped: the `read` table and its stamp stay as the last warm step
+    /// left them.
     ///
     /// After the swap it stamps the warm cursor with `rows` (defect A, interim): this is
     /// the table's only writer, so this is where it becomes keyed by this gather. It is
     /// NOT stamped at lookup time, because this solver looks up in `build_constraints`
     /// before its no-dynamic-body early return: a lookup-time stamp would mark a table
     /// current that the step never stored.
-    fn store_and_swap(&mut self, rows: &RowIdentity) {
-        if !self.warm_start_enabled {
+    fn store_and_swap(&mut self, rows: &RowIdentity, warm: bool) {
+        if !warm {
             return;
         }
         let point_count = self.points.len();
@@ -911,6 +918,9 @@ impl RigidSolver for SoftStepSolver {
         manifolds: &[Manifold],
         scratch: &mut SolverScratch,
     ) {
+        // L10 D5b: the step's effective warm start, first — the build below reads it before the
+        // early return.
+        let warm = self.warm_start_enabled && config.warm_start;
         let substeps = config.substeps.max(1);
         let h = config.dt / substeps as f32;
 
@@ -931,15 +941,15 @@ impl RigidSolver for SoftStepSolver {
                 rows,
                 ..
             } = &mut *scratch;
-            // Warm start is classified only while it is enabled: a disabled solver never
-            // reads or stores the table, so `Identity` is a placeholder that takes no
-            // per-manifold branch, and its cursor never counts a phantom `Reset`.
-            let warm_remap = if self.warm_start_enabled {
+            // Warm start is classified only on a warm step: a cold step never reads or stores
+            // the table, so `Identity` is a placeholder that takes no per-manifold branch, and
+            // its cursor never counts a phantom `Reset`.
+            let warm_remap = if warm {
                 self.warm_cursor.remap(rows)
             } else {
                 RowRemap::Identity
             };
-            self.build_constraints(manifolds, body_col.as_read_slice(), vn_initial, warm_remap);
+            self.build_constraints(manifolds, body_col.as_read_slice(), vn_initial, warm_remap, warm);
         }
         // No `manifolds.is_empty()` early-return: in solver-owned mode (C2) this
         // solver is the SOLE integrator, so the substep loop must run its gravity
@@ -1047,7 +1057,7 @@ impl RigidSolver for SoftStepSolver {
         // (W3) Store the converged accumulated impulses into the freshly-zeroed
         // write table (in manifold order) and swap read ↔ write so next frame
         // seeds from this frame's solution.
-        self.store_and_swap(&scratch.rows);
+        self.store_and_swap(&scratch.rows, warm);
 
         // Write the solved velocities back (positions/orientations were
         // integrated in place into the snapshot) and flag every integrated

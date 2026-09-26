@@ -164,7 +164,8 @@ pub enum SleepSkip {
     /// colouring and the solve, and its contacts are kept for the views (DEFAULT). A held
     /// island is restored — collided again from what it kept — the step its inputs change
     /// (`sleep_sets.rs`), and a change of `contact_reuse`, `contact_reuse_distance`, `dt`, the
-    /// warm start, the SDF field or its kernel restores every held island.
+    /// effective warm start (the solver's setup flag AND [`PhysicsConfig::warm_start`], L10 D5b),
+    /// the SDF field or its kernel restores every held island.
     #[default]
     Sets,
 }
@@ -205,6 +206,20 @@ pub struct PhysicsConfig {
     /// damping. `1.0` is critically damped; the Box2D-v3 "Soft Step" default of
     /// `10.0` is heavily overdamped for stable resting contact.
     pub contact_damping: f32,
+    /// Warm-start contacts from the previous step's impulses (default `true`). A solve runs warm
+    /// iff this AND the solver's setup flag
+    /// ([`ColoredSoftStepSolver::with_warm_start`](crate::solver::ColoredSoftStepSolver::with_warm_start),
+    /// [`SoftStepSolver::with_warm_start`](crate::solver::SoftStepSolver::with_warm_start)) are
+    /// both true. The pipeline reads it once per step, at the broadphase; a write takes effect at
+    /// the next broadphase (L10 D5b).
+    ///
+    /// In the plugin's pipelines, whose rows are gathered every step, the first warm step after a
+    /// cold one seeds every contact with zero, and every island asleep at that step (frozen, or
+    /// held by the sleep-skip) keeps no warm memory and wakes cold whenever it wakes. On a sleeping
+    /// colored world a change of the effective value also restores every held island (L10 D5). A
+    /// direct-drive caller that never gathers rows (`solve_colored`, `solve_colored_sleeping`,
+    /// `RigidSolver::solve`) resumes from the impulses its last warm solve stored.
+    pub warm_start: bool,
     /// Broadphase algorithm (default [`BroadphaseKind::AllPairs`] = the shipped
     /// O(n²) loop, byte-identical to today). Set to [`BroadphaseKind::Grid`] to
     /// opt into the O2 uniform-grid broadphase, or to [`BroadphaseKind::Tree`] for
@@ -589,6 +604,9 @@ impl Default for PhysicsConfig {
             relax_iterations: 2,
             contact_hertz: 30.0,
             contact_damping: 10.0,
+            // L10 D5b: warm start on, as the solvers' own default; the effective value is this AND
+            // the solver's setup flag, so the default keeps every setup choice's effect.
+            warm_start: true,
             // Default to the shipped O(n²) loop so an un-opted world is
             // byte-identical to today (the campaign 0%-gate).
             broadphase: BroadphaseKind::AllPairs,

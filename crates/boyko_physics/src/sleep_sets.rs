@@ -294,7 +294,9 @@ const SDF_EDIT_WORDS: usize = 12;
 pub(crate) struct SleepEpoch {
     /// The step mode.
     mode: u8,
-    /// Whether warm-starting is enabled.
+    /// The effective warm start: the colored solver's setup flag AND the latched
+    /// `PhysicsConfig::warm_start` (L10 D5b). A change restores every held island: `Off` keeps a
+    /// frozen island's records only while warm.
     warm: u8,
     /// `PhysicsConfig::sdf_narrowphase`.
     sdf_kernel: u8,
@@ -575,8 +577,9 @@ pub(crate) struct Prologue<'a> {
     pub(crate) jumpers_valid: bool,
     /// How L9's pair carry will classify this step (its cursor, peeked).
     pub(crate) carry: RowRemap<'a>,
-    /// The colored solver's warm-start flag, or `None` in a world whose solve is not the colored
-    /// one (the graph-only shape), where the sleep-skip never runs.
+    /// The step's effective warm start — the colored solver's setup flag AND the latched
+    /// `PhysicsConfig::warm_start` (L10 D5b) — or `None` in a world whose solve is not the
+    /// colored one (the graph-only shape), where the sleep-skip never runs.
     pub(crate) warm: Option<bool>,
     /// The latched SDF field the sleep epoch covers: the record's, in a world with the SDF stage
     /// only (design 04 D10).

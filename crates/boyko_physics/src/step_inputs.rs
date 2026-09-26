@@ -174,6 +174,7 @@ mod tests {
             relax_iterations: 5,
             contact_hertz: 41.0,
             contact_damping: 3.5,
+            warm_start: false,
             broadphase: BroadphaseKind::Tree,
             broadphase_select: BroadphaseSelectMode::Auto,
             simd: false,
@@ -209,6 +210,7 @@ mod tests {
             relax_iterations,
             contact_hertz,
             contact_damping,
+            warm_start,
             broadphase,
             broadphase_select,
             simd,
@@ -239,6 +241,7 @@ mod tests {
         assert_eq!(relax_iterations, b.relax_iterations, "relax_iterations");
         assert_eq!(contact_hertz.to_bits(), b.contact_hertz.to_bits(), "contact_hertz");
         assert_eq!(contact_damping.to_bits(), b.contact_damping.to_bits(), "contact_damping");
+        assert_eq!(warm_start, b.warm_start, "warm_start");
         assert_eq!(broadphase, b.broadphase, "broadphase");
         assert_eq!(broadphase_select, b.broadphase_select, "broadphase_select");
         assert_eq!(simd, b.simd, "simd");

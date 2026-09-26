@@ -62,6 +62,14 @@
 //! The rig also runs the pipelines without `IslandSleep` (the reference solver), where the
 //! observation keeps the bodies, the views and the soft particles.
 //!
+//! # Warm start as a latched input (L10 D5b, `levers/L10-sleeping/11-DESIGN-D5B.md`)
+//!
+//! A solve runs warm iff the solver's setup flag AND the latched `PhysicsConfig::warm_start` are
+//! both true. Arms A (a boundary toggle while held) and B (the same toggle in the window) run in
+//! lockstep; C is the deferral driver's; D runs six worlds of (setup flag, config) and requires the
+//! four with a false half to match exactly; E drives both solvers directly and pins that a direct
+//! drive resumes after a cold step instead of taking a `Reset`.
+//!
 //! # Anti-vacuity
 //!
 //! Each test states what it must observe (held rows, restores by rule, cross copies, restore
@@ -92,14 +100,14 @@ use boyko_threadpool::ThreadPoolBuilder;
 use boyko_physics::components::{
     Collider, ColliderShape, Kinematic, RigidBody, RigidBodyMass, Sensor, Simulated,
 };
-use boyko_physics::manifold::{BodyIndex, Manifold, SDF_SENTINEL};
+use boyko_physics::manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::{
     add_physics_sdf, add_physics_soft, add_physics_soft_colored, add_physics_systems,
 };
 use boyko_physics::broadphase_tree::{BroadphaseTree, TreeDiag, all_pairs_into};
 use boyko_physics::resources::{
-    BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
+    BodyState, BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
     PairTagProbe, PhysicsConfig, SdfNarrowphaseKernel, SleepSkip, SolverScratch,
 };
 use boyko_physics::sdf_query::SdfField;
@@ -979,6 +987,8 @@ struct Evidence {
     off_pairs: Vec<u64>,
     /// Per step: a hash of the `Off` world's logical manifolds' bytes.
     off_manifolds: Vec<u64>,
+    /// Per step: the `Sets` world's warm-seed statistics (equal to `Off`'s: they are compared).
+    warm: Vec<WarmSeedStats>,
 }
 
 impl Evidence {
@@ -1088,6 +1098,7 @@ fn lockstep_probed(
         ev.off_reused.push(classes.reused);
         ev.off_pairs.push(classes.pairs);
         ev.off_manifolds.push(manifolds_hash(&o.manifolds));
+        ev.warm.push(s.warm.unwrap_or_default());
         probe(step, &off, &sets);
     }
     ev.rules = sets.world.resource::<SleepSets>().rule_counts();
@@ -2961,6 +2972,7 @@ fn da9_rows(shape: Shape) -> Vec<Row> {
         self_collision_iters: _,
         soft_body_colored: _,
         soft_self_collision_colored: _,
+        warm_start: _,
     } = PhysicsConfig::default();
     let soft = shape != Shape::Sdf;
     let coupled = shape == Shape::SoftCoupled;
@@ -3009,6 +3021,8 @@ fn da9_rows(shape: Shape) -> Vec<Row> {
         Row { name: "soft_body_colored", write: |c| c.soft_body_colored = !c.soft_body_colored, class: pick(shape == Shape::SoftColored, O, U) },
         // Self-collision is off in these scenes (`self_collision_iters` is 0).
         Row { name: "soft_self_collision_colored", write: |c| c.soft_self_collision_colored = !c.soft_self_collision_colored, class: U },
+        // L10 D5b (design 11 §4.3 C): the ball's contact is warm-started on every shape.
+        Row { name: "warm_start", write: |c| c.warm_start = !c.warm_start, class: O },
     ]
 }
 
@@ -3305,4 +3319,345 @@ fn s3_mid_step_sleep_threshold_is_mode_independent() {
             );
         },
     );
+}
+
+// ── D5b: warm start as a latched input (L10 C3e; design 11, §4) ────────────────────────────
+
+/// The step the warm-start toggle writes at, and the one it is restored at.
+const WARM_OFF: usize = HELD_BY;
+/// See [`WARM_OFF`].
+const WARM_ON: usize = HELD_BY + 60;
+
+/// The warm-start arms' scenes: the towers and the ball on the default pipeline, over
+/// [`arm_variants`], and S4's tower and the ball on the SDF pipeline, over [`s4_variants`] — each
+/// with its held-row count (the ball is dynamic and never held).
+fn warm_arm_cells() -> Vec<(String, Pipeline, Variant, Vec<Spec>, u32)> {
+    let mut cells = Vec::new();
+    for v in arm_variants() {
+        let label = format!("[{:?} reuse {:?} W{}]", v.kind, v.reuse, v.workers);
+        cells.push((label, Pipeline::Default, v, towers_and_ball(), 9));
+    }
+    for (kind, v) in s4_variants() {
+        cells.push((format!("[S4 {kind} W{}]", v.workers), Pipeline::Sdf, v, sdf_tower_and_ball(), 3));
+    }
+    cells
+}
+
+/// Arm A (design 11 §4.3): `warm_start` off at [`WARM_OFF`] and back on at [`WARM_ON`] as boundary
+/// writes while the towers are held, then `wake_all()` at `HELD_BY + 120`; `Off` and `Sets` in
+/// lockstep. The epoch carries the effective warm start (the solver's flag AND the latched field),
+/// so each toggle flushes; the first warm step after the cold period is a `Reset` (L3), so no warm
+/// record captured before it is ever read again, in either mode.
+#[test]
+fn s3_warm_start_toggle_while_held_flushes() {
+    for (cell, pipeline, variant, specs, held) in warm_arm_cells() {
+        let label = format!("D5b A {cell}");
+        let mut script = |step: usize, rig: &mut Rig| {
+            if step == WARM_OFF {
+                rig.cfg().warm_start = false;
+            }
+            if step == WARM_ON {
+                rig.cfg().warm_start = true;
+            }
+            if step == HELD_BY + 120 {
+                wake_all(rig);
+            }
+        };
+        let ev = lockstep(&label, pipeline, variant, &specs, ARM_STEPS + 60, &mut script);
+        let (w, k) = (&ev.warm, WARM_OFF);
+        // (a) held and warm before the toggle.
+        assert_eq!(ev.stats[k - 1].held_rows, held, "{label}: void (a): not held before the toggle");
+        assert!(w[k - 1].carry_hits > 0, "{label}: void (a): no warm carry before the toggle: {:?}", w[k - 1]);
+        // (b) the toggle's step is cold and flushes.
+        assert!(
+            w[k].points > 0 && w[k].point_hits == 0 && ev.stats[k].flushes == 1,
+            "{label}: (b) the toggle's step: warm {:?}, stats {:?}",
+            w[k],
+            ev.stats[k]
+        );
+        // (c) held again inside the cold period, with no warm carry.
+        let reheld = (k + 1..WARM_ON).find(|&j| ev.stats[j].held_rows == held);
+        let j = WARM_ON - 1;
+        assert!(
+            reheld.is_some() && ev.stats[j].held_rows == held && w[j].carry_points == 0 && w[j].carry_hits == 0,
+            "{label}: (c) not held again with an empty carry by step {j}: stats {:?}, warm {:?}",
+            ev.stats[j],
+            w[j]
+        );
+        println!("{label}: re-held first at step {reheld:?} (predicted {})", k + 1);
+        // (d) the Reset lands on the toggle-back step.
+        let r = w[k - 1].remap_resets;
+        assert_eq!(ev.stats[WARM_ON].flushes, 1, "{label}: (d) the toggle back did not flush");
+        assert!(
+            (k - 1..WARM_ON).all(|j| w[j].remap_resets == r) && w[WARM_ON].remap_resets == r + 1,
+            "{label}: (d) remap_resets over [{}, {WARM_ON}]: {:?}",
+            k - 1,
+            (k - 1..=WARM_ON).map(|j| w[j].remap_resets).collect::<Vec<_>>()
+        );
+        assert!(
+            w[WARM_ON].point_hits == 0 && w[WARM_ON + 1].point_hits > 0,
+            "{label}: (d) point hits at the Reset and after: {} then {}",
+            w[WARM_ON].point_hits,
+            w[WARM_ON + 1].point_hits
+        );
+        // (e) the cold period erased the frozen islands' warm memory.
+        let e = HELD_BY + 100;
+        assert!(w[e].carry_points > 0 && w[e].carry_hits == 0, "{label}: (e) warm at step {e}: {:?}", w[e]);
+        // (f)
+        assert!(
+            ev.rules.d5_epoch >= 2 && ev.rules.d6_wake_all >= 1,
+            "{label}: void (f): {} epoch flushes, {} wake flushes",
+            ev.rules.d5_epoch,
+            ev.rules.d6_wake_all
+        );
+    }
+}
+
+/// Arm B: the same toggle written in the Early window (and, a second run, the Late one): the
+/// write's own step runs warm in both modes, and the next step is the cold, flushing one.
+#[test]
+fn s3_mid_step_warm_start_toggle_lands_next_step() {
+    for place in [Place::Early, Place::Late] {
+        for (cell, pipeline, variant, specs, held) in warm_arm_cells() {
+            let label = format!("D5b B {place:?} {cell}");
+            let mut script = |step: usize, rig: &mut Rig| {
+                if step == WARM_OFF {
+                    rig.mid(place).cfg = Some(|c| c.warm_start = false);
+                }
+                if step == WARM_ON {
+                    rig.mid(place).cfg = Some(|c| c.warm_start = true);
+                }
+            };
+            let mut applied = Vec::new();
+            let ev = lockstep_probed(&label, pipeline, variant, &specs, WARM_ON + 3, &mut script, &mut |_, _, sets| {
+                applied.push(sets.mid_ref(place).applied);
+            });
+            let (w, k) = (&ev.warm, WARM_OFF);
+            for s in [WARM_OFF, WARM_ON] {
+                assert_eq!(applied[s], applied[s - 1] + 1, "{label}: void: the write at step {s} was not applied");
+            }
+            assert!(w[k].point_hits > 0, "{label}: the write's own step ran cold: {:?}", w[k]);
+            assert!(
+                ev.stats[k].held_rows == held && ev.stats[k].flushes == 0,
+                "{label}: void: the write's step was not a held, unflushed one: {:?}",
+                ev.stats[k]
+            );
+            assert!(
+                w[k + 1].point_hits == 0 && ev.stats[k + 1].flushes == 1,
+                "{label}: the next step: warm {:?}, stats {:?}",
+                w[k + 1],
+                ev.stats[k + 1]
+            );
+            assert!(w[WARM_ON].point_hits == 0, "{label}: the toggle-back write's own step ran warm");
+            assert_eq!(
+                w[WARM_ON + 1].remap_resets,
+                w[WARM_ON].remap_resets + 1,
+                "{label}: the first warm step after the write is not a Reset"
+            );
+            assert!(w[WARM_ON + 2].point_hits > 0, "{label}: no warm hit after the Reset");
+        }
+    }
+}
+
+/// Arm C (D9b's deferral driver): `warm_start = false` in the Early and the Late window. On the
+/// default pipeline in every mode, and on the reference pipeline with sleeping off.
+#[test]
+fn d5b_defer_warm_start() {
+    for place in [Place::Early, Place::Late] {
+        let write = Defer::cfg(place, |c| c.warm_start = false);
+        for w in [1, 8] {
+            let variant = Variant::default_cfg(w);
+            for mode in MODES {
+                let label = cell_label(&format!("D5b C {place:?}"), Pipeline::Default, &variant, mode);
+                deferral(&label, Pipeline::Default, variant, mode, &towers_and_ball(), &quiet, &write, &mut |_| {});
+            }
+            let label = cell_label(&format!("D5b C {place:?}"), Pipeline::SoftCoupledRef, &variant, None);
+            deferral(&label, Pipeline::SoftCoupledRef, variant, None, &soft_scene(), &soft_setup, &write, &mut |_| {});
+        }
+    }
+}
+
+/// The last solve's warm-seed statistics of whichever solver `rig` runs.
+fn warm_stats_of(rig: &Rig) -> WarmSeedStats {
+    if rig.world.contains_resource::<ColoredSoftStepSolver>() {
+        rig.world.resource::<ColoredSoftStepSolver>().warm_seed_stats()
+    } else {
+        rig.world.resource::<SoftStepSolver>().warm_seed_stats()
+    }
+}
+
+/// Arm D, two knobs and one rule: warm start runs iff the solver's setup flag AND the latched
+/// `PhysicsConfig::warm_start` are both true. Six worlds per shape, as (solver flag, config):
+/// (t,t), (t,f), (f,t), (f,f), (f, toggled f→t→f) and (t, toggled t→f→t), the toggles at
+/// [`WARM_OFF`] and [`WARM_ON`]; the solver flag is set at setup by inserting
+/// `with_warm_start(false)` before the first step. Every world with a false half runs cold and they
+/// match exactly; (t,t) differs from them; and the sixth world, on the reference solver too, takes
+/// its `Reset` on the toggle-back step (L3).
+#[test]
+fn d5b_two_knobs_one_rule() {
+    let shapes = [(Pipeline::Default, Some(SleepSkip::Sets)), (Pipeline::SoftCoupledRef, None)];
+    // (solver flag, config at start, config toggled at WARM_OFF and back at WARM_ON)
+    let worlds = [(true, true, false), (true, false, false), (false, true, false), (false, false, false), (false, false, true), (true, true, true)];
+    for (pipeline, mode) in shapes {
+        let label = format!("D5b D [{pipeline:?}]");
+        let mut rigs: Vec<Rig> = worlds
+            .iter()
+            .map(|&(solver, cfg, _)| {
+                let mut rig = Rig::with_mode(pipeline, Variant::default_cfg(1), mode, &towers_and_ball());
+                if !solver {
+                    if pipeline == Pipeline::Default {
+                        rig.world.insert_resource(ColoredSoftStepSolver::with_warm_start(false));
+                    } else {
+                        rig.world.insert_resource(SoftStepSolver::with_warm_start(false));
+                    }
+                }
+                rig.cfg().warm_start = cfg;
+                // A cold solve settles the towers more slowly: with the default threshold the
+                // worlds that start cold never freeze before the first toggle. Two orders above it,
+                // every world holds its towers before each toggle.
+                rig.cfg().sleep_threshold = 1.0e-2;
+                rig
+            })
+            .collect();
+        let mut bodies_differ = false;
+        let mut sixth = Vec::new();
+        for step in 0..=WARM_ON + 1 {
+            for (rig, &(_, _, toggled)) in rigs.iter_mut().zip(&worlds) {
+                if toggled && (step == WARM_OFF || step == WARM_ON) {
+                    let on = rig.cfg().warm_start;
+                    rig.cfg().warm_start = !on;
+                }
+                rig.step();
+                if toggled && mode.is_some() && (step == WARM_OFF - 1 || step == WARM_ON - 1) {
+                    let held = rig.world.resource::<SleepSets>().stats().held_rows;
+                    assert!(held > 0, "{label}: void: a toggled world holds nothing before its toggle at step {}", step + 1);
+                }
+            }
+            let obs: Vec<Obs> = rigs.iter_mut().map(|rig| observe(&mut rig.world)).collect();
+            for k in [2, 3, 4] {
+                if let Some(why) = diff_named(&obs[1], &obs[k], ("(t,f)", "other"), false) {
+                    panic!("{label}: world {k} of the cold four differs from (t,f) after step {step}: {why}");
+                }
+            }
+            if mode.is_some() {
+                let d5: Vec<u64> = rigs[1..5].iter().map(|r| r.world.resource::<SleepSets>().rule_counts().d5_epoch).collect();
+                assert!(d5.iter().all(|&d| d == d5[0]), "{label}: the cold four's epoch flushes differ after step {step}: {d5:?}");
+            }
+            bodies_differ |= obs[0].bodies != obs[1].bodies;
+            sixth.push(warm_stats_of(&rigs[5]));
+        }
+        assert!(bodies_differ, "{label}: void: (t,t) equals (t,f): warm start changed nothing");
+        let r = sixth[WARM_OFF - 1].remap_resets;
+        assert!(
+            (WARM_OFF..WARM_ON).all(|j| sixth[j].point_hits == 0),
+            "{label}: the sixth world hit a warm record inside its cold period"
+        );
+        assert!(
+            (WARM_OFF - 1..WARM_ON).all(|j| sixth[j].remap_resets == r) && sixth[WARM_ON].remap_resets == r + 1,
+            "{label}: the sixth world's remap_resets over [{}, {WARM_ON}]: {:?}",
+            WARM_OFF - 1,
+            (WARM_OFF - 1..=WARM_ON).map(|j| sixth[j].remap_resets).collect::<Vec<_>>()
+        );
+        assert!(
+            sixth[WARM_ON].point_hits == 0 && sixth[WARM_ON + 1].point_hits > 0,
+            "{label}: the sixth world's point hits at the Reset and after: {} then {}",
+            sixth[WARM_ON].point_hits,
+            sixth[WARM_ON + 1].point_hits
+        );
+    }
+}
+
+/// Arm E's scene: a row of spheres of radius 0.5 resting on a static floor whose top is `y = 0`,
+/// the floor the last row.
+fn direct_drive_scene() -> Vec<BodyState> {
+    let sphere = |x: f32| BodyState {
+        inv_inertia: Mat3::from_diagonal(Vec3::new(10.0, 10.0, 10.0)),
+        inv_inertia_local: Mat3::from_diagonal(Vec3::new(10.0, 10.0, 10.0)),
+        position: Vec3::new(x, 0.5, 0.0),
+        linear_velocity: Vec3::ZERO,
+        angular_velocity: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        inv_mass: 1.0,
+        restitution: 0.0,
+        friction: 0.5,
+        simulated: true,
+        kinematic: false,
+        is_sensor: false,
+        shape: ColliderShape::Sphere { radius: 0.5 },
+    };
+    let mut bodies: Vec<BodyState> = (0..6).map(|i| sphere(2.0 * i as f32)).collect();
+    bodies.push(BodyState {
+        inv_inertia: Mat3::ZERO,
+        inv_inertia_local: Mat3::ZERO,
+        position: Vec3::new(0.0, -1.0, 0.0),
+        inv_mass: 0.0,
+        simulated: false,
+        shape: ColliderShape::Box { half_extents: FLOOR_HALF_EXTENTS },
+        ..sphere(0.0)
+    });
+    bodies
+}
+
+/// Each sphere's contact with the floor, rebuilt from the current positions, in `(sphere, floor)`
+/// row order.
+fn direct_drive_manifolds(bodies: &[BodyState]) -> Vec<Manifold> {
+    let floor = bodies.len() - 1;
+    bodies[..floor]
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| {
+            let separation = b.position.y - 0.5;
+            (separation < 0.01).then(|| {
+                let mut m = Manifold::new(BodyIndex(i as u32), BodyIndex(floor as u32));
+                m.normal = Vec3::new(0.0, -1.0, 0.0);
+                let anchor = Vec3::new(b.position.x, b.position.y - 0.5, b.position.z);
+                m.points[0] = ContactPoint { anchor_a: anchor, anchor_b: anchor, separation, feature_id: 0 };
+                m.count = 1;
+                m
+            })
+        })
+        .collect()
+}
+
+/// Arm E (L3′): a direct-drive caller never gathers rows, so its warm store's cursor classifies
+/// every step `Identity`: after a cold step it resumes from the impulses its last warm solve
+/// stored — no `Reset`. Both solvers, 30 steps, cold on step 20.
+#[test]
+fn d5b_direct_drive_resumes_after_a_cold_step() {
+    use boyko_physics::solver::RigidSolver;
+    let bodies = direct_drive_scene();
+    for drive in ["colored", "reference"] {
+        let mut scratch = SolverScratch::with_capacity(bodies.len());
+        scratch.set_bodies(&bodies);
+        let mut colored = ColoredSoftStepSolver::default();
+        let mut reference = SoftStepSolver::default();
+        let mut stats = Vec::new();
+        for step in 0..30 {
+            let cfg = PhysicsConfig { dt: DT, warm_start: step != 20, ..PhysicsConfig::default() };
+            let manifolds = direct_drive_manifolds(scratch.bodies());
+            scratch.touched.reset(scratch.bodies().len());
+            if drive == "colored" {
+                let mut graph = ConstraintGraph::with_capacity(bodies.len());
+                let inv_mass: Vec<f32> = scratch.bodies().iter().map(|b| b.inv_mass).collect();
+                graph.build(&manifolds, inv_mass.len(), |row| inv_mass.get(row as usize).is_some_and(|&m| m != 0.0));
+                colored.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+                stats.push((colored.warm_seed_stats(), colored.solved_steps()));
+            } else {
+                reference.solve(&cfg, &manifolds, &mut scratch);
+                stats.push((reference.warm_seed_stats(), reference.solved_steps()));
+            }
+        }
+        let label = format!("D5b E [{drive}]");
+        assert!(stats[19].0.point_hits > 0, "{label}: void: no warm hit at step 19: {:?}", stats[19].0);
+        assert!(
+            stats[20].1 == stats[19].1 + 1 && stats[20].0.point_hits == 0,
+            "{label}: step 20 did not run cold past the early return: {:?}",
+            stats[20]
+        );
+        assert!(
+            stats[21].0.point_hits > 0 && stats[21].0.remap_resets == 0,
+            "{label}: step 21 did not resume: {:?}",
+            stats[21].0
+        );
+    }
 }

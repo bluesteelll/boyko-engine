@@ -1519,8 +1519,14 @@ pub struct ColoredSoftStepSolver {
     /// The cold sorted index over the read side's keys, built by `plan_sources` on a
     /// step whose read side is not strictly increasing (D2; hand-built streams only).
     warm_index: WarmIndex,
-    /// Whether warm-starting is active (production default `true`).
+    /// The warm-start SETUP flag (production default `true`; `with_warm_start` sets it). The
+    /// pipeline never writes it: a solve runs warm iff this AND the configuration's
+    /// [`PhysicsConfig::warm_start`] are both true (L10 D5b).
     warm_start_enabled: bool,
+    /// Whether the last solve that ran past the no-dynamic-body early return ran warm:
+    /// `warm_start_enabled && config.warm_start`, written once per such solve before its first
+    /// reader (L10 D5b). Every warm gate of a step reads it. Initialised to the setup flag.
+    warm_effective: bool,
     /// O8 integrate-freeze scratch: the pre-solve `(row, BodyState)` snapshot of each
     /// slept body, captured before the substep loop and restored after — so a slept
     /// island's bodies are NOT integrated (their hot state is frozen) without masking
@@ -1574,6 +1580,7 @@ impl ColoredSoftStepSolver {
             warm_cur: 0,
             warm_index: WarmIndex::with_capacity(warm_table_id(6), contacts),
             warm_start_enabled: true,
+            warm_effective: true,
             frozen: ScratchColumn::new(
                 colored_frozen_rows_id(),
                 bodies.max(scratch_reserve_rows(size_of::<(u32, BodyState)>())),
@@ -1590,9 +1597,15 @@ impl ColoredSoftStepSolver {
 
     /// Builds a solver with warm-starting toggled `enabled` (test hook, mirrors
     /// [`SoftStepSolver::with_warm_start`](super::SoftStepSolver::with_warm_start)).
+    ///
+    /// A setup choice: a solve runs warm iff this flag AND the configuration's
+    /// [`PhysicsConfig::warm_start`] are both true (L10 D5b), so `false` here keeps the solver
+    /// cold whatever the configuration says, and `PhysicsConfig::warm_start` is the runtime
+    /// switch.
     pub fn with_warm_start(enabled: bool) -> Self {
         Self {
             warm_start_enabled: enabled,
+            warm_effective: enabled,
             ..Self::with_capacity(0, 0)
         }
     }
@@ -1627,19 +1640,24 @@ impl ColoredSoftStepSolver {
     /// stream's, whose records the last store wrote, and the held store's, whose records
     /// `sets` keeps — with the seed the next step's lookup of that manifold finds for the
     /// point's feature id: the last stored point with that id (Lemma W), `None` on a miss and
-    /// with warm start off. `key` is the manifold's ordinal in the rows of the last step. Stream
-    /// manifolds first, in stream order, then the kept ones by ordinal. O(points · log
-    /// manifolds) on a strict store.
+    /// with warm start off — off for the last solve that ran, the solver's setup flag AND the
+    /// configuration's `warm_start` (L10 D5b). `key` is the manifold's ordinal in the rows of the
+    /// last step. Stream manifolds first, in stream order, then the kept ones by ordinal.
+    /// O(points · log manifolds) on a strict store.
     pub fn for_each_warm_seed(
         &self,
         manifolds: &Manifolds,
         sets: &SleepSets,
         mut f: impl FnMut(u64, u16, Option<[f32; 3]>),
     ) {
+        debug_assert!(
+            self.warm_start_enabled || !self.warm_effective,
+            "invariant: warm start runs only if the setup flag allows it"
+        );
         let read = &self.warm[usize::from(self.warm_cur)];
         let (keys, recs) = (read.keys(), read.recs());
         let lookup = |key: u64, fid: u16| -> Option<[f32; 3]> {
-            if !self.warm_start_enabled {
+            if !self.warm_effective {
                 return None;
             }
             if read.strict() {
@@ -1663,7 +1681,7 @@ impl ColoredSoftStepSolver {
             let key = ord(m.body_a.0, m.body_b.0);
             for p in 0..usize::from(m.count) {
                 let fid = point_fid(&m, p);
-                let seed = if self.warm_start_enabled {
+                let seed = if self.warm_effective {
                     kept_rec.get(slot as usize).and_then(|r| r.seed_of(fid))
                 } else {
                     None
@@ -1673,8 +1691,10 @@ impl ColoredSoftStepSolver {
         }
     }
 
-    /// Whether warm-starting is active: L10's sleep epoch reads it in the broadphase (design
-    /// 04 D5), since a toggle changes what a held island's records would be under `Off`.
+    /// The warm-start setup flag. L10's broadphase ANDs it with the latched
+    /// `PhysicsConfig::warm_start` into the effective warm start its sleep epoch reads (design 04
+    /// D5, D5b), since a change of that value changes what a held island's records would be under
+    /// `Off`.
     #[inline]
     pub(crate) fn warm_start_enabled(&self) -> bool {
         self.warm_start_enabled
@@ -1685,10 +1705,11 @@ impl ColoredSoftStepSolver {
     /// searches the read side alone on that path, so every lookup of the step finds what
     /// `Off`'s store holds. Merged into the idle write side, which then becomes the read side;
     /// the warm cursor's stamp is unchanged, since the drained keys are in the rows the read
-    /// side is keyed in. Called by the colored broadphase, never by the solve. A disabled
-    /// solver reads no record, and takes none.
-    pub(crate) fn drain_restore(&mut self, restore: &WarmRecords) {
-        if !self.warm_start_enabled || restore.keys().is_empty() {
+    /// side is keyed in. Called by the colored broadphase, never by the solve, with `warm` the
+    /// step's effective warm start (L10 D5b: the solve has not yet set `warm_effective` for the
+    /// step). A cold step reads no record, and takes none.
+    pub(crate) fn drain_restore(&mut self, restore: &WarmRecords, warm: bool) {
+        if !warm || restore.keys().is_empty() {
             return;
         }
         let (read, write) = Self::warm_sides(&mut self.warm, self.warm_cur);
@@ -1711,7 +1732,7 @@ impl ColoredSoftStepSolver {
         }
         let mut kept_rec = held.kept_rec.build_view();
         let recs = kept_rec.as_mut_slice();
-        if !self.warm_start_enabled {
+        if !self.warm_effective {
             recs[range].fill(WarmRecord::EMPTY);
             return;
         }
@@ -1846,11 +1867,16 @@ impl ColoredSoftStepSolver {
             warm_cur,
             warm_index,
             warm_start_enabled,
+            warm_effective,
             warm_cursor,
             warm_stats,
             counters,
             ..
         } = self;
+        debug_assert!(
+            *warm_start_enabled || !*warm_effective,
+            "invariant: warm start runs only if the setup flag allows it"
+        );
         let n = manifolds.len();
 
         // P-a (D4): stream order. The write side takes this step's ordinals; every
@@ -1860,7 +1886,7 @@ impl ColoredSoftStepSolver {
         // any `solve_view()` captures a base — so no worker can see a moving base.
         let (read, write) = Self::warm_sides(warm, *warm_cur);
         cols.manifold_fill(n);
-        if *warm_start_enabled {
+        if *warm_effective {
             write.resize(n);
         }
 
@@ -1875,7 +1901,7 @@ impl ColoredSoftStepSolver {
         //
         // Warm-seed diagnostic (defect A): the carried count is taken only on a step
         // whose rows changed; the unchanged step does no per-manifold work for it.
-        let carried_rows = *warm_start_enabled && matches!(remap, RowRemap::Rows(_));
+        let carried_rows = *warm_effective && matches!(remap, RowRemap::Rows(_));
         let mut carried = 0u32;
         let mut points = 0u32;
         // Live points of the manifolds frozen this step (B1): the carry set's size.
@@ -1894,7 +1920,7 @@ impl ColoredSoftStepSolver {
                     if carried_rows && remap.manifold_pair(m).is_some() {
                         carried += 1;
                     }
-                } else if frozen && *warm_start_enabled && m.count != 0 {
+                } else if frozen && *warm_effective && m.count != 0 {
                     frozen_points += u32::from(m.count);
                     counters.duplicate_fids(m);
                 }
@@ -1909,7 +1935,7 @@ impl ColoredSoftStepSolver {
             warm_records::plan_sources_restored(
                 manifolds,
                 remap,
-                *warm_start_enabled,
+                *warm_effective,
                 read,
                 write,
                 warm_index,
@@ -1943,7 +1969,7 @@ impl ColoredSoftStepSolver {
                 tags: cols.tags.as_read_slice(),
             };
             let mut recs_view = write.recs_mut();
-            let mut recs_w = if *warm_start_enabled { Some(recs_view.as_mut_slice()) } else { None };
+            let mut recs_w = if *warm_effective { Some(recs_view.as_mut_slice()) } else { None };
             let mut heads = cols.heads.build_view();
             let mut cold = cols.cold.build_view();
             let mut blocks = cols.blocks.build_view();
@@ -1971,7 +1997,7 @@ impl ColoredSoftStepSolver {
         }
 
         let translated = match remap {
-            _ if !*warm_start_enabled => 0,
+            _ if !*warm_effective => 0,
             RowRemap::Identity => seeded,
             RowRemap::Rows(_) => carried,
             RowRemap::Reset => 0,
@@ -3846,8 +3872,8 @@ impl ColoredSoftStepSolver {
     ///
     /// After the swap it stamps the warm cursor with `rows`: the read side has just
     /// been written from this step's cohorts and carried records, keyed by this
-    /// gather's rows, and this is its only writer (defect A, interim). A disabled
-    /// solver neither stores nor stamps.
+    /// gather's rows, and this is its only writer (defect A, interim). A cold step (L10 D5b:
+    /// `warm_effective` false) neither stores nor stamps.
     ///
     /// `restore` is L10's restore warm source (design 06 A3): a frozen manifold that P-a
     /// marked `SRC_RESTORE` carries from it (design 08 A3′, mutation N28).
@@ -3859,7 +3885,11 @@ impl ColoredSoftStepSolver {
         manifolds: &[Manifold],
         restore: Option<&WarmRecords>,
     ) {
-        if !self.warm_start_enabled {
+        debug_assert!(
+            self.warm_start_enabled || !self.warm_effective,
+            "invariant: warm start runs only if the setup flag allows it"
+        );
+        if !self.warm_effective {
             return;
         }
         let cols = &self.columns;
@@ -3985,6 +4015,10 @@ impl ColoredSoftStepSolver {
     /// `solve` (the [`RigidSolver`] entry) cannot reach the graph through the
     /// trait signature, so the [`physics_solve_colored`](crate::systems::physics_solve_colored)
     /// stage calls THIS method directly with `Res<ConstraintGraph>`.
+    ///
+    /// The solve runs warm iff the solver's setup flag AND `config.warm_start` are both true
+    /// (L10 D5b). A direct-drive caller that never gathers rows keeps its warm store's cursor
+    /// on `Identity`, so after a cold step it resumes from the impulses its last warm solve stored.
     pub fn solve_colored(
         &mut self,
         config: &PhysicsConfig,
@@ -4013,7 +4047,9 @@ impl ColoredSoftStepSolver {
     /// manifold's record, swaps the store and advances the sleep state. Its values are the full
     /// path's, bit for bit.
     ///
-    /// Direct drive: the solve serves every `IslandSleep::wake_all` request made so far.
+    /// Direct drive: the solve serves every `IslandSleep::wake_all` request made so far, and after
+    /// a cold step (`config.warm_start` false, L10 D5b) it resumes from the impulses its last warm
+    /// solve stored.
     pub fn solve_colored_sleeping(
         &mut self,
         config: &PhysicsConfig,
@@ -4095,7 +4131,9 @@ impl ColoredSoftStepSolver {
             return;
         }
         self.solved_steps += 1;
-        self.counters.step(self.warm_start_enabled);
+        // L10 D5b: the step's effective warm start, written once, before any gate reads it.
+        self.warm_effective = self.warm_start_enabled && config.warm_start;
+        self.counters.step(self.warm_effective);
 
         // O8 phase 1 (BEFORE the solve): apply the wake conditions and build the
         // body→awake mask from last frame's sleep flags. This decides which islands
@@ -4128,10 +4166,10 @@ impl ColoredSoftStepSolver {
                 cls.iter().zip(self.bodies.as_read_slice()).all(|(c, e)| !c.is_held() || e.inv_mass == 0.0),
                 "invariant: a held row's effective inverse mass is 0 (design 04 D8, ruling W1)"
             );
-            // Warm start is classified only while it is enabled: a disabled solver never
-            // reads or stores the records, so `Identity` is a placeholder that takes no
-            // per-manifold branch, and its cursor never counts a phantom `Reset`.
-            let warm_remap = if self.warm_start_enabled {
+            // Warm start is classified only on a warm step: a cold step never reads or stores
+            // the records, so `Identity` is a placeholder that takes no per-manifold branch, and
+            // its cursor never counts a phantom `Reset`.
+            let warm_remap = if self.warm_effective {
                 self.warm_cursor.remap(&scratch.rows)
             } else {
                 RowRemap::Identity
@@ -4359,7 +4397,7 @@ impl ColoredSoftStepSolver {
             // L10 E6′ (design 06): the logical carry adds the held store's points and hits —
             // `Off` carries the same frozen manifolds' records every step with the same hits.
             if let Some(h) = held.as_ref()
-                && self.warm_start_enabled
+                && self.warm_effective
             {
                 self.warm_stats.carry_points += h.held.live_points();
                 self.warm_stats.carry_hits += *h.held_warm;
