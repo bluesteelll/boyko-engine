@@ -80,6 +80,15 @@ pub trait RigidSolver: Resource + 'static {
     ///
     /// `config` carries the global tunables (`substeps`, `dt`, the soft-constraint
     /// set); `manifolds` is the deterministic, dense contact buffer.
+    ///
+    /// A solver that warm-starts must honour [`PhysicsConfig::warm_start`]: it seeds a
+    /// step's contacts from stored impulses only when `config.warm_start` is `true`, and
+    /// solves the step cold otherwise (L10 D5b). This is documented, not enforced — the
+    /// pipeline cannot see inside the solve, so a solver that ignores the field keeps
+    /// warm-starting after `warm_start = false`. The pipeline passes the configuration this
+    /// step's broadphase latched (L10 D9b), so a write reaches the solve at the next
+    /// broadphase. The shipped [`ColoredSoftStepSolver`] and [`SoftStepSolver`] honour it
+    /// (each ANDs it with its own setup flag, `with_warm_start`).
     fn solve(
         &mut self,
         config: &PhysicsConfig,

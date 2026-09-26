@@ -621,6 +621,15 @@ C3d; this section names the functions.
   `contact_damping`; `Default` gives it `true`. The `SleepSkip::Sets` doc names the effective warm
   start. `PhysicsConfig` stays 72 B, because the `bool` fits in padding, and `StepInputs` stays
   1 664 B (both measured).
+  - One change to the rustdoc above (review r1 W1, a follow-up commit): its "iff" sentence is
+    scoped to the shipped solvers, and it points a custom solver at the obligation on
+    `RigidSolver::solve`. Unscoped, the sentence was false for a custom solver.
+- `solver/mod.rs` (review r1 W1, a follow-up commit): the `RigidSolver::solve` doc carries the
+  API decision above, "a custom `RigidSolver` should honour `config.warm_start`; documented, not
+  enforced". It states the obligation (seed from stored impulses only when the field is `true`),
+  that the pipeline passes the configuration the step's broadphase latched, and that the two
+  shipped solvers honour it by ANDing it with their setup flag. The sections above never named this
+  site, so C3e first shipped without the documentation the decision relies on.
 - `solver/colored.rs`:
   - `warm_effective`, initialised to the setup flag by `with_capacity` and `with_warm_start`.
   - Its single writer, `solve_colored_inner`, runs directly after the early return and

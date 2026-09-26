@@ -206,12 +206,12 @@ pub struct PhysicsConfig {
     /// damping. `1.0` is critically damped; the Box2D-v3 "Soft Step" default of
     /// `10.0` is heavily overdamped for stable resting contact.
     pub contact_damping: f32,
-    /// Warm-start contacts from the previous step's impulses (default `true`). A solve runs warm
-    /// iff this AND the solver's setup flag
+    /// Warm-start contacts from the previous step's impulses (default `true`, L10 D5b). A shipped
+    /// solver runs warm iff this AND its setup flag are both true
     /// ([`ColoredSoftStepSolver::with_warm_start`](crate::solver::ColoredSoftStepSolver::with_warm_start),
-    /// [`SoftStepSolver::with_warm_start`](crate::solver::SoftStepSolver::with_warm_start)) are
-    /// both true. The pipeline reads it once per step, at the broadphase; a write takes effect at
-    /// the next broadphase (L10 D5b).
+    /// [`SoftStepSolver::with_warm_start`](crate::solver::SoftStepSolver::with_warm_start)); a
+    /// custom solver must honour it ([`RigidSolver::solve`](crate::solver::RigidSolver::solve)). The
+    /// pipeline reads it once per step, at the broadphase; a write takes effect at the next one.
     ///
     /// In the plugin's pipelines, whose rows are gathered every step, the first warm step after a
     /// cold one seeds every contact with zero, and every island asleep at that step (frozen, or
