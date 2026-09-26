@@ -43,10 +43,11 @@ use crate::json::{self, Json};
 use crate::red::{Red, RedKind, Result};
 use crate::sha256;
 
-/// The six crates the modding design names for the source census (03 §6 leg 1); leg (7b) reads the
-/// rlibs among them. `boyko_macros` is a proc-macro and links into no binary, so it has no rlib.
-pub const CENSUS_CRATES: [&str; 6] =
-    ["boyko_ecs", "boyko_utils", "boyko_threadpool", "boyko_log", "boyko_diag", "boyko_macros"];
+/// The census crates: the six the modding design names (03 §6 leg 1), plus `boyko_memory` from rung
+/// C1 (03 `:177`). Leg (7b) reads the rlibs among them; `boyko_macros` is a proc-macro and links into
+/// no binary, so it has no rlib.
+pub const CENSUS_CRATES: [&str; 7] = ["boyko_ecs", "boyko_utils", "boyko_threadpool", "boyko_log",
+    "boyko_diag", "boyko_macros", "boyko_memory"];
 
 /// A cargo target kind a subject can have.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

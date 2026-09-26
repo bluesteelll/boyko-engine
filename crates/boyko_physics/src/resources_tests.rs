@@ -773,30 +773,33 @@
 
         fn latch(sleep: &IslandSleep) -> Vec<(bool, u16)> {
             sleep
-                .asleep
+                .latch
+                .as_read_slice()
                 .iter()
-                .zip(&sleep.below_count)
-                .map(|(&asleep, &below)| (asleep, below))
+                .map(|l| (l.asleep, l.below_count))
                 .collect()
         }
 
         fn set_latch(sleep: &mut IslandSleep, values: &[(bool, u16)]) {
-            assert_eq!(sleep.asleep.len(), values.len(), "test setup: latch length");
-            for (row, &(asleep, below)) in values.iter().enumerate() {
-                sleep.asleep[row] = asleep;
-                sleep.below_count[row] = below;
+            assert_eq!(sleep.latch.len(), values.len(), "test setup: latch length");
+            let mut view = sleep.latch.build_view();
+            for (l, &(asleep, below)) in view.as_mut_slice().iter_mut().zip(values) {
+                l.asleep = asleep;
+                l.below_count = below;
             }
         }
 
         /// The per-row island contact key (defect A4), row order.
         fn keys(sleep: &IslandSleep) -> Vec<u32> {
-            sleep.island_key.as_read_slice().to_vec()
+            sleep.latch.as_read_slice().iter().map(|l| l.island_key).collect()
         }
 
         fn set_keys(sleep: &mut IslandSleep, values: &[u32]) {
-            assert_eq!(sleep.island_key.len(), values.len(), "test setup: key length");
-            let mut view = sleep.island_key.build_view();
-            view.as_mut_slice().copy_from_slice(values);
+            assert_eq!(sleep.latch.len(), values.len(), "test setup: key length");
+            let mut view = sleep.latch.build_view();
+            for (l, &key) in view.as_mut_slice().iter_mut().zip(values) {
+                l.island_key = key;
+            }
         }
 
         /// U8 (defect A4): the `Rows` arm permutes the island contact key with the latch.
@@ -812,9 +815,9 @@
             gather(&mut rows, &[1, 2, 3], &[0, 1, 2]);
             sleep.rekey_rows(&rows);
             assert_eq!(
-                (keys(&sleep), sleep.island_key.len() == sleep.asleep.len()),
+                (keys(&sleep), keys(&sleep).len() == rows.rows_len()),
                 (vec![NO_ISLAND_KEY; 3], true),
-                "U8 first gather: every new row carries NO_ISLAND_KEY: (keys, key len == latch len)"
+                "U8 first gather: every new row carries NO_ISLAND_KEY: (keys, key len == gather rows)"
             );
             set_keys(&mut sleep, &[11, 12, 13]);
 
@@ -822,19 +825,19 @@
             gather(&mut rows, &[3, 1, 9, 2], &[2]);
             sleep.rekey_rows(&rows);
             assert_eq!(
-                (keys(&sleep), sleep.island_key.len() == sleep.asleep.len()),
+                (keys(&sleep), keys(&sleep).len() == rows.rows_len()),
                 (vec![13, 11, NO_ISLAND_KEY, 12], true),
                 "U8 growth: each body carries its own key and the new body reads NO_ISLAND_KEY: \
-                 (keys, key len == latch len)"
+                 (keys, key len == gather rows)"
             );
 
             // Shrink: ids 1 and 9 are gone, 2 and 3 swap ends.
             gather(&mut rows, &[2, 3], &[]);
             sleep.rekey_rows(&rows);
             assert_eq!(
-                (keys(&sleep), sleep.island_key.len() == sleep.asleep.len()),
+                (keys(&sleep), keys(&sleep).len() == rows.rows_len()),
                 (vec![12, 13], true),
-                "U8 shrink: each survivor carries its own key: (keys, key len == latch len)"
+                "U8 shrink: each survivor carries its own key: (keys, key len == gather rows)"
             );
         }
 
@@ -911,7 +914,7 @@
             assert_eq!(classify(&sleep, &rows), "Reset", "construction: one gather was missed");
             sleep.rekey_rows(&rows);
             assert_eq!(
-                (sleep.remap_resets(), sleep.wake_all, sleep.asleep.len(), sleep.cursor.synced_seq()),
+                (sleep.remap_resets(), sleep.wake_all, sleep.latch.len(), sleep.cursor.synced_seq()),
                 (1, true, 4, gather_seq(&rows)),
                 "T7 Reset: (remap_resets, wake_all, latch length, synced_seq)"
             );

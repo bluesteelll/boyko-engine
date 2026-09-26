@@ -268,6 +268,32 @@ pub struct BoxAxisCache {
     keys_changed: bool,
 }
 
+/// How a frame's key set changed in [`BoxAxisCache::begin_frame_synced`] (L10 design 06 D-C):
+/// the three causes its union, [`keys_changed`](BoxAxisCache::keys_changed), merges.
+///
+/// L9's reuse reads the union; L10's axis mirror reads the causes apart — every held key is
+/// re-keyed after a grow or a clear, only the moved ones on a plain `Rows` step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct KeyChange {
+    /// The consumer's cursor did not classify as `Identity` (the rows moved, or the table
+    /// missed a gather), so the carried axes were pre-read: the `prefetched` flag `read_hint`
+    /// and the parallel narrowphase take.
+    pub(crate) prefetched: bool,
+    /// The table was wholesale-cleared for its load (`occupied > len / 2`).
+    pub(crate) cleared: bool,
+    /// The table grew to fit the frame's logical pair count (a grow also empties it).
+    pub(crate) grown: bool,
+}
+
+impl KeyChange {
+    /// Whether the key set changed at all: [`keys_changed`](BoxAxisCache::keys_changed)'s
+    /// value for the frame.
+    #[inline]
+    pub(crate) fn any(self) -> bool {
+        self.prefetched || self.cleared || self.grown
+    }
+}
+
 /// The read-only hint source the parallel narrowphase's chunks share (L5 D2).
 ///
 /// On a frame without a pre-read it probes the live slots; on a pre-read frame it reads the
@@ -366,9 +392,17 @@ impl BoxAxisCache {
     /// "A hint change picks the contact, never whether there is one"). When neither
     /// trigger fires, the table is left in place and allocates nothing.
     pub fn begin_frame(&mut self, pairs: usize) {
+        let _ = self.begin_frame_keyed(pairs);
+    }
+
+    /// [`begin_frame`](Self::begin_frame), returning `(grown, cleared)`: whether the table grew
+    /// (a grow also empties it) or was wholesale-cleared for its load.
+    fn begin_frame_keyed(&mut self, pairs: usize) -> (bool, bool) {
         let len = next_pow2(2 * pairs.max(1));
-        self.keys_changed = len > self.slots.len() || self.occupied > self.slots.len() / 2;
-        if len > self.slots.len() {
+        let grown = len > self.slots.len();
+        let cleared = !grown && self.occupied > self.slots.len() / 2;
+        self.keys_changed = grown || cleared;
+        if grown {
             // Grow to a fresh larger table; it starts empty, so occupancy resets.
             // `clear` before `resize` is what makes it fresh — the surviving prefix
             // would otherwise keep last frame's keys.
@@ -379,7 +413,7 @@ impl BoxAxisCache {
             self.shift = shift_for(len);
             self.occupied = 0;
             self.grows += 1;
-        } else if self.occupied > self.slots.len() / 2 {
+        } else if cleared {
             // Stale entries have pushed the load past 0.5; wholesale clear to bound
             // occupancy and keep probe chains short (a one-frame warm-start miss).
             for slot in self.slots.build_view().as_mut_slice() {
@@ -388,6 +422,7 @@ impl BoxAxisCache {
             self.occupied = 0;
             self.load_clears += 1;
         }
+        (grown, cleared)
     }
 
     /// The first probe slot for `key` — `(key · GOLDEN_64) >> shift` (the same
@@ -466,7 +501,14 @@ impl BoxAxisCache {
     /// Prepares the table for a frame through the gather's row identity map (defect A,
     /// interim): classifies this consumer, pre-reads every box pair's previous axis when
     /// the rows changed, runs [`begin_frame`](Self::begin_frame), and stamps the cursor.
-    /// Returns whether the pre-read ran — the `prefetched` flag `read_hint` takes.
+    /// Returns how the frame's key set changed ([`KeyChange`]); its `prefetched` is the flag
+    /// `read_hint` takes.
+    ///
+    /// `stream` is the pair list the narrowphase collides — the pairs the pre-read covers —
+    /// and `p_logical` the step's LOGICAL pair count, which sizes the table (L10 design 04 A3,
+    /// T3): the stream plus the pairs L10's tree seam withholds. The table must be sized for
+    /// every key Off would insert, so its grow and clear decisions, and so its lookups, equal
+    /// Off's. With nothing withheld the two counts are equal.
     ///
     /// The pre-read is required on a step whose rows changed: when rows shift up by one,
     /// pair `(a, b)` reads key `(a − 1, b − 1)`, which an earlier pair in `(min, max)`
@@ -476,27 +518,41 @@ impl BoxAxisCache {
     /// `AXIS_NONE` and skips the probes.
     pub(crate) fn begin_frame_synced(
         &mut self,
-        pairs: &[(BodyIndex, BodyIndex)],
+        stream: &[(BodyIndex, BodyIndex)],
+        p_logical: usize,
         bodies: &[BodyState],
         rows: &RowIdentity,
-    ) -> bool {
+    ) -> KeyChange {
+        debug_assert!(
+            p_logical >= stream.len(),
+            "invariant: the logical pair count covers the stream"
+        );
         let remap = self.cursor.remap(rows);
         let prefetched = !matches!(remap, RowRemap::Identity);
         if prefetched {
-            self.prefetch_remapped(pairs, bodies, remap);
+            self.prefetch_remapped(stream, bodies, remap);
             debug_assert_eq!(
                 self.remapped.len(),
-                pairs.len(),
+                stream.len(),
                 "invariant: one carried axis per candidate pair on a pre-read frame"
             );
             self.prefetched_frames += 1;
         }
-        self.begin_frame(pairs.len());
+        let (grown, cleared) = self.begin_frame_keyed(p_logical);
         self.keys_changed |= prefetched;
         // Every current pair's previous axis is captured, and every later write this step
         // is `set(a, b)` in current rows: the table is keyed by this gather from here on.
         self.cursor.stamp(rows);
-        prefetched
+        KeyChange { prefetched, cleared, grown }
+    }
+
+    /// Whether [`begin_frame`](Self::begin_frame) for `pairs` pairs would grow or clear the
+    /// table: its two conditions, read-only (L10's D3 test, made in the broadphase before the
+    /// frame; design 04 A2.1).
+    #[inline]
+    pub(crate) fn would_clear(&self, pairs: usize) -> bool {
+        let len = next_pow2(2 * pairs.max(1));
+        len > self.slots.len() || self.occupied > self.slots.len() / 2
     }
 
     /// Whether this frame's key set changed — the table grew or cleared, or the rows moved or
@@ -920,7 +976,7 @@ mod tests {
         // Step 1: rows [A, B, C, D, E]; pair (B, C) chooses axis 4, pair (C, D) axis 9.
         gather(&mut rows, &[20, 21, 22, 23, 24], &[0, 1, 2, 3, 4]);
         let pairs = [(BodyIndex(1), BodyIndex(2)), (BodyIndex(2), BodyIndex(3))];
-        let prefetched = c.begin_frame_synced(&pairs, &bodies, &rows);
+        let prefetched = c.begin_frame_synced(&pairs, pairs.len(), &bodies, &rows).prefetched;
         for (k, (a, b), axis) in [(0, pairs[0], 4), (1, pairs[1], 9)] {
             let _ = c.read_hint(prefetched, k, a, b);
             c.set(a, b, axis);
@@ -929,7 +985,7 @@ mod tests {
         // Step 2: X is inserted ahead of every row, so (B, C) is now (2, 3) and (C, D) is (3, 4).
         gather(&mut rows, &[30, 20, 21, 22, 23, 24], &[0]);
         let pairs = [(BodyIndex(2), BodyIndex(3)), (BodyIndex(3), BodyIndex(4))];
-        let prefetched = c.begin_frame_synced(&pairs, &bodies, &rows);
+        let prefetched = c.begin_frame_synced(&pairs, pairs.len(), &bodies, &rows).prefetched;
         assert!(prefetched, "construction: the rows changed, so the pre-read must run");
         let first = c.read_hint(prefetched, 0, pairs[0].0, pairs[0].1);
         c.set(pairs[0].0, pairs[0].1, 13);
@@ -961,14 +1017,14 @@ mod tests {
 
         gather(&mut rows, &[40, 41, 42], &[0, 1, 2]);
         let pair = (BodyIndex(1), BodyIndex(2));
-        let prefetched = c.begin_frame_synced(&[pair], &bodies, &rows);
+        let prefetched = c.begin_frame_synced(&[pair], 1, &bodies, &rows).prefetched;
         let _ = c.read_hint(prefetched, 0, pair.0, pair.1);
         c.set(pair.0, pair.1, 6);
 
         // X inserted ahead: (41, 42) moves from (1, 2) to (2, 3), and two pairs outgrow the table.
         gather(&mut rows, &[50, 40, 41, 42], &[0]);
         let pairs = [(BodyIndex(0), BodyIndex(1)), (BodyIndex(2), BodyIndex(3))];
-        let prefetched = c.begin_frame_synced(&pairs, &bodies, &rows);
+        let prefetched = c.begin_frame_synced(&pairs, pairs.len(), &bodies, &rows).prefetched;
         assert!(prefetched, "construction: the rows changed, so the pre-read must run");
         assert!(
             c.slots.len() > small && live_slots(&c) == 0,
@@ -989,7 +1045,7 @@ mod tests {
     /// the hint the narrowphase would pass to the SAT, then store `axis`. Returns the hint.
     fn t10_frame(c: &mut BoxAxisCache, bodies: &[BodyState], rows: &RowIdentity, axis: usize) -> Option<usize> {
         let pair = (BodyIndex(1), BodyIndex(2));
-        let prefetched = c.begin_frame_synced(&[pair], bodies, rows);
+        let prefetched = c.begin_frame_synced(&[pair], 1, bodies, rows).prefetched;
         let hint = c.read_hint(prefetched, 0, pair.0, pair.1);
         c.set(pair.0, pair.1, axis);
         hint
@@ -1051,6 +1107,38 @@ mod tests {
                  consecutive gathers without a miss drops the carried hint",
                 step.what
             );
+        }
+    }
+
+    proptest::proptest! {
+        // `failure_persistence: None`: no regression file is read or written, so the test runs
+        // under Miri's default isolation (the crate's convention, `broadphase_tree/tests.rs`).
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 128 },
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        /// L10 (design 04 A2.1, "Unit and property tests"): `would_clear(p)` is exactly the grow or
+        /// clear decision the next `begin_frame(p)` takes, over random frame sizes and insertions
+        /// (the D3 rule reads it in the broadphase, before the narrowphase's frame).
+        #[test]
+        fn would_clear_is_begin_frames_decision(
+            frames in proptest::collection::vec((0usize..300, 0usize..400), 1..12),
+        ) {
+            let mut c = BoxAxisCache::with_capacity(box_axis_cache_id(), 8);
+            let mut key = 0u32;
+            for (pairs, inserts) in frames {
+                let predicted = c.would_clear(pairs);
+                let (grown, cleared) = c.begin_frame_keyed(pairs);
+                proptest::prop_assert_eq!(predicted, grown || cleared, "would_clear({})", pairs);
+                // At most a quarter of the table per frame: `begin_frame` leaves it at most half
+                // full, so the probes always find a slot.
+                for _ in 0..inserts.min(pairs.max(1) / 2) {
+                    key += 1;
+                    c.set(BodyIndex(key), BodyIndex(key + 1), (key % 15) as usize);
+                }
+            }
         }
     }
 }

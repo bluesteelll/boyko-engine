@@ -4,28 +4,28 @@
 # candidate list is either here or in leg2-absent.txt.
 # subject	cand	name	size	copies	sha256
 boyko_demo	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	466	1	c1df52f91f878e4e490bf67d73312544d3d20cf8acf63bdc30d7ae360e39d893
-boyko_demo	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	37	1	f72ee0f187be40485ea8d1b6983c6412d0f023e56c6e1ebcec8d5558fcf3c18e
+boyko_demo	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	37	1	b359d90839b7bc95996e2567fd13a66f8032d0fd535756a6016c448761ec2a3f
 boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	1163	1	270ce025c9d0df16ab7a8e669685751ed5ce544aafb1ebb2703adaafe76bdedb
 boyko_demo	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	207	1	5d6330778d5586c76a7649bd63ec9bec1ca1e5c2f1f560e6c70928ecfb23b83c
 boyko_demo	D-2	boyko_ecs::ecs::core::iters::query::query_type_registry::register_new	143	1	16a34425c52375ec5a34b1499396ee0db5071b8c596e9a9d99b89d042fde0e76
 boyko_demo	D-3	boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new	102	1	3d9d9328638bc8b9a5df0a428343eb6e001f944d18881594319786dd3cc9bf54
-boyko_demo	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>	651	1	e2cacac095a7312f1a2597de1eb117bf118715ac5dd7101d8dd9ecbbf75ce049
+boyko_demo	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>	651	1	8562f5f9571bd49905e65b332a9d33510e7aabba52cd6d4654f28c7f46f9d531
 clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	466	1	c1df52f91f878e4e490bf67d73312544d3d20cf8acf63bdc30d7ae360e39d893
-clear	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	37	1	f72ee0f187be40485ea8d1b6983c6412d0f023e56c6e1ebcec8d5558fcf3c18e
+clear	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	37	1	b359d90839b7bc95996e2567fd13a66f8032d0fd535756a6016c448761ec2a3f
 clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	1163	1	270ce025c9d0df16ab7a8e669685751ed5ce544aafb1ebb2703adaafe76bdedb
 clear	P29-4	<boyko_threadpool::block::ScopeBlock>::grow	207	1	5d6330778d5586c76a7649bd63ec9bec1ca1e5c2f1f560e6c70928ecfb23b83c
-clear	R-1	boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform>	439	3	04c8c1e8e39895cc47f2e61ae7eb6a222c7dccecafd635c4a561ce6b2cc27a2a
+clear	R-1	boyko_ecs::ecs::core::component::component_registry::register_new::<boyko_scene::transform::Transform>	439	3	d70dd8b18f77559fa06f27ca2a7dd13628a0bf10e870c76035ff1dd11dfb87c8
 clear	R-2	<boyko_scene::transform::Transform as boyko_ecs::ecs::core::component::component::Component>::component_id	43	3	2a4ba09075f65ea6a2884253f5c9db89e0b799ed7057389359064e6c94dd5e7c
 clear	D-2	boyko_ecs::ecs::core::iters::query::query_type_registry::register_new	143	1	8ebd64c85b1fdc603425814a5510d2bfbe52585dab6fe23349243c9fa440bb00
 clear	D-3	boyko_ecs::ecs::core::bundle::bundle_type_registry::register_new	102	1	f6b801649e20fbf2bb79a64e0bab875880f51cf6a23c3c43b37a1c8edb911638
-clear	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_app::occlusion_force::OcclusionForce>	648	1	069120729b00276ce193e6c60f552a52792a37a071b35b45e3b477d0b1033f50
+clear	D-4	boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_app::occlusion_force::OcclusionForce>	648	1	95b4dd30d5f80a59617204b556e83a013467989340e25f7dba9328052de7b239
 clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	13789	1	c6d02edcc5992c7d2c23db22b1fd0bdb48ea11d4819f50c495da14ade4e22992
-swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	2195	1	1ee9ec205980725c2a85963d8aacf796846e829f5d6c9df3ac8efc757f10ed5b
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	2195	1	5824249a73e6bc6094da4ea2e71b6077eb95eb62bc4a87e4f81339c8c20d3902
 swap_remove	H-2	<criterion::bencher::Bencher>::iter_batched::<(boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster, alloc::vec::Vec<boyko_ecs::ecs::core::entity::entity::Entity>), (), swap_remove::bench_swap_remove::{closure#0}::{closure#0}, swap_remove::bench_swap_remove::{closure#0}::{closure#1}>	19788	1	a25d1e0763faa34c249c8ff24020c5ab1886f575c2f0785c1e518da65c8ccccb
 swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::bench	403	1	aa8f34a27257394156349eacbb93c0bf195b01949a591b6f5d9d4442dfe6ee09
 swap_remove	H-2	<criterion::routine::Function<criterion::measurement::WallTime, swap_remove::bench_swap_remove::{closure#0}, usize> as criterion::routine::Routine<criterion::measurement::WallTime, usize>>::warm_up	319	1	dd872ed5c018fad3458ea6e311eb8dca6a386111fbb1032e25219238f5f26ec7
-swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	8476	1	f857fac1afd2fa0d15b5d0a7338fdd22b4ade85f8eff25838d57a8604b0a32b2
-query_dsl	R-4	boyko_ecs::ecs::core::component::component_registry::register_layout::<query_dsl::Tag>	376	1	f010ad75ee62a86f049e8cfab92f099c7efd21a82e2beb5047c7c54c9721294a
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	8476	1	b975c254a228d5bd0d3ba4e736ac49577e897aeff2ba39a401266d8bbd96c394
+query_dsl	R-4	boyko_ecs::ecs::core::component::component_registry::register_layout::<query_dsl::Tag>	376	1	48007a0efeb3374f10e2c1ec5c55ea3cc29353bdede97e3fda9457746af844bf
 query_dsl	H-1	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::run_system::<query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}::{closure#0}, (boyko_ecs::ecs::core::system::into_system::IsFunctionSystem, fn(boyko_ecs::ecs::core::iters::query::query::Query<&query_dsl::Position>)), ()>	1184	1	ac7105c2c6b4a6fc96f4bfc4859d6eea91c8804b3416e359579df29547a70bda
 query_dsl	H-1	<criterion::bencher::Bencher>::iter::<(), query_dsl::bench_query_ref_iter::{closure#0}::{closure#0}>	119	1	e602b850ff6c5044f23b25c6d0351c1ad988b8c5427dea986f5e38324af0f795
 query_dsl	H-1	<criterion::routine::Function<criterion::measurement::WallTime, <criterion::benchmark_group::BenchmarkGroup<criterion::measurement::WallTime>>::bench_function<criterion::benchmark_group::BenchmarkId, query_dsl::bench_query_ref_iter::{closure#0}>::{closure#0}, ()> as criterion::routine::Routine<criterion::measurement::WallTime, ()>>::bench	419	1	d6e9dd58824ce0cc967227552a41f296af45e14845257473e3e2700bc9c3f225

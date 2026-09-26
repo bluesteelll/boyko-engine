@@ -376,7 +376,7 @@ stable heap address so those pointers + per-`(D,F)` caches stay valid.
 
 ### 4. Reserve/commit virtual-memory backing (Phases X.C → X.F → X.G/X.H → X.I/X.J)
 
-**Where:** [memory/vm.rs](../crates/boyko_ecs/src/ecs/memory/vm.rs)
+**Where:** [boyko_memory/vm.rs](../crates/boyko_memory/src/vm.rs)
 
 Every storage owner backs itself with a `VmReservation`: a write-once
 virtual-address reservation (`VirtualAlloc(MEM_RESERVE, PAGE_NOACCESS)` on

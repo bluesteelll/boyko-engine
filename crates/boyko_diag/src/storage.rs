@@ -14,7 +14,7 @@
 //! # The boundary at `boyko_ecs` is forced, not chosen
 //!
 //! `VmReservation` cannot move down here. It is `pub(crate)` in `boyko_ecs`
-//! (`ecs/memory/vm.rs:85`, `:109`, `:199`), it has a `Drop` (`:263`), and its unix arm calls
+//! (`boyko_memory/src/vm.rs:85`, `:109`, `:199`), it has a `Drop` (`:263`), and its unix arm calls
 //! `libc::mmap` (`:149`). A std-only zero-dependency crate could host it only by taking a
 //! third-party dependency — forbidden here — or by minting a **second** hand-written per-OS
 //! backing implementation against that file's own single-source-of-truth clause (`:12-18`).

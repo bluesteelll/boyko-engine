@@ -299,7 +299,7 @@ fn deterministic_pair_order() {
         let mut schedule = build_schedule::<NoopSolver>(&mut world, dt);
         schedule.run(&mut world);
 
-        world.resource::<ContactPairs>().pairs().to_vec()
+        world.resource::<ContactPairs>().pairs().iter().copied().collect::<Vec<_>>()
     }
 
     let a = run_once();
@@ -386,7 +386,7 @@ fn sphere_sphere_narrowphase_3d() {
         1,
         "one overlapping sphere pair → one manifold"
     );
-    let m = &manifolds[0];
+    let m = &manifolds.get(0).expect("one manifold");
     assert_eq!(m.count, 1, "sphere-sphere emits a single contact point");
     // Normal points from A toward B (+X), unit length.
     assert!((m.normal.x - 1.0).abs() < 1e-5, "normal.x: {}", m.normal.x);

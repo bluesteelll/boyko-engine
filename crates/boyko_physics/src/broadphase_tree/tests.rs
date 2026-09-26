@@ -39,9 +39,9 @@ use super::kernel::{
     leaf_mask_above, leaf_mask_above_scalar, leaf_mask_scalar, sort_network, sort_network_scalar,
 };
 use super::{
-    ADMIT_BUILD_RATIO, BroadphaseTree, JUMPER, KIND_EXCLUDED, KIND_WIDE, LeafListCounts,
-    QueryKernel, TREE_BRUTE_MAX_ROWS, TreeDiag, all_pairs_into, classify, mark_jumpers,
-    merge_into_sorted, sphere_bound_feasible,
+    ADMIT_BUILD_RATIO, BroadphaseTree, JUMPER, KIND_EXCLUDED, KIND_WIDE, LeafListCounts, NoHint,
+    QueryKernel, SET_NONE, SET_S, SET_Z, SleepHint, TREE_BRUTE_MAX_ROWS, TreeDiag, all_pairs_into,
+    classify, mark_jumpers, merge_into_sorted, sphere_bound_feasible,
 };
 use crate::systems::body_bounding_radius;
 use crate::scratch_ids::{TREE_ACTIVE, TREE_SORT_A, TREE_SORT_B, TREE_SS, tree_column_id};
@@ -129,10 +129,22 @@ impl Sim {
     /// the same bytes.
     fn step_no_gather(&mut self) -> TreeDiag {
         self.tree.step(&self.bodies, &self.rows, &mut self.out);
+        self.check_step()
+    }
+
+    /// G-LL1 on a tree-path step, then the oracle.
+    fn check_step(&mut self) -> TreeDiag {
         let n = self.bodies.len();
         if n > self.tree.brute_max_rows() as usize {
             assert_kernels_agree(&mut self.tree, n);
         }
+        self.check_oracle();
+        self.tree.diag()
+    }
+
+    /// The logical pair set — the stream ⊎ the withheld pairs (L10 C3c, design 04 T3) —
+    /// equals all-pairs'.
+    fn check_oracle(&mut self) {
         all_pairs_into(&self.bodies, &mut self.oracle);
         assert_eq!(
             self.out.pairs(),
@@ -140,7 +152,21 @@ impl Sim {
             "the tree's pair set differs from all-pairs' (n = {})",
             self.bodies.len()
         );
-        self.tree.diag()
+    }
+
+    /// A gather then a step with the sleep hint `hint` (L10 C3c), against the oracle.
+    fn step_hinted(&mut self, hint: &BitHint) -> TreeDiag {
+        self.gather();
+        self.tree.step_hinted(&self.bodies, &self.rows, &mut self.out, hint);
+        self.check_step()
+    }
+
+    /// Releases the sleeper-set members among `rows` (T4), then checks the oracle again: a
+    /// release only moves pairs from the withheld list into the stream.
+    fn release(&mut self, rows: &[u32]) -> u32 {
+        let released = self.tree.release(&mut self.out, |r| rows.contains(&r));
+        self.check_oracle();
+        released
     }
 
     /// A gather then a step against the oracle.
@@ -1063,7 +1089,7 @@ fn consumed_mark_rejects_a_duplicate_locate() {
     let n = sim.bodies.len();
     let mut map: Vec<u32> = (0..n as u32).collect();
     map[1] = 0;
-    sim.tree.run(&sim.bodies, RowRemap::Rows(&map), &mut sim.out);
+    sim.tree.run(&sim.bodies, RowRemap::Rows(&map), &mut sim.out, &NoHint);
     all_pairs_into(&sim.bodies, &mut sim.oracle);
     assert_eq!(sim.out.pairs(), sim.oracle.pairs(), "the duplicate row keeps its pairs");
     let d = sim.tree.diag();
@@ -1942,6 +1968,280 @@ fn f2_network_sorts_every_length() {
             let mut scalar = input;
             sort_network_scalar(&mut scalar);
             assert_eq!(scalar, want, "scalar arm, n = {n}");
+        }
+    }
+}
+
+// ── L10 C3c: the sleeper set (design C5 as amended by L10's T1–T4 and T6) ────────────────────
+
+/// A test sleep hint (the design's `BitHint`, with L10's two answers): `frozen[r]` offers row
+/// `r` to Z, `anchor[r]` lets it be a member of either set at all. Rows past either list read
+/// "not frozen" and "may be a member".
+#[derive(Clone, Debug, Default)]
+struct BitHint {
+    frozen: Vec<bool>,
+    anchor: Vec<bool>,
+}
+
+impl SleepHint for BitHint {
+    fn frozen(&self, r: usize) -> bool {
+        self.frozen.get(r).copied().unwrap_or(false)
+    }
+
+    fn anchor_ok(&self, r: usize) -> bool {
+        self.anchor.get(r).copied().unwrap_or(true)
+    }
+}
+
+impl BitHint {
+    /// Every non-static row of `bodies` frozen, every row anchored.
+    fn all_dynamic(bodies: &[BodyState]) -> Self {
+        Self {
+            frozen: bodies.iter().map(|b| b.inv_mass != 0.0).collect(),
+            anchor: vec![true; bodies.len()],
+        }
+    }
+}
+
+/// The structural invariants of the sleeper set after a step with `hint` (or after a release):
+/// the withheld list is strictly sorted and every entry is `(min < max)` within the rows, a pair
+/// of S ∪ Z with a Z endpoint whose both rows the hint anchored this step (Invariant V), and the
+/// sleeper tree's live lanes are its member count.
+fn assert_sleeper_invariants(sim: &Sim, hint: &BitHint) {
+    let n = sim.bodies.len();
+    let withheld = sim.out.withheld();
+    assert!(withheld.windows(2).all(|w| w[0] < w[1]), "SL strictly sorted");
+    let recs = sim.tree.rec[usize::from(sim.tree.cur)].as_read_slice();
+    for &(a, b) in withheld {
+        let (a, b) = (a.0 as usize, b.0 as usize);
+        assert!(a < b && b < n, "an SL entry ({a}, {b}) is (min < max) within the rows");
+        let (sa, sb) = (recs[a].set(), recs[b].set());
+        assert!(
+            sa != SET_NONE && sb != SET_NONE && (sa == SET_Z || sb == SET_Z),
+            "({a}, {b}) is a pair of S ∪ Z with a Z endpoint"
+        );
+        assert!(hint.anchor_ok(a) && hint.anchor_ok(b), "Invariant V: ({a}, {b})'s rows may be members");
+        for (row, set) in [(a, sa), (b, sb)] {
+            let is_static = sim.bodies[row].inv_mass == 0.0 && !sim.bodies[row].kinematic;
+            assert_eq!(set == SET_S, is_static, "row {row}: S holds the statics, Z the rest");
+        }
+    }
+    assert_eq!(u64::from(sim.tree.sleepers.live()), sim.tree.sleeper_members(), "live sleeper lanes equal |Z|");
+}
+
+/// A floor and a 4 × 3 grid of touching boxes on it (unit pitch: every box pairs with its
+/// neighbours and the floor).
+fn grid_on_floor() -> Vec<BodyState> {
+    let mut v = vec![boxed([0.0, -1.0, 0.0], [20.0, 1.0, 20.0], 0.0)];
+    for k in 0..12 {
+        v.push(boxed([(k % 4) as f32, 0.5, (k / 4) as f32], [0.5, 0.5, 0.5], 1.0));
+    }
+    v
+}
+
+/// T3 and T4, and bp G1's release script: with every box frozen the rent rule admits the boxes
+/// into Z at step 1 and the floor into S at step 2, after which every pair is withheld and the
+/// stream is empty; a release of two boxes (a D2 hit) moves exactly their pairs into the stream;
+/// the next step, whose hint no longer offers them, keeps them out of Z; a release of every box
+/// empties the withheld list, and the stream is then the brute set.
+#[test]
+fn c3c_release_script_moves_exactly_the_released_rows_pairs() {
+    let mut sim = Sim::new(grid_on_floor());
+    let hint = BitHint::all_dynamic(&sim.bodies);
+    let d0 = sim.step_hinted(&hint);
+    assert_eq!((d0.sleeper_rebuilds, d0.hint_candidates), (0, 12), "step 0: twelve candidates, rent 12 < 12 + 3");
+    let d1 = sim.step_hinted(&hint);
+    assert_eq!(d1.sleeper_rebuilds, 1, "step 1: rent 24 ≥ 15, the boxes are admitted");
+    assert_eq!(sim.tree.sleeper_members(), 12);
+    let d2 = sim.step_hinted(&hint);
+    assert_eq!((d2.static_rebuilds, d2.members), (1, 13), "step 2: the floor is admitted");
+    let d3 = sim.step_hinted(&hint);
+    assert_eq!((d3.evictions, d3.hint_candidates), (0, 24), "no eviction; the 24 candidates of steps 0 and 1 only");
+    assert!(sim.out.pairs_stream().is_empty(), "every pair is withheld: {:?}", sim.out.pairs_stream());
+    let all = sim.out.withheld().len();
+    assert_eq!(all, sim.oracle.pairs().len(), "anti-vacuity: the withheld list is the whole set");
+    assert!(all > 12, "anti-vacuity: box–box pairs as well as box–floor pairs");
+    assert_sleeper_invariants(&sim, &hint);
+
+    // A D2 hit on rows 1 and 2: their pairs, and only theirs, move into the stream.
+    let released = sim.release(&[1, 2]);
+    assert_eq!(released, 2);
+    assert_eq!(sim.tree.sleeper_members(), 10);
+    let touches = |p: &(crate::manifold::BodyIndex, crate::manifold::BodyIndex)| {
+        [1, 2].contains(&p.0.0) || [1, 2].contains(&p.1.0)
+    };
+    assert!(!sim.out.pairs_stream().is_empty(), "anti-vacuity: the released rows had pairs");
+    assert!(sim.out.pairs_stream().iter().all(touches), "the stream holds only the released rows' pairs");
+    assert!(!sim.out.withheld().iter().any(touches), "the withheld list holds none of them");
+    assert_eq!(sim.out.pairs_stream().len() + sim.out.withheld().len(), all, "the release moves pairs, it drops none");
+    assert_sleeper_invariants(&sim, &hint);
+
+    // The next step's hint no longer offers them (their records restored): they are Q rows.
+    let mut after = hint.clone();
+    after.frozen[1] = false;
+    after.frozen[2] = false;
+    let d4 = sim.step_hinted(&after);
+    assert_eq!(d4.hint_candidates, d3.hint_candidates, "rows 1 and 2 are not candidates");
+    assert_eq!(sim.tree.sleeper_members(), 10);
+    assert_sleeper_invariants(&sim, &after);
+
+    // Every box released: the withheld list empties, the stream is the brute set.
+    let released = sim.release(&(1..13).collect::<Vec<u32>>());
+    assert_eq!(released, 10);
+    assert!(sim.out.withheld().is_empty(), "nothing withheld once every sleeper is released");
+    assert_eq!(sim.out.pairs_stream(), sim.oracle.pairs_stream(), "the stream is the brute set");
+}
+
+/// T6 and the hint-off rule: a brute step dissolves Z and empties the withheld list, and so does
+/// a `Reset` (a missed gather), whose verify reads no hint; the hint then admits the rows again.
+#[test]
+fn c3c_brute_step_and_reset_dissolve_the_sleeper_set() {
+    let mut sim = Sim::new(grid_on_floor());
+    let hint = BitHint::all_dynamic(&sim.bodies);
+    for _ in 0..4 {
+        sim.step_hinted(&hint);
+    }
+    assert_eq!(sim.tree.sleeper_members(), 12, "construction: the boxes are sleepers");
+    assert!(!sim.out.withheld().is_empty(), "construction: pairs are withheld");
+
+    sim.tree.set_brute_max_rows(1 << 20);
+    sim.step_hinted(&hint);
+    sim.tree.set_brute_max_rows(0);
+    assert_eq!(sim.tree.sleeper_members(), 0, "a brute step dissolves Z (T6)");
+    assert!(sim.out.withheld().is_empty(), "a brute step empties the withheld list (T6)");
+    assert_eq!(sim.tree.diag().members, 1, "the static set is untouched");
+
+    // The next tree step is a Reset (the brute step stamped nothing): no hint, no candidate.
+    let before = sim.tree.diag().hint_candidates;
+    sim.step_hinted(&hint);
+    assert_eq!(sim.tree.diag().hint_candidates, before, "a Reset reads no hint");
+    assert_eq!(sim.tree.sleeper_members(), 0);
+    for _ in 0..2 {
+        sim.step_hinted(&hint);
+    }
+    assert_eq!(sim.tree.sleeper_members(), 12, "the hint admits the boxes again");
+
+    // A missed gather: the next step is a Reset, which evicts every sleeper.
+    sim.gather();
+    let evictions = sim.tree.diag().evictions;
+    sim.step_hinted(&hint);
+    assert_eq!(sim.tree.sleeper_members(), 0, "a Reset dissolves Z");
+    assert_eq!(sim.tree.diag().evictions - evictions, 12, "every sleeper is evicted");
+    assert!(sim.out.withheld().is_empty(), "a Reset empties the withheld list");
+    assert_sleeper_invariants(&sim, &hint);
+}
+
+/// T2 (M15's unit form): a static the hint does not let rest leaves S at once — its withheld
+/// pairs with the sleepers leave the list and are queried again — and is never admitted while
+/// the hint keeps saying so, though it is still.
+#[test]
+fn c3c_a_static_the_hint_does_not_anchor_leaves_the_static_set() {
+    let mut sim = Sim::new(grid_on_floor());
+    let mut hint = BitHint::all_dynamic(&sim.bodies);
+    for _ in 0..4 {
+        sim.step_hinted(&hint);
+    }
+    assert_eq!(sim.tree.diag().members, 13, "construction: the floor and the boxes");
+    let floor_pairs = |sim: &Sim| sim.out.withheld().iter().filter(|p| p.0.0 == 0).count();
+    assert_eq!(floor_pairs(&sim), 12, "construction: the floor's pairs are withheld");
+    hint.anchor[0] = false;
+    let d = sim.step_hinted(&hint);
+    assert_eq!(d.members, 12, "the floor left S");
+    assert_eq!(floor_pairs(&sim), 0, "its pairs left the withheld list");
+    assert_eq!(sim.out.pairs_stream().len(), 12, "and are the stream: the floor is a Q row");
+    for _ in 0..4 {
+        let d = sim.step_hinted(&hint);
+        assert_eq!(d.members, 12, "a static the hint does not anchor is never admitted");
+    }
+    assert_sleeper_invariants(&sim, &hint);
+}
+
+/// One pseudo-random `u64` per call (xorshift64*), for the hints and releases of the property
+/// test below.
+fn next_rand(state: &mut u64) -> u64 {
+    *state ^= *state >> 12;
+    *state ^= *state << 25;
+    *state ^= *state >> 27;
+    state.wrapping_mul(0x2545_f491_4f6c_dd1d)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: CHURN_CASES,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    /// G1 with the sleeper set (L10 C3c): random churn over a real `RowIdentity`, as in
+    /// `g1_random_churn_scripts_equal_all_pairs`, a random hint on every step (most rows
+    /// frozen, a few not anchored) and a random release after it. The logical pair set — the
+    /// stream ⊎ the withheld pairs — equals all-pairs' after every step and every release, and
+    /// the withheld list keeps its invariants.
+    #[test]
+    fn g1_sleeper_set_under_random_hints_releases_and_churn(
+        ops in prop::collection::vec(churn_op(), 4..24),
+        dynamics in 4usize..14,
+        row_walk in any::<bool>(),
+        seed in 1u64..u64::MAX,
+    ) {
+        let mut sim = settled(dynamics);
+        sim.tree.set_query_kernel(if row_walk { QueryKernel::RowWalk } else { QueryKernel::LeafList });
+        let mut rng = seed;
+        for op in ops {
+            let n = sim.bodies.len();
+            match op {
+                ChurnOp::Hold => {}
+                ChurnOp::Spawn { at, is_static } => {
+                    let at = at % (n + 1);
+                    let inv_mass = if is_static { 0.0 } else { 1.0 };
+                    let x = -30.0 + 2.0 * (at % 30) as f32;
+                    sim.spawn_at(at, boxed([x, 0.49, 2.0 * (at / 30) as f32 + 14.0], [0.5; 3], inv_mass));
+                }
+                ChurnOp::DespawnSwap(row) => {
+                    if n > 2 {
+                        sim.despawn_swap(row % n);
+                    }
+                }
+                ChurnOp::Migrate { from, to } => sim.migrate(from % n, to % n),
+                ChurnOp::Teleport(row) => sim.bodies[row % n].position.x += 3.0,
+                ChurnOp::Reshape(row) => {
+                    let b = &mut sim.bodies[row % n];
+                    b.shape = match b.shape {
+                        ColliderShape::Box { half_extents } => {
+                            ColliderShape::Box { half_extents: half_extents + Vec3::new(0.25, 0.0, 0.0) }
+                        }
+                        ColliderShape::Sphere { radius } => ColliderShape::Sphere { radius: radius + 0.25 },
+                    };
+                }
+                ChurnOp::ClassFlip(row) => {
+                    let b = &mut sim.bodies[row % n];
+                    b.inv_mass = if b.inv_mass == 0.0 { 1.0 } else { 0.0 };
+                }
+                ChurnOp::MissGather => sim.gather(),
+                ChurnOp::Brute => sim.tree.set_brute_max_rows(1 << 20),
+            }
+            let n = sim.bodies.len();
+            let hint = BitHint {
+                frozen: (0..n).map(|_| !next_rand(&mut rng).is_multiple_of(8)).collect(),
+                anchor: (0..n).map(|_| !next_rand(&mut rng).is_multiple_of(16)).collect(),
+            };
+            // `step_hinted` asserts the oracle.
+            sim.step_hinted(&hint);
+            sim.tree.set_brute_max_rows(0);
+            assert_sleeper_invariants(&sim, &hint);
+            let released: Vec<u32> = (0..n as u32).filter(|_| next_rand(&mut rng).is_multiple_of(5)).collect();
+            // Only the sleepers among them leave (a static stays in S).
+            let leaving: Vec<u32> = {
+                let recs = sim.tree.rec[usize::from(sim.tree.cur)].as_read_slice();
+                released.iter().copied().filter(|&r| recs[r as usize].set() == SET_Z).collect()
+            };
+            // `release` asserts the oracle again.
+            prop_assert_eq!(sim.release(&released) as usize, leaving.len(), "the sleepers among the rows leave");
+            prop_assert!(
+                !sim.out.withheld().iter().any(|p| leaving.contains(&p.0.0) || leaving.contains(&p.1.0)),
+                "a released sleeper keeps no withheld pair"
+            );
+            assert_sleeper_invariants(&sim, &hint);
         }
     }
 }

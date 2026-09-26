@@ -175,7 +175,7 @@ impl Scene {
         assert_eq!(classes.reused + classes.full, 1, "construction: the pair is a box pair");
         let m = manifolds.manifolds();
         assert!(m.len() <= 1, "construction: one pair makes at most one manifold");
-        (classes, m.first().copied())
+        (classes, m.get(0))
     }
 }
 

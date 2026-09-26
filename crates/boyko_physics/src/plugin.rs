@@ -50,6 +50,7 @@ use crate::scene_sync::{
     debug_assert_dynamic_bodies_are_roots, sync_body_to_transform, sync_transform_to_body,
 };
 use crate::sdf_query::SdfField;
+use crate::sleep_sets::SleepSets;
 use crate::soft::{
     SoftColorScratch, SoftRigidReaction, physics_soft_rigid_apply, physics_soft_step,
     physics_soft_step_colored, physics_soft_step_coupled,
@@ -57,8 +58,10 @@ use crate::soft::{
 use crate::solver::colored::ColoredSoftStepSolver;
 use crate::solver::{DefaultRigidSolver, RigidSolver};
 use crate::systems::{
-    physics_apply, physics_broadphase, physics_build_graph, physics_gather, physics_integrate,
-    physics_narrowphase, physics_narrowphase_sdf, physics_solve_colored, physics_solve_step,
+    physics_apply, physics_broadphase, physics_broadphase_colored,
+    physics_broadphase_colored_sdf, physics_build_graph,
+    physics_gather, physics_integrate, physics_narrowphase, physics_narrowphase_colored,
+    physics_narrowphase_sdf, physics_solve_colored, physics_solve_step,
 };
 
 /// The pre-build stage handles of the physics pipeline (plan MINOR-1 / OQ3).
@@ -97,9 +100,11 @@ pub struct PhysicsStageKeys {
     /// params always resolve); in the default `Manual` mode it only counts bodies
     /// and never overrides the kind (the 0%-gate).
     pub select_broadphase: usize,
-    /// Descriptor index of the [`physics_broadphase`] stage.
+    /// Descriptor index of the [`physics_broadphase`] stage, or of
+    /// [`physics_broadphase_colored`] on the colored pipeline (L10).
     pub broadphase: usize,
-    /// Descriptor index of the [`physics_narrowphase`] stage.
+    /// Descriptor index of the [`physics_narrowphase`] stage, or of
+    /// [`physics_narrowphase_colored`] on the colored pipeline (L10).
     pub narrowphase: usize,
     /// Descriptor index of the [`physics_narrowphase_sdf`] SDF-collision stage, or
     /// `None` for the body-only [`add_physics_systems`] path (P2 W5).
@@ -641,6 +646,10 @@ fn insert_physics_resources<S: RigidSolver + Default>(world: &mut EcsMaster, opt
             INITIAL_BODY_CAPACITY,
             INITIAL_BODY_CAPACITY,
         ));
+        // L10: the sleep-skip state, beside `IslandSleep`, so the colored broadphase and
+        // narrowphase (registered only on this path) resolve `ResMut<SleepSets>`. It records
+        // the step mode and holds nothing while `PhysicsConfig::sleeping` is off.
+        world.insert_resource(SleepSets::with_capacity(INITIAL_BODY_CAPACITY));
     }
     if with_sdf || soft {
         // The CPU-authoritative SDF scene (empty by default; the caller fills it
@@ -776,10 +785,26 @@ fn register_physics_pipeline<S: RigidSolver + Default>(
     // conflict-derived (the policy's `ResMut<PhysicsConfig>` vs the broadphase's
     // `Res<PhysicsConfig>` would serialize them anyway, but the edge is explicit).
     let select = joined(builder.add_system(select_broadphase), set).after(gather).key();
-    let broadphase = joined(builder.add_system(physics_broadphase), set).after(select).key();
-    let narrowphase = joined(builder.add_system(physics_narrowphase), set)
-        .after(broadphase)
-        .key();
+    // L10 (design 04 D15): the colored pipeline — the one that inserts `IslandSleep` and
+    // `SleepSets` — runs the colored broadphase and narrowphase, which carry the sleep-skip;
+    // every other pipeline keeps the reference stages. With the SDF stage the broadphase's sleep
+    // epoch also covers the field (design 04 D10).
+    let broadphase = if colored && with_sdf {
+        joined(builder.add_system(physics_broadphase_colored_sdf), set).after(select).key()
+    } else if colored {
+        joined(builder.add_system(physics_broadphase_colored), set).after(select).key()
+    } else {
+        joined(builder.add_system(physics_broadphase), set).after(select).key()
+    };
+    let narrowphase = if colored {
+        joined(builder.add_system(physics_narrowphase_colored), set)
+            .after(broadphase)
+            .key()
+    } else {
+        joined(builder.add_system(physics_narrowphase), set)
+            .after(broadphase)
+            .key()
+    };
 
     // W5: the body-vs-SDF stage runs AFTER body-body narrowphase (both append to
     // `Manifolds`) and is forced BEFORE the solve via an explicit ordering edge — a
