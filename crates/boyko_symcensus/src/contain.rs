@@ -112,7 +112,7 @@ pub struct Containment {
     pub defs: usize,
 }
 
-/// Walks the six crates and computes the transitive by-value containment of each of [`ROOTS`].
+/// Walks the census crates and computes the transitive by-value containment of each of [`ROOTS`].
 pub fn capture(root: &Path) -> Result<Containment> {
     let mut defs = Defs::default();
     let mut files = 0usize;

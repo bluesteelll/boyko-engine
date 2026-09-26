@@ -8,6 +8,7 @@
 # (BASELINE_SCANNED), so this file can add crates but cannot demote one.
 kind	path	value	reason
 crate	crates/boyko_ecs	full	runtime kernel
+crate	crates/boyko_memory	full	runtime kernel: the memory primitives below the pool (VmReservation, VmColumn; KC-01), a normal dependency of boyko_ecs
 crate	crates/boyko_utils	full	runtime: a normal dependency of boyko_ecs, boyko_input, boyko_physics, boyko_rhi
 crate	crates/boyko_threadpool	full	runtime: the pool every parallel system runs on
 crate	crates/boyko_log	full	runtime: logging, linked into every engine crate
@@ -46,7 +47,7 @@ third-party	crates/boyko_ecs	crossbeam-queue	ArrayQueue and SegQueue are vocabul
 third-party	crates/boyko_ecs	crossbeam-utils	CachePadded only: no heap type
 third-party	crates/boyko_ecs	static_assertions	compile-time assertions only: no heap type
 third-party	crates/boyko_ecs	mimalloc	optional allocator shim (feature `mimalloc`); a #[global_allocator] static is a site of its own
-third-party	crates/boyko_ecs	libc	cfg(unix) FFI for the VmReservation backing: no heap type
+third-party	crates/boyko_memory	libc	cfg(unix) FFI for the VmReservation backing: no heap type
 third-party	crates/boyko_ecs	loom	cfg(loom) model-checker shim: never in a shipped build
 third-party	crates/boyko_threadpool	crossbeam-deque	Injector, Worker and Stealer are vocabulary heads
 third-party	crates/boyko_threadpool	crossbeam-utils	CachePadded only: no heap type

@@ -147,7 +147,7 @@ sparse-set collections; `Entity` implements `From<Slot>` / `Into<Slot>`.
 
 ### 2.1. VmReservation (per-OS reserve/commit primitive) ✅
 
-**File:** [crates/boyko_ecs/src/ecs/memory/vm.rs](../crates/boyko_ecs/src/ecs/memory/vm.rs)
+**File:** [crates/boyko_memory/src/vm.rs](../crates/boyko_memory/src/vm.rs)
 
 The single backing primitive of the memory subsystem (extracted Phase X.G as a
 twin of the X.C/X.F arena arms; the sole survivor since X.J retired the Arena):
@@ -257,11 +257,11 @@ chunks target distinct locations (Round 2 C3).
 (the old `debug_assert!(size > 0)` rejection is gone). A `stride == 0` pool is
 **tick-only**: `pool_byte_layout` degrades to `data_len == 0`,
 `added_off == 0`, `os_len == 2 * tick_len`
-([constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):335+);
+([constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):289+);
 `pool_reserve_rows(0) == POOL_MAX_ROWS` (rows bounded by the tick regions
 only — 2^24 × 4 B × 2 = 128 MiB address space per tag pool per hosting
 archetype, 2 MiB under the cfg fallback `POOL_MAX_ROWS = 262_144`
-([constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):114/:119), zero
+([constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):87/:92), zero
 resident until commit). Construction order is load-bearing (O1): tick bases
 derive from `base = vm.base()`; `buffer` is set per-arm LAST — for ZSTs a
 **dangling, provenance-free, non-null** pointer at
@@ -1911,16 +1911,16 @@ Bundle, SystemSet};`.
 
 | Name | Value | Where defined |
 |------|-------|---------------|
-| `COMMIT_GRANULE` | 64 KiB (renamed from `ARENA_COMMIT_GRANULE`, Phase X.J) | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):7 |
-| `CACHE_LINE_SIZE` | 64 B | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):37 |
-| `MIN_ALIGNMENT` | 8 B | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):42 |
-| `SIMD_BUFFER_ALIGN` | 32 B (AVX2) | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):52 (Phase X.A) |
-| `POOL_TARGET_DATA_BYTES` | 1 GiB (syscall arms) / 4 MiB (fallback) | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):89/:98 (syscall / fallback arm, Phase X.I) |
-| `POOL_MIN_ROWS` / `POOL_MAX_ROWS` | 2^16 / 2^24 (syscall arms); 256 / 2^18 (fallback) | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):104/:114 (syscall arms, Phase X.I) |
-| `POOL_MIN_SLAB` / `POOL_MAX_SLAB` | 64 KiB / 64 MiB | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):134/:145 (Phase X.I) |
-| `DEFAULT_INLAND_RESERVE` | 1 GiB (syscall arms) / 16 MiB (fallback) | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):437/:444 (syscall / fallback arm, Phase X.G) |
-| `INLAND_MIN_SLAB` / `INLAND_MAX_SLAB` | 256 KiB / 16 MiB | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):450/:455 (Phase X.G) |
-| `MAX_EVENT_THREADS` / `MAX_EVENT_CAPACITY` | 65 / 16384 | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):483/:501 |
+| `COMMIT_GRANULE` | 64 KiB (renamed from `ARENA_COMMIT_GRANULE`, Phase X.J) | [constants.rs](../crates/boyko_memory/src/constants.rs):16 |
+| `CACHE_LINE_SIZE` | 64 B | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):10 |
+| `MIN_ALIGNMENT` | 8 B | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):15 |
+| `SIMD_BUFFER_ALIGN` | 32 B (AVX2) | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):25 (Phase X.A) |
+| `POOL_TARGET_DATA_BYTES` | 1 GiB (syscall arms) / 4 MiB (fallback) | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):62/:71 (syscall / fallback arm, Phase X.I) |
+| `POOL_MIN_ROWS` / `POOL_MAX_ROWS` | 2^16 / 2^24 (syscall arms); 256 / 2^18 (fallback) | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):77/:87 (syscall arms, Phase X.I) |
+| `POOL_MIN_SLAB` / `POOL_MAX_SLAB` | 64 KiB / 64 MiB | [constants.rs](../crates/boyko_memory/src/constants.rs):65/:76 (Phase X.I) |
+| `DEFAULT_INLAND_RESERVE` | 1 GiB (syscall arms) / 16 MiB (fallback) | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):391/:398 (syscall / fallback arm, Phase X.G) |
+| `INLAND_MIN_SLAB` / `INLAND_MAX_SLAB` | 256 KiB / 16 MiB | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):404/:409 (Phase X.G) |
+| `MAX_EVENT_THREADS` / `MAX_EVENT_CAPACITY` | 65 / 16384 | [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):437/:455 |
 | `MAX_COMPONENTS` | 512 | [component/component_registry/mod.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs):63 |
 | `MAX_EVENTS` | 256 | [events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs):51 |
 | `MAX_ARCHETYPES` | 1024 | [iters/archetype_bit_set.rs](../crates/boyko_ecs/src/ecs/core/iters/archetype_bit_set.rs):7 |

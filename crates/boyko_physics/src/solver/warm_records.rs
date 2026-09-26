@@ -18,7 +18,7 @@
 //!
 //! # The lookup (D2, ruling W1)
 //!
-//! [`plan_sources`] runs once per step in stream order: it writes this step's
+//! [`plan_sources_restored`] runs once per step in stream order: it writes this step's
 //! ordinals into the write side and, for every manifold, searches the read side for
 //! the ordinal of the rows its pair held when the read side was written
 //! ([`RowRemap::manifold_pair`]). The result is a [`WarmRun`]: the whole run of
@@ -235,7 +235,7 @@ impl WarmRecord {
     /// The stored impulses of the LAST stored point whose feature id is `fid`, or
     /// `None` (Lemma W: the last insert of a key wins).
     #[inline]
-    fn seed_of(&self, fid: u16) -> Option<[f32; 3]> {
+    pub(crate) fn seed_of(&self, fid: u16) -> Option<[f32; 3]> {
         let live = &self.fid[..self.count as usize];
         live.iter()
             .rposition(|&f| f == fid)
@@ -274,13 +274,18 @@ pub(crate) struct Found {
     pub(crate) backward: bool,
 }
 
-/// What [`plan_sources`] counted for the G1 anti-vacuity counters.
+/// What [`plan_sources_restored`] counted for the G1 anti-vacuity counters.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PlanCounts {
     /// Lookups the strict-side cursor served by a backward binary search.
     pub(crate) backward_searches: u32,
     /// Whether the read side was non-strict and the cold index was built.
     pub(crate) cold_index: bool,
+    /// Lookups that missed the read side and searched L10's restore source
+    /// ([`plan_sources_restored`]).
+    pub(crate) restore_searches: u32,
+    /// Of those, the hits.
+    pub(crate) restore_hits: u32,
 }
 
 /// One side of the colored solver's double-buffered warm store.
@@ -345,7 +350,7 @@ impl WarmRecords {
 
     /// Sizes both columns to exactly `n` manifolds for a step that writes this side
     /// by index. Fills only on growth (O(1) in the steady state); every entry is then
-    /// overwritten by [`plan_sources`] (the keys) and the store (the records).
+    /// overwritten by [`plan_sources_restored`] (the keys) and the store (the records).
     pub(crate) fn resize(&mut self, n: usize) {
         self.keys.build_view().resize(n, 0);
         self.recs.build_view().resize(n, WarmRecord::EMPTY);
@@ -367,6 +372,49 @@ impl WarmRecords {
     #[inline]
     pub(crate) fn set_strict(&mut self, strict: bool) {
         self.strict = strict;
+    }
+
+    /// Writes `read` merged with `extra` into this side, by key: L10's D-H drain (ruling on
+    /// rev 2.3, open question 2), which hands the warm records of the islands a flush restores
+    /// to a solve that searches `read` alone. `extra` is strictly sorted and its keys are not
+    /// in `read` (no stream manifold of the step that wrote `read` named a held row), so on a
+    /// strict `read` the merge is strict and every lookup finds what a search of the two
+    /// sources finds; on a non-strict `read` `extra` is appended and the cold index serves
+    /// the lookups, whose runs are single records either way. O(|read| + |extra|), on a
+    /// flush step only.
+    pub(crate) fn merge_of(&mut self, read: &WarmRecords, extra: &WarmRecords) {
+        let (rk, rr) = (read.keys(), read.recs());
+        let (ek, er) = (extra.keys(), extra.recs());
+        debug_assert!(extra.strict, "invariant: the drained source is strictly sorted");
+        self.resize(rk.len() + ek.len());
+        let mut keys = self.keys.build_view();
+        let mut recs = self.recs.build_view();
+        let (keys, recs) = (keys.as_mut_slice(), recs.as_mut_slice());
+        if read.strict {
+            let (mut i, mut j) = (0, 0);
+            for (k, r) in keys.iter_mut().zip(recs.iter_mut()) {
+                let take_read = j == ek.len() || (i < rk.len() && rk[i] < ek[j]);
+                debug_assert!(
+                    j == ek.len() || i == rk.len() || rk[i] != ek[j],
+                    "invariant: the drained keys are not in the read side"
+                );
+                if take_read {
+                    (*k, *r) = (rk[i], rr[i]);
+                    i += 1;
+                } else {
+                    (*k, *r) = (ek[j], er[j]);
+                    j += 1;
+                }
+            }
+        } else {
+            let (k0, k1) = keys.split_at_mut(rk.len());
+            k0.copy_from_slice(rk);
+            k1.copy_from_slice(ek);
+            let (r0, r1) = recs.split_at_mut(rr.len());
+            r0.copy_from_slice(rr);
+            r1.copy_from_slice(er);
+        }
+        self.strict = read.strict;
     }
 
     /// D2's search on a STRICT read side. The cursor sits after the last result, so
@@ -486,7 +534,7 @@ impl WarmIndex {
 pub(crate) struct WarmLookup<'a> {
     /// The records the previous store wrote.
     pub(crate) read: &'a WarmRecords,
-    /// The cold index over `read`'s keys, built by [`plan_sources`] when `read` is
+    /// The cold index over `read`'s keys, built by [`plan_sources_restored`] when `read` is
     /// not strict.
     pub(crate) index: &'a WarmIndex,
 }
@@ -527,14 +575,8 @@ impl WarmLookup<'_> {
     }
 }
 
-/// P-a (D4): the stream-order pass of the build. Writes every manifold's ordinal
-/// into `write` (and its strictness), and the source run of every manifold into
-/// `plan[mi]` from `read` through `remap`. With warm start disabled nothing is
-/// written to `write` and every run is a miss; on a `Reset` the ordinals are still
-/// written (the store follows) and every run is a miss without a search. Builds
-/// `index` first when `read` is not strict and is looked up.
-///
-/// `plan` and `write` must be sized for `manifolds.len()` entries.
+/// [`plan_sources_restored`] with no restore source: the entry the L11 gates drive.
+#[cfg(test)]
 pub(crate) fn plan_sources(
     manifolds: &[Manifold],
     remap: RowRemap<'_>,
@@ -543,6 +585,47 @@ pub(crate) fn plan_sources(
     write: &mut WarmRecords,
     index: &mut WarmIndex,
     plan: &mut [WarmRun],
+) -> PlanCounts {
+    plan_sources_restored(
+        manifolds,
+        remap,
+        warm_start_enabled,
+        read,
+        write,
+        index,
+        plan,
+        None,
+        |_| {},
+    )
+}
+
+/// P-a (D4): the stream-order pass of the build. Writes every manifold's ordinal
+/// into `write` (and its strictness), and the source run of every manifold into
+/// `plan[mi]` from `read` through `remap`. With warm start disabled nothing is
+/// written to `write` and every run is a miss; on a `Reset` the ordinals are still
+/// written (the store follows) and every run is a miss without a search. Builds
+/// `index` first when `read` is not strict and is looked up.
+///
+/// L10's second source (design 06 A3, 08 A3′): a manifold whose translated ordinal misses
+/// `read` is searched in `restore` — the warm records of the kept manifolds restored this
+/// step, keyed in the rows `read` is keyed in, strictly sorted — by the same D2 routine with a
+/// cursor of its own, and `on_restore(mi)` marks a hit, whose run then names positions of
+/// `restore` (the caller's `SRC_RESTORE`). The two key sets are disjoint (no stream manifold
+/// of the step that wrote `read` named a held row), so a run lies in one source; a Reset or a
+/// flipped pair misses both without a search.
+///
+/// `plan` and `write` must be sized for `manifolds.len()` entries.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn plan_sources_restored(
+    manifolds: &[Manifold],
+    remap: RowRemap<'_>,
+    warm_start_enabled: bool,
+    read: &WarmRecords,
+    write: &mut WarmRecords,
+    index: &mut WarmIndex,
+    plan: &mut [WarmRun],
+    restore: Option<&WarmRecords>,
+    mut on_restore: impl FnMut(usize),
 ) -> PlanCounts {
     debug_assert_eq!(
         plan.len(),
@@ -554,6 +637,10 @@ pub(crate) fn plan_sources(
         plan.fill(WarmRun::MISS);
         return counts;
     }
+    debug_assert!(
+        restore.is_none_or(WarmRecords::strict),
+        "invariant: the restore source is strictly sorted"
+    );
     let looks_up = !matches!(remap, RowRemap::Reset);
     if looks_up && !read.strict() {
         index.build(read.keys());
@@ -570,6 +657,7 @@ pub(crate) fn plan_sources(
         );
         let mut prev = 0u64;
         let mut cursor = 0usize;
+        let mut restore_cursor = 0usize;
         for (mi, m) in manifolds.iter().enumerate() {
             let key = ord(m.body_a.0, m.body_b.0);
             strict &= mi == 0 || key > prev;
@@ -580,12 +668,24 @@ pub(crate) fn plan_sources(
             plan[mi] = match remap.manifold_pair(m) {
                 Some((la, lb)) => {
                     let lookup = ord(la, lb);
-                    if read.strict() {
+                    let run = if read.strict() {
                         let found = read.find(&mut cursor, lookup);
                         counts.backward_searches += u32::from(found.backward);
                         found.run
                     } else {
                         index.run(lookup)
+                    };
+                    match restore {
+                        Some(restore) if run == WarmRun::MISS => {
+                            counts.restore_searches += 1;
+                            let found = restore.find(&mut restore_cursor, lookup);
+                            if found.run != WarmRun::MISS {
+                                counts.restore_hits += 1;
+                                on_restore(mi);
+                            }
+                            found.run
+                        }
+                        _ => run,
                     }
                 }
                 None => WarmRun::MISS,

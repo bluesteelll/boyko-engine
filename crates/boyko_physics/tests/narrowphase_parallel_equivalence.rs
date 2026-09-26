@@ -461,7 +461,7 @@ fn run_churned_with(workers: usize, parallel_np: bool, reuse: bool) -> (Vec<Step
             witness.reused_after_churn += classes.reused;
         }
         hashes.push(StepHashes {
-            stream: stream_hash(m.manifolds()),
+            stream: stream_hash(m.solver_manifolds()),
             sensor: stream_hash(m.sensor_overlaps()),
             table: m.box_axis_cache.fingerprint(),
             tags: m.pair_tags_fingerprint(),
@@ -703,7 +703,7 @@ fn run_pyramid(workers: usize, parallel_np: bool, reuse: bool) -> (Vec<StepHashe
         let m = world.resource::<Manifolds>();
         reused += m.pair_classes().reused;
         hashes.push(StepHashes {
-            stream: stream_hash(m.manifolds()),
+            stream: stream_hash(m.solver_manifolds()),
             sensor: stream_hash(m.sensor_overlaps()),
             table: m.box_axis_cache.fingerprint(),
             tags: m.pair_tags_fingerprint(),

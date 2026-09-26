@@ -377,7 +377,7 @@ fn snapshot_probe(
         return;
     }
     probe.bodies = scratch.bodies().to_vec();
-    probe.pairs = pairs.pairs().to_vec();
+    probe.pairs = pairs.pairs().iter().copied().collect::<Vec<_>>();
     probe.hints = pairs.pairs().iter().map(|&(a, b)| manifolds.box_axis_cache.get(a, b)).collect();
     probe.manifolds = manifolds.manifolds().len();
     probe.sep_axis_hits = manifolds.separated_axis_hits();

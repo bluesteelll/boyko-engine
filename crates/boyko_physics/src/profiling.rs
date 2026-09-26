@@ -35,6 +35,7 @@
 //! | [`PHYS_SLEEP_BEGIN`] | `IslandSleep::begin_step` | 1, sleeping on only |
 //! | [`PHYS_SLEEP_FREEZE`] | the frozen-row capture, then the restore | 2, sleeping on only |
 //! | [`PHYS_SLEEP_END`] | `IslandSleep::end_step` | 1, sleeping on only |
+//! | [`PHYS_SLEEP_CLASSIFY`] | L10's sleep-skip classification in the colored broadphase's prologue | 1 on a colored step whose sleep-skip mode is `Sets`, else 0 |
 //! | [`PHYS_NP_DISPATCH`] | the parallel narrowphase's stage growth, spawn and join | 1 when it dispatched, else 0 |
 //! | [`PHYS_NP_COMPACT`] | its join of the chunks' runs into the two streams | 1 when it dispatched, else 0 |
 //! | [`PHYS_NP_AXIS_COMMIT`] | its serial replay of the axis writes | 1 when it dispatched, else 0 |
@@ -42,6 +43,14 @@
 //! | [`PHYS_BP_BUILD`] | its active-tree build | 1 on a tree-path step, else 0 |
 //! | [`PHYS_BP_QUERY`] | its queries and Wide-row loops | 1 on a tree-path step, else 0 |
 //! | [`PHYS_BP_ASSEMBLE`] | its pair assembly | 1 on a tree-path step, else 0 |
+//!
+//! On a step of the colored solve's no-awake fast path (L10 C3a: sleeping on, no dynamic row
+//! awake and no contact point laid out) the substep loop, the restitution pass and the freeze
+//! capture and restore do not run: [`PHYS_GRAVITY`], [`PHYS_WARM_APPLY`], [`PHYS_INTEGRATE`],
+//! [`PHYS_PASS_BIASED`], [`PHYS_PASS_RELAX`], the two color spans, [`PHYS_RESTITUTION`] and
+//! [`PHYS_SLEEP_FREEZE`] read 0 on it, and `ColoredSoftStepSolver::fast_path_steps` counts it.
+//! A reader derives the path from the world — the awake mask and the recomputed slots — never
+//! from that counter.
 //!
 //! The narrowphase dispatches when `parallel_narrowphase` is on, a pool of at least two workers
 //! is attached and the pair count yields at least two chunks — the chunk count
@@ -55,9 +64,14 @@
 //! three `phys_bp_*` structural counters (`broadphase_tree/mod.rs`). A reader derives the path
 //! from the configuration, the row count and `brute_max_rows()` — never from the implementation.
 //!
+//! The sleep-skip's step mode is `Off` when `PhysicsConfig::sleeping` is off and
+//! `PhysicsConfig::sleep_skip` otherwise; only the colored broadphase records it (a world without
+//! the colored pipeline has no sleep-skip), and a reader derives it from the configuration.
+//!
 //! Each of the ten step counters is emitted exactly once per step, including when its value is
 //! zero, so its per-step sample count is 1 and its per-step `total` is the value; the three
-//! tree counters are emitted once per tree-path step and not otherwise:
+//! tree counters are emitted once per tree-path step and not otherwise, and the sleep-skip's
+//! counter once per step whose classification ran (the [`PHYS_SLEEP_CLASSIFY`] span's steps):
 //!
 //! | Counter | Value |
 //! |---|---|
@@ -74,10 +88,12 @@
 //! | [`PHYS_NP_REUSED`] | box pairs whose output came from their contact-reuse record (L9b) |
 //! | [`PHYS_NP_SEP_HITS`] | box pairs their carried separating axis rejected, the SAT not run (L9a) |
 //! | [`PHYS_NP_FULL`] | box pairs whose full collision ran (neither of the two above) |
+//! | [`PHYS_SLEEP_HELD`] | rows L10's sleep-skip holds after the broadphase |
 //!
 //! The three narrowphase class counters are computed after the pair loop from the pairs' tags,
-//! and close: `PHYS_NP_FULL + PHYS_NP_REUSED + PHYS_NP_SEP_HITS` plus the non-box pairs is
-//! `PHYS_NP_PAIRS`. With contact reuse off `PHYS_NP_REUSED` is 0.
+//! and close: `PHYS_NP_FULL + PHYS_NP_REUSED + PHYS_NP_SEP_HITS` plus the non-box pairs and the
+//! pairs L10 skipped for a held endpoint (`Manifolds::pair_classes`) is `PHYS_NP_PAIRS`. With
+//! contact reuse off `PHYS_NP_REUSED` is 0.
 //!
 //! A step with no simulated dynamic body returns from the solve before its first zone, so the
 //! solve zones and the two slot counters are absent on that step; the broadphase and narrowphase
@@ -119,6 +135,7 @@ declare_zone!(PHYS_WRITE_BACK, name = "phys_write_back", scope = ROOT_SCOPE, tie
 declare_zone!(PHYS_SLEEP_BEGIN, name = "phys_sleep_begin", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_SLEEP_FREEZE, name = "phys_sleep_freeze", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_SLEEP_END, name = "phys_sleep_end", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_SLEEP_CLASSIFY, name = "phys_sleep_classify", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 
 // ── The parallel narrowphase's zones (L5) ─────────────────────────────────────
 
@@ -148,13 +165,14 @@ declare_zone!(PHYS_BP_REBUILDS, name = "phys_bp_rebuilds", scope = ROOT_SCOPE, t
 declare_zone!(PHYS_NP_REUSED, name = "phys_np_reused", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_NP_SEP_HITS, name = "phys_np_sep_hits", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_NP_FULL, name = "phys_np_full", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_SLEEP_HELD, name = "phys_sleep_held", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 
 /// Span zones this crate declares: the length of [`SPAN_ZONES`], so a reader's expectation
 /// table is typed by it and a zone without an expectation does not compile.
-pub const SPAN_ZONE_COUNT: usize = 21;
+pub const SPAN_ZONE_COUNT: usize = 22;
 
 /// Counter zones this crate declares: the length of [`COUNTER_ZONES`].
-pub const COUNTER_ZONE_COUNT: usize = 13;
+pub const COUNTER_ZONE_COUNT: usize = 14;
 
 /// Every span zone this crate declares, in the order of the table in the module docs.
 ///
@@ -176,6 +194,7 @@ pub static SPAN_ZONES: [&ZoneHandle; SPAN_ZONE_COUNT] = [
     &PHYS_SLEEP_BEGIN,
     &PHYS_SLEEP_FREEZE,
     &PHYS_SLEEP_END,
+    &PHYS_SLEEP_CLASSIFY,
     &PHYS_NP_DISPATCH,
     &PHYS_NP_COMPACT,
     &PHYS_NP_AXIS_COMMIT,
@@ -200,10 +219,11 @@ pub static COUNTER_ZONES: [&ZoneHandle; COUNTER_ZONE_COUNT] = [
     &PHYS_NP_REUSED,
     &PHYS_NP_SEP_HITS,
     &PHYS_NP_FULL,
+    &PHYS_SLEEP_HELD,
 ];
 
 /// Whether this build compiles the physics zones at all. Every zone is `Deep`, so one `const`
-/// answers for all thirty-four; `false` under a profile whose tier ceiling is below `Deep`, where
+/// answers for all thirty-six; `false` under a profile whose tier ceiling is below `Deep`, where
 /// every site folds to nothing and an armed profiler records none of them.
 pub const ZONES_COMPILED: bool = (PHYS_SOLVE_BUILD::TIER as u8) <= (GLOBAL_TIER as u8);
 

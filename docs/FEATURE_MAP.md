@@ -431,7 +431,7 @@ lazy). Public-book pages: `book/src/concepts/tags.md`,
 | Observers on a dynamic tag | [ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs) ✅ | the existing `add_observer(kind, tag.component_id(), runner)` — no gate (dynamic bit walk) |
 | The dynamic migration paths | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1573/:1654/:1724/:2022/:2291 ✅ | `merged_archetype_id_dyn` / `without_ids_archetype_id` (`kept.is_empty()` → EMPTY — O3) / `migrate_entity_attach_ids` / `migrate_entity_detach_ids` / `retag_in_place` — allocation-free, fire hooks+observers (ledger rows 8–10) |
 | Empty entities | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):648, [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):190 ✅ | `EcsMaster::spawn_empty` / `Commands::spawn_empty` (via `EmptyBundle`, [self_bundle.rs](../crates/boyko_ecs/src/ecs/core/bundle/self_bundle.rs):135); empty signature matches only zero-required-component queries |
-| ZST pool internals | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs), [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):114/:119 ✅ | tick-only layout, dangling SIMD-aligned base, `grow_rows_zst`; VA: 128 MiB reserve per tag pool per hosting archetype (2 MiB cfg fallback), zero resident until commit — see [SYSTEMS.md §2.3](SYSTEMS.md) |
+| ZST pool internals | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs), [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):87/:92 ✅ | tick-only layout, dangling SIMD-aligned base, `grow_rows_zst`; VA: 128 MiB reserve per tag pool per hosting archetype (2 MiB cfg fallback), zero resident until commit — see [SYSTEMS.md §2.3](SYSTEMS.md) |
 
 Ceilings (all loud): 512 shared ComponentIds, `MAX_ARCHETYPES = 1024`
 (N tags → up to 2^N hosting archetypes — the fragmentation ceiling; churn
@@ -849,10 +849,10 @@ written-never-read; a per-mutation `udiv` died with them). See
 
 | What you want to do | Where | Method |
 |---------------------|-------|--------|
-| Reserve/commit a VM range | [memory/vm.rs](../crates/boyko_ecs/src/ecs/memory/vm.rs) ✅ | `VmReservation::{reserve, commit, base, os_len}` — the single per-OS primitive under `InlandStore` and every `ComponentPool` (X.G/X.H/X.I) |
+| Reserve/commit a VM range | [boyko_memory/vm.rs](../crates/boyko_memory/src/vm.rs) ✅ | `VmReservation::{reserve, commit, base, os_len}` — the single per-OS primitive under `InlandStore` and every `ComponentPool` (X.G/X.H/X.I) |
 | Grow a pool (automatic) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `#[cold] grow_rows` — slab doubling 64 KiB…64 MiB, ticks in lockstep, bases never move (Phase X.I; see [Type-erased component storage](#type-erased-component-storage)) |
 | Grow the entity store (automatic) | [entity/inland_store.rs](../crates/boyko_ecs/src/ecs/core/entity/inland_store.rs) ✅ | `#[cold] grow_to` via `ensure(n)` — 256 KiB…16 MiB slabs, demand-zero = `EntityInland::NULL` (Phase X.G) |
-| Align an address/size | [memory/utils.rs](../crates/boyko_ecs/src/ecs/memory/utils.rs) ✅ | `align_up(value, alignment)` |
+| Align an address/size | [boyko_memory/utils.rs](../crates/boyko_memory/src/utils.rs) ✅ | `align_up(value, alignment)` |
 
 There is no shared allocator: **the Arena + `MemFreeBlockMaster` were DELETED
 in Phase X.J** (client-less since X.I — every pool owns its memory via a

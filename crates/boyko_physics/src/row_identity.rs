@@ -236,8 +236,8 @@ impl RowRemap<'_> {
     }
 }
 
-/// One row's sleep latch and island contact key: the element of `IslandSleep`'s permute
-/// carry. 8 B, align 4.
+/// One row's sleep latch and island contact key: the element of `IslandSleep`'s per-row latch
+/// column and of its permute carry (L10 C0, design D14). 8 B, align 4.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SleepLatch {
@@ -297,6 +297,15 @@ impl RemapCursor {
             self.resets += 1;
         }
         remap
+    }
+
+    /// Classifies the consumer against the current gather as [`remap`](Self::remap) does, but
+    /// counts nothing and never stamps: a reader that must know how ANOTHER consumer will
+    /// classify this step, before that consumer runs (L10 A1.1 reads `IslandSleep`'s latch
+    /// cursor and the pair carry's cursor this way, design 04 D9 / 06 B1).
+    #[inline]
+    pub(crate) fn peek<'a>(&self, rows: &'a RowIdentity) -> RowRemap<'a> {
+        rows.classify(self.synced_seq)
     }
 
     /// Records that the consumer's state is now keyed by the current gather's rows.
@@ -522,11 +531,32 @@ impl RowIdentity {
         self.cur.len()
     }
 
+    /// The current gather's previous-row map when the rows changed since the previous gather,
+    /// else `None` (L10's mirror tells a moved pair from an unmoved one by it).
+    #[inline]
+    pub(crate) fn prev_row_map(&self) -> Option<&[u32]> {
+        (!self.stable).then(|| self.prev_row.as_read_slice())
+    }
+
+    /// The number of rows in the previous gather (the range of `prev_row`'s values).
+    #[inline]
+    pub(crate) fn prev_rows_len(&self) -> usize {
+        self.prev.len()
+    }
+
     /// The current gather's sequence number: the stamp a consumer compares with a stamp it
     /// recorded, such as the pair list's (`ContactPairs`, L9).
     #[inline]
     pub(crate) fn gather_seq(&self) -> u64 {
         self.gather_seq
+    }
+
+    /// Whether the current gather's rows differ from the previous gather's, so a consumer
+    /// keyed one gather ago classifies as `Rows` (L10 C0: the broadphase rebuilds the jumper
+    /// bitset on exactly these steps).
+    #[inline]
+    pub(crate) fn rows_changed(&self) -> bool {
+        !self.stable
     }
 
     /// The rows of the current gather that stage 2 resolved, ascending (T5), or none when the

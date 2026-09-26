@@ -25,29 +25,58 @@
 //!
 //! # Sets (D3)
 //!
-//! A Normal row is in one of **Q** (queried; the active tree, rebuilt every step) or **S** (the
-//! static set: a tree and a sorted list `SS` of its internal pairs, both persistent). One verify
-//! pass per step locates every row's previous record — in place on `Identity`, through
-//! `prev_row` on `Rows`, in place after a `Reset` — and decides:
+//! A Normal row is in one of **Q** (queried; the active tree, rebuilt every step), **S** (the
+//! static set: a tree and a sorted list `SS` of its internal pairs, both persistent) or **Z**
+//! (the sleeper set: a tree and a sorted list `SL` of the pairs with one Z endpoint and the other
+//! in S ∪ Z, both persistent). One verify pass per step locates every row's previous record — in
+//! place on `Identity`, through `prev_row` on `Rows`, in place after a `Reset` — and decides:
 //! * *carried*: a member whose bits, kind and class are unchanged keeps its leaf;
 //! * *evicted*: a member that moved, reshaped, changed class or kind, or was located twice
 //!   (the consumed mark makes the locator injective) — its leaf is killed and its pairs filtered;
 //! * *vanished*: a member no row located (despawned, or a tail row past `N`) — found by the
 //!   count, killed by a leaf scan;
-//! * *pending*: a non-member static that is still (bits equal to its record) accrues rent.
+//! * *pending*: a non-member that fits a set — a static that is still (bits equal to its
+//!   record), or a row the sleep hint offers to Z — accrues that set's rent.
 //!
 //! Correctness rests on the bit compare, the injective locator and the filtered lists alone
 //! (Lemma D3.1); the class check is membership hygiene. A row move is a **translation** of the
 //! list entries and leaf rows through `prev_row`'s inverse, with the patch rule of ruling W1:
 //! an entry stays in place only if both its endpoints belong to the maximum-weight monotone
 //! subsequence of the carried rows (the "jumpers" are the rest) and it is greater than the last
-//! kept entry; the diverted entries are sorted and merged back. A new static waits as pending
-//! and is admitted by the rent rule (D3.5, a deterministic ski-rental bound): the tree is rebuilt
-//! over members and pending rows, only the pending rows are queried, their additions are merged
-//! into `SS`. Compaction rebuilds the tree when the dead lanes reach `max(live, 64)`.
+//! kept entry; the diverted entries are sorted and merged back. A new member waits as pending
+//! and is admitted by the rent rule (D3.5, a deterministic ski-rental bound): the set's tree is
+//! rebuilt over members and pending rows, only the pending rows are queried — against the set's
+//! own tree and the other set's — and their additions are merged into the lists. S is admitted
+//! before Z, so a pair of a new static and a new sleeper is found once, by Z's admission.
+//! Compaction rebuilds a tree when its dead lanes reach `max(live, 64)`.
 //!
-//! The sleeper set Z, its list SL, the sleep hint and `IslandSleep::mask_rows` are commit C5 of
-//! the design and are not here.
+//! # The sleeper set (L10 C3c: design C5 as amended by L10's T1–T4 and T6)
+//!
+//! Z serves L10's frozen-pair skip (`sleep_sets.rs`): a held island's pairs are neither queried
+//! nor emitted into the stream. The verify reads a [`SleepHint`]:
+//! * **T1** — a row is offered to Z iff its held record survives the step's prologue (L10's
+//!   `SLEEPER` flag: `PRE_HELD` less the prologue's restores). The hint is rebuilt from the
+//!   current step, so no stale mask exists and `IslandSleep::mask_rows` is never built.
+//! * **T2** — a row may be a member of S or Z only if it rests and is no sensor (L10's `RESTING`,
+//!   not `SENSOR`). So every `SL` pair has two resting, non-sensor endpoints, at least one held
+//!   (**Invariant V**, debug-asserted by the colored broadphase): a static whose rotation or shape
+//!   changed with `(x, y, z, r)` bit-equal leaves S, and its pairs with Z are queried again. L10
+//!   hands the tree its hint only on a step with at least one sleeper; on any other step the
+//!   verify reads [`NoHint`], so Z dissolves and S keeps its C1 class (a flush step, where no
+//!   row rests, does not dissolve S).
+//! * **T3** — `SL` IS [`ContactPairs::withheld`]: strictly sorted, never merged into the stream.
+//!   The logical pair view is the stream ⊎ `withheld` ([`ContactPairs::pairs`]), whose length —
+//!   `P_logical` — sizes the narrowphase's hysteresis table and feeds `phys_bp_pairs`.
+//! * **T4** — [`release`](BroadphaseTree::release): the rows whose records L10's epilogue
+//!   restores after the verify (its D2 scan and D3) leave Z in the same step: their leaves are
+//!   killed and their `withheld` pairs merged into the stream, which the narrowphase then
+//!   collides (or skips, for a still-held partner).
+//! * **T6** — `withheld` is non-empty only after a tree-path step: a kind switch or a brute step
+//!   dissolves Z and empties it ([`clear_sleepers`](BroadphaseTree::clear_sleepers)); a `Reset`
+//!   and a step without the sleep-skip read [`NoHint`], which evicts every Z member.
+//!
+//! Without the sleep-skip Z is empty, and every step is the static-set step byte for byte: the
+//! same stream, the same records, the same leaf-list counts.
 //!
 //! # A step (N > `brute_max_rows`)
 //!
@@ -55,10 +84,10 @@
 //! |---|---|
 //! | `phys_bp_verify` | the locator, the verify pass, maintenance (leaf scan, list pass, compaction, admission) — unconditionally, once per step; the cursor stamp follows the assembly, outside the zones |
 //! | `phys_bp_build` | the active tree over Q |
-//! | `phys_bp_query` | each Q row, in Morton order, against the active tree (`row > query`) and the static tree, by the selected [`QueryKernel`](crate::broadphase_tree::QueryKernel); then each Wide row's loop. Every row's partners form one segment `[< row \| > row]` in one stream |
-//! | `phys_bp_assemble` | rev counts → bucket starts → a scatter over rows ascending → `resize(P)` → a per-row merge of its forward run, its `SS` run and its bucket |
+//! | `phys_bp_query` | each Q row, in Morton order, against the active tree (`row > query`), the static tree and the sleeper tree, by the selected [`QueryKernel`](crate::broadphase_tree::QueryKernel); then each Wide row's loop. Every row's partners form one segment `[< row \| > row]` in one stream |
+//! | `phys_bp_assemble` | rev counts → bucket starts → a scatter over rows ascending → `resize(P)` → a per-row merge of its forward run, its `SS` run and its bucket (`SL` is not merged: T3) |
 //!
-//! The counters `phys_bp_queried` (`|Q| + |Wide|`), `phys_bp_members` (`|S|`) and
+//! The counters `phys_bp_queried` (`|Q| + |Wide|`), `phys_bp_members` (`|S| + |Z|`) and
 //! `phys_bp_rebuilds` (the step's admissions and compactions) are emitted once per such step.
 //! With `N ≤ brute_max_rows` the step is [`all_pairs_into`], the state is untouched and the
 //! cursor is not stamped, so the next tree step is a `Reset`.
@@ -91,10 +120,11 @@
 //! # Storage
 //!
 //! Every durable buffer is a [`ScratchColumn`] on the `BROADPHASE_TREE` cohort of
-//! `scratch_ids.rs` (ids 417..407 since L11 C2 narrowed the solver cohort; 399..389 at the
-//! design). Function-local scratch is the traversal stack, the radix histogram and the
-//! leaf-list query's two candidate lists (`kernel::CandList`, about 4.4 KB each on the stack,
-//! never initialised as a whole). No `Vec`, no pool, no atomics.
+//! `scratch_ids.rs` (ids 416..406 on this tree, 399..389 at the design; that file's asserts, not
+//! this figure, are the placement's proof). `SL` is the cohort's column too, owned by
+//! [`ContactPairs`] as its `withheld` list (T3). Function-local scratch is the traversal stack,
+//! the radix histogram and the leaf-list query's three candidate lists (`kernel::CandList`,
+//! about 4.4 KB each on the stack, never initialised as a whole). No `Vec`, no pool, no atomics.
 //!
 //! The non-default `bp-query-counts` feature (C3b, the query-cost investigation) adds the
 //! `counts` module and, per tree, one probe of relaxed atomics holding the last query's counts.
@@ -116,8 +146,9 @@ use crate::profiling::{
 use crate::resources::{BodyState, ContactPairs};
 use crate::row_identity::{NO_ROW, RemapCursor, RowIdentity, RowRemap};
 use crate::scratch_ids::{
-    TREE_ACTIVE, TREE_AUX, TREE_ITEMS, TREE_REC0, TREE_REC1, TREE_SORT_A, TREE_SORT_B, TREE_SS,
-    TREE_STATICS, register_tree_column_layouts, scratch_reserve_rows, tree_column_id,
+    TREE_ACTIVE, TREE_AUX, TREE_ITEMS, TREE_REC0, TREE_REC1, TREE_SLEEPERS, TREE_SORT_A,
+    TREE_SORT_B, TREE_SS, TREE_STATICS, register_tree_column_layouts, scratch_reserve_rows,
+    tree_column_id,
 };
 use crate::systems::body_bounding_radius;
 
@@ -180,12 +211,22 @@ const KIND_EXCLUDED: u32 = 2;
 const SET_NONE: u32 = 0;
 /// Set: the static set S.
 const SET_S: u32 = 1;
+/// Set: the sleeper set Z (L10 C3c).
+const SET_Z: u32 = 2;
+
+/// Index of S in the per-set arrays (members, rent, the step's pending count).
+const IX_S: usize = 0;
+/// Index of Z in the per-set arrays.
+const IX_Z: usize = 1;
 
 const TAG_SLOT_MASK: u32 = 0x00ff_ffff;
 const TAG_SET_SHIFT: u32 = 24;
 const TAG_KIND_SHIFT: u32 = 26;
 const TAG_CONSUMED: u32 = 1 << 29;
+/// Pending for S this step.
 const TAG_PENDING: u32 = 1 << 30;
+/// Pending for Z this step (the hint offered a row that is no member).
+const TAG_PENDING_Z: u32 = 1 << 31;
 
 /// Marks a translated old row as a jumper in the inverse map (rows stay below `2^24`).
 const JUMPER: u32 = 1 << 31;
@@ -199,7 +240,7 @@ pub(crate) struct RowRec {
     y: f32,
     z: f32,
     r: f32,
-    /// `slot:24 | set:2 | kind:2 | _:1 | consumed:1 | pending:1 | _:1`.
+    /// `slot:24 | set:2 | kind:2 | _:1 | consumed:1 | pending:1 | pending_z:1`.
     tag: u32,
     /// Q and Wide rows: the segment's start in the stream, this step.
     seg: u32,
@@ -245,6 +286,17 @@ impl RowRec {
     }
 
     #[inline]
+    fn is_pending_z(&self) -> bool {
+        self.tag & TAG_PENDING_Z != 0
+    }
+
+    /// Makes the record no member of any set (its leaf was killed elsewhere).
+    #[inline]
+    fn leave(&mut self) {
+        self.tag &= !(TAG_SLOT_MASK | (0b11 << TAG_SET_SHIFT));
+    }
+
+    #[inline]
     fn bits_equal(&self, x: f32, y: f32, z: f32, r: f32) -> bool {
         self.x.to_bits() == x.to_bits()
             && self.y.to_bits() == y.to_bits()
@@ -267,7 +319,7 @@ impl RowRec {
 pub struct TreeDiag {
     /// Admissions and compactions of the static set.
     pub static_rebuilds: u64,
-    /// Admissions and compactions of the sleeper set (commit C5; `0` until then).
+    /// Admissions and compactions of the sleeper set (L10 C3c; `0` without the sleep-skip).
     pub sleeper_rebuilds: u64,
     /// Members evicted (moved, reshaped, re-classed, re-kinded, located twice) or vanished.
     pub evictions: u64,
@@ -275,7 +327,8 @@ pub struct TreeDiag {
     pub translations: u64,
     /// List entries the patch rule diverted and merged back.
     pub patches: u64,
-    /// Rows the sleep hint offered as sleeper candidates (commit C5; `0` until then).
+    /// Row-steps the sleep hint offered to the sleeper set a row that was no member — pending for
+    /// Z that step (L10 C3c; `0` without the sleep-skip).
     pub hint_candidates: u64,
     /// Row-steps classed Wide.
     pub wide_rows: u64,
@@ -339,15 +392,62 @@ pub enum QueryKernel {
     LeafList,
 }
 
-/// The tree broadphase's state: the active and the static tree, two record buffers, the static
-/// pair list, the scratch stream and the row cursor (the sleeper tree and its list are commit
-/// C5's; their column ids are reserved). One per world; see the module docs.
+/// What a tree-path step's verify reads of L10's sleep-skip (module docs, "The sleeper set"): the
+/// rows the sleeper set may hold and the rows either persistent set may hold at all.
+///
+/// The hint chooses membership, never the pair set (Lemma D3.1): whatever it answers, the bit
+/// compare, the injective locator and the filtered lists keep the output exact. So the tests
+/// drive the verify with a hint of their own, and the production step has two: [`NoHint`] and
+/// L10's `HeldHint` (`sleep_sets.rs`), which reads the step's row classification.
+pub(crate) trait SleepHint {
+    /// Whether row `r` (a current row) is offered to Z this step: under L10's `Sets`, a member of
+    /// a held record the prologue did not restore (T1).
+    fn frozen(&self, r: usize) -> bool;
+    /// Whether row `r` may be a member of S or Z this step: under L10's `Sets` with a sleeper, a
+    /// row that rests and is no sensor (T2); any row otherwise.
+    fn anchor_ok(&self, r: usize) -> bool;
+}
+
+/// The hint of a step without the sleep-skip, and of every `Reset` (design D3.4): nothing is
+/// offered to Z, so every Z member is evicted and `SL` empties; S keeps its C1 class (a still
+/// static).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct NoHint;
+
+impl SleepHint for NoHint {
+    #[inline]
+    fn frozen(&self, _r: usize) -> bool {
+        false
+    }
+
+    #[inline]
+    fn anchor_ok(&self, _r: usize) -> bool {
+        true
+    }
+}
+
+/// The two classes a Normal row can fit, from the hint: S (a static the hint lets rest) and Z (a
+/// non-static the hint offers). Both `false` for a Wide or Excluded row.
+#[inline]
+fn fits<H: SleepHint>(hint: &H, r: usize, kind: u32, is_static: bool) -> (bool, bool) {
+    if kind != KIND_NORMAL {
+        return (false, false);
+    }
+    let anchor = hint.anchor_ok(r);
+    (is_static && anchor, !is_static && anchor && hint.frozen(r))
+}
+
+/// The tree broadphase's state: the active, the static and the sleeper tree, two record buffers,
+/// the static pair list, the scratch stream and the row cursor. The sleeper pair list `SL` is
+/// [`ContactPairs::withheld`] (T3). One per world; see the module docs.
 #[derive(Resource)]
 pub struct BroadphaseTree {
     /// The tree over Q, rebuilt every step.
     active: PackedBvh8,
     /// The tree over S.
     statics: PackedBvh8,
+    /// The tree over Z (L10 C3c).
+    sleepers: PackedBvh8,
     /// Radix ping-pong; cold: the diverted entries and the admission's additions.
     sort_a: ScratchColumn<u64>,
     /// Radix ping-pong.
@@ -365,8 +465,8 @@ pub struct BroadphaseTree {
     aux: ScratchColumn<u32>,
     /// This consumer's place in the gather sequence.
     cursor: RemapCursor,
-    /// The static set's rent.
-    rent: u64,
+    /// Each set's rent (`[IX_S]`, `[IX_Z]`).
+    rent: [u64; 2],
     /// Rows at or below which the brute loop runs.
     brute_max_rows: u32,
     /// The Q rows' query kernel.
@@ -378,15 +478,17 @@ pub struct BroadphaseTree {
     /// The last leaf-list pass's counts (test and `bp-query-counts` builds only).
     #[cfg(any(test, feature = "bp-query-counts"))]
     ll_counts: LeafListCounts,
-    /// `|S|`.
-    members: u32,
-    /// This step's pending static rows (the verify writes, the maintenance reads).
-    pending_step: u32,
+    /// `|S|` and `|Z|`.
+    members: [u32; 2],
+    /// This step's pending rows per set (the verify writes, the maintenance reads).
+    pending_step: [u32; 2],
     /// The verify saw a vanished member, or the rows changed with members: scan the leaves.
     needs_scan: bool,
-    /// The verify evicted or lost a member: filter the list.
-    needs_filter: bool,
-    /// A `Rows` step with at least one member: translate leaves and list.
+    /// The verify evicted or lost an S member: filter `SS`.
+    filter_ss: bool,
+    /// The verify evicted or lost a member of either set: filter `SL`.
+    filter_sl: bool,
+    /// A `Rows` step with at least one member: translate leaves and lists.
     rows_changed: bool,
     /// The counters.
     diag: TreeDiag,
@@ -416,6 +518,7 @@ impl BroadphaseTree {
         Self {
             active: PackedBvh8::new(tree_column_id(TREE_ACTIVE), node_rows),
             statics: PackedBvh8::new(tree_column_id(TREE_STATICS), node_rows),
+            sleepers: PackedBvh8::new(tree_column_id(TREE_SLEEPERS), node_rows),
             sort_a: ScratchColumn::new(tree_column_id(TREE_SORT_A), key_rows),
             sort_b: ScratchColumn::new(tree_column_id(TREE_SORT_B), key_rows),
             items: ScratchColumn::new(tree_column_id(TREE_ITEMS), item_rows),
@@ -427,17 +530,18 @@ impl BroadphaseTree {
             ss: ScratchColumn::new(tree_column_id(TREE_SS), key_rows),
             aux: ScratchColumn::new(tree_column_id(TREE_AUX), aux_rows),
             cursor: RemapCursor::default(),
-            rent: 0,
+            rent: [0; 2],
             brute_max_rows: TREE_BRUTE_MAX_ROWS,
             kernel: QueryKernel::default(),
             #[cfg(test)]
             leaf_list_cap: LEAF_LIST_CAP,
             #[cfg(any(test, feature = "bp-query-counts"))]
             ll_counts: LeafListCounts::default(),
-            members: 0,
-            pending_step: 0,
+            members: [0; 2],
+            pending_step: [0; 2],
             needs_scan: false,
-            needs_filter: false,
+            filter_ss: false,
+            filter_sl: false,
             rows_changed: false,
             diag: TreeDiag::default(),
         }
@@ -448,9 +552,16 @@ impl BroadphaseTree {
     pub fn diag(&self) -> TreeDiag {
         TreeDiag {
             locator_resets: self.cursor.resets(),
-            members: u64::from(self.members),
+            members: u64::from(self.members[IX_S] + self.members[IX_Z]),
             ..self.diag
         }
+    }
+
+    /// `|Z|`: the rows the sleeper set holds after the last step (L10 C3c; `0` without the
+    /// sleep-skip).
+    #[inline]
+    pub fn sleeper_members(&self) -> u64 {
+        u64::from(self.members[IX_Z])
     }
 
     /// Sets the row count at or below which the step runs the brute all-pairs loop. `0` forces
@@ -518,10 +629,11 @@ impl BroadphaseTree {
         let n = bodies.len();
         debug_assert!(n < 1 << 24, "invariant: rows stay below 2^24");
         if n <= self.brute_max_rows as usize {
+            self.clear_sleepers(out);
             all_pairs_into(bodies, out);
             return;
         }
-        self.run(bodies, RowRemap::Identity, out);
+        self.run(bodies, RowRemap::Identity, out, &NoHint);
     }
 
     /// One `Rows` step under direct drive with an explicit previous-row map, for a harness
@@ -545,49 +657,73 @@ impl BroadphaseTree {
         assert_eq!(prev_row.len(), n, "invariant: prev_row is indexed by the current rows");
         debug_assert!(n < 1 << 24, "invariant: rows stay below 2^24");
         if n <= self.brute_max_rows as usize {
+            self.clear_sleepers(out);
             all_pairs_into(bodies, out);
             return;
         }
-        self.run(bodies, RowRemap::Rows(prev_row), out);
+        self.run(bodies, RowRemap::Rows(prev_row), out, &NoHint);
     }
 
-    /// One step: fills `out` with the exact pair set of `bodies`, in `(min, max)` order.
-    ///
-    /// `rows` is the gather's row identity, which locates the records of the previous step
-    /// when the rows changed; a never-gathered identity (direct drive) classifies as
-    /// `Identity` on every step.
+    /// One step without the sleep-skip: [`step_hinted`](Self::step_hinted) with [`NoHint`].
     pub(crate) fn step(
         &mut self,
         bodies: &[BodyState],
         rows: &RowIdentity,
         out: &mut ContactPairs,
     ) {
+        self.step_hinted(bodies, rows, out, &NoHint);
+    }
+
+    /// One step: fills `out` with the exact pair set of `bodies` as the stream ⊎
+    /// [`ContactPairs::withheld`], both in `(min, max)` order.
+    ///
+    /// `rows` is the gather's row identity, which locates the records of the previous step
+    /// when the rows changed; a never-gathered identity (direct drive) classifies as
+    /// `Identity` on every step. `hint` is the step's sleep hint; a `Reset` reads [`NoHint`]
+    /// whatever it is (design D3.4). The brute path dissolves the sleeper set (T6).
+    pub(crate) fn step_hinted<H: SleepHint>(
+        &mut self,
+        bodies: &[BodyState],
+        rows: &RowIdentity,
+        out: &mut ContactPairs,
+        hint: &H,
+    ) {
         let n = bodies.len();
         debug_assert!(n < 1 << 24, "invariant: rows stay below 2^24");
         if n <= self.brute_max_rows as usize {
+            self.clear_sleepers(out);
             all_pairs_into(bodies, out);
             return;
         }
         let remap = self.cursor.remap(rows);
-        self.run(bodies, remap, out);
+        self.run(bodies, remap, out, hint);
         // Protocol P: the state is keyed by this gather's rows from here on. Once per tree-path
         // step, after the maintenance, whatever the locator was (ruling W2(a)).
         self.cursor.stamp(rows);
     }
 
-    /// The tree path with an explicit locator and no stamp: [`step`](Self::step) minus the
-    /// cursor, so a test can drive a hand-made `Rows` map.
-    fn run(&mut self, bodies: &[BodyState], remap: RowRemap<'_>, out: &mut ContactPairs) {
+    /// The tree path with an explicit locator and no stamp: [`step_hinted`](Self::step_hinted)
+    /// minus the cursor, so a test can drive a hand-made `Rows` map.
+    fn run<H: SleepHint>(
+        &mut self,
+        bodies: &[BodyState],
+        remap: RowRemap<'_>,
+        out: &mut ContactPairs,
+        hint: &H,
+    ) {
         let n = bodies.len();
         let rebuilds_before = self.diag.static_rebuilds + self.diag.sleeper_rebuilds;
 
         {
             let _zone = zone!(PHYS_BP_VERIFY);
             match remap {
-                RowRemap::Identity | RowRemap::Reset => self.verify_identity(bodies),
-                RowRemap::Rows(prev_row) => self.verify_rows(bodies, prev_row),
+                RowRemap::Identity => self.verify_identity(bodies, hint),
+                // The hint is off on a `Reset` (design D3.4): the records are located in place,
+                // so Z dissolves in this pass and its pairs are queried again.
+                RowRemap::Reset => self.verify_identity(bodies, &NoHint),
+                RowRemap::Rows(prev_row) => self.verify_rows(bodies, prev_row, hint),
             }
-            self.maintain(n);
+            self.maintain(n, out);
         }
         {
             let _zone = zone!(PHYS_BP_BUILD);
@@ -603,7 +739,7 @@ impl BroadphaseTree {
         }
 
         counter!(PHYS_BP_QUERIED, queried);
-        counter!(PHYS_BP_MEMBERS, u64::from(self.members));
+        counter!(PHYS_BP_MEMBERS, u64::from(self.members[IX_S] + self.members[IX_Z]));
         counter!(
             PHYS_BP_REBUILDS,
             self.diag.static_rebuilds + self.diag.sleeper_rebuilds - rebuilds_before
@@ -615,9 +751,9 @@ impl BroadphaseTree {
     /// The verify with the identity locator (`Identity`, `Reset`, direct drive): row `r`'s
     /// record is `rec[cur][r]`, updated in place. Evicted lanes are killed here; vanished ones
     /// (rows past `N`) by the scan in [`maintain`](Self::maintain).
-    fn verify_identity(&mut self, bodies: &[BodyState]) {
+    fn verify_identity<H: SleepHint>(&mut self, bodies: &[BodyState], hint: &H) {
         let n = bodies.len();
-        let Self { rec, cur, statics, diag, .. } = self;
+        let Self { rec, cur, statics, sleepers, diag, .. } = self;
         let mut counts = VerifyCounts::default();
         let mut view = rec[usize::from(*cur)].build_view();
         let old_len = view.len();
@@ -631,18 +767,28 @@ impl BroadphaseTree {
             let old = recs[r];
             let located = r < old_len;
             let still = located && old.bits_equal(x, y, z, rr);
+            let (s_fit, z_fit) = fits(hint, r, kind, is_static);
             let mut tag = kind << TAG_KIND_SHIFT;
-            if old.set() == SET_S {
-                if kind == KIND_NORMAL && still && is_static {
-                    counts.carried += 1;
-                    tag |= (SET_S << TAG_SET_SHIFT) | old.slot();
-                } else {
-                    counts.evicted += 1;
-                    statics.kill(old.slot());
+            match old.set() {
+                SET_S => {
+                    if s_fit && still {
+                        counts.carried[IX_S] += 1;
+                        tag |= (SET_S << TAG_SET_SHIFT) | old.slot();
+                    } else {
+                        counts.evicted[IX_S] += 1;
+                        statics.kill(old.slot());
+                    }
                 }
-            } else if kind == KIND_NORMAL && is_static && still {
-                counts.pending += 1;
-                tag |= TAG_PENDING;
+                SET_Z => {
+                    if z_fit && still {
+                        counts.carried[IX_Z] += 1;
+                        tag |= (SET_Z << TAG_SET_SHIFT) | old.slot();
+                    } else {
+                        counts.evicted[IX_Z] += 1;
+                        sleepers.kill(old.slot());
+                    }
+                }
+                _ => tag |= counts.pending_tag(s_fit && still, z_fit),
             }
             counts.note_kind(kind);
             recs[r] = RowRec { x, y, z, r: rr, tag, seg: 0, nrev: 0, nfwd: 0 };
@@ -655,8 +801,8 @@ impl BroadphaseTree {
     /// The verify with the `prev_row` locator (`Rows`): row `r`'s record is
     /// `rec[1 − cur][prev_row[r]]`, written to `rec[cur]` after the swap. A located record is
     /// marked consumed, so a second locate of it fails. The inverse map `inv[m] = r` of the
-    /// carried members is built in `aux` for the leaf scan and the list translation.
-    fn verify_rows(&mut self, bodies: &[BodyState], prev_row: &[u32]) {
+    /// carried members of both sets is built in `aux` for the leaf scan and the list translation.
+    fn verify_rows<H: SleepHint>(&mut self, bodies: &[BodyState], prev_row: &[u32], hint: &H) {
         let n = bodies.len();
         debug_assert_eq!(prev_row.len(), n, "invariant: prev_row is the current gather's");
         let Self { rec, cur, aux, diag, .. } = self;
@@ -691,18 +837,29 @@ impl BroadphaseTree {
                 RowRec::NONE
             };
             let still = located && old.bits_equal(x, y, z, rr);
+            let (s_fit, z_fit) = fits(hint, r, kind, is_static);
             let mut tag = kind << TAG_KIND_SHIFT;
-            if old.set() == SET_S {
-                if kind == KIND_NORMAL && still && is_static {
-                    counts.carried += 1;
-                    tag |= (SET_S << TAG_SET_SHIFT) | old.slot();
-                    inv[m as usize] = r as u32;
-                } else {
-                    counts.evicted += 1;
+            // An evicted member's lane is killed by the translation (no row carries it).
+            match old.set() {
+                SET_S => {
+                    if s_fit && still {
+                        counts.carried[IX_S] += 1;
+                        tag |= (SET_S << TAG_SET_SHIFT) | old.slot();
+                        inv[m as usize] = r as u32;
+                    } else {
+                        counts.evicted[IX_S] += 1;
+                    }
                 }
-            } else if kind == KIND_NORMAL && is_static && still {
-                counts.pending += 1;
-                tag |= TAG_PENDING;
+                SET_Z => {
+                    if z_fit && still {
+                        counts.carried[IX_Z] += 1;
+                        tag |= (SET_Z << TAG_SET_SHIFT) | old.slot();
+                        inv[m as usize] = r as u32;
+                    } else {
+                        counts.evicted[IX_Z] += 1;
+                    }
+                }
+                _ => tag |= counts.pending_tag(s_fit && still, z_fit),
             }
             counts.note_kind(kind);
             recs[r] = RowRec { x, y, z, r: rr, tag, seg: 0, nrev: 0, nfwd: 0 };
@@ -714,64 +871,97 @@ impl BroadphaseTree {
         self.finish_verify(counts, true);
     }
 
-    /// Closes a verify: the vanished count, the eviction counter and the structural flags the
-    /// maintenance reads.
+    /// Closes a verify: the vanished counts, the eviction and candidate counters and the
+    /// structural flags the maintenance reads.
     fn finish_verify(&mut self, counts: VerifyCounts, rows_changed: bool) {
-        let vanished = self.members - counts.carried - counts.evicted;
-        self.diag.evictions += u64::from(counts.evicted + vanished);
+        let had_members = self.members[IX_S] + self.members[IX_Z] > 0;
+        let mut changed = [false; 2];
+        let mut vanished_any = false;
+        for x in [IX_S, IX_Z] {
+            let vanished = self.members[x] - counts.carried[x] - counts.evicted[x];
+            self.diag.evictions += u64::from(counts.evicted[x] + vanished);
+            changed[x] = counts.evicted[x] + vanished > 0;
+            vanished_any |= vanished > 0;
+        }
+        self.diag.hint_candidates += u64::from(counts.pending[IX_Z]);
         self.pending_step = counts.pending;
-        self.needs_scan = vanished > 0 || (rows_changed && self.members > 0);
-        self.needs_filter = counts.evicted + vanished > 0;
-        self.rows_changed = rows_changed && self.members > 0;
+        self.needs_scan = vanished_any || (rows_changed && had_members);
+        self.filter_ss = changed[IX_S];
+        self.filter_sl = changed[IX_S] || changed[IX_Z];
+        self.rows_changed = rows_changed && had_members;
         self.members = counts.carried;
     }
 
     // ── Maintenance ──────────────────────────────────────────────────────────
 
-    /// Everything a step does to the static set after the verify: the leaf scan (translation
-    /// and kills), the list pass (translation with the patch rule, or a filter), compaction and
-    /// admission. Runs only on steps with a change; out of line so the verify stays compact.
+    /// Everything a step does to the persistent sets after the verify: the leaf scan
+    /// (translation and kills), the list passes (translation with the patch rule, or a filter),
+    /// admission (S, then Z) and compaction. `out` holds `SL` (its `withheld` list, T3). Out of
+    /// line so the verify stays compact.
     #[cold]
     #[inline(never)]
-    fn maintain(&mut self, n: usize) {
+    fn maintain(&mut self, n: usize, out: &mut ContactPairs) {
         if self.rows_changed {
             self.diag.translations += 1;
-            self.translate();
+            self.translate(out);
         } else {
             if self.needs_scan {
                 self.scan_leaves(n);
             }
-            if self.needs_filter {
+            if self.filter_ss {
                 self.filter_list(n);
+            }
+            if self.filter_sl {
+                self.filter_withheld(n, out);
             }
         }
         self.needs_scan = false;
-        self.needs_filter = false;
+        self.filter_ss = false;
+        self.filter_sl = false;
         self.rows_changed = false;
 
-        let pending = u64::from(self.pending_step);
-        if pending == 0 {
-            self.rent = 0;
-        } else {
-            self.rent += pending;
-            let (num, den) = ADMIT_BUILD_RATIO;
-            if self.rent * den >= pending * den + num * (u64::from(self.members) + pending) {
-                self.admit(n);
-                self.rent = 0;
-            }
+        // S before Z (design D3.5): a pair of a new static and a new sleeper is then found once,
+        // by Z's admission, whose pending rows query the static tree S's admission rebuilt.
+        if self.admission_due(IX_S) {
+            self.admit(n, out);
+            self.rent[IX_S] = 0;
+        }
+        if self.admission_due(IX_Z) {
+            self.admit_sleepers(n, out);
+            self.rent[IX_Z] = 0;
         }
         if self.statics.dead() >= self.statics.live().max(COMPACT_MIN_DEAD) {
-            self.compact();
+            self.compact(IX_S);
         }
-        self.debug_check_members(n);
+        if self.sleepers.dead() >= self.sleepers.live().max(COMPACT_MIN_DEAD) {
+            self.compact(IX_Z);
+        }
+        self.debug_check_members(n, out);
     }
 
-    /// Kills the lanes whose row is past `N` (a shrink under the identity locator).
+    /// The rent rule for set `x` (D3.5): accrues this step's pending rows and says whether the
+    /// set admits them now.
+    #[inline]
+    fn admission_due(&mut self, x: usize) -> bool {
+        let pending = u64::from(self.pending_step[x]);
+        if pending == 0 {
+            self.rent[x] = 0;
+            return false;
+        }
+        self.rent[x] += pending;
+        let (num, den) = ADMIT_BUILD_RATIO;
+        self.rent[x] * den >= pending * den + num * (u64::from(self.members[x]) + pending)
+    }
+
+    /// Kills the lanes of either tree whose row is past `N` (a shrink under the identity
+    /// locator).
     fn scan_leaves(&mut self, n: usize) {
-        for slot in 0..self.statics.leaves() {
-            let row = self.statics.leaf_row(slot);
-            if row != NO_LANE_ROW && row as usize >= n {
-                self.statics.kill(slot);
+        for tree in [&mut self.statics, &mut self.sleepers] {
+            for slot in 0..tree.leaves() {
+                let row = tree.leaf_row(slot);
+                if row != NO_LANE_ROW && row as usize >= n {
+                    tree.kill(slot);
+                }
             }
         }
     }
@@ -793,75 +983,62 @@ impl BroadphaseTree {
         view.truncate(w);
     }
 
-    /// A `Rows` step's translation: the leaf rows and the list entries through the inverse map,
-    /// dropping the members no row carried, with the patch rule of ruling W1.
-    fn translate(&mut self) {
-        let Self { statics, ss, aux, sort_a, diag, .. } = self;
+    /// Drops every `SL` entry that is no longer a pair of S ∪ Z with a Z endpoint, keeping the
+    /// order.
+    fn filter_withheld(&mut self, n: usize, out: &mut ContactPairs) {
+        let recs = self.rec[usize::from(self.cur)].as_read_slice();
+        let mut view = out.withheld_build();
+        let list = view.as_mut_slice();
+        let mut w = 0usize;
+        for i in 0..list.len() {
+            let (a, b) = (list[i].0.0 as usize, list[i].1.0 as usize);
+            if a < n && b < n && sl_pair(recs[a].set(), recs[b].set()) {
+                list[w] = list[i];
+                w += 1;
+            }
+        }
+        view.truncate(w);
+    }
+
+    /// A `Rows` step's translation: the leaf rows of both trees and the entries of both lists
+    /// through the inverse map, dropping the members no row carried, with the patch rule of
+    /// ruling W1 over the carried rows of both sets.
+    fn translate(&mut self, out: &mut ContactPairs) {
+        let Self { statics, sleepers, ss, aux, sort_a, diag, .. } = self;
         let mut inv_view = aux.build_view();
         let inv = inv_view.as_mut_slice();
         let old_len = inv.len();
 
         // Leaves: a carried member's lane takes its new row; every other live lane is killed.
-        for slot in 0..statics.leaves() {
-            let row = statics.leaf_row(slot);
-            if row == NO_LANE_ROW {
-                continue;
-            }
-            let new_row = if (row as usize) < old_len { inv[row as usize] } else { NO_ROW };
-            if new_row == NO_ROW {
-                statics.kill(slot);
-            } else {
-                statics.set_leaf_row(slot, new_row);
+        for tree in [&mut *statics, &mut *sleepers] {
+            for slot in 0..tree.leaves() {
+                let row = tree.leaf_row(slot);
+                if row == NO_LANE_ROW {
+                    continue;
+                }
+                let new_row = if (row as usize) < old_len { inv[row as usize] } else { NO_ROW };
+                if new_row == NO_ROW {
+                    tree.kill(slot);
+                } else {
+                    tree.set_leaf_row(slot, new_row);
+                }
             }
         }
 
         // The jumpers: carried rows outside the maximum-weight monotone run subsequence.
         mark_jumpers(inv);
 
-        // The list: translate, drop, keep or divert.
-        let mut list_view = ss.build_view();
-        let list = list_view.as_mut_slice();
-        let mut diverted = sort_a.build_view();
-        diverted.clear();
-        let mut w = 0usize;
-        let mut last_kept = 0u64;
-        for i in 0..list.len() {
-            let key = list[i];
-            let (a, b) = ((key >> 32) as usize, (key & 0xffff_ffff) as usize);
-            let na = if a < old_len { inv[a] } else { NO_ROW };
-            let nb = if b < old_len { inv[b] } else { NO_ROW };
-            if na == NO_ROW || nb == NO_ROW {
-                continue;
-            }
-            let jumper = (na | nb) & JUMPER != 0;
-            let (na, nb) = (na & !JUMPER, nb & !JUMPER);
-            let new_key = pair_key(na.min(nb), na.max(nb));
-            if !jumper && new_key > last_kept {
-                list[w] = new_key;
-                w += 1;
-                last_kept = new_key;
-            } else {
-                debug_assert!(jumper, "a non-jumper entry is in order by construction");
-                diverted.push(new_key);
-            }
-        }
-        list_view.truncate(w);
-        let a = diverted.len();
-        diag.patches += a as u64;
-        if a == 0 {
-            return;
-        }
-        let diverted = diverted.as_mut_slice();
-        diverted.sort_unstable();
-        merge_into_sorted(&mut list_view, diverted, a > w / 4);
-        debug_assert!(strictly_sorted(list_view.as_slice()), "SS is strictly sorted after a patch");
+        // The lists: translate, drop, keep or divert.
+        diag.patches += translate_list(&mut ss.build_view(), inv, sort_a);
+        diag.patches += translate_list(&mut out.withheld_build(), inv, sort_a);
     }
 
     /// Admits the pending rows into S: the tree is rebuilt over members and pending rows, each
     /// pending row is queried against it (a partner is an old member, or a pending row above
-    /// it), and the sorted additions are merged into `SS`.
-    fn admit(&mut self, n: usize) {
-        let Self { statics, items, sort_a, sort_b, rec, cur, ss, diag, members, .. } = self;
+    /// it) and against the sleeper tree, and the sorted additions are merged into `SS` and into
+    /// `SL` (`out`'s `withheld` list).
+    fn admit(&mut self, n: usize, out: &mut ContactPairs) {
+        let Self { statics, sleepers, items, sort_a, sort_b, rec, cur, ss, diag, members, .. } = self;
         let mut recs_view = rec[usize::from(*cur)].build_view();
         let recs = recs_view.as_mut_slice();
         debug_assert_eq!(recs.len(), n);
@@ -891,8 +1068,12 @@ impl BroadphaseTree {
             }
         }
 
+        // `SS` additions in `sort_a`, `SL` additions (a new static with a sleeper) in `sort_b`:
+        // both are free once the build has returned.
         let mut additions = sort_a.build_view();
         additions.clear();
+        let mut with_sleepers = sort_b.build_view();
+        with_sleepers.clear();
         for (r, rec) in recs.iter().enumerate() {
             if !rec.is_pending() {
                 continue;
@@ -902,6 +1083,9 @@ impl BroadphaseTree {
                 if t != r && (!recs[t as usize].is_pending() || t > r) {
                     additions.push(pair_key(r.min(t), r.max(t)));
                 }
+            });
+            sleepers.query(rec.x, rec.y, rec.z, rec.r, |t| {
+                with_sleepers.push(pair_key(r.min(t), r.max(t)));
             });
         }
         for rec in recs.iter_mut() {
@@ -915,52 +1099,226 @@ impl BroadphaseTree {
             merge_into_sorted(&mut list, additions, false);
             debug_assert!(strictly_sorted(list.as_slice()), "SS is strictly sorted after an admission");
         }
-        *members = statics.leaves();
+        if !with_sleepers.is_empty() {
+            let with_sleepers = with_sleepers.as_mut_slice();
+            with_sleepers.sort_unstable();
+            let mut list = out.withheld_build();
+            merge_into_sorted(&mut list, with_sleepers, false);
+            debug_assert!(strictly_sorted(list.as_slice()), "SL is strictly sorted after an admission");
+        }
+        members[IX_S] = statics.leaves();
         diag.static_rebuilds += 1;
     }
 
-    /// Rebuilds the static tree over its live lanes only. The list is already filtered.
-    fn compact(&mut self) {
-        let Self { statics, items, sort_a, sort_b, rec, cur, diag, .. } = self;
+    /// Admits the pending rows into Z (L10 C3c): the sleeper tree is rebuilt over members and
+    /// pending rows, each pending row is queried against it (a partner is an old member, or a
+    /// pending row above it) and against the static tree, and the sorted additions are merged
+    /// into `SL` (`out`'s `withheld` list).
+    fn admit_sleepers(&mut self, n: usize, out: &mut ContactPairs) {
+        let Self { statics, sleepers, items, sort_a, sort_b, rec, cur, diag, members, .. } = self;
+        let mut recs_view = rec[usize::from(*cur)].build_view();
+        let recs = recs_view.as_mut_slice();
+        debug_assert_eq!(recs.len(), n);
+
         let mut items_view = items.build_view();
         items_view.clear();
-        for slot in 0..statics.leaves() {
-            let leaf = statics.leaf(slot);
+        for slot in 0..sleepers.leaves() {
+            let leaf = sleepers.leaf(slot);
             if leaf.row != NO_LANE_ROW {
                 items_view.push(Item::new(leaf.x, leaf.y, leaf.z, leaf.r, leaf.row));
             }
         }
-        statics.build(items_view.as_slice(), sort_a, sort_b);
+        for (r, rec) in recs.iter().enumerate() {
+            if rec.is_pending_z() {
+                debug_assert_eq!(rec.kind(), KIND_NORMAL, "only a Normal row is pending");
+                items_view.push(Item::new(rec.x, rec.y, rec.z, rec.r, r as u32));
+            }
+        }
+        sleepers.build(items_view.as_slice(), sort_a, sort_b);
+        // `join` keeps the Z pending mark, which the queries below read.
+        for slot in 0..sleepers.leaves() {
+            let row = sleepers.leaf_row(slot) as usize;
+            recs[row].join(SET_Z, slot);
+        }
+
+        let mut additions = sort_a.build_view();
+        additions.clear();
+        for (r, rec) in recs.iter().enumerate() {
+            if !rec.is_pending_z() {
+                continue;
+            }
+            let r = r as u32;
+            sleepers.query(rec.x, rec.y, rec.z, rec.r, |t| {
+                if t != r && (!recs[t as usize].is_pending_z() || t > r) {
+                    additions.push(pair_key(r.min(t), r.max(t)));
+                }
+            });
+            statics.query(rec.x, rec.y, rec.z, rec.r, |t| {
+                additions.push(pair_key(r.min(t), r.max(t)));
+            });
+        }
+        for rec in recs.iter_mut() {
+            rec.tag &= !TAG_PENDING_Z;
+        }
+        if !additions.is_empty() {
+            let additions = additions.as_mut_slice();
+            additions.sort_unstable();
+            let mut list = out.withheld_build();
+            merge_into_sorted(&mut list, additions, false);
+            debug_assert!(strictly_sorted(list.as_slice()), "SL is strictly sorted after an admission");
+        }
+        members[IX_Z] = sleepers.leaves();
+        diag.sleeper_rebuilds += 1;
+    }
+
+    /// Rebuilds set `x`'s tree over its live lanes only. Its lists are already filtered.
+    fn compact(&mut self, x: usize) {
+        let Self { statics, sleepers, items, sort_a, sort_b, rec, cur, diag, .. } = self;
+        let (tree, set) = if x == IX_S { (statics, SET_S) } else { (sleepers, SET_Z) };
+        let mut items_view = items.build_view();
+        items_view.clear();
+        for slot in 0..tree.leaves() {
+            let leaf = tree.leaf(slot);
+            if leaf.row != NO_LANE_ROW {
+                items_view.push(Item::new(leaf.x, leaf.y, leaf.z, leaf.r, leaf.row));
+            }
+        }
+        tree.build(items_view.as_slice(), sort_a, sort_b);
         let mut recs_view = rec[usize::from(*cur)].build_view();
         let recs = recs_view.as_mut_slice();
-        for slot in 0..statics.leaves() {
-            let row = statics.leaf_row(slot) as usize;
-            recs[row].join(SET_S, slot);
+        for slot in 0..tree.leaves() {
+            let row = tree.leaf_row(slot) as usize;
+            recs[row].join(set, slot);
         }
-        diag.static_rebuilds += 1;
+        if x == IX_S {
+            diag.static_rebuilds += 1;
+        } else {
+            diag.sleeper_rebuilds += 1;
+        }
+    }
+
+    // ── The seam with L10 (T4, T6) ───────────────────────────────────────────
+
+    /// T4: the sleeper-set members for which `released(row)` holds leave Z in this step — L10's
+    /// epilogue restored their records after the verify (its D2 scan, D3). Their lanes are
+    /// killed, and every `withheld` pair that is no longer a pair of S ∪ Z with a Z endpoint is
+    /// sorted-merged into the stream, so the narrowphase sees the logical set's partition as
+    /// `Off` computes it. `O(|Z| + |withheld| + |stream|)`, and only on a step that releases a
+    /// member. Returns the rows released.
+    pub(crate) fn release(&mut self, out: &mut ContactPairs, released: impl Fn(u32) -> bool) -> u32 {
+        if self.members[IX_Z] == 0 {
+            return 0;
+        }
+        self.release_members(out, released)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn release_members(&mut self, out: &mut ContactPairs, released: impl Fn(u32) -> bool) -> u32 {
+        let Self { sleepers, rec, cur, sort_a, members, .. } = self;
+        let mut recs_view = rec[usize::from(*cur)].build_view();
+        let recs = recs_view.as_mut_slice();
+        let mut count = 0u32;
+        for slot in 0..sleepers.leaves() {
+            let row = sleepers.leaf_row(slot);
+            if row != NO_LANE_ROW && released(row) {
+                sleepers.kill(slot);
+                recs[row as usize].leave();
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return 0;
+        }
+        members[IX_Z] -= count;
+        let (mut stream, mut withheld) = out.split_build();
+        let mut moved = sort_a.build_view();
+        moved.clear();
+        {
+            let list = withheld.as_mut_slice();
+            let mut w = 0usize;
+            for i in 0..list.len() {
+                let (a, b) = list[i];
+                if sl_pair(recs[a.0 as usize].set(), recs[b.0 as usize].set()) {
+                    list[w] = list[i];
+                    w += 1;
+                } else {
+                    moved.push(ListKey::key(list[i]));
+                }
+            }
+            withheld.truncate(w);
+        }
+        // A subsequence of a sorted list, disjoint from the stream: a plain merge.
+        merge_into_sorted(&mut stream, moved.as_slice(), false);
+        debug_assert!(
+            stream.as_slice().windows(2).all(|p| p[0] < p[1]),
+            "the stream is strictly sorted after a release"
+        );
+        count
+    }
+
+    /// T6: dissolves the sleeper set and empties `withheld` (`out`'s), for a step on which the
+    /// tree path does not run — a kind switch or the brute path emits every pair itself. The
+    /// static set is untouched. O(1) when Z and `withheld` are already empty.
+    #[inline]
+    pub(crate) fn clear_sleepers(&mut self, out: &mut ContactPairs) {
+        if self.sleepers.leaves() == 0 && out.withheld().is_empty() {
+            return;
+        }
+        self.dissolve_sleepers(out);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn dissolve_sleepers(&mut self, out: &mut ContactPairs) {
+        let Self { sleepers, rec, cur, sort_a, sort_b, members, rent, .. } = self;
+        {
+            let mut recs_view = rec[usize::from(*cur)].build_view();
+            let recs = recs_view.as_mut_slice();
+            for slot in 0..sleepers.leaves() {
+                let row = sleepers.leaf_row(slot);
+                if row != NO_LANE_ROW {
+                    recs[row as usize].leave();
+                }
+            }
+        }
+        sleepers.build(&[], sort_a, sort_b);
+        members[IX_Z] = 0;
+        rent[IX_Z] = 0;
+        out.withheld_build().clear();
     }
 
     /// Debug-only: every member's leaf points back at its row, no Wide or Excluded row is in a
-    /// tree, the live lane count is the member count, and `SS` is strictly sorted.
+    /// tree, each tree's live lane count is its member count, `SS` and `SL` are strictly sorted,
+    /// and every `SL` entry is a pair of S ∪ Z with a Z endpoint.
     #[inline]
-    fn debug_check_members(&self, n: usize) {
+    fn debug_check_members(&self, n: usize, out: &ContactPairs) {
         if cfg!(debug_assertions) {
             let recs = self.rec[usize::from(self.cur)].as_read_slice();
-            let mut live = 0u32;
+            let mut live = [0u32; 2];
             for (r, rec) in recs.iter().enumerate().take(n) {
-                if rec.set() == SET_S {
-                    live += 1;
-                    assert_eq!(rec.kind(), KIND_NORMAL, "row {r}: a member is Normal");
-                    assert_eq!(
-                        self.statics.leaf_row(rec.slot()),
-                        r as u32,
-                        "row {r}: its leaf slot points back at it"
-                    );
-                }
+                let (x, tree) = match rec.set() {
+                    SET_S => (IX_S, &self.statics),
+                    SET_Z => (IX_Z, &self.sleepers),
+                    _ => continue,
+                };
+                live[x] += 1;
+                assert_eq!(rec.kind(), KIND_NORMAL, "row {r}: a member is Normal");
+                assert_eq!(tree.leaf_row(rec.slot()), r as u32, "row {r}: its leaf slot points back at it");
             }
-            assert_eq!(live, self.members, "the member count is the carried count");
-            assert_eq!(live, self.statics.live(), "live lanes equal members");
+            assert_eq!(live, self.members, "each member count is its carried count");
+            assert_eq!(live[IX_S], self.statics.live(), "live static lanes equal members");
+            assert_eq!(live[IX_Z], self.sleepers.live(), "live sleeper lanes equal members");
             assert!(strictly_sorted(self.ss.as_read_slice()), "SS is strictly sorted");
+            let sl = out.withheld();
+            assert!(sl.windows(2).all(|p| p[0] < p[1]), "SL is strictly sorted");
+            assert!(
+                sl.iter().all(|&(a, b)| {
+                    let (a, b) = (a.0 as usize, b.0 as usize);
+                    a < n && b < n && sl_pair(recs[a].set(), recs[b].set())
+                }),
+                "every SL entry is a pair of S ∪ Z with a Z endpoint"
+            );
         }
     }
 
@@ -987,6 +1345,7 @@ impl BroadphaseTree {
         let Self {
             active,
             statics,
+            sleepers,
             rec,
             cur,
             aux,
@@ -999,11 +1358,11 @@ impl BroadphaseTree {
         let mut recs_view = rec[usize::from(*cur)].build_view();
         let recs = recs_view.as_mut_slice();
         let mut stream = aux.build_view();
+        let trees = Trees { active, statics, sleepers };
 
         match *kernel {
             QueryKernel::LeafList => leaf_list_pass(
-                active,
-                statics,
+                trees,
                 recs,
                 &mut stream,
                 cap,
@@ -1014,7 +1373,7 @@ impl BroadphaseTree {
             QueryKernel::RowWalk => {
                 stream.clear();
                 for slot in 0..active.leaves() {
-                    row_walk_slot(active, statics, recs, &mut stream, slot);
+                    row_walk_slot(trees, recs, &mut stream, slot);
                 }
                 diag.row_walk_leaves += u64::from(active.leaves().div_ceil(LANES as u32));
             }
@@ -1128,17 +1487,33 @@ impl BroadphaseTree {
     }
 }
 
-/// Per-verify tallies.
+/// Per-verify tallies, per set where a set is named (`[IX_S]`, `[IX_Z]`).
 #[derive(Default)]
 struct VerifyCounts {
-    carried: u32,
-    evicted: u32,
-    pending: u32,
+    carried: [u32; 2],
+    evicted: [u32; 2],
+    pending: [u32; 2],
     wide: u64,
     excluded: u64,
 }
 
 impl VerifyCounts {
+    /// The pending mark of a non-member that is pending for S (`s`) or for Z (`z`) — never both:
+    /// S holds statics, Z non-statics — counted.
+    #[inline]
+    fn pending_tag(&mut self, s: bool, z: bool) -> u32 {
+        debug_assert!(!(s && z), "invariant: S and Z classes are disjoint");
+        self.pending[IX_S] += u32::from(s);
+        self.pending[IX_Z] += u32::from(z);
+        if s {
+            TAG_PENDING
+        } else if z {
+            TAG_PENDING_Z
+        } else {
+            0
+        }
+    }
+
     #[inline]
     fn note_kind(&mut self, kind: u32) {
         self.wide += u64::from(kind == KIND_WIDE);
@@ -1177,21 +1552,117 @@ const fn pair_key(min: u32, max: u32) -> u64 {
 }
 
 #[inline]
-fn strictly_sorted(keys: &[u64]) -> bool {
+fn strictly_sorted<K: Ord>(keys: &[K]) -> bool {
     keys.windows(2).all(|w| w[0] < w[1])
+}
+
+/// Whether a pair whose endpoints' records are in sets `sa` and `sb` belongs to `SL`: both
+/// members of S ∪ Z, at least one of Z.
+#[inline]
+fn sl_pair(sa: u32, sb: u32) -> bool {
+    (sa == SET_Z || sb == SET_Z) && sa != SET_NONE && sb != SET_NONE
+}
+
+/// An entry of a persistent pair list: `SS` keeps `(min << 32) | max` keys, `SL` (the withheld
+/// pairs, T3) the `(min, max)` tuples the logical pair view hands out. The two orders are the
+/// same, so every list routine is one generic body over both.
+trait ListKey: Copy + Ord + 'static {
+    /// The entry of key `(min << 32) | max`.
+    fn from_key(key: u64) -> Self;
+    /// The entry's key `(min << 32) | max`.
+    fn key(self) -> u64;
+}
+
+impl ListKey for u64 {
+    #[inline]
+    fn from_key(key: u64) -> Self {
+        key
+    }
+
+    #[inline]
+    fn key(self) -> u64 {
+        self
+    }
+}
+
+impl ListKey for (BodyIndex, BodyIndex) {
+    #[inline]
+    fn from_key(key: u64) -> Self {
+        (BodyIndex((key >> 32) as u32), BodyIndex(key as u32))
+    }
+
+    #[inline]
+    fn key(self) -> u64 {
+        pair_key(self.0.0, self.1.0)
+    }
+}
+
+/// A `Rows` step's translation of one persistent list through the inverse map `inv` (the
+/// jumpers marked): an entry with an endpoint no row carried is dropped; a non-jumper entry
+/// greater than the last kept one stays in place; every other entry is diverted to `sort_a`,
+/// sorted and merged back (the patch rule of ruling W1). Returns the diverted count.
+fn translate_list<K: ListKey>(
+    list_view: &mut ScratchBuildView<'_, K>,
+    inv: &[u32],
+    sort_a: &mut ScratchColumn<u64>,
+) -> u64 {
+    let old_len = inv.len();
+    let list = list_view.as_mut_slice();
+    let mut diverted = sort_a.build_view();
+    diverted.clear();
+    let mut w = 0usize;
+    let mut last_kept = 0u64;
+    for i in 0..list.len() {
+        let key = list[i].key();
+        let (a, b) = ((key >> 32) as usize, (key & 0xffff_ffff) as usize);
+        let na = if a < old_len { inv[a] } else { NO_ROW };
+        let nb = if b < old_len { inv[b] } else { NO_ROW };
+        if na == NO_ROW || nb == NO_ROW {
+            continue;
+        }
+        let jumper = (na | nb) & JUMPER != 0;
+        let (na, nb) = (na & !JUMPER, nb & !JUMPER);
+        let new_key = pair_key(na.min(nb), na.max(nb));
+        if !jumper && new_key > last_kept {
+            list[w] = K::from_key(new_key);
+            w += 1;
+            last_kept = new_key;
+        } else {
+            debug_assert!(jumper, "a non-jumper entry is in order by construction");
+            diverted.push(new_key);
+        }
+    }
+    list_view.truncate(w);
+    let a = diverted.len();
+    if a == 0 {
+        return 0;
+    }
+    let diverted = diverted.as_mut_slice();
+    diverted.sort_unstable();
+    merge_into_sorted(list_view, diverted, a > w / 4);
+    debug_assert!(strictly_sorted(list_view.as_slice()), "a list is strictly sorted after a patch");
+    a as u64
+}
+
+/// The three trees a Q row queries.
+#[derive(Clone, Copy)]
+struct Trees<'a> {
+    active: &'a PackedBvh8,
+    statics: &'a PackedBvh8,
+    sleepers: &'a PackedBvh8,
 }
 
 /// The per-row walk of the Q row in active leaf slot `slot` (C1's query kernel): one walk of
 /// each tree, the active one filtered to `row > query`, appended to the stream as the row's
-/// sorted segment, and the row's record.
+/// sorted segment, and the row's record. An empty sleeper tree ends its walk at once.
 #[inline]
 fn row_walk_slot(
-    active: &PackedBvh8,
-    statics: &PackedBvh8,
+    trees: Trees<'_>,
     recs: &mut [RowRec],
     stream: &mut ScratchBuildView<'_, u32>,
     slot: u32,
 ) {
+    let Trees { active, statics, sleepers } = trees;
     let leaf = active.leaf(slot);
     let row = leaf.row;
     debug_assert_ne!(row, NO_LANE_ROW, "the active tree has no dead lane");
@@ -1202,6 +1673,9 @@ fn row_walk_slot(
         }
     });
     statics.query(leaf.x, leaf.y, leaf.z, leaf.r, |t| {
+        stream.push(t);
+    });
+    sleepers.query(leaf.x, leaf.y, leaf.z, leaf.r, |t| {
         stream.push(t);
     });
     let segment = &mut stream.as_mut_slice()[seg..];
@@ -1217,9 +1691,14 @@ fn row_walk_slot(
 /// The leaf-list query of every Q row (module docs, "Query kernels"; design C3b, F1). Per
 /// active leaf node `L`, in slot order: one collection walk of each tree with `L`'s box; then
 /// per live lane of `L`, ascending, the row's tests — the static candidates (or the static
-/// tree's one leaf node, which the per-row walk also tests without a cull), then the active
-/// candidates with the max-row cut, the exact test on each kept leaf with `row > query` in the
-/// active mask — and the segment's sort and record, exactly as the per-row walk writes them.
+/// tree's one leaf node, which the per-row walk also tests without a cull), the sleeper
+/// candidates the same way, then the active candidates with the max-row cut, the exact test on
+/// each kept leaf with `row > query` in the active mask — and the segment's sort and record,
+/// exactly as the per-row walk writes them.
+///
+/// An empty sleeper tree is neither collected nor counted, so without the sleep-skip the pass —
+/// its stream, its records and its [`LeafListCounts`] — is C3b's. The sleeper list's own figures
+/// are not counted; its partners enter `emitted` and `sort_shifts` with the segment.
 ///
 /// The stream is written by index into its initialised length, which a step leaves at least
 /// at the previous step's length: before a leaf whose worst case (`live · 8` entries per
@@ -1230,27 +1709,35 @@ fn row_walk_slot(
 /// the rest of the step and gives the codegen receipt (G-LL7) something to read.
 #[inline(never)]
 fn leaf_list_pass(
-    active: &PackedBvh8,
-    statics: &PackedBvh8,
+    trees: Trees<'_>,
     recs: &mut [RowRec],
     stream: &mut ScratchBuildView<'_, u32>,
     cap: usize,
     diag: &mut TreeDiag,
     #[cfg(any(test, feature = "bp-query-counts"))] counts: &mut LeafListCounts,
 ) {
+    let Trees { active, statics, sleepers } = trees;
     debug_assert!(active.maxrow_valid(), "invariant: the active tree is not killed or re-rowed after its build");
     debug_assert_eq!(active.dead(), 0, "the active tree has no dead lane");
     #[cfg(any(test, feature = "bp-query-counts"))]
     {
         *counts = LeafListCounts::default();
     }
+    // The sleeper collection's box tests: walked like the static collection, not reported.
+    #[cfg(any(test, feature = "bp-query-counts"))]
+    let mut z_box_tests = 0u64;
     let mut act_slot = MaybeUninit::uninit();
     let mut sta_slot = MaybeUninit::uninit();
+    let mut slp_slot = MaybeUninit::uninit();
     let act = CandList::init_in(&mut act_slot);
     let sta = CandList::init_in(&mut sta_slot);
+    let slp = CandList::init_in(&mut slp_slot);
     let a_leaves = active.leaf_nodes();
     let s_leaves = statics.leaf_nodes();
+    let z_leaves = sleepers.leaf_nodes();
     let s_single = statics.levels() == 1;
+    let z_on = sleepers.levels() > 0;
+    let z_single = sleepers.levels() == 1;
     let slots = active.leaves() as usize;
     let mut w = 0usize;
     let mut len = stream.len();
@@ -1271,14 +1758,30 @@ fn leaf_list_pass(
                 cap,
                 #[cfg(any(test, feature = "bp-query-counts"))]
                 &mut counts.collect_box_static,
-            ));
+            ))
+            && (!z_on
+                || z_single
+                || sleepers.collect_leaves::<false>(
+                    &box_l,
+                    slp,
+                    cap,
+                    #[cfg(any(test, feature = "bp-query-counts"))]
+                    &mut z_box_tests,
+                ));
         if !collected {
-            w = fallback_leaf(active, statics, recs, stream, w, l, live);
+            w = fallback_leaf(trees, recs, stream, w, l, live);
             len = w;
             diag.fallback_leaves += 1;
             continue;
         }
-        let need = live * LANES * (act.len() + if s_single { 1 } else { sta.len() });
+        let z_count = if !z_on {
+            0
+        } else if z_single {
+            1
+        } else {
+            slp.len()
+        };
+        let need = live * LANES * (act.len() + if s_single { 1 } else { sta.len() } + z_count);
         if w + need > len {
             len = grow_stream(stream, w + need.max(STREAM_GROW));
         }
@@ -1314,6 +1817,15 @@ fn leaf_list_pass(
                     {
                         counts.kept_static += 1;
                     }
+                });
+            }
+            if z_single {
+                let s = &z_leaves[0];
+                w = emit_lanes(out, w, s, leaf_mask(s, x, y, z, r));
+            } else if z_on {
+                slp.for_each_kept::<false>(&q, row, |leaf| {
+                    let s = &z_leaves[leaf as usize];
+                    w = emit_lanes(out, w, s, leaf_mask(s, x, y, z, r));
                 });
             }
             act.for_each_kept::<true>(&q, row, |leaf| {
@@ -1381,8 +1893,7 @@ fn emit_lanes(out: &mut [u32], mut w: usize, node: &Node8, mut mask: u32) -> usi
 #[cold]
 #[inline(never)]
 fn fallback_leaf(
-    active: &PackedBvh8,
-    statics: &PackedBvh8,
+    trees: Trees<'_>,
     recs: &mut [RowRec],
     stream: &mut ScratchBuildView<'_, u32>,
     w: usize,
@@ -1391,7 +1902,7 @@ fn fallback_leaf(
 ) -> usize {
     stream.truncate(w);
     for k in 0..live {
-        row_walk_slot(active, statics, recs, stream, (l * LANES + k) as u32);
+        row_walk_slot(trees, recs, stream, (l * LANES + k) as u32);
     }
     stream.len()
 }
@@ -1448,13 +1959,15 @@ fn sort_long_segment(segment: &mut [u32]) {
 /// Merges the sorted `added` keys into the sorted `list` (disjoint keys), in place from the end.
 /// With `sort_whole` the list is appended to and sorted instead (the patch rule's fallback when
 /// the diverted run is large).
-fn merge_into_sorted(list: &mut ScratchBuildView<'_, u64>, added: &[u64], sort_whole: bool) {
+fn merge_into_sorted<K: ListKey>(list: &mut ScratchBuildView<'_, K>, added: &[u64], sort_whole: bool) {
     let k = list.len();
     let a = added.len();
-    list.resize(k + a, 0);
+    list.resize(k + a, K::from_key(0));
     let out = list.as_mut_slice();
     if sort_whole {
-        out[k..].copy_from_slice(added);
+        for (slot, &key) in out[k..].iter_mut().zip(added) {
+            *slot = K::from_key(key);
+        }
         out.sort_unstable();
         return;
     }
@@ -1462,12 +1975,12 @@ fn merge_into_sorted(list: &mut ScratchBuildView<'_, u64>, added: &[u64], sort_w
     let mut w = k + a;
     while j > 0 {
         w -= 1;
-        if i > 0 && out[i - 1] > added[j - 1] {
+        if i > 0 && out[i - 1].key() > added[j - 1] {
             i -= 1;
             out[w] = out[i];
         } else {
             j -= 1;
-            out[w] = added[j];
+            out[w] = K::from_key(added[j]);
         }
     }
 }

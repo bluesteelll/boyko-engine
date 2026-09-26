@@ -31,12 +31,18 @@
 //! # How a pass is counted
 //!
 //! [`BroadphaseTree::count_query_pass`] replays the query pass of the last tree-path step: the
-//! same rows in the same order, against the same two trees, through the same kernel, with the
+//! same rows in the same order, against the same trees, through the same kernel, with the
 //! same filter. It checks every row's emitted partner count against the segment that step
 //! wrote, so a replay that walked anything other than what the step walked fails there. The
 //! replay exists because the step has no per-row storage to hand out: a `Vec` or a new scratch
 //! column in the step would be a heap site or a column id this feature does not own, while a
 //! query is a pure function of the tree and the query row.
+//!
+//! The sleeper tree of L10 C3c is walked for that check and not reported: without the
+//! sleep-skip it is empty, and every count here is C3b's. With the sleep-skip, a step whose
+//! query was followed by a change to the sleeper set — L10's release (T4) after the query, or a
+//! brute or other-kind step that dissolved the set (T6) — cannot be replayed: the replay misses
+//! the partners the step found in the killed lanes, and the check above panics.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -163,7 +169,8 @@ pub struct QueryPassTotals {
 }
 
 impl QueryPassTotals {
-    /// The step's pair count as the three sources add up to it.
+    /// The step's stream length as the three sources add up to it (the pairs L10's sleeper set
+    /// withholds, T3, are not in the stream).
     #[inline]
     pub const fn pairs(&self) -> u64 {
         self.emitted + self.wide_emitted + self.static_pairs
@@ -283,13 +290,14 @@ impl QueryProbe {
 impl BroadphaseTree {
     /// Replays the query pass of the last tree-path step and calls `sink` once per queried row,
     /// in the step's order (the active tree's leaves, Morton order): the row's walk of the
-    /// active tree with the `partner > row` filter, then of the static tree. Returns what the
-    /// pass covered beside the rest of the step's pair set, so a caller can check
-    /// [`QueryPassTotals::pairs`] against the step's output.
+    /// active tree with the `partner > row` filter, then of the static tree (then, unreported,
+    /// of the sleeper tree). Returns what the pass covered beside the rest of the step's pair
+    /// set, so a caller can check [`QueryPassTotals::pairs`] against the step's output.
     ///
     /// Read-only: the trees, the records and the pair list are the step's. A brute step
-    /// (`N ≤ brute_max_rows`) touches none of them, so after one the replay is still of the last
-    /// tree-path step.
+    /// (`N ≤ brute_max_rows`) touches none of them while the sleeper set is empty (it dissolves
+    /// the set otherwise; module docs), so after one the replay is still of the last tree-path
+    /// step.
     ///
     /// # Panics
     ///
@@ -311,14 +319,20 @@ impl BroadphaseTree {
                 emitted_statics += 1;
             });
             let statics = self.statics.last_query();
+            // L10 C3c: the sleeper tree's partners belong to the segment too; its walk is not
+            // reported (an empty sleeper tree, every step without the sleep-skip, emits none).
+            let mut emitted_sleepers = 0u32;
+            self.sleepers.query(leaf.x, leaf.y, leaf.z, leaf.r, |_| {
+                emitted_sleepers += 1;
+            });
             let rec = &recs[row as usize];
             assert_eq!(
-                emitted_active + emitted_statics,
+                emitted_active + emitted_statics + emitted_sleepers,
                 rec.nrev + rec.nfwd,
                 "row {row}: the replay emits the segment the step wrote"
             );
             totals.rows += 1;
-            totals.emitted += u64::from(emitted_active + emitted_statics);
+            totals.emitted += u64::from(emitted_active + emitted_statics + emitted_sleepers);
             sink(RowQueryCounts { row, active, statics, emitted_active, emitted_statics });
         }
         for rec in recs.iter().filter(|rec| rec.kind() == KIND_WIDE) {

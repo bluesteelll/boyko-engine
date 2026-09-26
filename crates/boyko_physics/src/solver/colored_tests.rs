@@ -286,8 +286,8 @@
         let graph = build_graph(&bodies, &manifolds);
 
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&bodies);
-        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
+        solver.build_bodies(&bodies, &[]);
+        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
         let cols = &solver.columns;
 
         // The total live point count = 1 + 1 + 4 = 6.
@@ -449,8 +449,8 @@
         proptest!(ProptestConfig::with_cases(400), |(seed in any::<u64>())| {
             let (bodies, manifolds, graph) = random_scene(seed);
             let mut solver = ColoredSoftStepSolver::default();
-            solver.build_bodies(&bodies);
-            solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
+            solver.build_bodies(&bodies, &[]);
+            solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
             let cols = &solver.columns;
 
             let n_colors = cols.color_offsets().len().saturating_sub(1);
@@ -1149,8 +1149,8 @@
         let manifolds = dense_collision_manifolds(&bodies);
         let graph = build_graph(&bodies, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&bodies);
-        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
+        solver.build_bodies(&bodies, &[]);
+        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
         let cols = &solver.columns;
         let n_colors = cols.color_offsets().len().saturating_sub(1);
         (0..n_colors)
@@ -1566,8 +1566,8 @@
 
             // ── Scalar arm ──────────────────────────────────────────────────
             let mut solver_scalar = ColoredSoftStepSolver::default();
-            solver_scalar.build_bodies(&bodies);
-            solver_scalar.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
+            solver_scalar.build_bodies(&bodies, &[]);
+            solver_scalar.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
             let cols_scalar = &solver_scalar.columns;
             let n_colors = cols_scalar.color_offsets().len() - 1;
             let bodies_scalar = body_scratch_from(&pristine_bodies);
@@ -1593,8 +1593,8 @@
 
             // ── SIMD arm ─────────────────────────────────────────────────────
             let mut solver_simd = ColoredSoftStepSolver::default();
-            solver_simd.build_bodies(&bodies);
-            solver_simd.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
+            solver_simd.build_bodies(&bodies, &[]);
+            solver_simd.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
             let cols_simd = &solver_simd.columns;
             let bodies_simd = body_scratch_from(&pristine_bodies);
             {
@@ -1842,8 +1842,8 @@
         }
         let graph = build_graph(&states, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&states);
-        solver.build_columns(&manifolds, &graph, &states, None, RowRemap::Identity);
+        solver.build_bodies(&states, &[]);
+        solver.build_columns(&manifolds, &graph, &states, None, RowRemap::Identity, None);
         assert_eq!(solver.columns.color_offsets().len(), 2, "body-disjoint specs form one color");
         assert_eq!(solver.columns.group_start().len(), groups.len() + 1, "one group per spec");
         // The seeds are the specs' (the fresh warm store seeded zero).
@@ -2451,8 +2451,8 @@
         let (bodies, manifolds) = ragged_colored_scene(11);
         let graph = build_graph(&bodies, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&bodies);
-        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity);
+        solver.build_bodies(&bodies, &[]);
+        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
         let mut rng = SplitMix64(0x11C3_5EED_A1B2_C3D4);
         seed_live_lanes(&mut solver, &mut rng);
 
@@ -3579,6 +3579,71 @@
         assert!(sleep.is_row_asleep(0), "the resting body must end latched asleep");
     }
 
+    /// **L10 C0, mutation M0's carrier — the island metric is the MAX over its rows.** One
+    /// island of three dynamic rows chained on a static floor, driven through
+    /// `begin_step` / `end_step` directly:
+    ///
+    /// * every row at 0.6 × the threshold: each row, and so the MAX, is below it while the
+    ///   SUM (1.8 ×) is above, so the island latches asleep after the debounce;
+    /// * one row at 2 × the threshold, the others at rest: the MAX is above it, so the busy
+    ///   row keeps its whole island awake (the "single busy row" rule the docs state).
+    ///
+    /// M0 (the energy MAX replaced by a SUM in `end_step`) turns the first arm red; the
+    /// design's named carrier, `sleeping_pipeline_o8`, stays green under it (measured at
+    /// C0), because none of its assertions reads a sleep decision.
+    #[test]
+    fn island_metric_is_the_max_over_its_rows() {
+        let threshold = DEFAULT_SLEEP_THRESHOLD;
+        let debounce: u16 = 8;
+        let bodies = vec![
+            dyn_sphere(Vec3::new(0.0, 0.5, 0.0), 1.0, 0.5, 0.0),
+            dyn_sphere(Vec3::new(0.0, 1.5, 0.0), 1.0, 0.5, 0.0),
+            dyn_sphere(Vec3::new(0.0, 2.5, 0.0), 1.0, 0.5, 0.0),
+            static_body(Vec3::ZERO),
+        ];
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        let ms = vec![
+            manifold(0, 3, Vec3::new(0.0, -1.0, 0.0), -0.01, Vec3::ZERO),
+            manifold(0, 1, up, -0.01, Vec3::ZERO),
+            manifold(1, 2, up, -0.01, Vec3::ZERO),
+        ];
+        let graph = build_graph(&bodies, &ms);
+        let isl = graph.island_of(0);
+        assert!(
+            isl != ConstraintGraph::NO_ISLAND && graph.island_of(1) == isl && graph.island_of(2) == isl,
+            "construction: the three dynamic rows form one island"
+        );
+        let run = |speeds2: [f32; 3]| {
+            let mut sleep = IslandSleep::with_capacity(4, 4);
+            let mut bs = bodies.clone();
+            for (b, v2) in bs.iter_mut().zip(speeds2) {
+                b.linear_velocity = Vec3::new(v2.sqrt(), 0.0, 0.0);
+            }
+            for _ in 0..2 * debounce {
+                sleep.begin_step(&graph, bs.len());
+                sleep.end_step(&bs, &graph, threshold, debounce);
+            }
+            [0, 1, 2].map(|r| sleep.is_row_asleep(r))
+        };
+        let slow = 0.6 * threshold;
+        assert!(
+            3.0 * slow >= threshold,
+            "construction: the rows' speed² sum must reach the threshold for the arm to separate MAX \
+             from SUM"
+        );
+        assert_eq!(
+            run([slow; 3]),
+            [true; 3],
+            "every row below the threshold: the island's MAX is below it, so all three latch asleep \
+             (a SUM, 1.8 x the threshold, would keep them awake)"
+        );
+        assert_eq!(
+            run([2.0 * threshold, 0.0, 0.0]),
+            [false; 3],
+            "one busy row keeps its whole island awake"
+        );
+    }
+
     /// **Gate 9 probe — does a dense resting pile actually latch asleep, and after
     /// how many frames?** This mirrors the criterion `sleeping` bench's `pile_scene`
     /// (a grid of sphere columns on a floor with vertical + lateral contacts) and
@@ -3718,7 +3783,7 @@
                 }
                 for isl in 0..n_islands {
                     let expect_frozen = member_count[isl] > 0 && all_asleep[isl];
-                    // An island with no members is `frozen_islands[isl] == true` by the
+                    // An island with no members is `is_island_frozen(isl) == true` by the
                     // resize default but has no rows, so no row reports awake/frozen via it.
                     if member_count[isl] > 0 {
                         prop_assert_eq!(
@@ -4912,8 +4977,14 @@
                 grid.build(scratch.bodies(), pairs);
                 let prefetched = manifolds
                     .box_axis_cache
-                    .begin_frame_synced(pairs.pairs(), scratch.bodies(), &scratch.rows);
-                narrowphase_serial(manifolds, scratch.bodies(), pairs.pairs(), prefetched);
+                    .begin_frame_synced(
+                        pairs.pairs_stream(),
+                        pairs.pairs().len(),
+                        scratch.bodies(),
+                        &scratch.rows,
+                    )
+                    .prefetched;
+                narrowphase_serial(manifolds, scratch.bodies(), pairs.pairs_stream(), prefetched);
                 if sdf_plane {
                     let mut out = manifolds.manifolds.build_view();
                     for (row, b) in scratch.bodies().iter().enumerate() {
@@ -4932,7 +5003,7 @@
                     solver,
                     scratch,
                     sleep.as_mut(),
-                    manifolds.manifolds(),
+                    manifolds.solver_manifolds(),
                     hash,
                     wide_steps,
                 );
@@ -5259,4 +5330,58 @@
                 );
             }
         }
+    }
+
+    /// L10 A1′ (design 06 A1, mutation N2): a kept manifold moved in this step takes the record
+    /// the carry routine builds from the read side — each point the LAST stored point carrying
+    /// its feature id (Lemma W), the hits compacted — not the previous record copied verbatim.
+    /// The two differ exactly when a manifold repeats a feature id, which this one does.
+    #[test]
+    fn a_moved_in_manifold_takes_the_carry_not_a_copy() {
+        use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
+
+        use crate::held_store::HeldStore;
+        use crate::held_store::tests::{ModelRecord, manifold as kept_manifold, move_in};
+        use crate::scratch_ids::{register_sleep_sets_layouts, sleep_kept_rec_id, sleep_scratch_id};
+        use crate::sleep_sets::{HeldSolve, SleepRuleCounts, SleepSkipStats};
+
+        register_sleep_sets_layouts();
+        // The manifold: rows 0 and 1, two points sharing feature id 7.
+        let mut m = kept_manifold(0, 1, 2, 1);
+        m.points[0].feature_id = 7;
+        m.points[1].feature_id = 7;
+        // The read side: the manifold's record, the two points' impulses distinct.
+        let mut solver = ColoredSoftStepSolver::with_capacity(2, 8);
+        {
+            let read = &mut solver.warm[usize::from(solver.warm_cur)];
+            read.resize(1);
+            read.keys_mut().as_mut_slice()[0] = ord(0, 1);
+            let (n, t1, t2) = ([1.0f32, 2.0], [3.0f32, 4.0], [5.0f32, 6.0]);
+            read.recs_mut().as_mut_slice()[0] = WarmRecord::solved(&m, 0, 2, [&n, &t1, &t2]);
+            read.set_strict(true);
+        }
+        // The held store: one record, moved in this step, keeping the manifold.
+        let mut store = HeldStore::with_capacity(0);
+        let mut ids: ScratchColumn<u64> = ScratchColumn::new(sleep_scratch_id(), 64);
+        let record = ModelRecord { members: vec![0, 1], kept: vec![(m, 1)], pairs: Vec::new(), live: true };
+        move_in(&mut store, &mut ids, &record, 2);
+        let mut kept_rec: ScratchColumn<WarmRecord> = ScratchColumn::new(sleep_kept_rec_id(), 64);
+        kept_rec.build_view().resize(1, WarmRecord::EMPTY);
+        let (mut held_warm, mut stats, mut rules) = (0u32, SleepSkipStats::default(), SleepRuleCounts::default());
+        let mut held = HeldSolve {
+            cls: &[],
+            restore: None,
+            held: store.view(),
+            capture: 0..1,
+            kept_rec: &mut kept_rec,
+            held_warm: &mut held_warm,
+            sources: &[],
+            stats: &mut stats,
+            rules: &mut rules,
+        };
+        solver.capture_moved_in(RowRemap::Identity, &mut held);
+        // Lemma W: both points take the last stored point with id 7 — the second one's impulses.
+        let want = WarmRecord::solved(&m, 0, 2, [&[2.0, 2.0], &[4.0, 4.0], &[6.0, 6.0]]);
+        assert_eq!(kept_rec.as_read_slice()[0].words(), want.words(), "the capture is the carry, not the stored record");
+        assert_eq!(held_warm, 2, "both points hit");
     }

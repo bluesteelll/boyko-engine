@@ -1069,7 +1069,7 @@ impl Crowd {
     /// its dispatch floor.
     fn widest_awake_color_slots(&self) -> usize {
         let graph = self.world.resource::<ConstraintGraph>();
-        let manifolds = self.world.resource::<Manifolds>().manifolds();
+        let manifolds = self.world.resource::<Manifolds>().solver_manifolds();
         let sleep = self.world.resource::<IslandSleep>();
         let bodies = self.world.resource::<SolverScratch>().bodies();
         (0..graph.n_colors())
