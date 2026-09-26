@@ -678,8 +678,8 @@ fn the_baseline_scanned_crates_are_workspace_members() {
     }
     assert_eq!(
         scan::BASELINE_SCANNED.len(),
-        23,
-        "22 full crates and boyko_macros (emitted)"
+        24,
+        "23 full crates and boyko_macros (emitted)"
     );
 }
 

@@ -1,6 +1,6 @@
 # ug15 leg2 pins v1
 # == leg (2) pins of boyko_demo under release
-# tree         D:\wt\lighttable (HEAD 631c14b98656cef9d46530199c157135c7a0b869, 0 uncommitted path(s))
+# tree         D:\wt\lighttable (HEAD 7f881bf14592fd022f0f6f099acec9c098d7f2d4, 0 uncommitted path(s))
 # target dir   D:/wt/_targets/vkval-msvc
 # host         x86_64-pc-windows-msvc (msvc)
 # rustc -vV    rustc 1.98.1 (48a229cea 2026-09-01)
@@ -18,12 +18,12 @@
 # subject      boyko_demo (boyko_demo --bin boyko_demo)
 # profile      release
 # object       D:/wt/_targets/vkval-msvc\release\deps\boyko_demo.o
-# object sha   4452cea7b201c537862419d357bdd90157c27de922a1a08360fefe172cdcdda1
+# object sha   a17df3d725eceaae7fdcc9cff31ae6665b45ab207c9b6eef01b5375d6a19d983
 # image        D:/wt/_targets/vkval-msvc\release\deps\boyko_demo.exe
-# image sha    beeef8ce2c5e7865df714739f5a794e20f44db6c046a6b3a44f174181aa9ea71
+# image sha    941d638fc2588c85ba708177cf21930394bf9d5cb5806436289ac01a9313d008
 # pdb          D:/wt/_targets/vkval-msvc\release\deps\boyko_demo.pdb
-# link args    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "D:/wt/_targets/vkval-msvc\\release\\deps\\boyko_demo.boyko_demo.8595b65b38f0f039-cgu.0.rcgu.o" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcTEOrvq\\libgetrandom-5c5bfbeeb531b711.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcTEOrvq\\libwindows_sys-580135e73d930774.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcTEOrvq\\liblibloading-1e4c9da494d1298e.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcTEOrvq\\libwindows-c19e306b3672b7ac.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcTEOrvq\\libwindows_numerics-090b778de29f40e5.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcTEOrvq\\libwindows_core-325392be9da29609.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcTEOrvq\\libwindows_strings-9a201cfed9e48952.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcTEOrvq\\libwindows_result-2af2fbf16144a430.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcTEOrvq\\libparking_lot_core-ae66d183fa563878.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustcTEOrvq\\libstd-44a584f44bc3dd65.rlib" "C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib\\libcompiler_builtins-d2ba6b5d33df79c1.rlib" "shlwapi.lib" "kernel32.lib" "user32.lib" "shell32.lib" "gdi32.lib" "advapi32.lib" "C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.53.1\\lib\\windows.0.53.0.lib" "C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "opengl32.lib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/LIBPATH:C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib" "/LIBPATH:C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.53.1\\lib" "/OUT:D:/wt/_targets/vkval-msvc\\release\\deps\\boyko_demo.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libstd.natvis" "/NATVIS:D:/wt/_targets/vkval-msvc\\release\\deps\\rustcTEOrvq\\boyko_demo-0.natvis" "/NATVIS:D:/wt/_targets/vkval-msvc\\release\\deps\\rustcTEOrvq\\boyko_demo-1.natvis" "/NATVIS:D:/wt/_targets/vkval-msvc\\release\\deps\\rustcTEOrvq\\boyko_demo-2.natvis"
-# final rustc  Running `C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name boyko_demo --edition=2024 'crates\boyko_demo\src\main.rs' --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C opt-level=3 -C lto=fat --warn=unexpected_cfgs '--allow=clippy::missing_const_for_thread_local' '--deny=clippy::disallowed_types' --check-cfg 'cfg(loom)' --check-cfg 'cfg(force_alloc_panic)' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=79f2aff1461f0635 --out-dir 'D:/wt/_targets/vkval-msvc\release\deps' -C strip=debuginfo -L 'dependency=D:/wt/_targets/vkval-msvc\release\deps' --extern 'boyko_diag=D:/wt/_targets/vkval-msvc\release\deps\libboyko_diag-b560511677c8eafc.rlib' --extern 'boyko_ecs=D:/wt/_targets/vkval-msvc\release\deps\libboyko_ecs-e93203faf86ba798.rlib' --extern 'boyko_log=D:/wt/_targets/vkval-msvc\release\deps\libboyko_log-d52904bfffa357e2.rlib' --extern 'boyko_macros=D:/wt/_targets/vkval-msvc\release\deps\boyko_macros-f880e435a2f5fc23.dll' --extern 'boyko_threadpool=D:/wt/_targets/vkval-msvc\release\deps\libboyko_threadpool-a64270c06f5de4b0.rlib' --extern 'boyko_demo=D:/wt/_targets/vkval-msvc\release\deps\libboyko_demo-f431c4fa688002a0.rlib' --extern 'bytemuck=D:/wt/_targets/vkval-msvc\release\deps\libbytemuck-8741d75d28ecc71d.rlib' --extern 'eframe=D:/wt/_targets/vkval-msvc\release\deps\libeframe-f1933ccdd279a621.rlib' --extern 'rand=D:/wt/_targets/vkval-msvc\release\deps\librand-987591a5f3bbc988.rlib' --emit=obj --print link-args -C target-cpu=x86-64-v3 -L 'native=C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows_x86_64_msvc-0.52.6\lib' -L 'native=C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows_x86_64_msvc-0.53.1\lib'`
+# link args    "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\link.exe" "/NOLOGO" "D:/wt/_targets/vkval-msvc\\release\\deps\\boyko_demo.boyko_demo.aae7489168a34086-cgu.0.rcgu.o" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustc2m2HAS\\libgetrandom-5c5bfbeeb531b711.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustc2m2HAS\\libwindows_sys-580135e73d930774.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustc2m2HAS\\liblibloading-1e4c9da494d1298e.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustc2m2HAS\\libwindows-c19e306b3672b7ac.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustc2m2HAS\\libwindows_numerics-090b778de29f40e5.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustc2m2HAS\\libwindows_core-325392be9da29609.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustc2m2HAS\\libwindows_strings-9a201cfed9e48952.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustc2m2HAS\\libwindows_result-2af2fbf16144a430.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustc2m2HAS\\libparking_lot_core-ae66d183fa563878.rlib" "D:/wt/_targets/vkval-msvc\\release\\deps\\rustc2m2HAS\\libstd-44a584f44bc3dd65.rlib" "C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\x86_64-pc-windows-msvc\\lib\\libcompiler_builtins-d2ba6b5d33df79c1.rlib" "shlwapi.lib" "kernel32.lib" "user32.lib" "shell32.lib" "gdi32.lib" "advapi32.lib" "C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.53.1\\lib\\windows.0.53.0.lib" "C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib\\windows.0.52.0.lib" "opengl32.lib" "kernel32.lib" "kernel32.lib" "kernel32.lib" "ntdll.lib" "userenv.lib" "ws2_32.lib" "dbghelp.lib" "/defaultlib:msvcrt" "/NXCOMPAT" "/LIBPATH:C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.52.6\\lib" "/LIBPATH:C:\\Users\\flint\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows_x86_64_msvc-0.53.1\\lib" "/OUT:D:/wt/_targets/vkval-msvc\\release\\deps\\boyko_demo.exe" "/OPT:REF,ICF" "/DEBUG" "/PDBALTPATH:%_PDB%" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\intrinsic.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:C:\\Users\\flint\\.rustup\\toolchains\\stable-x86_64-pc-windows-msvc\\lib\\rustlib\\etc\\libstd.natvis" "/NATVIS:D:/wt/_targets/vkval-msvc\\release\\deps\\rustc2m2HAS\\boyko_demo-0.natvis" "/NATVIS:D:/wt/_targets/vkval-msvc\\release\\deps\\rustc2m2HAS\\boyko_demo-1.natvis" "/NATVIS:D:/wt/_targets/vkval-msvc\\release\\deps\\rustc2m2HAS\\boyko_demo-2.natvis"
+# final rustc  Running `C:\Users\flint\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name boyko_demo --edition=2024 'crates\boyko_demo\src\main.rs' --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type bin --emit=dep-info,link -C opt-level=3 -C lto=fat --warn=unexpected_cfgs '--allow=clippy::missing_const_for_thread_local' '--deny=clippy::disallowed_types' --check-cfg 'cfg(loom)' --check-cfg 'cfg(force_alloc_panic)' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=13cfa2c4b23bbc8f --out-dir 'D:/wt/_targets/vkval-msvc\release\deps' -C strip=debuginfo -L 'dependency=D:/wt/_targets/vkval-msvc\release\deps' --extern 'boyko_diag=D:/wt/_targets/vkval-msvc\release\deps\libboyko_diag-b560511677c8eafc.rlib' --extern 'boyko_ecs=D:/wt/_targets/vkval-msvc\release\deps\libboyko_ecs-4207f061a7986000.rlib' --extern 'boyko_log=D:/wt/_targets/vkval-msvc\release\deps\libboyko_log-d52904bfffa357e2.rlib' --extern 'boyko_macros=D:/wt/_targets/vkval-msvc\release\deps\boyko_macros-f880e435a2f5fc23.dll' --extern 'boyko_threadpool=D:/wt/_targets/vkval-msvc\release\deps\libboyko_threadpool-a64270c06f5de4b0.rlib' --extern 'boyko_demo=D:/wt/_targets/vkval-msvc\release\deps\libboyko_demo-619f4b696bd00ef4.rlib' --extern 'bytemuck=D:/wt/_targets/vkval-msvc\release\deps\libbytemuck-8741d75d28ecc71d.rlib' --extern 'eframe=D:/wt/_targets/vkval-msvc\release\deps\libeframe-f1933ccdd279a621.rlib' --extern 'rand=D:/wt/_targets/vkval-msvc\release\deps\librand-987591a5f3bbc988.rlib' --emit=obj --print link-args -C target-cpu=x86-64-v3 -L 'native=C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows_x86_64_msvc-0.52.6\lib' -L 'native=C:\Users\flint\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows_x86_64_msvc-0.53.1\lib'`
 == boyko_demo | P29-1 | <boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows | size=466 (section RawDataSize) | copies=1 | sha256=c1df52f91f878e4e490bf67d73312544d3d20cf8acf63bdc30d7ae360e39d893
 <<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows> @+0x0:
      0: push r15
@@ -155,7 +155,7 @@
    1c9: mov rdx, rbp
    1cc: mov qword ptr [rbx + 0x48], r15
    1d0: jmp 0x170
-== boyko_demo | P29-2 | <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion | size=37 (section RawDataSize) | copies=1 | sha256=f72ee0f187be40485ea8d1b6983c6412d0f023e56c6e1ebcec8d5558fcf3c18e
+== boyko_demo | P29-2 | <boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion | size=37 (section RawDataSize) | copies=1 | sha256=b359d90839b7bc95996e2567fd13a66f8032d0fd535756a6016c448761ec2a3f
 <<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion> @+0x0:
      0: sub rsp, 0x28
      4: test rcx, rcx
@@ -165,7 +165,7 @@
      f: mov rdx, r8
     12: mov r8, r9
     15: add rsp, 0x28
-    19: jmp 0x1e ; REL32 <boyko_ecs::ecs::memory::vm::VmReservation>::commit
+    19: jmp 0x1e ; REL32 <boyko_memory::vm::VmReservation>::commit
     1e: call 0x23 ; REL32 <boyko_ecs::ecs::memory::component_pool::PoolBacking>::grow_is_host_only
     23: ud2
 == boyko_demo | P29-3 | boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan | size=1163 (section RawDataSize) | copies=1 | sha256=270ce025c9d0df16ab7a8e669685751ed5ce544aafb1ebb2703adaafe76bdedb
@@ -576,14 +576,14 @@
     5a: lea rdx, [rsp + 0x28]
     5f: call 0x64 ; REL32 core::panicking::panic_fmt
     64: ud2
-== boyko_demo | D-4 | boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid> | size=651 (section RawDataSize) | copies=1 | sha256=e2cacac095a7312f1a2597de1eb117bf118715ac5dd7101d8dd9ecbbf75ce049
+== boyko_demo | D-4 | boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid> | size=651 (section RawDataSize) | copies=1 | sha256=8562f5f9571bd49905e65b332a9d33510e7aabba52cd6d4654f28c7f46f9d531
 <boyko_ecs::ecs::core::resources::resource_registry::register_new::<boyko_demo::sim::grid::SpatialGrid>> @+0x0:
      0: push rsi
      1: push rdi
      2: sub rsp, 0x78
      6: xor eax, eax
      8: lea rcx, [rip] ; REL32 boyko_ecs::ecs::core::component::component_registry::LAYOUTS
-     f: vmovdqa xmm0, xmmword ptr [rip] ; REL32 __xmm@3b7811ac6d665c7bde21fa4be2001c82
+     f: vmovdqa xmm0, xmmword ptr [rip] ; REL32 __xmm@4445a54a4247ed6bda18ee8b9e462f6d
     17: jmp 0x32
     19: nop dword ptr [rax]
     20: add rax, 0x100
@@ -656,7 +656,7 @@
    173: jne 0x1fc
    179: add rsi, rcx
    17c: vmovdqu xmm0, xmmword ptr [rsi + 0x28]
-   181: vpxor xmm0, xmm0, xmmword ptr [rip] ; REL32 __xmm@3b7811ac6d665c7bde21fa4be2001c82
+   181: vpxor xmm0, xmm0, xmmword ptr [rip] ; REL32 __xmm@4445a54a4247ed6bda18ee8b9e462f6d
    189: vptest xmm0, xmm0
    18e: jne 0x216
    194: mov rax, qword ptr [rsp + 0x28]

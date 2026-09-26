@@ -21,10 +21,7 @@ boyko_demo	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_r
 boyko_demo	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	library/core/src/cmp.rs
 boyko_demo	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	library/core/src/intrinsics/mod.rs
 boyko_demo	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	library/core/src/num/uint_macros.rs
-boyko_demo	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	crates/boyko_ecs/src/ecs/constants.rs
 boyko_demo	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	crates/boyko_ecs/src/ecs/memory/component_pool.rs
-boyko_demo	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	library/core/src/intrinsics/mod.rs
-boyko_demo	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	library/core/src/num/uint_macros.rs
 boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/archetype/archetype.rs
 boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs
 boyko_demo	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs
@@ -159,14 +156,12 @@ clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	registry/fix
 clear	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	registry/fixedbitset-0.5.7/src/lib.rs
 clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	crates/boyko_ecs/src/ecs/constants.rs
 clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	crates/boyko_ecs/src/ecs/memory/component_pool.rs
+clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	crates/boyko_ecs/src/lib.rs
 clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	library/core/src/alloc/layout.rs
 clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	library/core/src/cmp.rs
 clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	library/core/src/intrinsics/mod.rs
 clear	P29-1	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::grow_rows	library/core/src/num/uint_macros.rs
-clear	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	crates/boyko_ecs/src/ecs/constants.rs
 clear	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	crates/boyko_ecs/src/ecs/memory/component_pool.rs
-clear	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	library/core/src/intrinsics/mod.rs
-clear	P29-2	<boyko_ecs::ecs::memory::component_pool::ComponentPool>::commit_subregion	library/core/src/num/uint_macros.rs
 clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/archetype/archetype.rs
 clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs
 clear	P29-3	boyko_ecs::ecs::core::change_detection::check_ticks::run_check_ticks_scan	crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs
@@ -284,12 +279,12 @@ phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	r
 phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	registry/crossbeam-utils-0.8.23/src/backoff.rs
 phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	registry/fixedbitset-0.5.7/src/block/avx2.rs
 phase9_scheduler	H-3	<boyko_ecs::ecs::core::schedule::schedule::Schedule>::run	registry/fixedbitset-0.5.7/src/lib.rs
-phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::apply	library/core/src/error.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::apply	crates/boyko_ecs/src/ecs/core/system/system.rs
 phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::check_change_tick	crates/boyko_ecs/src/ecs/core/change_detection/tick.rs
 phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::check_change_tick	crates/boyko_ecs/src/ecs/core/system/function_system.rs
 phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::check_change_tick	library/core/src/num/uint_macros.rs
-phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::has_deferred	library/std/src/sys/io/error/windows.rs
-phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::has_deferred	library/std/src/sys/stdio/windows.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::has_deferred	crates/boyko_ecs/src/ecs/core/system/function_system.rs
+phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::has_deferred	registry/clap_builder-4.6.7/src/builder/value_parser.rs
 phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize	crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs
 phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize	crates/boyko_ecs/src/ecs/core/system/filtered_access_set.rs
 phase9_scheduler	H-3	<boyko_ecs::ecs::core::system::function_system::FunctionSystem<phase9_scheduler::bench_schedule_two_disjoint::{closure#0}, fn()> as boyko_ecs::ecs::core::system::system::System>::initialize	crates/boyko_ecs/src/ecs/core/system/function_system.rs
@@ -463,7 +458,7 @@ swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delet
 swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/core/entity/inland_store.rs
 swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/identifiers/primitives.rs
 swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/memory/component_pool.rs
-swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_ecs/src/ecs/memory/vm_column.rs
+swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_memory/src/vm_column.rs
 swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	crates/boyko_utils/src/sparse_map/sparse_map.rs
 swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/alloc/src/alloc.rs
 swap_remove	H-2	<boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster>::delete_entity	library/alloc/src/raw_vec/mod.rs
@@ -573,7 +568,7 @@ swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/
 swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/entity/entity_reservoir.rs
 swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/core/entity/inland_store.rs
 swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/memory/component_pool.rs
-swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_ecs/src/ecs/memory/vm_column.rs
+swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_memory/src/vm_column.rs
 swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_utils/src/bit_mask/bit_set.rs
 swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	crates/boyko_utils/src/sparse_map/sparse_map.rs
 swap_remove	H-2	swap_remove::bench_swap_remove::{closure#0}::{closure#0}	library/alloc/src/alloc.rs

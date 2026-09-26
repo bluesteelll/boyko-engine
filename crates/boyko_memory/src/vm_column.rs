@@ -1,8 +1,8 @@
 //! [`VmColumn<T>`] — a typed, address-stable, growable column on ONE
 //! [`VmReservation`] (kernel-memory audit F1 / F3).
 //!
-//! This is the generic sibling of [`InlandStore`](crate::ecs::core::entity::inland_store)
-//! and the per-row backing story of [`ComponentPool`](crate::ecs::memory::component_pool):
+//! This is the generic sibling of `InlandStore` (`boyko_ecs::ecs::core::entity::inland_store`)
+//! and the per-row backing story of `ComponentPool` (`boyko_ecs::ecs::memory::component_pool`):
 //! a single contiguous virtual-address reservation, committed lazily in
 //! geometric frontier slabs, whose base **never moves**. It replaces the two
 //! remaining per-row hot columns still living on a realloc-able `std::Vec`
@@ -42,8 +42,8 @@
 //! `mprotect` would reject the recommit of a LEGAL growth with a release
 //! assert-panic.
 //!
-//! The consumers, every instantiation in the workspace (the type is
-//! `pub(crate)`, so no other crate can add one):
+//! The consumers, every instantiation in the workspace at rung C1 (the type is
+//! public since KC-01 moved it here; `new`'s assert, not visibility, refuses a size outside it):
 //!
 //! | column | `T` | `size_of::<T>()` |
 //! |---|---|---|
@@ -59,6 +59,17 @@
 //! Each of 1, 4, 8 and 16 divides 4 096, and so also divides the 64 KiB
 //! commit page of the non-`x86_64` arm.
 //!
+//! `align_of::<T>()` must not exceed [`RESERVATION_BASE_ALIGN`] (4 096), the
+//! base alignment every arm of the reservation guarantees — also asserted in
+//! [`VmColumn::new`], and the pin every element access's alignment rests on
+//! (base aligned to the floor, the floor a multiple of `align_of::<T>()`, the
+//! stride `size_of::<T>()` a multiple of `align_of::<T>()`). On `x86_64` the
+//! size pin implies it. Off `x86_64` it does not: the 64 KiB commit page
+//! admits a type aligned to 8, 16, 32 or 64 KiB, and neither the unix arm's
+//! page-aligned `mmap` base nor the fallback arm's 4 096-aligned allocation
+//! satisfies one (C1 W1, measured under Miri for `aarch64-unknown-linux-gnu`).
+//! Every consumer above is aligned to 16 or less.
+//!
 //! The divisor is the commit quantum, which the packing plan (D1) lowered
 //! from the 64 KiB granule to the page, so the domain tightened from
 //! "divides 65 536" to "divides 4 096": the only sizes it newly refuses are
@@ -70,7 +81,7 @@
 //! # Zero-fill contract
 //!
 //! Newly committed pages read zero on first access on every arm (the
-//! [`vm`](crate::ecs::memory::vm) module's zero-fill contract). `VmColumn`
+//! [`vm`](crate::vm) module's zero-fill contract). `VmColumn`
 //! never *reads* an element it did not `push`/`set` first (`len` is the bounds
 //! oracle for `as_slice`/`get`), so — unlike `InlandStore`, which reads
 //! never-written slots as `NULL` — it does not depend on the zero-read property
@@ -81,8 +92,9 @@
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-use crate::ecs::constants::{COMMIT_PAGE, POOL_MAX_SLAB, POOL_MIN_SLAB};
-use crate::ecs::memory::vm::VmReservation;
+use crate::constants::{COMMIT_PAGE, POOL_MAX_SLAB, POOL_MIN_SLAB, RESERVATION_BASE_ALIGN};
+use crate::owner::{ColumnOwner, CommitOwner};
+use crate::vm::{VmReservation, commit_at};
 
 /// Typed, address-stable, growable column of `T` on one [`VmReservation`].
 ///
@@ -99,8 +111,13 @@ use crate::ecs::memory::vm::VmReservation;
 /// `swap_remove` / `set` / `truncate` / `clear` / `extend_exact`) requires
 /// `&mut self`, and cross-thread `&self` reads (`as_slice` / `get`) touch only
 /// committed plain-old-data memory below `len` with no interior mutability.
+///
+/// `O` is the commit owner the column's commits are counted under (UG-04):
+/// [`ColumnOwner`] by default; a KC-18 kernel table is `VmColumn<T, TableOwner>`,
+/// built with [`with_owner`](Self::with_owner). It is a type, so the choice
+/// costs no instruction and no byte.
 #[repr(C)]
-pub(crate) struct VmColumn<T: Copy> {
+pub struct VmColumn<T: Copy, O: CommitOwner = ColumnOwner> {
     /// Cached base of the reservation, hot-path twin of `vm`'s base.
     /// **Dangling until the first `grow_to`** — sound because the hot
     /// `as_slice` is `from_raw_parts(base, len)` and `len == 0` until the
@@ -112,11 +129,11 @@ pub(crate) struct VmColumn<T: Copy> {
     /// Live element count — the bounds oracle for `as_slice`/`get`/`set` and
     /// the frontier for `push`/`swap_remove`. Mutated only under `&mut self`.
     len: usize,
-    /// Commit frontier in ELEMENTS (== committed_bytes / size_of::<T>()).
+    /// Commit frontier in ELEMENTS (`== committed_bytes / size_of::<T>()`).
     /// Warm-path comparator in `push`; the `n * size` overflow class is
     /// confined to the cold `grow_to` path's checked math.
     committed_elems: usize,
-    /// Hard element ceiling (== reservation / size_of::<T>(), the value the
+    /// Hard element ceiling (`== reservation / size_of::<T>()`, the value the
     /// constructor was sized for). `push` past it panics loudly — the caller's
     /// row-index type (`u32` `unit_index`) cannot represent a larger column.
     reserve_elems: usize,
@@ -131,17 +148,13 @@ pub(crate) struct VmColumn<T: Copy> {
     /// `VmColumn<EntityId>` type, so `type_name` alone cannot. Cold-only
     /// diagnostic metadata; never read on a warm path.
     label: &'static str,
-    /// Ties the erased byte reservation to `T` for the typed pointer API.
-    _marker: PhantomData<T>,
+    /// Ties the erased byte reservation to `T` for the typed pointer API, and
+    /// names the commit owner `O`. A ZST and the last field of the `#[repr(C)]`
+    /// struct, so the owner moves no displacement and no size.
+    _marker: PhantomData<(T, O)>,
 }
 
 impl<T: Copy> VmColumn<T> {
-    /// Element stride in bytes. A zero-size `T` is rejected at construction
-    /// (`new`'s assert) — the id columns this primitive serves are all 8-byte
-    /// `EntityId`, and the element-count math (`committed_bytes / SIZE`) would
-    /// divide by zero for a ZST.
-    const SIZE: usize = size_of::<T>();
-
     /// Creates a LAZY column reserving room for `reserve_elems` elements
     /// (materialized by the first `push` — construction pays no reservation
     /// syscall, mirroring `InlandStore::new`), commit 0, len 0.
@@ -154,13 +167,26 @@ impl<T: Copy> VmColumn<T> {
     ///
     /// # Panics
     /// * `size_of::<T>() == 0` — a ZST column has no element-count math.
+    /// * `align_of::<T>() > RESERVATION_BASE_ALIGN` — the alignment pin
+    ///   (module doc): no arm guarantees a reservation base aligned above it,
+    ///   so every element write would be misaligned.
     /// * `COMMIT_PAGE % size_of::<T>() != 0` — the supported-domain pin
     ///   (review #4, module doc): a non-dividing size would misalign the
     ///   commit frontier and panic a later LEGAL growth on the unix arm.
     /// * `reserve_elems == 0` — the ceiling must be non-zero.
     /// * `reserve_elems * size_of::<T>()` overflows `usize`.
-    pub(crate) fn new(label: &'static str, reserve_elems: usize) -> Self {
+    pub fn new(label: &'static str, reserve_elems: usize) -> Self {
         assert!(Self::SIZE > 0, "VmColumn[{label}]: element type must not be a ZST");
+        // The alignment pin every element access's SAFETY rests on (C1 W1).
+        // Checked before the size pin, which on `x86_64` already refuses every
+        // type it refuses, so that a refusal names the alignment as its cause.
+        // A per-`T` constant, like the size pin: it folds away.
+        assert!(
+            align_of::<T>() <= RESERVATION_BASE_ALIGN,
+            "VmColumn[{label}]: align_of::<T>() = {} exceeds RESERVATION_BASE_ALIGN ({})",
+            align_of::<T>(),
+            RESERVATION_BASE_ALIGN
+        );
         // Review #4 — the page-divisibility domain pin (see the module doc's
         // "Supported element domain"): keeps `committed_elems * SIZE` exact, so
         // every `commit(old, new)` range stays page-aligned. The condition is
@@ -186,6 +212,37 @@ impl<T: Copy> VmColumn<T> {
             _marker: PhantomData,
         }
     }
+}
+
+impl<T: Copy, O: CommitOwner> VmColumn<T, O> {
+    /// Element stride in bytes. A zero-size `T` is rejected at construction
+    /// (`new`'s assert) — the id columns this primitive serves are all 8-byte
+    /// `EntityId`, and the element-count math (`committed_bytes / SIZE`) would
+    /// divide by zero for a ZST.
+    const SIZE: usize = size_of::<T>();
+
+    /// Creates a lazy column exactly like [`VmColumn::new`], whose commits are
+    /// counted under owner `O` instead of the default [`ColumnOwner`] (UG-04):
+    /// a KC-18 kernel table is `VmColumn::<T, TableOwner>::with_owner(..)`.
+    ///
+    /// # Panics
+    /// As [`VmColumn::new`].
+    pub fn with_owner(label: &'static str, reserve_elems: usize) -> Self {
+        let lazy = VmColumn::<T>::new(label, reserve_elems);
+        // Re-tagging moves plain fields only: a lazy column holds no
+        // reservation yet (`vm` is `None`), and the owner is read at commit
+        // time alone.
+        Self {
+            base: lazy.base,
+            len: lazy.len,
+            committed_elems: lazy.committed_elems,
+            reserve_elems: lazy.reserve_elems,
+            reserve_request: lazy.reserve_request,
+            vm: lazy.vm,
+            label: lazy.label,
+            _marker: PhantomData,
+        }
+    }
 
     /// Appends `value` at the frontier, growing the commit frontier (cold,
     /// rare) when the live range reaches the committed frontier.
@@ -194,16 +251,16 @@ impl<T: Copy> VmColumn<T> {
     /// one indexed `ptr::write`, one increment — no realloc, no copy, the base
     /// never moves.
     #[inline]
-    pub(crate) fn push(&mut self, value: T) {
+    pub fn push(&mut self, value: T) {
         if self.len == self.committed_elems {
             self.grow_to(self.len + 1);
         }
         debug_assert!(self.len < self.committed_elems);
         // SAFETY: `len < committed_elems` (the branch above grew the frontier
         //   when they were equal), so the slot at `len` lies in the committed
-        //   read/write prefix of the reservation and is 8-aligned (`base` is
-        //   granule-aligned on the syscall arms, ≥ 4096-aligned on the
-        //   fallback, and `T`'s align divides that). `T: Copy` ⇒ the slot needs
+        //   read/write prefix of the reservation and is `T`-aligned (`base` is
+        //   `RESERVATION_BASE_ALIGN`-aligned on every arm, and `new` asserted
+        //   `align_of::<T>()` does not exceed it). `T: Copy` ⇒ the slot needs
         //   no prior drop. `&mut self` ⇒ exclusive access. After the write the
         //   slot is owned by the column (len is bumped), so no reader observes
         //   uninitialized bytes at or above `len`.
@@ -235,7 +292,7 @@ impl<T: Copy> VmColumn<T> {
     ///   check — panic, never UB).
     /// * `len + iter.len()` overflows or exceeds the reservation ceiling.
     #[inline]
-    pub(crate) fn extend_exact(&mut self, iter: impl ExactSizeIterator<Item = T>) {
+    pub fn extend_exact(&mut self, iter: impl ExactSizeIterator<Item = T>) {
         let additional = iter.len();
         if additional == 0 {
             return;
@@ -251,8 +308,9 @@ impl<T: Copy> VmColumn<T> {
         // SAFETY: `grow_to(target)` (or the pre-existing frontier) guarantees
         //   `target = len + additional <= committed_elems`, so every slot in
         //   `[len, len + additional)` lies in the committed read/write prefix
-        //   and is aligned. The write index is `len + count` with `count <
-        //   additional` enforced by the RELEASE assert INSIDE the loop — the
+        //   and is `T`-aligned (`new`'s alignment pin). The write index is
+        //   `len + count` with `count < additional` enforced by the RELEASE
+        //   assert INSIDE the loop — the
         //   bound is structural, NOT trusted from `ExactSizeIterator::len()`
         //   (review #1: a lying over-yielding iterator is safe code and panics
         //   here instead of writing past the frontier). `T: Copy` ⇒ no slot
@@ -298,7 +356,7 @@ impl<T: Copy> VmColumn<T> {
     ///   structural-change paths only — one predictable compare, exactly the
     ///   check the former `Vec` paid.
     #[inline]
-    pub(crate) fn swap_remove(&mut self, index: usize) -> T {
+    pub fn swap_remove(&mut self, index: usize) -> T {
         // Review #2 — release bounds check (the panic arm lowers to a cold
         // call; the taken path is one predictable compare).
         assert!(
@@ -310,8 +368,9 @@ impl<T: Copy> VmColumn<T> {
         let last = self.len - 1;
         // SAFETY: `index < len` (release assert above) and `last = len - 1 <
         //   len <= committed_elems` (`len >= 1`, so the sub cannot wrap), so
-        //   both slots lie in the committed read/write prefix, are aligned, and
-        //   were initialized by `push`/`set`/`extend_exact`. `T: Copy` ⇒ `read`
+        //   both slots lie in the committed read/write prefix, are `T`-aligned
+        //   (`new`'s alignment pin), and were initialized by
+        //   `push`/`set`/`extend_exact`. `T: Copy` ⇒ `read`
         //   copies the value out without a move-out drop. The move is BRANCHED
         //   (review #9): when `index != last`, `last`'s value is copied into
         //   `index`, overwriting a `Copy` value (no old-value drop needed);
@@ -331,7 +390,7 @@ impl<T: Copy> VmColumn<T> {
 
     /// The number of live elements.
     #[inline]
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.len
     }
 
@@ -343,7 +402,7 @@ impl<T: Copy> VmColumn<T> {
     /// tests and kept for future world-reset / diagnostic callers.
     #[allow(dead_code)]
     #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
@@ -353,7 +412,7 @@ impl<T: Copy> VmColumn<T> {
     /// `EntityReservoir` claim path reads through it from worker threads
     /// without forming a `&[T]` over a length another thread may later change.
     #[inline]
-    pub(crate) fn as_ptr(&self) -> *const T {
+    pub fn as_ptr(&self) -> *const T {
         self.base.as_ptr()
     }
 
@@ -362,14 +421,14 @@ impl<T: Copy> VmColumn<T> {
     /// through the same `entity_ids_slice()` / `s2e()` accessors and take
     /// `.as_ptr()` off it.
     #[inline]
-    pub(crate) fn as_slice(&self) -> &[T] {
+    pub fn as_slice(&self) -> &[T] {
         // SAFETY: before materialization `base` is `NonNull::dangling()` AND
         //   `len == 0` — `from_raw_parts(dangling, 0)` is explicitly valid.
-        //   After materialization `base` is non-null, `T`-aligned (page-aligned
-        //   on the syscall arms, ≥ 4096-aligned on the fallback, both ⊇
-        //   `align_of::<T>()`), its provenance spans the whole single-object
-        //   reservation, and `len * SIZE ≤ committed_bytes ≤ os_len ≤
-        //   isize::MAX`; every element in `[0, len)` was initialized by
+        //   After materialization `base` is non-null, `T`-aligned (aligned to
+        //   `RESERVATION_BASE_ALIGN` on every arm, and `new` asserted that
+        //   `align_of::<T>()` does not exceed it), its provenance spans the
+        //   whole single-object reservation, and `len * SIZE ≤ committed_bytes
+        //   ≤ os_len ≤ isize::MAX`; every element in `[0, len)` was initialized by
         //   `push`/`set` (nothing is read at or above `len`). No reference
         //   escapes the borrow.
         unsafe { std::slice::from_raw_parts(self.base.as_ptr(), self.len) }
@@ -388,7 +447,7 @@ impl<T: Copy> VmColumn<T> {
     /// same span `as_slice` exposes — and it cannot move the base, because it
     /// neither grows nor commits.
     #[inline]
-    pub(crate) fn as_mut_slice(&mut self) -> &mut [T] {
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
         // SAFETY: identical to `as_slice`'s, with exclusivity strengthened from
         //   "no other reference escapes" to `&mut self`. Before materialization
         //   `base` is `NonNull::dangling()` AND `len == 0` —
@@ -402,11 +461,12 @@ impl<T: Copy> VmColumn<T> {
 
     /// Returns the element at `index`, or `None` if `index >= len`.
     #[inline]
-    pub(crate) fn get(&self, index: usize) -> Option<T> {
+    pub fn get(&self, index: usize) -> Option<T> {
         if index < self.len {
             // SAFETY: `index < len <= committed_elems`, so the slot is in the
-            //   committed prefix, aligned, and was initialized by `push`/`set`.
-            //   `T: Copy` ⇒ the read copies it out without disturbing the slot.
+            //   committed prefix, `T`-aligned (`new`'s alignment pin), and was
+            //   initialized by `push`/`set`. `T: Copy` ⇒ the read copies it out
+            //   without disturbing the slot.
             Some(unsafe { self.base.as_ptr().add(index).read() })
         } else {
             None
@@ -419,7 +479,7 @@ impl<T: Copy> VmColumn<T> {
     /// * `index >= len` — a RELEASE bounds check (review #2), restoring the
     ///   former `Vec` `IndexMut` panic. Structural-change paths only.
     #[inline]
-    pub(crate) fn set(&mut self, index: usize, value: T) {
+    pub fn set(&mut self, index: usize, value: T) {
         // Review #2 — release bounds check (Vec `IndexMut` parity).
         assert!(
             index < self.len,
@@ -428,9 +488,9 @@ impl<T: Copy> VmColumn<T> {
             self.len
         );
         // SAFETY: `index < len <= committed_elems` (release assert above), so
-        //   the slot is in the committed read/write prefix and aligned. `T:
-        //   Copy` ⇒ the old value needs no drop; the write overwrites it in
-        //   place. `&mut self` ⇒ exclusive access.
+        //   the slot is in the committed read/write prefix and `T`-aligned
+        //   (`new`'s alignment pin). `T: Copy` ⇒ the old value needs no drop;
+        //   the write overwrites it in place. `&mut self` ⇒ exclusive access.
         unsafe {
             self.base.as_ptr().add(index).write(value);
         }
@@ -440,7 +500,7 @@ impl<T: Copy> VmColumn<T> {
     /// semantics). Growing is a no-op. `T: Copy` ⇒ the dropped tail needs no
     /// destructor; the committed frontier is kept for reuse.
     #[inline]
-    pub(crate) fn truncate(&mut self, new_len: usize) {
+    pub fn truncate(&mut self, new_len: usize) {
         if new_len < self.len {
             self.len = new_len;
         }
@@ -460,14 +520,14 @@ impl<T: Copy> VmColumn<T> {
     /// in-place-reuse caller; the archetype / dense id columns are dropped
     /// whole instead.
     #[inline]
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.len = 0;
     }
 
     /// Commit frontier in elements (diagnostics — mirror of
     /// `InlandStore::committed_slots` / `ComponentPool::committed_rows`).
     #[inline]
-    pub(crate) fn committed_elems(&self) -> usize {
+    pub fn committed_elems(&self) -> usize {
         self.committed_elems
     }
 
@@ -479,7 +539,7 @@ impl<T: Copy> VmColumn<T> {
     /// # Panics
     /// * `n` exceeds the reservation ceiling (the `grow_to` exhaustion assert).
     #[cold]
-    pub(crate) fn precommit(&mut self, n: usize) {
+    pub fn precommit(&mut self, n: usize) {
         if n > self.committed_elems {
             self.grow_to(n);
         }
@@ -537,7 +597,14 @@ impl<T: Copy> VmColumn<T> {
         let new_bytes = (old_bytes + step).min(vm.os_len());
         debug_assert!(new_bytes >= needed, "VmColumn::grow_to post-condition (proof) violated");
 
-        vm.commit(old_bytes, new_bytes);
+        // SAFETY: `off + len = new_bytes`, which the `min` above caps at
+        // `vm.os_len()`, and `new_bytes > old_bytes`, so `new_bytes - old_bytes`
+        // cannot wrap: every caller grows past the frontier (`n >
+        // committed_elems`), so `needed >= n * SIZE > old_bytes`; the step is at
+        // least `needed - old_bytes`; and `os_len >= needed`, since `os_len` is
+        // the granule-rounded `reserve_elems * SIZE` and `n <= reserve_elems`
+        // (the exhaustion assert above).
+        unsafe { commit_at::<O>(vm, old_bytes, new_bytes - old_bytes) };
         // Exact division (review #4): `SIZE | COMMIT_PAGE | new_bytes`, so no
         // flooring slack exists. The `min(reserve_elems)` clamp guards the case
         // where page or granule padding rounds the byte frontier above the
@@ -564,16 +631,22 @@ fn checked_slab_round(bytes: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ecs::identifiers::primitives::EntityId;
 
-    const SIZE: usize = size_of::<EntityId>(); // 8 on the 64-bit target
+    /// An 8-byte element standing in for `boyko_ecs`'s entity id (`#[repr(transparent)]` over
+    /// `usize`), the element type of the columns these tests model. Not named `EntityId`: UG-15's
+    /// containment map resolves types by name across the census crates.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(transparent)]
+    struct ElemId(usize);
+
+    const SIZE: usize = size_of::<ElemId>(); // 8 on the 64-bit target
     const MIN_ELEMS: usize = POOL_MIN_SLAB / SIZE;
 
-    fn eid(v: usize) -> EntityId {
-        EntityId(v)
+    fn eid(v: usize) -> ElemId {
+        ElemId(v)
     }
 
-    fn col(reserve: usize) -> VmColumn<EntityId> {
+    fn col(reserve: usize) -> VmColumn<ElemId> {
         VmColumn::new("test", reserve)
     }
 
@@ -619,7 +692,7 @@ mod tests {
     #[test]
     fn swap_remove_matches_vec() {
         let mut c = col(1024);
-        let mut model: Vec<EntityId> = Vec::new();
+        let mut model: Vec<ElemId> = Vec::new();
         for i in 0..64 {
             c.push(eid(i));
             model.push(eid(i));
@@ -676,6 +749,7 @@ mod tests {
         let mut c = col(8 * MIN_ELEMS);
         c.push(eid(42));
         let base0 = c.as_ptr();
+        // SAFETY: `add(0)` offsets by zero bytes, which is in bounds for any pointer.
         let addr0 = unsafe { c.as_ptr().add(0) };
 
         // Grow across several slab boundaries.
@@ -684,6 +758,7 @@ mod tests {
         }
         assert!(c.committed_elems() >= 4 * MIN_ELEMS);
         assert_eq!(c.as_ptr(), base0, "base pointer moved across growth");
+        // SAFETY: as above, a zero offset.
         assert_eq!(unsafe { c.as_ptr().add(0) }, addr0, "element 0 address moved");
         assert_eq!(c.get(0), Some(eid(42)), "written value lost across growth");
     }
@@ -751,7 +826,7 @@ mod tests {
     ///
     /// Packing plan S2 re-derivation: the alignment pin read "a multiple of
     /// `COMMIT_GRANULE`", which the first frontier no longer is — it is one
-    /// `COMMIT_PAGE` (`MIN_ELEMS` = 4096 / 8 = 512 `EntityId`s, was 8192).
+    /// `COMMIT_PAGE` (`MIN_ELEMS` = 4096 / 8 = 512 `ElemId`s, was 8192).
     #[test]
     fn grow_policy() {
         let mut c = col(64 * MIN_ELEMS);
@@ -786,6 +861,39 @@ mod tests {
         assert!(msg.contains("test"), "exhaustion panic must name the column label: {msg}");
     }
 
+    /// C1 W1 — the alignment pin: `new` refuses an element type aligned above
+    /// every reservation base, and the refusal names the alignment. On
+    /// `x86_64` the size pin refuses this type too (8 192 does not divide the
+    /// 4 KiB commit page), so before the fix the panic named the size and this
+    /// test failed on its message. Off `x86_64` the size pin admitted it (8 192
+    /// divides the 64 KiB page) and the `push` below wrote to a misaligned
+    /// slot.
+    #[test]
+    #[should_panic(expected = "exceeds RESERVATION_BASE_ALIGN")]
+    fn new_refuses_alignment_above_the_base_floor() {
+        #[derive(Clone, Copy)]
+        #[repr(C, align(8192))]
+        struct Align8k(u8);
+        let mut c = VmColumn::<Align8k>::new("align8k", 1);
+        c.push(Align8k(1));
+        assert_eq!(c.get(0).map(|e| e.0), Some(1));
+    }
+
+    /// Boundary control for the alignment pin: an element aligned exactly to
+    /// the 4 096 B floor is accepted, and its elements land aligned through
+    /// both write paths (`push`, `extend_exact`).
+    #[test]
+    fn new_accepts_alignment_at_the_base_floor() {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[repr(C, align(4096))]
+        struct Align4k(u64);
+        let mut c = VmColumn::<Align4k>::new("align4k", 4);
+        c.push(Align4k(7));
+        c.extend_exact([Align4k(8), Align4k(9)].into_iter());
+        assert_eq!(c.as_slice(), &[Align4k(7), Align4k(8), Align4k(9)]);
+        assert!(c.as_ptr().addr().is_multiple_of(align_of::<Align4k>()), "base misaligned");
+    }
+
     /// A never-materialized column (no push) has a valid empty slice and a
     /// dangling base — `as_slice` must not touch memory.
     #[test]
@@ -793,7 +901,7 @@ mod tests {
         let c = col(16);
         assert_eq!(c.len(), 0);
         assert!(c.is_empty());
-        assert_eq!(c.as_slice(), &[] as &[EntityId]);
+        assert_eq!(c.as_slice(), &[] as &[ElemId]);
         assert_eq!(c.get(0), None);
     }
 

@@ -1,0 +1,19 @@
+[package]
+name = "boyko-memory"
+version = "0.1.0"
+edition = "2024"
+
+# Unified plan KC-01 (rung C1): the memory primitives one layer below the ECS pool -- the per-OS
+# virtual-memory reservation (`vm`), the typed address-stable column on it (`vm_column`), and the
+# commit-granularity constants they step by. `boyko_ecs` depends on this crate and re-exports its
+# old `ecs::memory::{vm, vm_column, utils}` and `ecs::constants` paths. The edge runs that way
+# only: this crate has no first-party dependency, so a crate below the ECS can build on it.
+
+# The unix arm of `VmReservation` (`src/vm.rs`) calls `mmap` / `mprotect` / `munmap` via `libc`.
+# Moved here from `boyko_ecs` with its only user. Not pulled in on Windows/wasm32 (the cfg-gated
+# arms there use `VirtualAlloc` / the global allocator).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true

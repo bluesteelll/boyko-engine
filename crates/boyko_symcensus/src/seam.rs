@@ -69,11 +69,11 @@ pub const MIN_FILES: usize = 250;
 pub struct SeamCensus {
     /// Files and items walked.
     pub stats: Stats,
-    /// Every seam fact across the six crates.
+    /// Every seam fact across the census crates.
     pub facts: SeamFacts,
 }
 
-/// Walks the six census crates for leg (5)'s facts.
+/// Walks the census crates ([`CENSUS_CRATES`]) for leg (5)'s facts.
 pub fn census(root: &Path) -> Result<SeamCensus> {
     let mut out = SeamCensus::default();
     for c in CENSUS_CRATES {

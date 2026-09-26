@@ -6,13 +6,13 @@ boyko_ecs	boyko-diag	normal	lib
 boyko_ecs	boyko-log	dev	lib
 boyko_ecs	boyko-log	normal	lib
 boyko_ecs	boyko-macros	dev	proc-macro
+boyko_ecs	boyko-memory	normal	lib
 boyko_ecs	boyko-threadpool	normal	lib
 boyko_ecs	boyko-utils	normal	lib
 boyko_ecs	criterion	dev	lib
 boyko_ecs	crossbeam-queue	normal	lib
 boyko_ecs	crossbeam-utils	normal	lib
 boyko_ecs	fixedbitset	normal	lib
-boyko_ecs	libc	normal	lib
 boyko_ecs	loom	normal	lib
 boyko_ecs	proptest	dev	lib
 boyko_ecs	rand	dev	lib
@@ -24,6 +24,7 @@ boyko_macros	boyko-symcensus	dev	lib
 boyko_macros	proc-macro2	normal	lib
 boyko_macros	quote	normal	lib
 boyko_macros	syn	normal	lib
+boyko_memory	libc	normal	lib
 boyko_threadpool	boyko-diag	normal	lib
 boyko_threadpool	boyko-log	dev	lib
 boyko_threadpool	boyko-log	normal	lib

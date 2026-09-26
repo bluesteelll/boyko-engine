@@ -554,24 +554,19 @@ impl ComponentPool {
     /// `changed`. Every sub-region offset is `≡ stagger (mod COMMIT_PAGE)` and
     /// `stagger < POOL_STAGGER_SPAN <= COMMIT_PAGE` (const-asserted), so the
     /// floor is a page multiple and the stagger pad is committed with the
-    /// sub-region's first page. `old` / `new` are frontiers measured from that
-    /// floor: page multiples by induction over the ladder (`pool_commit_step`
-    /// of page multiples, capped at a page multiple), `new > old`. The OS is
-    /// therefore told exactly `new - old` bytes — no rounding and no overshoot,
-    /// where the granule ladder's `align_down`/`align_up` pair committed a whole
-    /// extra granule per sub-region whenever the stagger was non-zero.
+    /// sub-region's first page. `old` / `new` are page-multiple frontiers from
+    /// that floor (induction over the ladder), `new > old`: the OS is told
+    /// exactly `new - old` bytes (the granule ladder overshot by a granule).
     ///
     /// The name predates the page floors and is kept: UG-15 leg (2) pins this
-    /// body by exact symbol name (P29-2).
-    ///
-    /// IM-3: grow is Host-only in Phase 4 — the caller funnels through
-    /// `host_vm_mut`, which `unreachable!`s on a Device pool (never minted).
+    /// body by exact symbol name (P29-2). IM-3: grow is Host-only in Phase 4 —
+    /// the caller funnels through `host_vm_mut`, which `unreachable!`s on a
+    /// Device pool (never minted).
     #[cold]
     #[inline(never)]
     fn commit_subregion(&mut self, floor: usize, old: usize, new: usize) {
-        // D2 obligation 5 (strict growth; `VmReservation::commit`'s `new > old`).
+        // D2 obligations 5 (strict growth) and 6 (page alignment of both ends).
         debug_assert!(new > old, "commit_subregion: empty or backwards range");
-        // D2 obligation 6 (page alignment of both ends).
         debug_assert!(
             floor.is_multiple_of(COMMIT_PAGE)
                 && old.is_multiple_of(COMMIT_PAGE)
@@ -579,7 +574,12 @@ impl ComponentPool {
             "commit_subregion: floor {floor} + [{old}, {new}) is not page-aligned \
              (D2 obligation 6)"
         );
-        self.backing.host_vm_mut().commit(floor + old, floor + new);
+        // SAFETY: `commit` needs `floor + old < floor + new <= os_len`. The fn is
+        // private; its five callers pass strictly growing frontiers (GROW1-XI 0b,
+        // the `t_new > ticks_committed` guard, Z4) inside the reservation: data
+        // `new_d <= data_cap <= data_len + COMMIT_PAGE <= os_len`, ticks `floor +
+        // t_new <= changed_floor + tick_cap <= os_len` (D2 obligations 2-4, Z3).
+        unsafe { self.backing.host_vm_mut().commit(floor + old, floor + new) };
     }
 
     /// Phase X.I D4 — the single cold growth funnel: ensures rows `[0, n)`

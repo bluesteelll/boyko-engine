@@ -1,4 +1,4 @@
-//! UG-15 leg (1), the source census (03 §6), over the six census crates of this tree.
+//! UG-15 leg (1), the source census (03 §6), over the census crates of this tree (`CENSUS_CRATES`).
 //!
 //! Pass: the counted findings equal `ug15/allowlist-leg1.toml` exactly (empty at B3; edited only
 //! in an owner-signed commit). The run prints what it read; a walk under the floors is RED, because
