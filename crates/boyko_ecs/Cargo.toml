@@ -8,7 +8,7 @@ boyko-utils =  { path = "../boyko_utils" }
 boyko-threadpool = { path = "../boyko_threadpool" }
 # The logging seam (rung L5). The edge runs THIS WAY and never back: `boyko_log` knows nothing
 # about the ECS -- it writes formatted lines into a `.bss` byte ring and one system here copies
-# them into `LogRing`, whose `VmColumn` backing is `pub(crate)` to this crate and must stay so.
+# them into `LogRing`, whose `VmColumn` fields are private to this crate and must stay so.
 # `boyko-log` depends only on `boyko-diag`, which has an empty `[dependencies]`, so this adds no
 # third-party crate to any graph that reaches the ECS.
 boyko-log = { path = "../boyko_log" }
@@ -35,13 +35,13 @@ static_assertions = "1.1"
 # `cargo bench --features bench-alloc`. See docs/BENCHMARKING.md.
 mimalloc = { version = "0.1", optional = true }
 
-# Phase X.C/X.H — lazy-commit virtual-memory backing store. The Unix arm of
-# `VmReservation` (`memory/vm.rs`) calls `mmap` / `mprotect` / `munmap` via
-# `libc`. Already present in Cargo.lock at 0.2.x (transitively), so this
-# unifies with zero new compilation. Not pulled in on Windows/wasm32 (the
-# cfg-gated arms there use `VirtualAlloc` / the global allocator).
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
+# Rung C1 (unified plan KC-01): the lazy-commit virtual-memory backing store (`VmReservation`,
+# `VmColumn`, the commit-granularity constants) lives in `boyko_memory`, one layer below the pool.
+# This crate re-exports the old `ecs::memory::{vm, vm_column, utils}` and `ecs::constants` paths.
+# `libc` (the unix `mmap` / `mprotect` / `munmap` arm) moved there with its only user, so this
+# crate no longer names it. The edge runs this way only: `boyko_memory` has no first-party
+# dependency.
+boyko-memory = { path = "../boyko_memory" }
 
 # Phase 22.1: loom is pulled in ONLY under `--cfg loom` (mirrors
 # boyko_threadpool's Phase-9.1 setup). `term_list.rs` aliases its atomics to

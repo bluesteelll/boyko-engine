@@ -86,6 +86,7 @@ pub const BASELINE_HEADS: &[(&str, Origin)] = &[
 /// file may add crates, never demote these).
 pub const BASELINE_SCANNED: &[(&str, Mode)] = &[
     ("crates/boyko_ecs", Mode::Full),
+    ("crates/boyko_memory", Mode::Full),
     ("crates/boyko_utils", Mode::Full),
     ("crates/boyko_threadpool", Mode::Full),
     ("crates/boyko_log", Mode::Full),

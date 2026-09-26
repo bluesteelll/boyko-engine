@@ -2,7 +2,7 @@
 //!
 //! **One visitor, three inputs.** [`count_file`] walks a parsed file: every item, including
 //! items nested inside fn bodies and const blocks, impl items, trait items and foreign items.
-//! It is run over the six census crates' `src/**` (the leg), over the expanded output of every
+//! It is run over the census crates' `src/**` (the leg), over the expanded output of every
 //! `boyko_macros` fixture (M-b, from that crate's own tests), and over a build script's generated
 //! sources (`ug15 leg7b`). A second copy of the visitor would be a second definition of
 //! "counted" that can drift from the first.
@@ -752,7 +752,7 @@ pub fn parse_path(path: &Path) -> Result<syn::File> {
     syn::parse_file(&src).map_err(|e| Red::new(RedKind::Malformed, format!("{} does not parse: {e}", path.display())))
 }
 
-/// Leg (1): the census of the six crates under `root` — `src/**` with the one visitor, plus
+/// Leg (1): the census of the census crates under `root` — `src/**` with the one visitor, plus
 /// each crate's `build.rs` string literals.
 ///
 /// RED on a missing crate directory or a crate with zero files: an empty walk has no zero to

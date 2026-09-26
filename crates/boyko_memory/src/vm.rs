@@ -23,9 +23,9 @@
 //! - Unix: anonymous `mmap` pages are zero-fill; `mprotect` does not alter
 //!   contents.
 //! - Fallback (Miri / wasm32 / exotic): the WHOLE reservation is eagerly
-//!   acquired with [`alloc_zeroed`] (NOT `alloc` — the X.G/X.I consumers
-//!   READ never-program-written memory by design, see `InlandStore`'s I-Z
-//!   invariant and the pool's J-XI tick contract).
+//!   acquired with [`std::alloc::alloc_zeroed`] (NOT `alloc` — the X.G/X.I
+//!   consumers READ never-program-written memory by design, see
+//!   `InlandStore`'s I-Z invariant and the pool's J-XI tick contract).
 //!
 //! De-jure status of the syscall arms (plan R2-W1): the Rust abstract machine
 //! does not model raw-syscall memory; the justification is equivalence with
@@ -42,7 +42,8 @@ use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
-use crate::ecs::constants::{COMMIT_GRANULE, COMMIT_PAGE};
+use crate::constants::{COMMIT_GRANULE, COMMIT_PAGE};
+use crate::owner::{self, ColumnOwner, CommitOwner};
 
 /// Cold-path checked `align_up` — twin of `arena.rs::checked_align_up`
 /// (kept private per module until the X.H unification).
@@ -131,7 +132,7 @@ mod win {
 /// `!Send`/`!Sync` via `NonNull` — owners that are shared across threads opt
 /// in with their own `unsafe impl` and their own exclusivity argument
 /// (`EntityMaster`'s SEND5), matching the `Arena` discipline.
-pub(crate) struct VmReservation {
+pub struct VmReservation {
     /// Write-once base of the single reservation; never reassigned, so every
     /// pointer derived from it stays valid for the reservation's lifetime.
     base: NonNull<u8>,
@@ -155,7 +156,8 @@ impl VmReservation {
     /// contract — see the module doc). The historical `reserve_unzeroed`
     /// variant (a fallback-arm `alloc` for write-before-read consumers) was
     /// deleted with its sole client, the shared Arena (Phase X.J).
-    pub(crate) fn reserve(len: usize) -> Self {
+    #[doc(hidden)]
+    pub fn reserve(len: usize) -> Self {
         assert!(len > 0, "VmReservation: reserve length must be non-zero");
         // Packing plan D1 belt: `COMMIT_PAGE` is a compile-time assumption
         // about the OS page size (it must stay `const` for the layout
@@ -199,6 +201,16 @@ impl VmReservation {
             };
             let base = NonNull::new(raw as *mut u8)
                 .expect("VirtualAlloc failed to reserve address space");
+            // A reservation base is aligned to the allocation granularity
+            // (64 KiB on every Windows arch), above the floor `VmColumn`'s
+            // alignment proof rests on: checked here, where that claim is made.
+            debug_assert!(
+                base.as_ptr()
+                    .addr()
+                    .is_multiple_of(crate::constants::RESERVATION_BASE_ALIGN),
+                "VmReservation: VirtualAlloc base {base:p} is below the {} B alignment floor",
+                crate::constants::RESERVATION_BASE_ALIGN
+            );
             Self { base, os_len }
         }
 
@@ -226,12 +238,22 @@ impl VmReservation {
                 "mmap failed to reserve address space"
             );
             let base = NonNull::new(raw as *mut u8).expect("mmap returned null");
+            // `mmap` promises only page alignment, so the floor `VmColumn`'s
+            // alignment proof rests on is a claim about the kernel's page
+            // size: checked here, where that claim is made.
+            debug_assert!(
+                base.as_ptr()
+                    .addr()
+                    .is_multiple_of(crate::constants::RESERVATION_BASE_ALIGN),
+                "VmReservation: mmap base {base:p} is below the {} B alignment floor",
+                crate::constants::RESERVATION_BASE_ALIGN
+            );
             Self { base, os_len }
         }
 
         #[cfg(any(miri, not(any(windows, unix))))]
         {
-            let layout = Layout::from_size_align(os_len, COMMIT_GRANULE.min(4096))
+            let layout = Layout::from_size_align(os_len, crate::constants::RESERVATION_BASE_ALIGN)
                 .expect("VmReservation: invalid fallback layout");
             // SAFETY (V-RES-F, twin of arena F-RES + the X.G zero-fill
             // contract): non-zero size (asserted above), power-of-two align.
@@ -245,91 +267,162 @@ impl VmReservation {
 
     /// Base of the reservation (write-once; stable for the lifetime).
     #[inline]
-    pub(crate) fn base(&self) -> NonNull<u8> {
+    pub fn base(&self) -> NonNull<u8> {
         self.base
     }
 
     /// Granule-rounded reservation length in bytes.
     #[inline]
-    pub(crate) fn os_len(&self) -> usize {
+    pub fn os_len(&self) -> usize {
         self.os_len
     }
 
     /// Commits (makes readable/writable, zero-filled) the byte range
-    /// `[old, new)` of the reservation. Page-aligned (`COMMIT_PAGE`),
-    /// in-bounds, monotonic-frontier use only (debug-asserted). `MEM_COMMIT`
-    /// inside a reservation and `mprotect` are page-granular; only the
-    /// reservation itself is bound by the 64 KiB granularity (packing plan
-    /// D1). Page alignment plus `new <= os_len` is what keeps a frontier commit
-    /// inside the kernel's mapping: `os_len` is granule-rounded and a granule
-    /// is a whole number of pages. No-op on the fallback arm (the whole
-    /// reservation is eagerly RW + zeroed).
+    /// `[old, new)` of the reservation, counted under [`ColumnOwner`]: the
+    /// route of every `ComponentPool`, `InlandStore` and the profiling store. A
+    /// store owned by another owner calls [`commit_at`] directly. Page-aligned
+    /// (`COMMIT_PAGE`) and monotonic-frontier use only (debug-asserted in
+    /// `commit_at`). `MEM_COMMIT` inside a reservation and `mprotect` are
+    /// page-granular; only the reservation itself is bound by the 64 KiB
+    /// granularity (packing plan D1). Page alignment plus `new <= os_len` is
+    /// what keeps a frontier commit inside the kernel's mapping: `os_len` is
+    /// granule-rounded and a granule is a whole number of pages. No-op on the
+    /// fallback arm (the whole reservation is eagerly RW + zeroed).
+    ///
+    /// Never inlined: the Column route stays one out-of-line cold call, so the
+    /// callers' bodies (`ComponentPool::commit_subregion` jumps here) do not
+    /// change with what the commit path counts.
+    ///
+    /// # Safety
+    /// `old < new` and `new <= self.os_len()` (debug-asserted). The syscall
+    /// arms offset the base by `old` and change the protection of `new - old`
+    /// bytes from there, which is sound only inside the reservation.
+    ///
+    /// The fn is `unsafe` since rung C1 made it public in another crate. Inside
+    /// `boyko_ecs` it was a safe `pub(crate)` fn whose range was checked only in
+    /// debug builds, sound because every caller was in the crate. A release
+    /// range check instead would move the pinned callers' codegen (UG-15
+    /// P29-1, P29-2: reading `os_len` here stops LLVM promoting `&self` to its
+    /// `base`), so each caller proves the range at its own site.
+    ///
+    /// # Panics
+    /// The OS refuses the commit (commit charge or overcommit exhausted).
     #[cold]
-    pub(crate) fn commit(&self, old: usize, new: usize) {
-        debug_assert!(new > old, "VmReservation::commit: empty or backwards range");
+    #[inline(never)]
+    #[doc(hidden)]
+    pub unsafe fn commit(&self, old: usize, new: usize) {
         debug_assert!(
-            old.is_multiple_of(COMMIT_PAGE) && new.is_multiple_of(COMMIT_PAGE),
-            "VmReservation::commit: range [{old}, {new}) not page-aligned"
-        );
-        debug_assert!(
-            new <= self.os_len,
-            "VmReservation::commit: range end {new} overruns the reservation ({})",
+            old < new && new <= self.os_len,
+            "VmReservation::commit: range [{old}, {new}) is empty, backwards or overruns the \
+             reservation ({})",
             self.os_len
         );
-
-        #[cfg(all(not(miri), windows))]
-        {
-            // SAFETY (V-CMT-W, twin of arena W-CMT): the range lies inside
-            // our own reservation (`new <= os_len`, asserted), is
-            // `COMMIT_PAGE`-aligned on both ends (asserted; the base is
-            // granule-aligned), and re-committing an already committed page
-            // is documented-idempotent (contents untouched). NULL result =
-            // commit charge exhausted — the loud genuine-OOM surface.
-            let raw = unsafe {
-                win::VirtualAlloc(
-                    self.base.as_ptr().add(old) as *mut core::ffi::c_void,
-                    new - old,
-                    win::MEM_COMMIT,
-                    win::PAGE_READWRITE,
-                )
-            };
-            assert!(
-                !raw.is_null(),
-                "VirtualAlloc(MEM_COMMIT) failed committing [{old}, {new}) \
-                 (commit charge exhausted?)"
-            );
-        }
-
-        #[cfg(all(not(miri), unix, not(windows)))]
-        {
-            // SAFETY (V-CMT-U, twin of arena U-CMT): the range lies inside
-            // our own mapping (`new <= os_len == munmap length`) and both ends
-            // are `COMMIT_PAGE`-aligned (asserted) from a page-aligned base.
-            // The OS page divides `COMMIT_PAGE` — 4 KiB is the x86_64 base
-            // page and every other arch commits by the granule (packing plan
-            // D1; the debug belt in `reserve` checks it at the first
-            // reservation) — so mprotect gets a page-aligned base and length.
-            // ENOMEM here is the overcommit-mode-2 failure surface.
-            let ret = unsafe {
-                libc::mprotect(
-                    self.base.as_ptr().add(old) as *mut core::ffi::c_void,
-                    new - old,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                )
-            };
-            assert!(
-                ret == 0,
-                "mprotect(PROT_READ | PROT_WRITE) failed committing [{old}, {new}) \
-                 (ENOMEM = overcommit limit)"
-            );
-        }
-
-        // Fallback arm: no-op — eagerly RW + zero-filled in `reserve`.
-        #[cfg(any(miri, not(any(windows, unix))))]
-        {
-            let _ = (old, new);
-        }
+        // SAFETY: the caller upholds this fn's `# Safety`, `old < new <= os_len`,
+        // so `new - old` does not wrap and `old + (new - old) = new <= os_len`:
+        // exactly `commit_at`'s contract.
+        unsafe { commit_at::<ColumnOwner>(self, old, new - old) }
     }
+}
+
+/// Commits `[off, off + len)` of `res` and counts the `len` bytes under owner
+/// `O`: the one choke point every kernel commit goes through (unified plan
+/// KC-01; gate UG-04 reads the counter). [`VmReservation::commit`] is the
+/// [`ColumnOwner`] route; a store owned by another owner (a KC-18 table as
+/// `VmColumn<T, TableOwner>`, the scope `ChunkArena`) calls this directly.
+///
+/// `len` should be non-zero and `off`, `off + len` should be `COMMIT_PAGE`
+/// multiples (debug-asserted). Neither is a soundness condition: a misaligned
+/// range is rounded out to whole pages on Windows and refused with a panic on
+/// unix. Idempotent over already committed pages. A no-op on the fallback arm
+/// (the whole reservation is eagerly RW + zeroed), and counted there too, so
+/// Miri reads the same numbers as a native run.
+///
+/// Never inlined: every commit, whatever its route, pays one cold call beside
+/// a syscall, and the counter's add exists in exactly this function.
+///
+/// # Safety
+/// `off + len` must not overflow and must be `<= res.os_len()`. The syscall
+/// arms offset the reservation's base by `off` and change the protection of
+/// `len` bytes from there, which is sound only inside the reservation.
+///
+/// # Panics
+/// The OS refuses the commit (commit charge or overcommit exhausted).
+#[doc(hidden)]
+#[cold]
+#[inline(never)]
+pub unsafe fn commit_at<O: CommitOwner>(res: &VmReservation, off: usize, len: usize) {
+    let (old, new) = (off, off + len);
+    debug_assert!(new > old, "commit_at: empty range");
+    debug_assert!(
+        old.is_multiple_of(COMMIT_PAGE) && new.is_multiple_of(COMMIT_PAGE),
+        "commit_at: range [{old}, {new}) not page-aligned"
+    );
+    debug_assert!(
+        new <= res.os_len,
+        "commit_at: range end {new} overruns the reservation ({})",
+        res.os_len
+    );
+
+    #[cfg(all(not(miri), windows))]
+    {
+        // SAFETY (V-CMT-W, twin of arena W-CMT): the range lies inside
+        // the reservation (`off + len <= os_len`, this fn's `# Safety`
+        // contract), so `base + old` stays inside the reservation object. It
+        // is `COMMIT_PAGE`-aligned on both ends (debug-asserted; the base is
+        // granule-aligned), and a misaligned range would only be rounded out
+        // to whole pages, which the granule-rounded `os_len` keeps inside the
+        // reservation. Re-committing an already committed page is
+        // documented-idempotent (contents untouched). NULL result = commit
+        // charge exhausted — the loud genuine-OOM surface.
+        let raw = unsafe {
+            win::VirtualAlloc(
+                res.base.as_ptr().add(old) as *mut core::ffi::c_void,
+                new - old,
+                win::MEM_COMMIT,
+                win::PAGE_READWRITE,
+            )
+        };
+        assert!(
+            !raw.is_null(),
+            "VirtualAlloc(MEM_COMMIT) failed committing [{old}, {new}) \
+             (commit charge exhausted?)"
+        );
+    }
+
+    #[cfg(all(not(miri), unix, not(windows)))]
+    {
+        // SAFETY (V-CMT-U, twin of arena U-CMT): the range lies inside the
+        // mapping (`off + len <= os_len == munmap length`, this fn's
+        // `# Safety` contract), so `base + old` stays inside it, and both ends
+        // are `COMMIT_PAGE`-aligned (debug-asserted) from a page-aligned base.
+        // The OS page divides `COMMIT_PAGE` — 4 KiB is the x86_64 base page
+        // and every other arch commits by the granule (packing plan D1; the
+        // debug belt in `reserve` checks it at the first reservation) — so
+        // mprotect gets a page-aligned base and length; a misaligned one is
+        // refused with EINVAL and panics at the release assert below, never
+        // touching another mapping. ENOMEM here is the overcommit-mode-2
+        // failure surface.
+        let ret = unsafe {
+            libc::mprotect(
+                res.base.as_ptr().add(old) as *mut core::ffi::c_void,
+                new - old,
+                libc::PROT_READ | libc::PROT_WRITE,
+            )
+        };
+        assert!(
+            ret == 0,
+            "mprotect(PROT_READ | PROT_WRITE) failed committing [{old}, {new}) \
+             (ENOMEM = overcommit limit)"
+        );
+    }
+
+    // Fallback arm: no-op — eagerly RW + zero-filled in `reserve`.
+    #[cfg(any(miri, not(any(windows, unix))))]
+    {
+        let _ = (old, new);
+    }
+
+    owner::record::<O>(len);
 }
 
 impl Drop for VmReservation {
@@ -372,7 +465,7 @@ impl Drop for VmReservation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ecs::constants::COMMIT_GRANULE as G;
+    use crate::constants::COMMIT_GRANULE as G;
 
     /// U-V1 — reserve/commit/drop round trip ×50, including
     /// partially-committed reservations (native syscall exercise; pure
@@ -382,9 +475,11 @@ mod tests {
         for i in 0..50 {
             let vm = VmReservation::reserve(4 * G);
             if i % 2 == 0 {
-                vm.commit(0, G);
+                // SAFETY: `0 < G <= 4 * G = os_len` (`4 * G` is a granule multiple).
+                unsafe { vm.commit(0, G) };
                 if i % 4 == 0 {
-                    vm.commit(G, 3 * G);
+                    // SAFETY: `G < 3 * G <= 4 * G = os_len`.
+                    unsafe { vm.commit(G, 3 * G) };
                 }
             }
             // Drop releases partially-committed reservations in full.
@@ -396,7 +491,8 @@ mod tests {
     #[test]
     fn committed_memory_reads_zero() {
         let vm = VmReservation::reserve(2 * G);
-        vm.commit(0, 2 * G);
+        // SAFETY: `0 < 2 * G = os_len` (`2 * G` is a granule multiple).
+        unsafe { vm.commit(0, 2 * G) };
         // SAFETY: [0, 2G) was just committed RW on every arm; head/tail are
         // in-bounds; u8 reads of zero-fill memory per the module contract.
         unsafe {
@@ -411,12 +507,14 @@ mod tests {
     #[test]
     fn committed_writes_survive_further_commits() {
         let vm = VmReservation::reserve(4 * G);
-        vm.commit(0, G);
+        // SAFETY: `0 < G <= 4 * G = os_len` (`4 * G` is a granule multiple).
+        unsafe { vm.commit(0, G) };
         // SAFETY: [0, G) committed RW; in-bounds write/read.
         unsafe {
             *vm.base().as_ptr().add(100) = 0xAB;
         }
-        vm.commit(G, 4 * G);
+        // SAFETY: `G < 4 * G = os_len`.
+        unsafe { vm.commit(G, 4 * G) };
         // SAFETY: still committed; the X.F idempotent-commit/W-CMT contract
         // says earlier contents are untouched by later frontier commits.
         unsafe {
@@ -444,7 +542,8 @@ mod tests {
     fn small_reserve_round_trip() {
         let vm = VmReservation::reserve(1);
         assert_eq!(vm.os_len(), G, "1-byte request rounds to one granule");
-        vm.commit(0, G);
+        // SAFETY: `0 < G = os_len`, asserted on the line above.
+        unsafe { vm.commit(0, G) };
         // SAFETY: committed above; single in-bounds byte.
         unsafe {
             assert_eq!(*vm.base().as_ptr(), 0);

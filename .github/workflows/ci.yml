@@ -566,7 +566,7 @@ jobs:
       - name: cargo miri test (pure-compute sweep)
         run: |
           cargo +nightly miri test --locked --all-targets \
-            -p boyko-ecs -p boyko-utils -p boyko-threadpool -p boyko-serialize \
+            -p boyko-ecs -p boyko-memory -p boyko-utils -p boyko-threadpool -p boyko-serialize \
             -p boyko-math -p boyko_sdf_math -p boyko_image \
             -p boyko-reflect \
             -p reflect-fixture --features reflect-fixture/reflect

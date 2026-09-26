@@ -215,13 +215,13 @@ impl InlandStore {
         let needed = checked_slab_round(n * SLOT_SIZE); // n*16 can't overflow: n ≤ ceiling ≤ os_len/16
         // Geometric doubling clamped to [MIN, MAX], request-dominant (a
         // single huge request is a single event), never past the reservation.
-        let step = old_bytes
-            .clamp(INLAND_MIN_SLAB, INLAND_MAX_SLAB)
-            .max(needed - old_bytes);
+        let step = old_bytes.clamp(INLAND_MIN_SLAB, INLAND_MAX_SLAB).max(needed - old_bytes);
         let new_bytes = (old_bytes + step).min(vm.os_len());
         debug_assert!(new_bytes >= needed, "grow_to post-condition (proof) violated");
-
-        vm.commit(old_bytes, new_bytes);
+        // SAFETY: `old_bytes < new_bytes <= os_len`: the `min` bounds `new_bytes`, and both
+        // callers pass `n > committed_slots` (`ensure`'s guard, `with_capacity`'s fresh store), so
+        // `old_bytes < n * 16 <= os_len` (the ceiling assert above) and `step >= MIN_SLAB > 0`.
+        unsafe { vm.commit(old_bytes, new_bytes) };
         self.committed_slots = new_bytes / SLOT_SIZE;
     }
 
