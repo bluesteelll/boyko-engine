@@ -289,7 +289,7 @@ impl QueryProbe {
 
 impl BroadphaseTree {
     /// Replays the query pass of the last tree-path step and calls `sink` once per queried row,
-    /// in the step's order (the active tree's leaves, Morton order): the row's walk of the
+    /// in the step's order (the active tree's leaves, in its leaf order): the row's walk of the
     /// active tree with the `partner > row` filter, then of the static tree (then, unreported,
     /// of the sleeper tree). Returns what the pass covered beside the rest of the step's pair
     /// set, so a caller can check [`QueryPassTotals::pairs`] against the step's output.
@@ -355,6 +355,10 @@ impl BroadphaseTree {
     /// `(seg, nrev, nfwd)`. The trees and the records' bits are the step's and the stage reads
     /// nothing else, so the re-run is the step's stage under the other kernel; the selected
     /// kernel and the structural counters are restored.
+    ///
+    /// A re-run does not rebuild: the active tree keeps the leaf order of the kernel the step ran
+    /// under, whatever `kernel` is. So `query_stage(QueryKernel::LeafListKd)` after a Morton-built
+    /// step is the leaf list over Morton leaves, and comparing two leaf orders takes two steps.
     ///
     /// Allocates nothing: a driver that compares two kernels' stages copies what it keeps, as
     /// [`count_query_pass`](Self::count_query_pass) hands its rows to a sink (module docs, "How

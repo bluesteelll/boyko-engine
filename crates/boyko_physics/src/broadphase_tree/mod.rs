@@ -83,8 +83,8 @@
 //! | zone | what |
 //! |---|---|
 //! | `phys_bp_verify` | the locator, the verify pass, maintenance (leaf scan, list pass, compaction, admission) — unconditionally, once per step; the cursor stamp follows the assembly, outside the zones |
-//! | `phys_bp_build` | the active tree over Q |
-//! | `phys_bp_query` | each Q row, in Morton order, against the active tree (`row > query`), the static tree and the sleeper tree, by the selected [`QueryKernel`](crate::broadphase_tree::QueryKernel); then each Wide row's loop. Every row's partners form one segment `[< row \| > row]` in one stream |
+//! | `phys_bp_build` | the active tree over Q, in the selected kernel's leaf order (Morton, or kd under `LeafListKd`) |
+//! | `phys_bp_query` | each Q row, in the active tree's leaf order, against the active tree (`row > query`), the static tree and the sleeper tree, by the selected [`QueryKernel`](crate::broadphase_tree::QueryKernel); then each Wide row's loop. Every row's partners form one segment `[< row \| > row]` in one stream |
 //! | `phys_bp_assemble` | rev counts → bucket starts → a scatter over rows ascending → `resize(P)` → a per-row merge of its forward run, its `SS` run and its bucket (`SL` is not merged: T3) |
 //!
 //! The counters `phys_bp_queried` (`|Q| + |Wide|`), `phys_bp_members` (`|S| + |Z|`) and
@@ -94,13 +94,16 @@
 //!
 //! # Query kernels (C3b)
 //!
-//! Two kernels answer the Q rows, selected by [`BroadphaseTree::set_query_kernel`], and they
-//! write the same bytes: the stream and every Q row's `(seg, nrev, nfwd)`.
+//! Three kernels answer the Q rows, selected by [`BroadphaseTree::set_query_kernel`]. On one tree
+//! the first two write the same bytes: the stream and every Q row's `(seg, nrev, nfwd)`. The
+//! third also chooses the active tree's leaf order, so its segments sit in another order at
+//! other offsets while each segment's bytes — and `ContactPairs`, after the canonical assembly —
+//! are the same.
 //!
 //! * [`QueryKernel::RowWalk`](crate::broadphase_tree::QueryKernel::RowWalk) (C1's kernel): per Q row, one depth-first walk of each tree, the
 //!   active one filtered to `row > query` after the exact test.
 //! * [`QueryKernel::LeafList`](crate::broadphase_tree::QueryKernel::LeafList) (the default; design C3b, F1 — a packet traversal over the eight
-//!   Morton-adjacent rows of a leaf): per active leaf node `L`, one walk of each tree with `L`'s
+//!   adjacent rows of a leaf): per active leaf node `L`, one walk of each tree with `L`'s
 //!   box collects the candidate leaves (`PackedBvh8::collect_leaves`); each row of `L` then
 //!   tests them eight at a time against its own query box — the static ones first, the active
 //!   ones with the max-row cut — and runs the exact test on the kept ones, the active ones with
@@ -113,9 +116,16 @@
 //!   network (`kernel::sort_network`, C3b F2), a longer one as the walk sorts it. A collection
 //!   over `kernel::LEAF_LIST_CAP` candidates on either tree answers that leaf's rows with the
 //!   per-row walk (the fallback).
+//! * [`QueryKernel::LeafListKd`](crate::broadphase_tree::QueryKernel::LeafListKd) (F3,
+//!   `levers/broadphase/06-DESIGN-F3.md`; opt-in): the leaf-list query over an active tree built
+//!   in the kd median-split order (`bvh::kd_sort`) instead of Morton's — the design model's
+//!   `kd_order`, whose leaves are spatially tighter, so a leaf collects fewer candidates. The one
+//!   kernel whose choice reaches the build (`QueryKernel::leaf_order`); the query is
+//!   `LeafList`'s, and the static and sleeper trees stay Morton.
 //!
 //! [`TreeDiag`] counts the active leaf nodes each path answered (`leaf_list_leaves`,
-//! `fallback_leaves`, `row_walk_leaves`), so a receipt names the kernel that ran.
+//! `fallback_leaves`, `row_walk_leaves`) and the active builds in the kd order
+//! (`kd_order_builds`), so a receipt names the kernel that ran.
 //!
 //! # Storage
 //!
@@ -123,8 +133,10 @@
 //! `scratch_ids.rs` (ids 416..406 on this tree, 399..389 at the design; that file's asserts, not
 //! this figure, are the placement's proof). `SL` is the cohort's column too, owned by
 //! [`ContactPairs`] as its `withheld` list (T3). Function-local scratch is the traversal stack,
-//! the radix histogram and the leaf-list query's three candidate lists (`kernel::CandList`,
-//! about 4.4 KB each on the stack, never initialised as a whole). No `Vec`, no pool, no atomics.
+//! the radix histogram, the kd order's stack of pieces (512 B) and the leaf-list query's three
+//! candidate lists (`kernel::CandList`, about 4.4 KB each on the stack, never initialised as a
+//! whole). The kd order permutes the active build's input (`TREE_ITEMS`) in place and keeps each
+//! row's key in its item, so it has no column of its own. No `Vec`, no pool, no atomics.
 //!
 //! The non-default `bp-query-counts` feature (C3b, the query-cost investigation) adds the
 //! `counts` module and, per tree, one probe of relaxed atomics holding the last query's counts.
@@ -153,7 +165,8 @@ use crate::scratch_ids::{
 use crate::systems::body_bounding_radius;
 
 use self::bvh::{
-    Item, LANES, LEAF_R, LEAF_ROW, LEAF_X, LEAF_Y, LEAF_Z, NO_LANE_ROW, Node8, PackedBvh8,
+    Item, LANES, LEAF_R, LEAF_ROW, LEAF_X, LEAF_Y, LEAF_Z, LeafOrder, NO_LANE_ROW, Node8,
+    PackedBvh8,
 };
 use self::kernel::{
     CandList, LEAF_LIST_CAP, NETWORK_SORT_MAX, QueryBox, leaf_mask, leaf_mask_above, sort_network,
@@ -353,6 +366,9 @@ pub struct TreeDiag {
     pub fallback_leaves: u64,
     /// Active leaf nodes the per-row walk answered with [`QueryKernel::RowWalk`] selected.
     pub row_walk_leaves: u64,
+    /// Active builds in the kd median-split leaf order ([`QueryKernel::LeafListKd`], F3): one
+    /// per tree-path step with it selected; `0` under the other kernels and on brute steps.
+    pub kd_order_builds: u64,
 }
 
 /// What the last leaf-list pass did (C3b's G-LL3 counts): compiled only in the crate's test
@@ -386,8 +402,14 @@ pub struct LeafListCounts {
     pub sort_shifts: u64,
 }
 
-/// The kernel that answers the Q rows' queries (module docs, "Query kernels"). Both write the
-/// same stream and records; the choice moves no pair and no pose byte.
+/// The kernel that answers the Q rows' queries (module docs, "Query kernels"). The choice moves
+/// no pair and no pose byte: on one tree the kernels write the same stream and records, and the
+/// kd leaf order of [`LeafListKd`](Self::LeafListKd) moves only the segments' order, which the
+/// assembly does not read.
+///
+/// The parity runner's `--bp-kernel` names them `rowwalk`, `leaflist` and `leaflist-kd`, and a
+/// driver parses those names with a string match and an error arm: a match over this enum
+/// outside the crate must not be exhaustive in a way a new kernel breaks at a merge.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum QueryKernel {
     /// Per Q row, one depth-first walk of each tree (C1's kernel): the reference, and the
@@ -397,6 +419,23 @@ pub enum QueryKernel {
     /// prefilters them eight at a time and runs the exact test on the kept ones (C3b, F1).
     #[default]
     LeafList,
+    /// [`LeafList`](Self::LeafList)'s query over an active tree built in the kd median-split leaf
+    /// order instead of Morton's (F3, `levers/broadphase/06-DESIGN-F3.md`): the one kernel whose
+    /// choice reaches the build. Opt-in until the quiet window's claim (its R1–R3).
+    LeafListKd,
+}
+
+impl QueryKernel {
+    /// The leaf order of the active tree this kernel queries: the kd order for
+    /// [`LeafListKd`](Self::LeafListKd), Morton otherwise. The static and sleeper trees are Morton
+    /// under every kernel.
+    #[inline]
+    pub(crate) const fn leaf_order(self) -> LeafOrder {
+        match self {
+            Self::LeafListKd => LeafOrder::Kd,
+            Self::RowWalk | Self::LeafList => LeafOrder::Morton,
+        }
+    }
 }
 
 /// What a tree-path step's verify reads of L10's sleep-skip (module docs, "The sleeper set"): the
@@ -459,7 +498,8 @@ pub struct BroadphaseTree {
     sort_a: ScratchColumn<u64>,
     /// Radix ping-pong.
     sort_b: ScratchColumn<u64>,
-    /// Q rows in row order; cold: a rebuild's input.
+    /// Q rows in row order, permuted in place by the kd leaf order during the active build; cold:
+    /// a rebuild's input. Every user refills it before its build.
     items: ScratchColumn<Item>,
     /// The two record buffers: `rec[cur]` holds the last step's records at a step's start.
     rec: [ScratchColumn<RowRec>; 2],
@@ -585,8 +625,9 @@ impl BroadphaseTree {
     }
 
     /// Selects the kernel that answers the Q rows (module docs, "Query kernels"). The pair set
-    /// and its order do not depend on it; the G4 bench's `tree_rowwalk` arm uses it for a
-    /// same-binary A/B.
+    /// and its order do not depend on it; the G4 bench's `tree_rowwalk` and `tree_kd` arms use
+    /// it for a same-binary A/B. The next tree-path step builds the active tree in the kernel's
+    /// leaf order.
     #[inline]
     pub fn set_query_kernel(&mut self, kernel: QueryKernel) {
         self.kernel = kernel;
@@ -1064,7 +1105,7 @@ impl BroadphaseTree {
                 items_view.push(Item::new(rec.x, rec.y, rec.z, rec.r, r as u32));
             }
         }
-        statics.build(items_view.as_slice(), sort_a, sort_b);
+        statics.build(items_view.as_mut_slice(), LeafOrder::Morton, sort_a, sort_b);
         for slot in 0..statics.leaves() {
             let row = statics.leaf_row(slot) as usize;
             let pending = recs[row].is_pending();
@@ -1141,7 +1182,7 @@ impl BroadphaseTree {
                 items_view.push(Item::new(rec.x, rec.y, rec.z, rec.r, r as u32));
             }
         }
-        sleepers.build(items_view.as_slice(), sort_a, sort_b);
+        sleepers.build(items_view.as_mut_slice(), LeafOrder::Morton, sort_a, sort_b);
         // `join` keeps the Z pending mark, which the queries below read.
         for slot in 0..sleepers.leaves() {
             let row = sleepers.leaf_row(slot) as usize;
@@ -1190,7 +1231,7 @@ impl BroadphaseTree {
                 items_view.push(Item::new(leaf.x, leaf.y, leaf.z, leaf.r, leaf.row));
             }
         }
-        tree.build(items_view.as_slice(), sort_a, sort_b);
+        tree.build(items_view.as_mut_slice(), LeafOrder::Morton, sort_a, sort_b);
         let mut recs_view = rec[usize::from(*cur)].build_view();
         let recs = recs_view.as_mut_slice();
         for slot in 0..tree.leaves() {
@@ -1289,7 +1330,7 @@ impl BroadphaseTree {
                 }
             }
         }
-        sleepers.build(&[], sort_a, sort_b);
+        sleepers.build(&mut [], LeafOrder::Morton, sort_a, sort_b);
         members[IX_Z] = 0;
         rent[IX_Z] = 0;
         out.withheld_build().clear();
@@ -1331,9 +1372,10 @@ impl BroadphaseTree {
 
     // ── Build and query ──────────────────────────────────────────────────────
 
-    /// Builds the active tree over the Q rows, in row order.
+    /// Builds the active tree over the Q rows, pushed in row order, in the selected kernel's leaf
+    /// order ([`QueryKernel::leaf_order`]).
     fn build_active(&mut self, n: usize) {
-        let Self { active, items, sort_a, sort_b, rec, cur, .. } = self;
+        let Self { active, items, sort_a, sort_b, rec, cur, kernel, diag, .. } = self;
         let recs = rec[usize::from(*cur)].as_read_slice();
         let mut items_view = items.build_view();
         items_view.clear();
@@ -1342,11 +1384,14 @@ impl BroadphaseTree {
                 items_view.push(Item::new(rec.x, rec.y, rec.z, rec.r, r as u32));
             }
         }
-        active.build(items_view.as_slice(), sort_a, sort_b);
+        let order = kernel.leaf_order();
+        diag.kd_order_builds += u64::from(order == LeafOrder::Kd);
+        active.build(items_view.as_mut_slice(), order, sort_a, sort_b);
     }
 
-    /// Queries every Q row (Morton order) with the selected kernel and loops every Wide row
-    /// (row order), appending each row's segment to the stream. Returns `|Q| + |Wide|`.
+    /// Queries every Q row (the active tree's leaf order) with the selected kernel and loops
+    /// every Wide row (row order), appending each row's segment to the stream. Returns
+    /// `|Q| + |Wide|`.
     fn query_all(&mut self, n: usize) -> u64 {
         let cap = self.leaf_list_cap();
         let Self {
@@ -1368,7 +1413,7 @@ impl BroadphaseTree {
         let trees = Trees { active, statics, sleepers };
 
         match *kernel {
-            QueryKernel::LeafList => leaf_list_pass(
+            QueryKernel::LeafList | QueryKernel::LeafListKd => leaf_list_pass(
                 trees,
                 recs,
                 &mut stream,
