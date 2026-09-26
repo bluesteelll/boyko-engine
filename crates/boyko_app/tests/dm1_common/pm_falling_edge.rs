@@ -12,12 +12,23 @@
 //! the archetype's last row, so `D4` takes the same row and the same ring index 4, and the flag
 //! falls.
 //!
-//! **Premises:** the sample at `X`'s position is RED and stable over frames 6..=9 (`X` renders its
-//! own material); the control cube `D0` is never RED.
+//! **Premises:** the sample at `X`'s position is the background, stable over frames 0..=4 (nothing
+//! is drawn there yet), and RED, stable over frames 6..=9 (`X` renders its own material); the
+//! control cube `D0` is never RED, and on every verdict frame it is Neutral and more than
+//! [`DRAWN_MARGIN`] away from that background (the control is drawn).
 //!
-//! **Verdict:** from frame `SWAP_AT + FRAMES_IN_FLIGHT` on, the sample at `X`'s position is NOT
-//! red — `D4` draws material 0. RED on a tree without the F7 upload rule by derivation (RESEARCH
-//! §1.11 D-2), and shown red on the parent before the fix lands.
+//! **Verdict:** from frame `SWAP_AT + FRAMES_IN_FLIGHT` on, `D4` renders material 0: its sample
+//! equals `D0`'s in the SAME frame within [`MATCH_TOL`] per channel (design §7 DM1 test (4):
+//! "every instance must render material 0"). RED on a tree without the F7 upload rule by
+//! derivation (RESEARCH §1.11 D-2), and shown red on the parent before the fix lands.
+//!
+//! **Why a positive verdict, not "not RED".** With DM1 in, a stale id stops reading RED: `X` is the
+//! departed material's last carrier, so its refcount turns the row `Retiring` (freed at `epoch +
+//! RETIRE_DELAY`), and the stager uploads every non-`Loaded` row as zeros — a stale id reads
+//! black. A "not RED" verdict therefore passed a runner that shared one high-water record between
+//! both ring slots (slot 1 kept `X`'s id and drew black on every later slot-1 frame), and caught
+//! the full D-2 revert on one frame only (DM1 triage r1, T1). Equality with the in-frame control
+//! rejects the departed RED row, a zeroed row, an out-of-range id and an undrawn `D4` alike.
 
 use boyko_app::prelude::*;
 use boyko_ecs::ecs::core::entity::entity::Entity;
@@ -38,6 +49,16 @@ pub const SWAP_AT: u64 = 10;
 pub const FRAMES: u32 = 16;
 /// The frames the verdict reads: `SWAP_AT + FRAMES_IN_FLIGHT (2)` onward.
 pub const VERDICT: core::ops::RangeInclusive<u32> = 12..=(FRAMES - 1);
+/// The per-channel tolerance within which `D4`'s sample must equal `D0`'s in the same frame. Both
+/// read `[165, 165, 166]` on VB and Forward (difference 0); every failure class sits more than 100
+/// away on some channel — the departed RED row `[244, 53, 48]`, a zeroed row `[0, 0, 0]`, the
+/// undrawn background `[46, 46, 50]`.
+pub const MATCH_TOL: u8 = 8;
+/// The least per-channel distance between `D0` and the background at `X`'s position (the
+/// [`Hue::of`] channel margin): without it, "`D4` equals `D0`" could be met by a `D4` that is not
+/// drawn at all.
+pub const DRAWN_MARGIN: u8 = 40;
+const _: () = assert!(DRAWN_MARGIN > MATCH_TOL, "an undrawn D4 must fail the D0 comparison");
 
 const DEFAULTS: [(f32, f32); 4] = [(-2.0, 1.3), (0.0, 1.3), (2.0, 1.3), (-2.0, -1.3)];
 const X_POS: (f32, f32) = (1.2, -1.3);
@@ -100,6 +121,7 @@ pub fn run(test: &str, path: RenderPath) {
     eprintln!("DM1(4) {path:?} X/D4 sample at {x_px:?}:{}", cap.trace(x_px, 0..=FRAMES - 1));
     eprintln!("DM1(4) {path:?} D0 control at {d0_px:?}:{}", cap.trace(d0_px, 0..=FRAMES - 1));
 
+    let background = cap.assert_stable("background at X", x_px, 0..=4);
     let before = cap.assert_stable("X", x_px, 6..=9);
     assert_eq!(
         Hue::of(before),
@@ -110,22 +132,59 @@ pub fn run(test: &str, path: RenderPath) {
         let v = cap.frame(k).image.rgb(d0_px);
         assert_ne!(Hue::of(v), Hue::Red, "PREMISE: the default control cube D0 is RED at frame {k} ({v:?})");
     }
+    for k in VERDICT {
+        let d0 = cap.frame(k).image.rgb(d0_px);
+        assert_eq!(
+            Hue::of(d0),
+            Hue::Neutral,
+            "PREMISE: the default control cube D0 renders {d0:?} at frame {k}, not a neutral material-0 surface"
+        );
+        assert!(
+            channel_distance(d0, background) > DRAWN_MARGIN,
+            "PREMISE: D0 renders {d0:?} at frame {k}, within {DRAWN_MARGIN} of the background \
+             {background:?} — an undrawn control cannot tell a drawn D4 from none"
+        );
+    }
 
     let mut failures = Vec::new();
     for k in VERDICT {
-        let v = cap.frame(k).image.rgb(x_px);
-        if Hue::of(v) == Hue::Red {
+        let f = cap.frame(k);
+        let d4 = f.image.rgb(x_px);
+        let d0 = f.image.rgb(d0_px);
+        if channel_distance(d4, d0) > MATCH_TOL {
             failures.push(format!(
-                "frame {k} slot {}: D4 (material 0) renders {v:?} — X's RED material, read through \
-                 a stale PerInstanceMaterial id",
-                cap.frame(k).slot
+                "frame {k} slot {}: D4 renders {d4:?} ({:?}), the D0 control {d0:?} — {}",
+                f.slot,
+                Hue::of(d4),
+                diagnose(d4, background)
             ));
         }
     }
     assert!(
         failures.is_empty(),
-        "DM1 test (4) / D-2 on {path:?}: after the last non-default instance left at frame \
-         {SWAP_AT}, the renumbered default instance still draws the departed material:\n{}",
+        "DM1 test (4) / D-2 on {path:?}: after the last non-default instance left at frame {SWAP_AT}, \
+         the renumbered default instance D4 does not render material 0 (the D0 control's colour \
+         within {MATCH_TOL} per channel):\n{}",
         failures.join("\n")
     );
+}
+
+/// The largest per-channel difference between two texels.
+fn channel_distance(a: [u8; 3], b: [u8; 3]) -> u8 {
+    a.iter().zip(b).map(|(x, y)| x.abs_diff(y)).max().expect("invariant: three channels")
+}
+
+/// Names the failing class of a `D4` sample for the verdict message — a diagnostic only; the
+/// verdict is the D0 comparison.
+fn diagnose(d4: [u8; 3], background: [u8; 3]) -> &'static str {
+    if Hue::of(d4) == Hue::Red {
+        "X's departed RED material, read through a stale PerInstanceMaterial id"
+    } else if channel_distance(d4, background) <= MATCH_TOL {
+        "the background: D4 is not drawn"
+    } else if Hue::of(d4) == Hue::Dark {
+        "a zeroed material row: a stale id into the departed material's retired row, or an id past \
+         the table"
+    } else {
+        "not material 0"
+    }
 }
