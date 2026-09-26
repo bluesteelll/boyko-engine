@@ -185,8 +185,16 @@ fn spawn_box(world: &mut EcsMaster, position: Vec3, dynamic: bool) {
 
 /// The J snapshot: Jolt's pyramid on the real colored schedule with the Tree forced, sleeping
 /// off, one worker, after [`J_SNAPSHOT_STEPS`] steps — the bodies the broadphase read on the
-/// last of them.
+/// last of them. Contact reuse is left at its default, on since L9 C4.
 pub(crate) fn j_snapshot() -> Vec<BodyState> {
+    j_snapshot_with_reuse(None)
+}
+
+/// [`j_snapshot`] with [`PhysicsConfig::contact_reuse`] set to `contact_reuse` when it is `Some`
+/// (`None` keeps the default). Contact reuse changes the trajectory of the
+/// [`J_SNAPSHOT_STEPS`] steps, so the snapshot's bodies depend on it: `Some(false)` gives the
+/// bodies of the exact narrowphase, which was the default before L9 C4.
+pub(crate) fn j_snapshot_with_reuse(contact_reuse: Option<bool>) -> Vec<BodyState> {
     let mut world = EcsMaster::new();
     spawn_box(&mut world, Vec3::new(0.0, -1.0, 0.0), false);
     let mut boxes = 0usize;
@@ -218,6 +226,9 @@ pub(crate) fn j_snapshot() -> Vec<BodyState> {
         cfg.sleeping = false;
         cfg.broadphase_select = BroadphaseSelectMode::Manual;
         cfg.broadphase = BroadphaseKind::Tree;
+        if let Some(contact_reuse) = contact_reuse {
+            cfg.contact_reuse = contact_reuse;
+        }
     }
     world.resource_mut::<BroadphaseTree>().set_brute_max_rows(0);
     for _ in 0..J_SNAPSHOT_STEPS {
