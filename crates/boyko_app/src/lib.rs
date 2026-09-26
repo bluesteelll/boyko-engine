@@ -119,6 +119,10 @@ mod window_info;
 /// the pure per-slot [`light_upload_due`](light_gate::light_upload_due) gate
 /// the runner drives its staging-ring rewrites with.
 pub mod light_gate;
+/// Dynamic-materials DM1: the host half of the material upload protocol — the pure
+/// [`pm_ring_action`](material_gate::pm_ring_action) rule the runner keeps the
+/// `PerInstanceMaterial` ring clean with (live defect D-2).
+pub mod material_gate;
 /// Particles P0: the host half of the effect-table generation protocol — the pure per-slot
 /// [`particle_effects_upload_due`](particle_gate::particle_effects_upload_due) gate the runner
 /// drives its effect-staging rewrites with, `light_gate`'s twin.

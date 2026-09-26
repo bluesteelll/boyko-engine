@@ -2399,6 +2399,8 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // on-change re-upload this run, so the recorder records NO copy/barrier (the
         // command stream is byte-identical to before L0-r0).
         light_dirty: false,
+        // DM1: this harness host-seeds its own material table; it never uploads one per frame.
+        material_upload: None,
         // Lighting L1 is OFF for the on-screen demo (no cluster cull wired): the cull
         // pipeline + cluster SSBOs are absent, so the recorder skips the cull pass entirely
         // and the resolve loops the flat table — the L1 OFF / 0%-gate. Its `use_clusters` is
@@ -3523,6 +3525,8 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         light_staging: &light_staging,
         light_upload_bytes: light_table_bytes,
         light_dirty: false,
+        // DM1: this harness host-seeds its own material table; it never uploads one per frame.
+        material_upload: None,
         cluster_cull: None,
         cull_layout: None,
         cluster_grid: None,
@@ -8580,6 +8584,8 @@ fn run_showcase_body_ddgi(
         light_staging: &light_staging,
         light_upload_bytes: light_table_bytes,
         light_dirty: false,
+        // DM1: this harness host-seeds its own material table; it never uploads one per frame.
+        material_upload: None,
         cluster_cull: None,
         cull_layout: None,
         cluster_grid: None,
@@ -9855,6 +9861,8 @@ fn run_showcase_body(
         light_staging: &light_staging,
         light_upload_bytes: light_table_bytes,
         light_dirty: false,
+        // DM1: this harness host-seeds its own material table; it never uploads one per frame.
+        material_upload: None,
         // L1 cluster cull OFF (NON-CLUSTERED): a deliberate harness choice, not a cull-drop
         // workaround — this showcase runs the multi-light SDF-shadow path on the flat-table
         // (non-clustered) resolve — exactly `p6_r1_multi_light_sdf_shadows_match_oracle`'s path.

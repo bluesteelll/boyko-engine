@@ -108,6 +108,9 @@ const STATE_FAILED: u32 = 3;
 /// discriminator between the two.
 const STATE_RETIRING: u32 = 4;
 
+/// Rows per word of [`Assets`]'s edited set (`u64` words).
+const EDITED_WORD_BITS: usize = 64;
+
 /// Sentinel generation (asset-streaming plan F5): marks a `boyko_scene`
 /// `MeshRefGen`/`MaterialRefGen` lane as "bound this frame, not yet
 /// gen-stamped by `apply_refcount_deltas`", and is the value
@@ -197,6 +200,14 @@ pub struct RetireTicket {
 ///   re-install AND a bare retire-to-Vacant, which neither
 ///   [`high_water`](Self::high_water) nor [`dirty_gen`](Self::dirty_gen)
 ///   captures.
+/// - [`edited_words`](Self::edited_words) / [`edited_count`](Self::edited_count)
+///   — the EDITED set (dynamic-materials DM1, design F2): one bit per row meaning
+///   "a GPU image of this row may differ from the CPU authority". Set by
+///   [`Self::get_mut`], [`Self::add`], [`Self::fill`], [`Self::remove`] and
+///   [`Self::retire`]; drained in ascending row order by [`Self::drain_edited`].
+///   Distinct from `dirty`, which means *freed or retired* (streaming lifetime).
+///   A `VmColumn` word array plus a count rather than a `LiveBitmap`: the count
+///   makes [`Self::edited_any`] O(1), so an idle frame never scans the words.
 pub struct Assets<T: AssetBacking> {
     col: ComponentPool,
     slot_word: VmColumn<u32>,
@@ -205,6 +216,12 @@ pub struct Assets<T: AssetBacking> {
     free: Vec<u32>,
     pinned: LiveBitmap,
     dirty: LiveBitmap,
+    // Invariant: `edited_words.len() == high_water().div_ceil(64)` — the fresh-row
+    // paths of `add`/`reserve` append a word when a row starts one, so marking a
+    // row never grows the column.
+    edited_words: VmColumn<u64>,
+    // Invariant: the number of set bits in `edited_words`.
+    edited_count: u32,
     live_count: usize,
     dirty_gen: u64,
     free_epoch: u64,
@@ -239,6 +256,8 @@ impl<T: AssetBacking> Assets<T> {
             free: Vec::new(),
             pinned: LiveBitmap::with_capacity(cap),
             dirty: LiveBitmap::with_capacity(cap),
+            edited_words: VmColumn::new("Assets.edited_words", reserve_rows.div_ceil(EDITED_WORD_BITS)),
+            edited_count: 0,
             live_count: 0,
             dirty_gen: 0,
             free_epoch: 0,
@@ -318,6 +337,7 @@ impl<T: AssetBacking> Assets<T> {
             unsafe { self.write_value_at(idx, value) };
             self.slot_word.set(idx, pack_slot_word(generation, STATE_LOADED));
             self.refcount.set(idx, 0);
+            self.mark_edited(idx);
             self.live.set(idx);
             self.live_count += 1;
             self.install_epoch = self.install_epoch.wrapping_add(1);
@@ -336,6 +356,8 @@ impl<T: AssetBacking> Assets<T> {
         );
         self.slot_word.push(pack_slot_word(0, STATE_LOADED));
         self.refcount.push(0);
+        self.cover_edited_word(idx);
+        self.mark_edited(idx);
         self.live.set(idx);
         self.install_epoch = self.install_epoch.wrapping_add(1);
         self.live_count += 1;
@@ -391,6 +413,7 @@ impl<T: AssetBacking> Assets<T> {
         );
         self.slot_word.push(pack_slot_word(0, STATE_LOADING));
         self.refcount.push(0);
+        self.cover_edited_word(idx);
         Handle::new(idx as u32, 0)
     }
 
@@ -466,6 +489,7 @@ impl<T: AssetBacking> Assets<T> {
         self.live_count += 1;
         self.dirty_gen += 1;
         self.install_epoch = self.install_epoch.wrapping_add(1);
+        self.mark_edited(idx);
         Ok(())
     }
 
@@ -495,11 +519,13 @@ impl<T: AssetBacking> Assets<T> {
     }
 
     /// Mutable variant of [`Self::get`]. Bumps [`dirty_gen`](Self::dirty_gen)
-    /// on every call that resolves to a live row.
+    /// and marks the row edited ([`Self::drain_edited`]) on every call that
+    /// resolves to a live row.
     #[inline]
     pub fn get_mut(&mut self, handle: Handle<T>) -> Option<&mut T> {
         let idx = self.resolve_occupied(handle)?;
         self.dirty_gen += 1;
+        self.mark_edited(idx);
         let ptr = self
             .col
             .get_raw_mut(idx)
@@ -573,6 +599,7 @@ impl<T: AssetBacking> Assets<T> {
         self.free.push(idx as u32);
         self.free_epoch = self.free_epoch.wrapping_add(1);
         self.dirty.set(idx);
+        self.mark_edited(idx);
         value
     }
 
@@ -696,6 +723,97 @@ impl<T: AssetBacking> Assets<T> {
     #[inline]
     pub fn dirty_gen(&self) -> u64 {
         self.dirty_gen
+    }
+
+    /// Keeps [`Self::edited_words`] covering every minted row: a FRESH row that starts a
+    /// new 64-row word appends a zero word. Called only on the fresh-row paths of
+    /// [`Self::add`]/[`Self::reserve`] (fresh rows are minted one at a time, in order), so
+    /// [`Self::mark_edited`] never grows the column.
+    #[inline]
+    fn cover_edited_word(&mut self, idx: usize) {
+        if idx.is_multiple_of(EDITED_WORD_BITS) {
+            self.edited_words.push(0);
+        }
+        debug_assert_eq!(
+            self.edited_words.len(),
+            (idx + 1).div_ceil(EDITED_WORD_BITS),
+            "invariant: edited_words covers exactly the minted rows"
+        );
+    }
+
+    /// Marks row `idx` edited, counting it once however often it is marked.
+    #[inline]
+    fn mark_edited(&mut self, idx: usize) {
+        let word = &mut self.edited_words.as_mut_slice()[idx / EDITED_WORD_BITS];
+        let bit = 1u64 << (idx % EDITED_WORD_BITS);
+        self.edited_count += u32::from(*word & bit == 0);
+        *word |= bit;
+    }
+
+    /// `true` iff at least one row is marked edited. O(1): the count, never the words —
+    /// the idle-frame test a GPU mirror (the material stager) gates all its work on.
+    #[inline]
+    pub fn edited_any(&self) -> bool {
+        self.edited_count != 0
+    }
+
+    /// The number of rows currently marked edited. O(1).
+    #[inline]
+    pub fn edited_count(&self) -> usize {
+        self.edited_count as usize
+    }
+
+    /// Drains the edited set: calls `f(row, value)` once per marked row, in ASCENDING row
+    /// order, and clears every mark. `value` is `Some(&T)` iff the row is `Loaded` (the
+    /// predicate [`Self::iter`] uses), else `None` — a freed (`Vacant`), `Loading`, `Failed`
+    /// or `Retiring` row, whose GPU image a mirror writes as zeros.
+    ///
+    /// What marks a row: [`Self::get_mut`], [`Self::add`] (fresh and reused rows),
+    /// [`Self::fill`], [`Self::remove`] and [`Self::retire`] (the two transitions to
+    /// `Vacant`). NOT [`Self::fail`] (no value, the row was never staged), NOT
+    /// [`Self::reserve`], and NOT [`Self::dec_ref`]'s `Retiring` transition — the row still
+    /// holds its `T`, and it is marked again by the `retire` that frees it.
+    ///
+    /// Marks persist until drained, however many frames pass. O(1) when nothing is marked;
+    /// otherwise it visits words only up to the last marked row.
+    pub fn drain_edited(&mut self, mut f: impl FnMut(u32, Option<&T>)) {
+        if self.edited_count == 0 {
+            return;
+        }
+        for (w, word) in self.edited_words.as_mut_slice().iter_mut().enumerate() {
+            if self.edited_count == 0 {
+                break;
+            }
+            let mut bits = core::mem::take(word);
+            // Per word, so a panicking `f` leaves the count equal to the bits still set.
+            self.edited_count -= bits.count_ones();
+            while bits != 0 {
+                let idx = w * EDITED_WORD_BITS + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let state = self
+                    .slot_word
+                    .get(idx)
+                    .map(unpack_state)
+                    .expect("invariant: every marked row is a minted row (idx < slot_word.len())");
+                let value = if state == STATE_LOADED {
+                    let ptr = self
+                        .col
+                        .get_raw(idx)
+                        .expect("invariant: a Loaded slot's row must be < col.count()");
+                    // SAFETY: `idx`'s packed state is Loaded (checked above), so the data
+                    // column's row holds a valid, initialized `T` written by
+                    // `push_value`/`write_value_at` (the same argument as `iter()`). The
+                    // reference lives only for this call of `f`; this method's `&mut self`
+                    // mutates `edited_words` and `edited_count` alone, never `col`, so nothing
+                    // writes or drops the row while `f` holds it.
+                    Some(unsafe { &*ptr.cast::<T>() })
+                } else {
+                    None
+                };
+                f(idx as u32, value);
+            }
+        }
+        debug_assert_eq!(self.edited_count, 0, "invariant: the drain visited every marked row");
     }
 
     /// Iterates every live (`Loaded`) `(Handle<T>, &T)` pair, skipping
@@ -1042,6 +1160,7 @@ impl<T: AssetBacking> Assets<T> {
         // bump the epoch.
         self.install_epoch = self.install_epoch.wrapping_add(1);
         self.dirty.set(idx);
+        self.mark_edited(idx);
         value
     }
 }
@@ -2628,6 +2747,338 @@ mod tests {
                     "the correctly gen'd dec_ref must still retire the row, proving the \
                      stale call never touched the refcount"
                 );
+            }
+        }
+    }
+
+    /// Dynamic-materials DM1 (design F2): the edited set — which transitions mark a row,
+    /// which do not, and the ascending, clearing drain a GPU mirror stages from.
+    mod edited_set {
+        use std::collections::BTreeSet;
+
+        use proptest::prelude::*;
+
+        use super::*;
+
+        /// Drains `assets`' edited set into `(row, value)` pairs, in drain order.
+        fn drain(assets: &mut Assets<u64>) -> Vec<(u32, Option<u64>)> {
+            let mut out = Vec::new();
+            assets.drain_edited(|row, value| out.push((row, value.copied())));
+            out
+        }
+
+        #[test]
+        fn get_mut_marks_the_row_once_however_often_it_is_called() {
+            let mut assets = Assets::<u64>::with_reserved(4);
+            assets.add(1);
+            let b = assets.add(2);
+            drain(&mut assets);
+            assert!(!assets.edited_any(), "PREMISE: the mint marks were drained");
+            *assets.get_mut(b).expect("invariant: b is live") = 20;
+            *assets.get_mut(b).expect("invariant: b is live") = 21;
+            assert!(assets.edited_any());
+            assert_eq!(assets.edited_count(), 1, "two get_mut calls on one row count once");
+            assert_eq!(drain(&mut assets), vec![(1, Some(21))], "the drain yields the row's current value");
+            assert!(!assets.edited_any());
+            assert_eq!(assets.edited_count(), 0);
+        }
+
+        #[test]
+        fn add_marks_fresh_and_reused_rows_and_remove_marks_the_freed_row() {
+            let mut assets = Assets::<u64>::with_reserved(4);
+            let a = assets.add(10);
+            assert_eq!(drain(&mut assets), vec![(0, Some(10))], "a fresh row is marked");
+            assert_eq!(assets.remove(a), Some(10));
+            assert_eq!(drain(&mut assets), vec![(0, None)], "a removed row is marked, and drains as freed");
+            let reused = assets.add(11);
+            assert_eq!(reused.index(), 0, "PREMISE: the freed row is reused");
+            assert_eq!(drain(&mut assets), vec![(0, Some(11))], "a reused row is marked");
+        }
+
+        #[test]
+        fn fill_marks_the_row_and_reserve_and_fail_do_not() {
+            let mut assets = Assets::<u64>::with_reserved(4);
+            let filled = assets.reserve();
+            let failed = assets.reserve();
+            assert!(!assets.edited_any(), "reserve does not mark: the row has no value");
+            assets.fail(failed);
+            assert!(!assets.edited_any(), "fail does not mark: the row never had a value");
+            assets.fill(filled, 7).expect("invariant: a reserved row fills");
+            assert_eq!(drain(&mut assets), vec![(0, Some(7))]);
+        }
+
+        #[test]
+        fn retire_marks_the_row_and_the_retiring_transition_does_not() {
+            let mut assets = Assets::<u64>::with_reserved(4);
+            let h = assets.add(5);
+            drain(&mut assets);
+            assert!(assets.inc_ref(h.index()));
+            let ticket = assets.dec_ref(h.index(), GEN_UNSYNCED);
+            assert!(ticket.is_some(), "PREMISE: the refcount reached zero, so the row is Retiring");
+            assert!(
+                !assets.edited_any(),
+                "dec_ref's Retiring transition does not mark: the row still holds its T"
+            );
+            assert_eq!(assets.retire(h.index()), Some(5));
+            assert_eq!(drain(&mut assets), vec![(0, None)], "retire marks the row, and it drains as freed");
+        }
+
+        /// A row edited and then taken to `Retiring` before the drain drains as `None` — the
+        /// drain's `Some` predicate is `Loaded`, the one `iter()` (and so a full-image seed)
+        /// uses.
+        #[test]
+        fn an_edited_row_that_went_retiring_drains_as_none() {
+            let mut assets = Assets::<u64>::with_reserved(4);
+            let h = assets.add(5);
+            assert!(assets.inc_ref(h.index()));
+            assert!(assets.dec_ref(h.index(), GEN_UNSYNCED).is_some(), "PREMISE: the row is Retiring");
+            assert_eq!(drain(&mut assets), vec![(0, None)]);
+        }
+
+        #[test]
+        fn the_drain_is_ascending_across_words_and_clears_every_mark() {
+            let mut assets = Assets::<u64>::with_reserved(200);
+            let handles: Vec<Handle<u64>> = (0..200u64).map(|v| assets.add(v)).collect();
+            assert_eq!(assets.edited_count(), 200, "every mint is marked");
+            drain(&mut assets);
+            for &row in &[130usize, 2, 64, 63, 199, 0] {
+                *assets.get_mut(handles[row]).expect("invariant: live") += 1000;
+            }
+            assert_eq!(assets.edited_count(), 6);
+            assert_eq!(
+                drain(&mut assets),
+                vec![(0, Some(1000)), (2, Some(1002)), (63, Some(1063)), (64, Some(1064)), (130, Some(1130)), (199, Some(1199))]
+            );
+            assert!(drain(&mut assets).is_empty(), "the drain cleared every mark");
+            assert!(!assets.edited_any());
+        }
+
+        /// Marks accumulate across any number of "frames" without a drain, and one drain
+        /// yields each marked row exactly once.
+        #[test]
+        fn marks_persist_until_drained() {
+            let mut assets = Assets::<u64>::with_reserved(8);
+            let handles: Vec<Handle<u64>> = (0..8u64).map(|v| assets.add(v)).collect();
+            drain(&mut assets);
+            for frame in 0..5u64 {
+                *assets.get_mut(handles[3]).expect("invariant: live") = frame;
+                *assets.get_mut(handles[(frame % 2) as usize]).expect("invariant: live") = frame;
+            }
+            assert_eq!(drain(&mut assets), vec![(0, Some(4)), (1, Some(3)), (3, Some(4))]);
+        }
+
+        #[test]
+        fn an_idle_table_drains_nothing() {
+            let mut assets = Assets::<u64>::with_reserved(4);
+            assert!(!assets.edited_any());
+            assert!(drain(&mut assets).is_empty());
+            assert!(!assets.edited_any());
+        }
+
+        /// The model's view of one row.
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Row {
+            Loading,
+            Loaded(u64),
+            Failed,
+            /// `Some` when the row held a value as it went `Retiring`.
+            Retiring(Option<u64>),
+            Vacant,
+        }
+
+        #[derive(Clone, Debug)]
+        enum EdOp {
+            Add(u64),
+            Reserve,
+            FillAt(usize, u64),
+            FailAt(usize),
+            RemoveAt(usize),
+            GetMutAt(usize, u64),
+            IncRefAt(usize),
+            DecRefAt(usize),
+            RetireAt(usize),
+            Drain,
+        }
+
+        fn ed_op_strategy() -> impl Strategy<Value = EdOp> {
+            prop_oneof![
+                any::<u64>().prop_map(EdOp::Add),
+                Just(EdOp::Reserve),
+                (any::<usize>(), any::<u64>()).prop_map(|(i, v)| EdOp::FillAt(i, v)),
+                any::<usize>().prop_map(EdOp::FailAt),
+                any::<usize>().prop_map(EdOp::RemoveAt),
+                (any::<usize>(), any::<u64>()).prop_map(|(i, v)| EdOp::GetMutAt(i, v)),
+                any::<usize>().prop_map(EdOp::IncRefAt),
+                any::<usize>().prop_map(EdOp::DecRefAt),
+                any::<usize>().prop_map(EdOp::RetireAt),
+                Just(EdOp::Drain),
+            ]
+        }
+
+        proptest! {
+            // Under Miri, two cases of at most 48 ops (the `row_identity.rs` cfg!(miri) precedent):
+            // the op alphabet is the same, and even 4 interpreted cases of up to 300 ops did not
+            // finish inside a 25-minute bounded run.
+            #![proptest_config(ProptestConfig { cases: if cfg!(miri) { 2 } else { 256 }, ..ProptestConfig::default() })]
+            /// The edited set against a per-row model of the whole lifecycle: after every op
+            /// the count and `edited_any` match the model's marked set, and every drain yields
+            /// exactly the marked rows, ascending, each with `Some(value)` iff the row is
+            /// `Loaded`. Every op addresses a row through its CURRENT generation (stale handles
+            /// are the other oracles' subject), and `dec_ref`/`retire` are in the alphabet, so
+            /// the `Retiring` transitions are exercised, not assumed.
+            #[test]
+            fn edited_set_matches_model_oracle(
+                ops in proptest::collection::vec(ed_op_strategy(), 1..if cfg!(miri) { 48 } else { 300 })
+            ) {
+                let mut assets = Assets::<u64>::with_reserved(8);
+                // Per row: (generation, state, refcount).
+                let mut rows: Vec<(u32, Row, u32)> = Vec::new();
+                let mut free: Vec<u32> = Vec::new();
+                let mut edited: BTreeSet<u32> = BTreeSet::new();
+
+                for op in ops {
+                    match op {
+                        EdOp::Add(value) => {
+                            let handle = assets.add(value);
+                            let row = if let Some(reused) = free.pop() {
+                                rows[reused as usize].1 = Row::Loaded(value);
+                                reused
+                            } else {
+                                rows.push((0, Row::Loaded(value), 0));
+                                rows.len() as u32 - 1
+                            };
+                            prop_assert_eq!(handle.index(), row);
+                            edited.insert(row);
+                        }
+                        EdOp::Reserve => {
+                            let handle = assets.reserve();
+                            let row = if let Some(reused) = free.pop() {
+                                rows[reused as usize].1 = Row::Loading;
+                                reused
+                            } else {
+                                rows.push((0, Row::Loading, 0));
+                                rows.len() as u32 - 1
+                            };
+                            prop_assert_eq!(handle.index(), row);
+                        }
+                        EdOp::FillAt(pick, value) => {
+                            if rows.is_empty() {
+                                continue;
+                            }
+                            let row = pick % rows.len();
+                            let (generation, state, _) = rows[row];
+                            let fills = matches!(state, Row::Loading | Row::Failed);
+                            let real = assets.fill(Handle::new(row as u32, generation), value);
+                            prop_assert_eq!(real.is_ok(), fills);
+                            if fills {
+                                rows[row].1 = Row::Loaded(value);
+                                edited.insert(row as u32);
+                            }
+                        }
+                        EdOp::FailAt(pick) => {
+                            if rows.is_empty() {
+                                continue;
+                            }
+                            let row = pick % rows.len();
+                            let (generation, state, _) = rows[row];
+                            assets.fail(Handle::new(row as u32, generation));
+                            if matches!(state, Row::Loading | Row::Failed) {
+                                rows[row].1 = Row::Failed;
+                            }
+                        }
+                        EdOp::RemoveAt(pick) => {
+                            if rows.is_empty() {
+                                continue;
+                            }
+                            let row = pick % rows.len();
+                            let (generation, state, _) = rows[row];
+                            // `remove` no-ops on Retiring; a Vacant row has no current handle.
+                            if matches!(state, Row::Retiring(_) | Row::Vacant) {
+                                continue;
+                            }
+                            let real = assets.remove(Handle::new(row as u32, generation));
+                            let model = if let Row::Loaded(value) = state { Some(value) } else { None };
+                            prop_assert_eq!(real, model);
+                            rows[row] = (generation.wrapping_add(1), Row::Vacant, 0);
+                            free.push(row as u32);
+                            edited.insert(row as u32);
+                        }
+                        EdOp::GetMutAt(pick, value) => {
+                            if rows.is_empty() {
+                                continue;
+                            }
+                            let row = pick % rows.len();
+                            let (generation, state, _) = rows[row];
+                            let real = assets.get_mut(Handle::new(row as u32, generation)).map(|v| *v = value);
+                            prop_assert_eq!(real.is_some(), matches!(state, Row::Loaded(_)));
+                            if real.is_some() {
+                                rows[row].1 = Row::Loaded(value);
+                                edited.insert(row as u32);
+                            }
+                        }
+                        EdOp::IncRefAt(pick) => {
+                            if rows.is_empty() {
+                                continue;
+                            }
+                            let row = pick % rows.len();
+                            let live = matches!(rows[row].1, Row::Loading | Row::Loaded(_) | Row::Failed);
+                            prop_assert_eq!(assets.inc_ref(row as u32), live);
+                            if live {
+                                rows[row].2 += 1;
+                            }
+                        }
+                        EdOp::DecRefAt(pick) => {
+                            if rows.is_empty() {
+                                continue;
+                            }
+                            let row = pick % rows.len();
+                            let (generation, state, count) = rows[row];
+                            let live = matches!(state, Row::Loading | Row::Loaded(_) | Row::Failed);
+                            // `dec_ref`'s own precondition: a live row with a non-zero count.
+                            if !live || count == 0 {
+                                continue;
+                            }
+                            let ticket = assets.dec_ref(row as u32, generation);
+                            rows[row].2 = count - 1;
+                            prop_assert_eq!(ticket.is_some(), count == 1);
+                            if count == 1 {
+                                let held = if let Row::Loaded(value) = state { Some(value) } else { None };
+                                rows[row].1 = Row::Retiring(held);
+                            }
+                        }
+                        EdOp::RetireAt(pick) => {
+                            if rows.is_empty() {
+                                continue;
+                            }
+                            let row = pick % rows.len();
+                            let (generation, state, _) = rows[row];
+                            let Row::Retiring(held) = state else {
+                                continue;
+                            };
+                            prop_assert_eq!(assets.retire(row as u32), held);
+                            rows[row] = (generation.wrapping_add(1), Row::Vacant, 0);
+                            free.push(row as u32);
+                            edited.insert(row as u32);
+                        }
+                        EdOp::Drain => {
+                            let model: Vec<(u32, Option<u64>)> = edited
+                                .iter()
+                                .map(|&row| {
+                                    let value = if let Row::Loaded(value) = rows[row as usize].1 {
+                                        Some(value)
+                                    } else {
+                                        None
+                                    };
+                                    (row, value)
+                                })
+                                .collect();
+                            prop_assert_eq!(drain(&mut assets), model);
+                            edited.clear();
+                        }
+                    }
+                    prop_assert_eq!(assets.edited_count(), edited.len());
+                    prop_assert_eq!(assets.edited_any(), !edited.is_empty());
+                }
             }
         }
     }

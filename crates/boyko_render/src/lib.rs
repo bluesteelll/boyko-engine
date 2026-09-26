@@ -205,6 +205,11 @@ pub mod material;
 /// [`MaterialId`](material::MaterialId). Replaces the standalone mesh-materials rung
 /// M(-1) `MaterialRegistry`.
 pub mod material_table;
+/// Dynamic-materials DM1 — how a Tier-1 material edit reaches the GPU table: the compact
+/// [`MaterialUploadStaging`](material_upload::MaterialUploadStaging) resource and the
+/// [`stage_material_edits`](material_upload::stage_material_edits) system that drains
+/// `Assets<Material>`'s edited set into it.
+pub mod material_upload;
 /// The GPU-resident mesh asset record (mesh foundation M2, asset-system rung A2):
 /// [`MeshGpu`] / [`Vertex`], the GPU vertex+index buffers a `MeshHandle` indexes.
 pub mod mesh;
@@ -604,6 +609,7 @@ pub use material::{
     MATERIAL_FLAG_TEXTURED, MATERIAL_GPU_WORDS, Material, MaterialGpu, MaterialId, MaterialTextures,
 };
 pub use material_table::MaterialTable;
+pub use material_upload::{MATERIAL_ROW_BYTES, MaterialUploadStaging, stage_material_edits};
 pub use mesh::{MeshGpu, U16_INDEX_VERTEX_LIMIT, VERTEX_STRIDE as MESH_VERTEX_STRIDE, Vertex};
 pub use mesh_assets::{MeshAssetsExt, MeshAssetsVbExt, OrphanedMeshGpu, build_mesh_gpu};
 pub use mesh_data::MeshData;
@@ -654,10 +660,10 @@ pub use texture_data::TextureData;
 pub use upload::{
     upload_atlas_ring, upload_camera_ring, upload_camera_ring_sheared, upload_csm_ring,
     upload_ddgi_grid, upload_instance_materials, upload_instance_materials_tex, upload_instance_models,
-    upload_light_table, upload_pair_out_slot, upload_pair_ring, upload_particle_effects,
+    upload_light_table, upload_material_rows, upload_pair_out_slot, upload_pair_ring, upload_particle_effects,
     upload_particle_emit_requests, upload_ray_shadow_ring, upload_sdf_edit_list,
     upload_shadow_denoise_ring, upload_taa_ring, upload_temporal_shadow_ring,
-    upload_vb_instance_rows,
+    upload_vb_instance_rows, zero_instance_materials,
 };
 // Lane fix/hwrt-shadow-ray-origin: the HOT per-frame tail of the HWRT `RayShadowUbo` (seed +
 // shadow-ray origin mode + the raster's jittered forward). Un-walled like `ResolvedRayShadow`

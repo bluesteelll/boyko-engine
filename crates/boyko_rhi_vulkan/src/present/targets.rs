@@ -2407,13 +2407,23 @@ const VOCAB_MATERIAL_BINDING: u32 = 7;
 /// consume [`resolve_software_entries`]'s output unmodified for this binding).
 const RESOLVE_MATERIAL_BINDING: u32 = 4;
 
+/// DM1 D-3: the Forward-family Set-0 material binding ([`ForwardTargets::set0`]'s
+/// `Materials` @4, `forward_opaque.fs.hlsl`'s `[[vk::binding(4, 0)]]`).
+const FORWARD_SET0_MATERIAL_BINDING: u32 = 4;
+
+/// DM1 D-3: the VB Set-0 family's material binding — [`GBufferTargets::vb_set0`] and its
+/// four siblings (`_tex`, `_froxel`, `_tex_froxel`, `_late`) all carry `Materials` @4 against
+/// `vb_layout0`/`vb_layout0_froxel` (`vb_shade`/`vb_resolve`/`vb_geo`/`vb_shade_split`'s
+/// `[[vk::binding(4, 0)]]`).
+const VB_SET0_MATERIAL_BINDING: u32 = 4;
+
+/// DM1 D-3: the `sdf_forward_march` Set-0 material binding ([`GBufferTargets::sdf_forward_set`]'s
+/// `Materials` @2, `sdf_forward_march.comp.hlsl`'s `[[vk::binding(2, 0)]]`).
+const SDF_FORWARD_MATERIAL_BINDING: u32 = 2;
+
 /// Asset-streaming plan F7 §5 (C1): the minimum material-bearing ring count — the two
 /// ALWAYS-present rings ([`GBufferTargets::vocab_set`] + [`GBufferTargets::resolve_set`]).
 /// A sanity floor for [`GBufferTargets::material_set_rings`]'s count debug_assert.
-/// `hwrt`-only: on a `not(hwrt)` build `material_set_rings()` always yields exactly these
-/// two (no `Option`-guarded ring exists to enumerate), so the floor check is not wired
-/// there (nothing to catch).
-#[cfg(feature = "hwrt")]
 const MATERIAL_SET_RING_COUNT_MIN: usize = 2;
 
 /// The binding count of the SOFTWARE deferred-resolve set (indices 0..=18). The HWRT variant is
@@ -2589,30 +2599,49 @@ fn resolve_software_entries<'a>(
 }
 
 impl GBufferTargets {
-    /// Asset-streaming plan F7 §5 (C1): THE canonical enumeration of every per-FIF
-    /// descriptor-set ring that binds the material buffer, paired with its binding
-    /// index — co-located with [`resolve_software_entries`] (the SOLE builder that
-    /// emits `scene.material_table`) so a reviewer sees the builder and the repoint
-    /// list together, and a new resolve variant added there must be added here too.
-    /// [`GBufferFrame::repoint_material_table`] walks EXACTLY this list; nothing else
-    /// enumerates the material-bearing sets.
-    #[cfg(not(feature = "hwrt"))]
-    fn material_set_rings(&self) -> impl Iterator<Item = (&[VulkanBindGroup; FRAMES_IN_FLIGHT], u32)> {
-        [
-            (&self.vocab_set, VOCAB_MATERIAL_BINDING),
-            (&self.resolve_set, RESOLVE_MATERIAL_BINDING),
-        ]
-        .into_iter()
-    }
-
-    /// HW-RT variant of [`Self::material_set_rings`]: the two always-present rings PLUS
-    /// every `Option`-guarded HWRT resolve-family ring that exists on this device/config
-    /// (`None` on the OFF path — flattened out, not enumerated).
-    #[cfg(feature = "hwrt")]
+    /// Asset-streaming plan F7 §5 (C1), widened by DM1 D-3: THE canonical enumeration of
+    /// every per-FIF descriptor-set ring that binds the material buffer, paired with its
+    /// binding index. [`GBufferFrame::repoint_material_table`] walks EXACTLY this list;
+    /// nothing else enumerates the material-bearing sets, so a ring missing here keeps the
+    /// superseded table after a grow and reads it after it is destroyed.
+    ///
+    /// Every path's rings, because every path's shaders read `Materials`:
+    /// - Deferred: [`Self::vocab_set`] (the marcher family) and [`Self::resolve_set`], plus
+    ///   the HWRT resolve variants ([`Self::hwrt_material_set_rings`]);
+    /// - the Forward family: [`ForwardTargets::set0`] (`forward_opaque`);
+    /// - VB: [`Self::vb_set0`], [`Self::vb_set0_tex`], [`Self::vb_set0_froxel`],
+    ///   [`Self::vb_set0_tex_froxel`], [`Self::vb_set0_late`];
+    /// - the SDF leg on Forward and VB: [`Self::sdf_forward_set`].
+    ///
+    /// Until D-3 only the Deferred rings were listed, so a grow left VB and Forward on the old
+    /// buffer (`VUID-vkCmdDispatch-None-08114` once it was retired). The source census
+    /// `material_binder_census_every_binding_ring_is_repointed` (this file's tests) reads every
+    /// `BindGroupEntry` that binds `material_table` and every shader that declares `Materials`,
+    /// and fails on one this list does not cover.
     fn material_set_rings(&self) -> impl Iterator<Item = (&[VulkanBindGroup; FRAMES_IN_FLIGHT], u32)> {
         [
             Some((&self.vocab_set, VOCAB_MATERIAL_BINDING)),
             Some((&self.resolve_set, RESOLVE_MATERIAL_BINDING)),
+            self.forward.as_ref().map(|f| (&f.set0, FORWARD_SET0_MATERIAL_BINDING)),
+            self.sdf_forward_set.as_ref().map(|s| (s, SDF_FORWARD_MATERIAL_BINDING)),
+            self.vb_set0.as_ref().map(|s| (s, VB_SET0_MATERIAL_BINDING)),
+            self.vb_set0_tex.as_ref().map(|s| (s, VB_SET0_MATERIAL_BINDING)),
+            self.vb_set0_froxel.as_ref().map(|s| (s, VB_SET0_MATERIAL_BINDING)),
+            self.vb_set0_tex_froxel.as_ref().map(|s| (s, VB_SET0_MATERIAL_BINDING)),
+            self.vb_set0_late.as_ref().map(|s| (s, VB_SET0_MATERIAL_BINDING)),
+        ]
+        .into_iter()
+        .chain(self.hwrt_material_set_rings())
+        .flatten()
+    }
+
+    /// The HWRT resolve-family share of [`Self::material_set_rings`]: every `Option`-guarded
+    /// resolve variant that exists on this device/config (`None` on the OFF path — flattened
+    /// out, not enumerated). All of them take `Materials` from [`resolve_software_entries`]'s
+    /// shared prefix, so all bind it at [`RESOLVE_MATERIAL_BINDING`].
+    #[cfg(feature = "hwrt")]
+    fn hwrt_material_set_rings(&self) -> [Option<(&[VulkanBindGroup; FRAMES_IN_FLIGHT], u32)>; 5] {
+        [
             self.resolve_set_hwrt
                 .as_ref()
                 .map(|s| (s, RESOLVE_MATERIAL_BINDING)),
@@ -2629,39 +2658,63 @@ impl GBufferTargets {
                 .as_ref()
                 .map(|s| (s, RESOLVE_MATERIAL_BINDING)),
         ]
-        .into_iter()
-        .flatten()
     }
 
-    /// Asset-streaming plan F7 §5 (C1, review O1): the count [`Self::material_set_rings`]
-    /// MUST yield for THIS already-built `self` — read directly off the SAME `Option`
-    /// fields `material_set_rings` enumerates (`.is_some()`), NOT re-derived from the
-    /// arming predicates `create`'s builders gate on. A predicate-based re-derivation is
-    /// unsound as a secondary check: a device where the arming predicate holds but a
-    /// specific ring's `create_bind_group` degraded to `None` (an internal builder
-    /// failure/degrade path, independent of the predicate) would make a predicate-based
-    /// count diverge from `material_set_rings().count()` and trip this debug_assert
-    /// SPURIOUSLY. Reading `self`'s own fields instead can only diverge from
-    /// `material_set_rings()` when a NEW field is added to `Self` without a matching
-    /// entry there — exactly the C1 regression this guard exists to catch.
+    /// The `not(hwrt)` build has no HWRT resolve variant to enumerate.
+    #[cfg(not(feature = "hwrt"))]
+    fn hwrt_material_set_rings(&self) -> [Option<(&[VulkanBindGroup; FRAMES_IN_FLIGHT], u32)>; 0] {
+        []
+    }
+
+    /// Asset-streaming plan F7 §5 (C1, review O1), widened by DM1 D-3: the count
+    /// [`Self::material_set_rings`] MUST yield for THIS already-built `self` — read directly
+    /// off the SAME `Option` fields `material_set_rings` enumerates (`.is_some()`), NOT
+    /// re-derived from the arming predicates `create`'s builders gate on. A predicate-based
+    /// re-derivation is unsound as a secondary check: a device where the arming predicate
+    /// holds but a specific ring's `create_bind_group` degraded to `None` (an internal
+    /// builder failure/degrade path, independent of the predicate) would make a
+    /// predicate-based count diverge from `material_set_rings().count()` and trip this
+    /// debug_assert SPURIOUSLY. Reading `self`'s own fields instead can only diverge from
+    /// `material_set_rings()` when a field is counted here without a matching entry there.
     ///
-    /// This debug_assert is a SECONDARY self-consistency net; the PRIMARY exhaustiveness
-    /// guarantees are `material_set_rings`'s co-location with `resolve_software_entries`
-    /// (a reviewer sees both together) and the headless C1 repoint-counter test (F7 §12).
-    #[cfg(feature = "hwrt")]
+    /// This debug_assert is a SECONDARY self-consistency net. The PRIMARY exhaustiveness
+    /// guarantee is the source census (`material_binder_census_every_binding_ring_is_repointed`),
+    /// which derives the binders from the set builders and the shaders themselves.
     fn expected_material_ring_count(&self) -> usize {
+        let optional = [
+            self.forward.is_some(),
+            self.sdf_forward_set.is_some(),
+            self.vb_set0.is_some(),
+            self.vb_set0_tex.is_some(),
+            self.vb_set0_froxel.is_some(),
+            self.vb_set0_tex_froxel.is_some(),
+            self.vb_set0_late.is_some(),
+        ];
         MATERIAL_SET_RING_COUNT_MIN
-            + self.resolve_set_hwrt.is_some() as usize
+            + optional.iter().filter(|&&armed| armed).count()
+            + self.expected_hwrt_material_ring_count()
+    }
+
+    /// The HWRT share of [`Self::expected_material_ring_count`].
+    #[cfg(feature = "hwrt")]
+    fn expected_hwrt_material_ring_count(&self) -> usize {
+        self.resolve_set_hwrt.is_some() as usize
             + self.shadow_vis_resolve_set.is_some() as usize
             + self.shadow_denoised_resolve_set.is_some() as usize
             + self.shadow_vis_mv_resolve_set.is_some() as usize
             + self.shadow_temporal_denoised_resolve_set.is_some() as usize
     }
 
+    /// The `not(hwrt)` build has no HWRT resolve variant.
+    #[cfg(not(feature = "hwrt"))]
+    fn expected_hwrt_material_ring_count(&self) -> usize {
+        0
+    }
+
     /// Asset-streaming plan F7-hwrt (task#11): THE canonical enumeration of every per-FIF
-    /// AS-bearing descriptor-set ring, paired with [`TLAS_ACCEL_BINDING`] — the HWRT subset
-    /// of [`Self::material_set_rings`] MINUS the two software-only sets (`vocab_set`/
-    /// `resolve_set`, which declare no `AccelerationStructure` binding at all).
+    /// AS-bearing descriptor-set ring, paired with [`TLAS_ACCEL_BINDING`] — exactly the rings
+    /// of [`Self::hwrt_material_set_rings`] (every other material-bearing set declares no
+    /// `AccelerationStructure` binding at all).
     /// [`GBufferFrame::repoint_tlas_accel`] walks EXACTLY this list when the per-slot TLAS
     /// grows — a resolve variant added without an entry here would dangle at the freed AS
     /// handle the instant the superseded TLAS is retired (the C1-class UAF
@@ -9456,16 +9509,15 @@ impl GBufferTargets {
         // failure leaves the previous (still-valid) targets in place.
         let fresh = Self::create(ctx, scene, extent, aa_extent, profile)?;
 
-        // Asset-streaming plan F7 §5 (C1, review O1): a SECONDARY self-consistency net —
-        // every material-bearing ring `create` just built must be enumerated by
-        // `material_set_rings`, else a repointed material-table grow would silently miss
-        // one (a UAF the moment its buffer is later freed). `expected_material_ring_count`
-        // reads `fresh`'s own `Option` fields directly (not a re-derived arming predicate),
-        // so this cannot spuriously fire on a device where a ring degraded to `None` for a
-        // reason the predicate wouldn't see. The PRIMARY exhaustiveness guarantees are
-        // `material_set_rings`'s co-location with `resolve_software_entries` and the
-        // headless C1 repoint-counter test (F7 §12) — this debug_assert is a cheap backstop.
-        #[cfg(feature = "hwrt")]
+        // Asset-streaming plan F7 §5 (C1, review O1), widened by DM1 D-3: a SECONDARY
+        // self-consistency net — every material-bearing ring `create` just built must be
+        // enumerated by `material_set_rings`, else a repointed material-table grow would
+        // silently miss one (a UAF the moment its buffer is later freed).
+        // `expected_material_ring_count` reads `fresh`'s own `Option` fields directly (not a
+        // re-derived arming predicate), so this cannot spuriously fire on a device where a
+        // ring degraded to `None` for a reason the predicate wouldn't see. The PRIMARY
+        // exhaustiveness guarantee is the source census
+        // (`material_binder_census_every_binding_ring_is_repointed`) — this is a backstop.
         {
             let ring_count = fresh.material_set_rings().count();
             debug_assert!(
@@ -9475,11 +9527,12 @@ impl GBufferTargets {
             debug_assert_eq!(
                 ring_count,
                 fresh.expected_material_ring_count(),
-                "invariant (F7 C1): material_set_rings() must enumerate EXACTLY every \
-                 material-bearing ring create() built — a new resolve variant was added \
-                 without adding its ring to material_set_rings()"
+                "invariant (F7 C1, DM1 D-3): material_set_rings() must enumerate EXACTLY \
+                 every material-bearing ring create() built"
             );
-
+        }
+        #[cfg(feature = "hwrt")]
+        {
             // Asset-streaming plan F7-hwrt (task#11): the AS-repoint counterpart of the
             // material-ring check above — every AS-bearing ring `create` just built must
             // be enumerated by `tlas_accel_sets`, else a TLAS grow's repoint would
@@ -10136,22 +10189,305 @@ mod tests {
         }
     }
 
-    /// Asset-streaming plan F7 C1: on a `not(hwrt)` build `material_set_rings()`
-    /// always yields exactly the two always-present rings — no `Option`-guarded
-    /// HWRT ring exists to enumerate on this build (see that fn's doc); this is
-    /// the non-hwrt companion of the exhaustive hwrt combination test below
-    /// (`expected_material_ring_count`/`MATERIAL_SET_RING_COUNT_MIN` are
-    /// themselves `#[cfg(feature = "hwrt")]`-only, so there is nothing else to
-    /// cross-check here).
+    /// Asset-streaming plan F7 C1: on a `not(hwrt)` build with no Forward, VB or SDF-forward
+    /// set built (a Deferred boot), `material_set_rings()` yields exactly the two
+    /// always-present rings — no HWRT resolve variant exists on this build.
     #[test]
     #[cfg(not(feature = "hwrt"))]
-    fn material_set_rings_is_always_exactly_two_on_a_non_hwrt_build() {
+    fn material_set_rings_is_exactly_the_two_deferred_rings_on_a_non_hwrt_deferred_boot() {
         let targets = fake_targets();
         assert_eq!(
             targets.material_set_rings().count(),
             2,
-            "a not(hwrt) build has only vocab_set + resolve_set to enumerate"
+            "a not(hwrt) Deferred boot has only vocab_set + resolve_set to enumerate"
         );
+    }
+
+    /// The all-off fake of the running build: no optional ring of either family armed.
+    fn base_targets() -> GBufferTargets {
+        #[cfg(not(feature = "hwrt"))]
+        let targets = fake_targets();
+        #[cfg(feature = "hwrt")]
+        let targets = fake_targets(false, false, false, false, false);
+        targets
+    }
+
+    /// The seven material-bearing rings DM1 D-3 added to the repoint walk, armed per bit of
+    /// `mask` (bit 0 the Forward Set 0, bit 1 `sdf_forward_set`, bits 2..=6 the VB Set-0
+    /// family in field order).
+    const D3_RING_COUNT: u32 = 7;
+
+    fn arm_d3_rings(targets: &mut GBufferTargets, mask: u32) {
+        let on = |bit: u32| mask & (1 << bit) != 0;
+        targets.forward = on(0).then(|| ForwardTargets { depth: tex_ring(), set0: bg_ring(), set1: bg_ring() });
+        targets.sdf_forward_set = on(1).then(bg_ring);
+        targets.vb_set0 = on(2).then(bg_ring);
+        targets.vb_set0_tex = on(3).then(bg_ring);
+        targets.vb_set0_froxel = on(4).then(bg_ring);
+        targets.vb_set0_tex_froxel = on(5).then(bg_ring);
+        targets.vb_set0_late = on(6).then(bg_ring);
+    }
+
+    /// DM1 D-3: across every arming combination of the seven Forward/VB/SDF-forward rings
+    /// (2^7), `material_set_rings()` enumerates exactly the two Deferred rings plus every armed
+    /// one, and agrees with `expected_material_ring_count()` (`sync_gbuffer`'s debug_assert).
+    /// Before D-3 the walk ignored all seven, so every mask but 0 was short.
+    #[test]
+    fn material_set_rings_enumerates_every_armed_forward_vb_and_sdf_forward_ring() {
+        for mask in 0u32..(1 << D3_RING_COUNT) {
+            let mut targets = base_targets();
+            arm_d3_rings(&mut targets, mask);
+            let actual = targets.material_set_rings().count();
+            let armed = mask.count_ones() as usize;
+            assert_eq!(
+                actual,
+                MATERIAL_SET_RING_COUNT_MIN + armed,
+                "mask {mask:07b}: material_set_rings() yields {actual} rings, want the 2 Deferred \
+                 rings + {armed} armed Forward/VB/SDF-forward rings (D-3: a ring missing here keeps \
+                 the superseded material table after a grow)"
+            );
+            assert_eq!(
+                actual,
+                targets.expected_material_ring_count(),
+                "mask {mask:07b}: material_set_rings() and expected_material_ring_count() disagree"
+            );
+        }
+    }
+
+    /// DM1 D-3: with every ring armed, each one is walked at the binding its shaders declare
+    /// `Materials` at — identity by address, so a ring enumerated twice or at the wrong binding
+    /// is caught, not only a missing one.
+    #[test]
+    fn material_set_rings_walks_each_ring_once_at_its_material_binding() {
+        let mut targets = base_targets();
+        arm_d3_rings(&mut targets, (1 << D3_RING_COUNT) - 1);
+        let forward = targets.forward.as_ref().expect("invariant: armed above");
+        let want: [(&[VulkanBindGroup; FRAMES_IN_FLIGHT], u32, &str); 9] = [
+            (&targets.vocab_set, VOCAB_MATERIAL_BINDING, "vocab_set"),
+            (&targets.resolve_set, RESOLVE_MATERIAL_BINDING, "resolve_set"),
+            (&forward.set0, FORWARD_SET0_MATERIAL_BINDING, "forward.set0"),
+            (targets.sdf_forward_set.as_ref().expect("armed"), SDF_FORWARD_MATERIAL_BINDING, "sdf_forward_set"),
+            (targets.vb_set0.as_ref().expect("armed"), VB_SET0_MATERIAL_BINDING, "vb_set0"),
+            (targets.vb_set0_tex.as_ref().expect("armed"), VB_SET0_MATERIAL_BINDING, "vb_set0_tex"),
+            (targets.vb_set0_froxel.as_ref().expect("armed"), VB_SET0_MATERIAL_BINDING, "vb_set0_froxel"),
+            (targets.vb_set0_tex_froxel.as_ref().expect("armed"), VB_SET0_MATERIAL_BINDING, "vb_set0_tex_froxel"),
+            (targets.vb_set0_late.as_ref().expect("armed"), VB_SET0_MATERIAL_BINDING, "vb_set0_late"),
+        ];
+        let walked: Vec<(&[VulkanBindGroup; FRAMES_IN_FLIGHT], u32)> = targets.material_set_rings().collect();
+        assert_eq!(walked.len(), want.len(), "the all-armed walk has the wrong length");
+        for (ring, binding, name) in want {
+            let hits: Vec<u32> = walked.iter().filter(|(r, _)| core::ptr::eq(*r, ring)).map(|&(_, b)| b).collect();
+            assert_eq!(hits, [binding], "{name}: walked at {hits:?}, want exactly once at binding {binding}");
+        }
+    }
+
+    /// Every non-empty, non-comment line of the `.rs` files under `dir`, with its path and
+    /// 0-based line index.
+    fn census_rust_lines(dir: &std::path::Path, out: &mut Vec<(String, usize, String)>) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("census: cannot read {} ({e})", dir.display()))
+            .map(|e| e.expect("invariant: a readable dir entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                census_rust_lines(&path, out);
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                let text = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("census: cannot read {} ({e})", path.display()));
+                for (i, line) in text.lines().enumerate() {
+                    out.push((path.display().to_string(), i, line.to_owned()));
+                }
+            }
+        }
+    }
+
+    /// `true` iff `line` reads the field `ident` (`.ident` followed by a non-identifier byte).
+    fn reads_field(line: &str, ident: &str) -> bool {
+        let pat = format!(".{ident}");
+        line.match_indices(&pat).any(|(at, _)| {
+            line[at + pat.len()..].chars().next().is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+        })
+    }
+
+    /// The set builder a binder line sits in: the nearest enclosing `let mut <name>: [Option<
+    /// VulkanBindGroup>; FRAMES_IN_FLIGHT]` slot array, or the nearest enclosing `fn <name>`.
+    fn census_identity(lines: &[(String, usize, String)], at: usize) -> Option<String> {
+        const SLOTS: &str = ": [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT]";
+        let file = &lines[at].0;
+        for (f, _, line) in lines[..at].iter().rev() {
+            if f != file {
+                return None;
+            }
+            let t = line.trim_start();
+            if let Some(rest) = t.strip_prefix("let mut ")
+                && let Some(end) = rest.find(SLOTS)
+            {
+                return Some(rest[..end].to_owned());
+            }
+            let t = t.trim_start_matches("pub(crate) ").trim_start_matches("pub ").trim_start_matches("unsafe ");
+            if let Some(rest) = t.strip_prefix("fn ") {
+                let end = rest.find(['(', '<']).unwrap_or(rest.len());
+                return Some(format!("fn {}", &rest[..end]));
+            }
+        }
+        None
+    }
+
+    /// DM1 D-3's structural gate: every descriptor set that binds the material table is in the
+    /// grow repoint's walk, derived from the SOURCE rather than from a hand count — so a future
+    /// set that binds `Materials` and is not repointed is RED here, not a UAF found by a pixel.
+    ///
+    /// **Rust side.** Every line under `src/` that reads `.material_table` inside a
+    /// `BindGroupEntry` (on the line or one of the two above it) is a binder. Its builder is the
+    /// nearest enclosing per-slot array or `fn` (`census_identity`). Each builder must be one of
+    /// `RUST_BINDERS`, in `present/targets.rs` (the only file whose sets the repoint reaches),
+    /// and each entry's field must be walked by `material_set_rings`'s body. The resolve family's
+    /// HWRT variants share `resolve_software_entries` and are walked by `hwrt_material_set_rings`,
+    /// pinned by the hwrt count tests.
+    ///
+    /// **Shader side.** Every `StructuredBuffer<MaterialGpu>` declaration under `shaders/` must be
+    /// one of `SHADER_BINDERS`, declared in Set 0 at the binding its rings are walked at.
+    #[test]
+    fn material_binder_census_every_binding_ring_is_repointed() {
+        /// (builder identity, the `GBufferTargets` field its ring lands in).
+        const RUST_BINDERS: [(&str, &str); 9] = [
+            ("fn resolve_software_entries", "resolve_set"),
+            ("vocab_slots", "vocab_set"),
+            ("set0_slots", "forward"),
+            ("sdf_forward_slots", "sdf_forward_set"),
+            ("vb_slots", "vb_set0"),
+            ("vb_tex_slots", "vb_set0_tex"),
+            ("vb_froxel_slots", "vb_set0_froxel"),
+            ("vb_tex_froxel_slots", "vb_set0_tex_froxel"),
+            ("late_slots", "vb_set0_late"),
+        ];
+        /// (shader file, the binding constant the rings its pipelines bind are walked at).
+        const SHADER_BINDERS: [(&str, u32); 8] = [
+            ("deferred_pbr.hlsl", RESOLVE_MATERIAL_BINDING),
+            ("sdf_gbuffer_composite.hlsl", VOCAB_MATERIAL_BINDING),
+            ("forward_opaque.fs.hlsl", FORWARD_SET0_MATERIAL_BINDING),
+            ("sdf_forward_march.comp.hlsl", SDF_FORWARD_MATERIAL_BINDING),
+            ("vb_geo.comp.hlsl", VB_SET0_MATERIAL_BINDING),
+            ("vb_resolve.comp.hlsl", VB_SET0_MATERIAL_BINDING),
+            ("vb_shade.comp.hlsl", VB_SET0_MATERIAL_BINDING),
+            ("vb_shade_split.comp.hlsl", VB_SET0_MATERIAL_BINDING),
+        ];
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut lines = Vec::new();
+        census_rust_lines(&root.join("src"), &mut lines);
+        let mut failures = Vec::new();
+
+        // The Rust binders.
+        let mut seen = [0usize; RUST_BINDERS.len()];
+        for (at, (file, i, line)) in lines.iter().enumerate() {
+            if line.trim_start().starts_with("//") || !reads_field(line, "material_table") {
+                continue;
+            }
+            let in_entry = (at.saturating_sub(2)..=at)
+                .any(|j| lines[j].0 == *file && lines[j].2.contains("BindGroupEntry"));
+            if !in_entry {
+                continue;
+            }
+            let id = census_identity(&lines, at);
+            match RUST_BINDERS.iter().position(|(b, _)| Some(*b) == id.as_deref()) {
+                Some(k) if file.replace('\\', "/").ends_with("src/present/targets.rs") => seen[k] += 1,
+                Some(_) => failures.push(format!(
+                    "{file}:{}: binds material_table outside present/targets.rs — the grow repoint \
+                     walks GBufferTargets only",
+                    i + 1
+                )),
+                None => failures.push(format!(
+                    "{file}:{}: an unlisted set builder {id:?} binds material_table — add its ring \
+                     to material_set_rings (or the grow leaves it on the superseded table) and to \
+                     RUST_BINDERS",
+                    i + 1
+                )),
+            }
+        }
+        for (k, (builder, _)) in RUST_BINDERS.iter().enumerate() {
+            if seen[k] != 1 {
+                failures.push(format!("RUST_BINDERS `{builder}` matched {} binder lines, want exactly 1", seen[k]));
+            }
+        }
+
+        // Every listed builder's ring is walked by `material_set_rings`.
+        let targets_rs = lines
+            .iter()
+            .filter(|(f, _, _)| f.replace('\\', "/").ends_with("src/present/targets.rs"))
+            .map(|(_, _, l)| l.as_str())
+            .collect::<Vec<_>>();
+        let start = targets_rs
+            .iter()
+            .position(|l| l.contains("fn material_set_rings("))
+            .expect("census: material_set_rings is defined in present/targets.rs");
+        let body_len = targets_rs[start..]
+            .iter()
+            .position(|l| *l == "    }")
+            .expect("census: material_set_rings has a closing brace at impl indent");
+        let body = &targets_rs[start..start + body_len];
+        for (builder, field) in RUST_BINDERS {
+            if !body.iter().any(|l| reads_field(l, field)) {
+                failures.push(format!(
+                    "`{builder}` builds the `{field}` ring, which material_set_rings does not walk — \
+                     a material-table grow leaves it bound to the superseded buffer (D-3)"
+                ));
+            }
+        }
+
+        // The shader binders.
+        let mut shader_seen = [0usize; SHADER_BINDERS.len()];
+        let mut shaders: Vec<_> = std::fs::read_dir(root.join("shaders"))
+            .expect("census: the shaders dir is readable")
+            .map(|e| e.expect("invariant: a readable dir entry").path())
+            .filter(|p| p.extension().is_some_and(|x| x == "hlsl" || x == "hlsli"))
+            .collect();
+        shaders.sort();
+        for path in shaders {
+            let name = path.file_name().expect("invariant: a file").to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path).expect("census: a readable shader");
+            for (i, line) in text.lines().enumerate() {
+                let t = line.trim_start();
+                if t.starts_with("//") || !t.contains("StructuredBuffer<MaterialGpu>") {
+                    continue;
+                }
+                let binding = if let Some(rest) = t.split("[[vk::binding(").nth(1) {
+                    let args: Vec<&str> = rest.split(")]]").next().unwrap_or("").split(',').map(str::trim).collect();
+                    if args.get(1).copied().unwrap_or("0") != "0" {
+                        failures.push(format!("{name}:{}: declares Materials outside Set 0", i + 1));
+                    }
+                    args[0].parse::<u32>().ok()
+                } else {
+                    t.split("register(t").nth(1).and_then(|r| r.split(')').next()).and_then(|n| n.parse::<u32>().ok())
+                };
+                match SHADER_BINDERS.iter().position(|(f, _)| *f == name) {
+                    Some(k) => {
+                        shader_seen[k] += 1;
+                        if binding != Some(SHADER_BINDERS[k].1) {
+                            failures.push(format!(
+                                "{name}:{}: declares Materials at {binding:?}, but its rings are \
+                                 repointed at binding {}",
+                                i + 1,
+                                SHADER_BINDERS[k].1
+                            ));
+                        }
+                    }
+                    None => failures.push(format!(
+                        "{name}:{}: an unlisted shader reads Materials — the sets its pipelines bind \
+                         must be in material_set_rings, and the shader in SHADER_BINDERS",
+                        i + 1
+                    )),
+                }
+            }
+        }
+        for (k, (shader, _)) in SHADER_BINDERS.iter().enumerate() {
+            if shader_seen[k] != 1 {
+                failures.push(format!("SHADER_BINDERS `{shader}` matched {} declarations, want exactly 1", shader_seen[k]));
+            }
+        }
+
+        assert!(failures.is_empty(), "material-binder census (DM1 D-3):\n{}", failures.join("\n"));
     }
 
     /// A `GBufferTargets` with every ALWAYS-present field filled + the 5

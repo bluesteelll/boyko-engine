@@ -26,10 +26,10 @@ use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
     AssetRefcountPlugin, ClusterConfig, CsmCasterScratch, CsmFitSet, CsmPlugin, CsmResolveSet,
     DdgiPlugin, DdgiResolveSet, LightCollectSet, LightSeedSet, LightingConfig, LightingPlugin,
-    MeshRenderScratch, ParticlePlugin, ParticleTickSet, RayPlugin, Render3dPlugin,
+    MaterialUploadStaging, MeshRenderScratch, ParticlePlugin, ParticleTickSet, RayPlugin, Render3dPlugin,
     RenderPathPlugin, SdfPlugin, ShadowAtlasPlugin, ShadowDenoisePlugin, SsaoPlugin,
     add_gather_mesh_draws, add_gather_shadow_casters, add_gpu_transform_pack,
-    reduce_caster_bounds, snap_apply, sync_cluster_light_gate, sync_csm_light_gate,
+    reduce_caster_bounds, snap_apply, stage_material_edits, sync_cluster_light_gate, sync_csm_light_gate,
     sync_ddgi_light_gate, sync_punctual_light_gate, sync_ssao_light_gate, sync_sv0_light_gate,
 };
 use boyko_scene::{CameraPlugin, CameraSet, FixedSet, VisibilitySet};
@@ -711,6 +711,9 @@ impl Plugin for EnginePlugins {
         // out-slot, so the runner arms interp only when `dynamic_count() > 0`.
         app.insert_resource(MeshRenderScratch::default());
         app.insert_resource(CsmCasterScratch::default());
+        // Dynamic-materials DM1: the compact material upload staging `stage_material_edits`
+        // (registered below) fills and the runner copies into the table's staging slot.
+        app.insert_resource(MaterialUploadStaging::default());
         // HW-RT rung 3b step 5a: the persisted prev-frame camera view-proj (the motion-vector
         // camera carry). Inserted so the runner's `advance` (temporal frames only) finds it; a
         // `None` seed yields `prev == cur` on the first temporal frame (zero motion). Dormant until
@@ -788,8 +791,9 @@ impl Plugin for EnginePlugins {
 }
 
 /// The `Main`-schedule frame systems `EnginePlugins` registers -- the affine pack, the caster
-/// gather, every `sync_*_light_gate` header bridge, the snap collapse and the unified draw
-/// gather -- as ONE builder fn (the body of the former `add_systems_cfg` closure, moved verbatim).
+/// gather, every `sync_*_light_gate` header bridge, the snap collapse, the unified draw
+/// gather and the material edit stager -- as ONE builder fn (the body of the former
+/// `add_systems_cfg` closure, moved verbatim).
 ///
 /// `pub` so an INTEGRATION test can run the PRODUCTION registration in a world composed of
 /// the same render plugins minus the window/runner (the `tests/camera_resolve.rs` subset
@@ -936,7 +940,14 @@ pub fn register_main_frame_systems(b: &mut ScheduleBuilder) {
     let snap = b.add_system(snap_apply).key();
     // `add_gather_mesh_draws`: the helper chains `.after_set(AssetValidateSet)` (see the
     // caster gather above); `VisibilitySet::Read` is this host's pin.
-    add_gather_mesh_draws(b).after(pack).after(snap).in_set(VisibilitySet::Read);
+    let gather = add_gather_mesh_draws(b).after(pack).after(snap).in_set(VisibilitySet::Read).key();
+    // Dynamic-materials DM1: drain `Assets<Material>`'s edited set into `MaterialUploadStaging`.
+    // AFTER the gather, so every material id the gather scattered this frame belongs to a row
+    // minted before the drain — a row minted into the table's headroom (defect D-1) is staged on
+    // the first frame it can be drawn, never one frame late. (Before the gather, a mint landing
+    // between the two would draw one frame of an unstaged row.) It also keeps the stager off the
+    // validate → gather chain.
+    b.add_system(stage_material_edits).after(gather);
 
     // ── Every render reader runs after its writer (R4-frame-order) ──────────────────────
     //
