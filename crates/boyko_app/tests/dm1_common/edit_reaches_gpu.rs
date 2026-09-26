@@ -12,12 +12,21 @@
 //! geometry and nothing else moves it); every frame a clause names was captured.
 //!
 //! **Verdict:** both samples are RED on every frame in [`VERDICT`].
+//!
+//! **The idle assert** (DM1 (c), critique W3), from the sidecar's recorder-site counts: frame 0
+//! records ONE `material_upload` pass copying ONE full-image region; the edit frame records one pass
+//! and at least one region; every other frame records NO pass and NO region — a pass declared with
+//! an empty run list still counts, so a graph that paid the upload's barriers on an idle frame is
+//! red here. The edit system runs before `VisibilitySet::Read`, so the stager (after the gather)
+//! drains the edit on [`EDIT_AT`] itself rather than on whichever frame the executor's packing
+//! chose.
 
 use boyko_app::prelude::*;
 use boyko_ecs::ecs::core::asset::Handle;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_macros::Resource;
 use boyko_render::{GeometryLegs, Material, RenderPath};
+use boyko_scene::VisibilitySet;
 
 use super::{
     Capture, GREEN, Hue, RED, arm_dump, assert_ran, assert_resolved, build_app, cube_pixel,
@@ -74,7 +83,9 @@ pub fn run(test: &str, path: RenderPath) {
     let mut app = build_app("boyko_app DM1 edit reaches gpu", path, GeometryLegs::Both);
     app.insert_resource(EditRows::default());
     app.add_startup_system(setup);
-    app.add_systems(edit);
+    app.add_systems_cfg(|b| {
+        b.add_system(edit).before_set(VisibilitySet::Read);
+    });
     app.run();
     assert_ran(&app);
     assert_resolved(&app, path, true);
@@ -104,10 +115,33 @@ pub fn run(test: &str, path: RenderPath) {
         }
         eprintln!("DM1(1) {path:?} `{name}` at {px:?}:{}", cap.trace(px, 0..=FRAMES - 1));
     }
+    for k in 0..FRAMES {
+        let f = cap.frame(k);
+        let count = |key: &str| -> u32 {
+            f.field(key)
+                .unwrap_or_else(|| panic!("PREMISE: the frame-{k} state line carries no `{key}=` (the runner's DM1 upload counters)"))
+                .parse()
+                .unwrap_or_else(|e| panic!("frame {k}: `{key}=` is not an integer ({e})"))
+        };
+        let (pass, regions, full) = (count("mat_pass"), count("mat_regions"), count("mat_full"));
+        eprintln!("DM1(1) {path:?} frame {k}: mat_pass={pass} mat_regions={regions} mat_full={full}");
+        let ok = match u64::from(k) {
+            0 => (pass, regions, full) == (1, 1, 1),
+            EDIT_AT => pass == 1 && regions >= 1 && full == 0,
+            _ => (pass, regions) == (0, 0),
+        };
+        if !ok {
+            failures.push(format!(
+                "{path:?} frame {k}: mat_pass={pass} mat_regions={regions} mat_full={full} — frame 0 copies one \
+                 full-image region, frame {EDIT_AT} the compact edit runs, and every other frame nothing"
+            ));
+        }
+    }
     assert!(
         failures.is_empty(),
-        "DM1 test (1) on {path:?}: an edit made through Assets::get_mut did not reach the GPU \
-         table ({} failing samples):\n{}",
+        "DM1 test (1) on {path:?}: {} failures — a sample that is not RED is an edit made through \
+         Assets::get_mut that never reached the GPU table; a `mat_*` line is an upload recorded where \
+         none was due, or missing where one was:\n{}",
         failures.len(),
         failures.join("\n")
     );

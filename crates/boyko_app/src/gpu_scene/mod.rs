@@ -6209,6 +6209,10 @@ impl GpuSceneBundles {
         // boot-owned 1-slot stub; only slot 0 is ever registered this rung, so the
         // bound bytes are byte-identical to that stub.
         material_table: &'a MaterialTable,
+        // Dynamic-materials DM1: this frame's material-table copy regions, `Some` iff the runner
+        // wrote staging slot `slot` this frame (frame 0 / a grow / after a lost edit: the one
+        // full-image region; an edit frame: the compact runs). `None` declares and records nothing.
+        material_upload: Option<&'a [boyko_rhi::BufferCopy]>,
         // Asset-streaming plan F8 §2.2: `true` iff THIS gather scattered any non-default
         // material id (`MeshRenderScratch::any_non_default_material`, read by the runner
         // AFTER the gather). Gates `raster_pipeline_pm`/`pm_bind_group` below — `false` on
@@ -6701,6 +6705,10 @@ impl GpuSceneBundles {
             light_staging: &self.light_staging[slot],
             light_upload_bytes: light_upload.unwrap_or(0),
             light_dirty: light_upload.is_some(),
+            material_upload: material_upload.map(|regions| boyko_rhi_vulkan::present::MaterialUploadScene {
+                staging: material_table.staging_slot(slot),
+                regions,
+            }),
             cluster_cull,
             cull_layout,
             cluster_grid,

@@ -25,27 +25,25 @@
 //! [`NonSendResource`](boyko_ecs::ecs::core::resources::resource::NonSendResource)
 //! alongside the mesh assets ([`MeshAssetsExt`](crate::mesh_assets::MeshAssetsExt)).
 //!
-//! # Boot-seed vs. steady-state refresh
+//! # How the table's bytes arrive (dynamic-materials DM1)
 //!
-//! [`boot_seed`](MaterialTable::boot_seed) is the ONE-TIME device-table allocation +
-//! seed, run after every startup mint into `Assets<Material>` landed and BEFORE the
-//! first frame's descriptor sets bind [`table`](MaterialTable::table)
-//! (`boyko_app::runner`'s boot-ordering contract). It is UNCONDITIONAL — never gated
-//! on `Assets::dirty_gen()` — see its doc for the boot-seed race a dirty-gen gate would
-//! reopen.
+//! The host never writes the table itself. Every byte reaches it through a recorded
+//! `staging → table` copy (the `material_upload` pass every render path declares right after
+//! `light_upload`), from the FENCED in-flight slot of the staging ring:
 //!
-//! [`flush_if_dirty`](MaterialTable::flush_if_dirty) is the steady-state per-frame
-//! refresh: it re-stages ONLY the fenced in-flight slot (never all FIF slots at once —
-//! the M(-1) `MaterialRegistry::set_material`'s finding: re-seeding every ring slot
-//! unconditionally is a latent host-write-before-fence WAR once a recorder reads a
-//! sibling slot). At this rung (A1) no caller ever mutates a material after boot, so
-//! this never actually runs — it exists fenced-correct now so a later rung (materials
-//! editable post-boot) is safe from day one.
+//! - **The full image** ([`write_full_image`](MaterialTable::write_full_image)): zero plus every
+//!   `Loaded` row, rebuilt from the CPU authority, as ONE region `[0, capacity·48)`. Owed on frame
+//!   0 ([`boot_seed`](MaterialTable::boot_seed) creates the table EMPTY), on a grow frame
+//!   ([`grow_if_needed`](MaterialTable::grow_if_needed) creates the grown table empty), and on the
+//!   first recorded frame after a frame that drained edits but never recorded their copy. The host
+//!   flag that tracks it is `boyko_app::material_gate`'s.
+//! - **The compact edited rows** (`crate::material_upload`): every other frame with an edit, the
+//!   stager's packed rows at `[0, k·48)` of the slot, copied at their runs.
 //!
-//! A follow-up rung wires the GPU-side staging→table copy into the recorder (the
-//! `boyko_rhi_vulkan` present pass that already copies the light table on a dirty
-//! frame); this type only provides the host-side staging + the dirty read
-//! (`seen_gen` vs. `Assets::dirty_gen()`) that copy will consult.
+//! Writing only the fenced slot is what keeps both race-free (the M(-1) `MaterialRegistry`'s
+//! finding: re-seeding every ring slot is a host-write-before-fence WAR once a recorder reads a
+//! sibling slot), and the graph's cross-frame seed-WAR orders a copy after the sibling frame's
+//! table reads.
 
 use boyko_ecs::ecs::core::asset::Assets;
 use boyko_ecs::ecs::core::resources::resource::NonSendResource;
@@ -71,18 +69,13 @@ pub struct MaterialTable {
     /// The device SSBO (`STORAGE | TRANSFER_DST`), hard-sized to
     /// `assets.high_water()` (NOT `assets.len()` — see [`boot_seed`](Self::boot_seed)'s
     /// doc) at [`boot_seed`](Self::boot_seed). `None` before the boot seed runs —
-    /// there is no valid binding target yet.
+    /// there is no valid binding target yet. Written ONLY by recorded copies (the module doc).
     table: Option<BoundBuffer>,
-    /// The per-in-flight-frame staging ring (`TRANSFER_SRC`, host-coherent) a future
-    /// recorder copies from on a dirty frame, mirroring the light table's staging ring
-    /// (`boyko_app::gpu_scene`'s `light_staging`). `None` before the boot seed runs.
+    /// The per-in-flight-frame staging ring (`TRANSFER_SRC`, host-coherent) the
+    /// `material_upload` copy reads from, mirroring the light table's staging ring
+    /// (`boyko_app::gpu_scene`'s `light_staging`): slot `s` is written only by a frame fenced on
+    /// `s`. Sized like the table, so it holds a full image. `None` before the boot seed runs.
     staging: Option<[BoundBuffer; FRAMES_IN_FLIGHT]>,
-    /// The `Assets::dirty_gen()` value this table's bytes were last refreshed from.
-    /// [`boot_seed`](Self::boot_seed) sets it to the assets' generation AFTER seeding
-    /// (not a hardcoded `0`): a fresh `Assets<T>` also starts at generation `0` (only
-    /// `get_mut` bumps it — `add` does not), so seeding this from the real value keeps
-    /// the invariant correct regardless of whether that changes later.
-    seen_gen: u64,
     /// Asset-streaming plan F7: the table's current row capacity (`assets.high_water()`
     /// at [`boot_seed`](Self::boot_seed), `next_power_of_two()`-doubled by
     /// [`grow_if_needed`](Self::grow_if_needed)). The steady-state `need <=
@@ -108,31 +101,24 @@ impl MaterialTable {
         Self {
             table: None,
             staging: None,
-            seen_gen: 0,
             capacity_rows: 0,
             rebind_pending: [false; FRAMES_IN_FLIGHT],
         }
     }
 
     /// Allocates the device table hard-sized to `assets.high_water()` materials (NOT
-    /// `assets.len()` — see below) and seeds it — UNCONDITIONALLY, never gated on
-    /// `assets.dirty_gen()` — with `assets`'s current CPU authority, plus the
-    /// per-in-flight-frame staging ring [`flush_if_dirty`](Self::flush_if_dirty)
-    /// writes into. Call ONCE, after every startup mint (`Assets::add`) landed and
-    /// BEFORE the first frame's descriptor sets bind [`table`](Self::table)
+    /// `assets.len()` — see below) plus the per-in-flight-frame staging ring the
+    /// `material_upload` copy reads from. Call ONCE, after every startup mint (`Assets::add`)
+    /// landed and BEFORE the first frame's descriptor sets bind [`table`](Self::table)
     /// (`boyko_app::runner`'s boot-ordering contract).
     ///
-    /// # Why unconditional (not gated on dirty_gen)
+    /// # Created empty (dynamic-materials DM1)
     ///
-    /// A dirty-gen GATE (`if assets.dirty_gen() != seen_gen { seed }`) would be wrong
-    /// here: a freshly-populated `Assets<Material>` starts at `dirty_gen() == 0`
-    /// (only `get_mut` bumps it — `add` does not), so a table whose `seen_gen` also
-    /// starts at `0` would see the comparison as "already caught up" and skip the seed
-    /// entirely, leaving the SSBO unseeded when the one-shot descriptor bind captures
-    /// it at the first `sync_gbuffer` — a black-material bug. This fn always seeds
-    /// directly from `assets`'s rows; `seen_gen` is set to `assets.dirty_gen()` AFTER,
-    /// purely so the FIRST [`flush_if_dirty`](Self::flush_if_dirty) call correctly
-    /// sees no edit pending.
+    /// Neither buffer is written here. Frame 0 owes the table its full image
+    /// ([`write_full_image`](Self::write_full_image) into the fenced staging slot, then the
+    /// recorded copy — the host's full-image flag starts `true`), and the copy is ordered before
+    /// every reader of the table on every render path, so no shader ever reads it unwritten. That
+    /// is also why the table can be device-local: nothing needs its mapping.
     ///
     /// # Why `high_water()`, not `len()` (the W1 fix)
     ///
@@ -146,15 +132,15 @@ impl MaterialTable {
     /// [`Assets::high_water`](boyko_ecs::ecs::core::asset::Assets::high_water) is the
     /// slot-row high-water mark (`records.len()`, including holes), so every live
     /// handle's index is unconditionally in range — no append-only assumption needed.
-    /// The buffer is zero-initialized before the per-row seed so an unreferenced hole
+    /// The full image is zero-filled before the per-row seed, so an unreferenced hole
     /// reads a benign all-zero record, never neighbor-row or uninitialized bytes.
     ///
     /// # Panics
     ///
-    /// - `debug_assert!`s it has not already run (a double-seed would leak the first
+    /// - `debug_assert!`s it has not already run (a double boot would leak the first
     ///   table/staging ring) and that `assets` is non-empty (the runner mints slot 0's
     ///   default material before this call).
-    /// - Panics (`expect`) on an RHI create/map failure — a device OOM at scene-boot
+    /// - Panics (`expect`) on an RHI create failure — a device OOM at scene-boot
     ///   time is a setup failure, not a recoverable per-frame error (the
     ///   [`MeshAssetsExt::register_mesh`](crate::mesh_assets::MeshAssetsExt::register_mesh)
     ///   precedent).
@@ -168,125 +154,95 @@ impl MaterialTable {
             "invariant: slot 0's default material is minted before boot_seed"
         );
 
-        let stride = core::mem::size_of::<MaterialGpu>();
-        let bytes = (assets.high_water() * stride) as u64;
+        let capacity = assets.high_water();
+        self.table = Some(Self::create_table(ctx, capacity));
+        self.staging = Some(Self::create_staging(ctx, capacity));
+        // Asset-streaming plan F7: `capacity_rows` starts at the boot high-water mark;
+        // `rebind_pending` starts all-`false` (nothing to repoint — `table()`/`staging`
+        // are being bound for the FIRST time, not superseding a prior buffer).
+        self.capacity_rows = capacity as u32;
+    }
 
-        let table = RhiDevice::create_buffer(
+    /// The device table buffer for `rows` materials (`STORAGE | TRANSFER_DST`), created EMPTY
+    /// — its bytes arrive only through the recorded `material_upload` copy.
+    fn create_table(ctx: &VulkanContext, rows: usize) -> BoundBuffer {
+        RhiDevice::create_buffer(
             ctx,
             &BufferDesc {
-                size: bytes,
+                size: (rows * core::mem::size_of::<MaterialGpu>()) as u64,
                 usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
                 location: MemoryLocation::HostVisibleCoherent,
             },
         )
-        .expect("invariant: material table storage buffer create");
-        let mapped = RhiDevice::buffer_mapped_ptr(ctx, &table)
-            .expect("invariant: host-visible material table is mapped");
-        // SAFETY: `mapped` targets `bytes == assets.high_water() * stride` valid
-        // mapped host-coherent bytes (the buffer was just created with exactly that
-        // size); no GPU work is in flight yet (boot-time seeding).
-        unsafe {
-            core::ptr::write_bytes(mapped.as_ptr(), 0, bytes as usize);
-            Self::seed_rows(mapped.as_ptr(), assets, stride);
-        }
+        .expect("invariant: material table storage buffer create")
+    }
 
-        let staging: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
-            let b = RhiDevice::create_buffer(
+    /// The per-in-flight-frame staging ring for a `rows`-material table (`TRANSFER_SRC`,
+    /// host-coherent, persistently mapped), sized to hold a full image. Not written here: each
+    /// slot is written only by a frame fenced on it.
+    fn create_staging(ctx: &VulkanContext, rows: usize) -> [BoundBuffer; FRAMES_IN_FLIGHT] {
+        core::array::from_fn(|_| {
+            RhiDevice::create_buffer(
                 ctx,
                 &BufferDesc {
-                    size: bytes,
+                    size: (rows * core::mem::size_of::<MaterialGpu>()) as u64,
                     usage: BufferUsage::TRANSFER_SRC,
                     location: MemoryLocation::HostVisibleCoherent,
                 },
             )
-            .expect("invariant: material staging ring slot create");
-            let mapped = RhiDevice::buffer_mapped_ptr(ctx, &b)
-                .expect("invariant: host-visible material staging is mapped");
-            // SAFETY: same contract as the table seed above — `bytes`-sized, boot-time.
-            unsafe {
-                core::ptr::write_bytes(mapped.as_ptr(), 0, bytes as usize);
-                Self::seed_rows(mapped.as_ptr(), assets, stride);
-            }
-            b
-        });
-
-        self.table = Some(table);
-        self.staging = Some(staging);
-        self.seen_gen = assets.dirty_gen();
-        // Asset-streaming plan F7: `capacity_rows` starts at the boot high-water mark;
-        // `rebind_pending` starts all-`false` (nothing to repoint — `table()`/`staging`
-        // are being bound for the FIRST time, not superseding a prior buffer).
-        self.capacity_rows = assets.high_water() as u32;
+            .expect("invariant: material staging ring slot create")
+        })
     }
 
-    /// Re-stages `assets`'s CURRENT bytes into ONLY the fenced in-flight slot
-    /// (`token.slot()`) if `assets.dirty_gen()` has advanced since this table last saw
-    /// it — the per-frame steady-state refresh. Does nothing (no host write at all) on
-    /// an up-to-date generation, mirroring the light table's no-rewrite idle
-    /// invariant.
+    /// The staging ring's slot `slot` — the copy source of this frame's `material_upload`, and
+    /// the destination of [`write_full_image`](Self::write_full_image) and the compact row upload
+    /// (`crate::upload_material_rows`). Always the CURRENT ring (a grow replaces every slot).
     ///
-    /// # Why the fenced slot ONLY (not every ring slot)
-    ///
-    /// M(-1)'s `MaterialRegistry::set_material` re-seeded every FIF staging slot
-    /// unconditionally on every edit — harmless while no recorder ever read the ring,
-    /// but a latent host-write-before-fence WAR the moment a recorder copies a sibling
-    /// slot's staging on the GPU timeline. Writing ONLY `token.slot()` restores the
-    /// token discipline every other per-slot host writer in this crate follows
-    /// ([`upload_light_table`](crate::upload_light_table) /
-    /// [`upload_camera_ring`](crate::upload_camera_ring)): the borrowed
-    /// [`FrameWriteToken`] proves THIS slot's in-flight fence was waited this frame,
-    /// so the slot's previous occupant's recorded copy (if any) already retired.
-    ///
-    /// At rung A1 no caller ever mutates `Assets<Material>` after
-    /// [`boot_seed`](Self::boot_seed) (only slot 0 is ever registered), so
-    /// `assets.dirty_gen()` never advances and this never actually re-stages — it is
-    /// implemented fenced-correct now so a later rung (materials editable post-boot)
-    /// is safe from day one.
+    /// # Panics
+    /// Panics if called before [`boot_seed`](Self::boot_seed).
+    #[inline]
+    pub fn staging_slot(&self, slot: usize) -> &BoundBuffer {
+        &self
+            .staging
+            .as_ref()
+            .expect("invariant: boot_seed runs before staging_slot() is read")[slot]
+    }
+
+    /// Writes the table's FULL image — zero, then every `Loaded` row of `assets` at its absolute
+    /// row offset ([`seed_rows`](Self::seed_rows), the TEXTURED-flag derive included) — into the
+    /// fenced staging slot `token.slot()`, and returns its byte length `capacity·48`: the one
+    /// region `[0, capacity·48)` the caller then copies. Owed on frame 0, on a grow frame, and
+    /// after a frame whose edits were drained but never copied (`boyko_app::material_gate`).
     ///
     /// # Panics
     ///
-    /// - `expect`s [`boot_seed`](Self::boot_seed) already ran — no staging ring exists
-    ///   otherwise, a caller bug.
-    /// - Hard `assert!`s `assets.high_water() * size_of::<MaterialGpu>()` (NOT
-    ///   `assets.len() * size_of::<MaterialGpu>()` — see [`boot_seed`](Self::boot_seed)'s
-    ///   W1 note) fits the staging slot's size before the memcpy (the
-    ///   [`upload_light_table`](crate::upload_light_table) discipline — a bound check
-    ///   that gates unsafe memory access must not compile out in release).
-    pub fn flush_if_dirty(&mut self, assets: &Assets<Material>, token: &FrameWriteToken) {
-        let generation = assets.dirty_gen();
-        if generation == self.seen_gen {
-            return;
-        }
-        self.seen_gen = generation;
-
-        let staging = self
-            .staging
-            .as_ref()
-            .expect("invariant: flush_if_dirty runs after boot_seed");
+    /// - `expect`s [`boot_seed`](Self::boot_seed) already ran.
+    /// - Hard `assert!`s `assets.high_water() <= capacity` (the caller grows first) and that the
+    ///   image fits the slot — the bound that gates the unsafe writes must not compile out.
+    pub fn write_full_image(&self, token: &FrameWriteToken, assets: &Assets<Material>) -> u64 {
         let stride = core::mem::size_of::<MaterialGpu>();
-        let slot = &staging[token.slot()];
-        let mapped = slot
-            .mapped
-            .expect("invariant: the material staging slot is host-visible mapped");
-        let bytes = (assets.high_water() * stride) as u64;
+        let bytes = self.capacity_rows as usize * stride;
+        let slot = self.staging_slot(token.slot());
         assert!(
-            bytes <= slot.size,
-            "material table overflow: {bytes} high-water bytes exceed the {}-byte \
-             staging slot (asset-streaming plan F7: `MaterialTable::grow_if_needed` \
-             reallocates this staging ring in lockstep with the device table on every \
-             post-boot mint that exceeds capacity — a live overflow here is a caller- \
-             ordering bug that skipped the grow, not a capacity limit)",
+            assets.high_water() <= self.capacity_rows as usize && bytes as u64 <= slot.size,
+            "material full image overflow: high-water {} rows, capacity {} rows ({bytes} bytes), \
+             staging slot {} bytes — a mint past the capacity reached the upload without the grow",
+            assets.high_water(),
+            self.capacity_rows,
             slot.size
         );
-        // SAFETY: `mapped` targets >= `slot.size` valid mapped host-coherent bytes
-        // (`BoundBuffer`'s own contract), and `bytes <= slot.size` is hard-asserted
-        // above — every write `seed_rows` performs stays in range (it writes at
-        // `handle.index() * stride < assets.high_water() * stride == bytes`). The
-        // borrowed `FrameWriteToken` + the slot-identity contract
-        // (`staging[token.slot()]`) prove this slot's in-flight fence was waited THIS
-        // frame, so the previous occupant's recorded staging→table copy (if any)
-        // already retired — race-free, lock-free.
-        unsafe { Self::seed_rows(mapped.as_ptr(), assets, stride) };
+        let mapped = slot.mapped.expect("invariant: the material staging slot is host-visible mapped");
+        // SAFETY: `mapped` targets >= `slot.size` valid mapped host-coherent bytes (`BoundBuffer`'s
+        // own contract) and `bytes <= slot.size` is hard-asserted above, so the zero-fill is in
+        // range; `seed_rows` writes only rows `< high_water <= capacity_rows`, inside `bytes`
+        // (asserted above). The borrowed `FrameWriteToken` + the slot identity (`staging[token.
+        // slot()]`) prove this slot's in-flight fence was waited THIS frame, so the previous
+        // occupant's recorded copy already retired — race-free, lock-free.
+        unsafe {
+            core::ptr::write_bytes(mapped.as_ptr(), 0, bytes);
+            Self::seed_rows(mapped.as_ptr(), assets, stride);
+        }
+        bytes as u64
     }
 
     /// The device-resident material SSBO (vocab binding 7 / resolve binding 4). Always
@@ -347,11 +303,12 @@ impl MaterialTable {
     }
 
     /// Grows the device table + FIF staging ring to `next_power_of_two(assets.
-    /// high_water())` iff that exceeds the table's current row capacity, re-seeding
-    /// the new buffers from `assets` and routing the superseded ones through
-    /// `retired` at `epoch + RETIRE_DELAY` (asset-streaming plan F7 §7.1). Returns
-    /// `true` iff a grow happened (the caller then repoints the fenced slot to
-    /// [`table`](Self::table)).
+    /// high_water())` iff that exceeds the table's current row capacity, creating the new
+    /// buffers EMPTY and routing the superseded ones through `retired` at `epoch +
+    /// RETIRE_DELAY` (asset-streaming plan F7 §7.1). Returns `true` iff a grow happened: the
+    /// caller then repoints the fenced slot to [`table`](Self::table) AND owes the grown table
+    /// its full image this frame ([`write_full_image`](Self::write_full_image) — design F3; the
+    /// frame's compact runs alone would leave every row they do not touch unseeded).
     ///
     /// # Steady-state cost
     ///
@@ -362,35 +319,29 @@ impl MaterialTable {
     /// out this call requires; this re-check is a defensive belt-and-suspenders, not
     /// the steady-state gate anymore.
     ///
-    /// # Zero-fill before re-seed (O2)
+    /// # The grown table is filled from the authority, never copied from the old buffer
     ///
-    /// The new table/staging buffers are `write_bytes(0)`-cleared BEFORE
-    /// `seed_rows` writes the live rows — this covers both the
-    /// newly-grown hole `[old_cap, new_cap)` and any freed (`Retiring`/`Vacant`) slot
-    /// below `old_cap`, mirroring [`boot_seed`](Self::boot_seed)'s own zero-then-seed
-    /// order. `seed_rows` iterates [`Assets::iter`](boyko_ecs::ecs::core::asset::Assets::iter),
-    /// which yields ONLY `Loaded` rows (`assets.rs` — verified, not merely believed) —
-    /// a HARD precondition of `seed_rows` this re-seed relies on exactly like
-    /// `boot_seed` does: it never forms `&MaterialGpu` over an uninitialized or
+    /// The full image ([`write_full_image`](Self::write_full_image)) zero-fills the whole
+    /// `[0, new_cap)` range before `seed_rows` writes the `Loaded` rows, which covers the
+    /// newly-grown hole `[old_cap, new_cap)` and any freed (`Retiring`/`Vacant`) row below
+    /// `old_cap`. `seed_rows` iterates [`Assets::iter`](boyko_ecs::ecs::core::asset::Assets::iter),
+    /// which yields ONLY `Loaded` rows, so it never forms `&MaterialGpu` over an uninitialized or
     /// `Retiring` slot.
     ///
-    /// # No device→device copy; staging reallocated whole (O3, deferred)
+    /// # Every staging slot is replaced at once (DM1 cut C-5)
     ///
-    /// The table is re-seeded from the CPU authority (`assets`), never copied from the
-    /// old device buffer. The staging ring is not bound in any descriptor set and —
-    /// until a staging→table GPU copy is wired (see this type's module doc) — is read
-    /// by nothing, so ALL FIF staging slots may be reallocated in this one call
-    /// (unlike the table, which needs the per-slot `rebind_pending` discipline because
-    /// it IS bound). When that copy lands, staging must adopt the SAME per-slot
-    /// fenced-grow discipline as the table — flagged here so a future editor does not
-    /// silently widen this reallocate-all-slots shortcut past its precondition.
+    /// The staging ring is bound in no descriptor set; only recorded copies reference it. The
+    /// superseded slots are retired at `epoch + RETIRE_DELAY` like the table, so the sibling
+    /// in-flight frame's already-recorded copy still reads a live buffer, and every later frame
+    /// writes and copies from the NEW slot of its own fence. A per-slot fenced staging grow is
+    /// therefore unnecessary.
     ///
     /// # Panics
     ///
     /// Hard `assert!`s `new_cap <= MAX_MATERIAL_ROWS` — [`MaterialId`](crate::material::MaterialId)
     /// is a 16-bit index, so a table beyond `1 << 16` rows is an addressing failure,
     /// not a mere sanity bound (this assert MUST NOT be downgraded to `debug_assert!`).
-    /// Panics (`expect`) on an RHI create/map failure, mirroring
+    /// Panics (`expect`) on an RHI create failure, mirroring
     /// [`boot_seed`](Self::boot_seed) — a device OOM on a post-boot mint is a setup
     /// failure, not a recoverable per-frame error.
     pub fn grow_if_needed(
@@ -414,49 +365,8 @@ impl MaterialTable {
              more rows"
         );
 
-        let stride = core::mem::size_of::<MaterialGpu>();
-        let bytes = (new_cap * stride) as u64;
-
-        let new_table = RhiDevice::create_buffer(
-            ctx,
-            &BufferDesc {
-                size: bytes,
-                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
-                location: MemoryLocation::HostVisibleCoherent,
-            },
-        )
-        .expect("invariant: grown material table storage buffer create");
-        let mapped = RhiDevice::buffer_mapped_ptr(ctx, &new_table)
-            .expect("invariant: host-visible grown material table is mapped");
-        // SAFETY: `mapped` targets `bytes == new_cap * stride` valid mapped host-
-        // coherent bytes (the buffer was just created with exactly that size);
-        // `write_bytes(0)` runs BEFORE `seed_rows` (O2 — holes `[old_cap, new_cap)`
-        // and any freed slot read benign zero); no GPU work references this fresh
-        // allocation yet.
-        unsafe {
-            core::ptr::write_bytes(mapped.as_ptr(), 0, bytes as usize);
-            Self::seed_rows(mapped.as_ptr(), assets, stride);
-        }
-
-        let new_staging: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
-            let b = RhiDevice::create_buffer(
-                ctx,
-                &BufferDesc {
-                    size: bytes,
-                    usage: BufferUsage::TRANSFER_SRC,
-                    location: MemoryLocation::HostVisibleCoherent,
-                },
-            )
-            .expect("invariant: grown material staging ring slot create");
-            let mapped = RhiDevice::buffer_mapped_ptr(ctx, &b)
-                .expect("invariant: host-visible grown material staging is mapped");
-            // SAFETY: same contract as the grown table's seed above.
-            unsafe {
-                core::ptr::write_bytes(mapped.as_ptr(), 0, bytes as usize);
-                Self::seed_rows(mapped.as_ptr(), assets, stride);
-            }
-            b
-        });
+        let new_table = Self::create_table(ctx, new_cap);
+        let new_staging = Self::create_staging(ctx, new_cap);
 
         let old_table = self
             .table
@@ -506,9 +416,9 @@ impl MaterialTable {
     ///
     /// # `MATERIAL_FLAG_TEXTURED` is RE-DERIVED here, not copied verbatim
     ///
-    /// This is the ONE host→GPU copy boundary every `MaterialTable` write path
-    /// ([`boot_seed`](Self::boot_seed), [`flush_if_dirty`](Self::flush_if_dirty),
-    /// [`grow_if_needed`](Self::grow_if_needed)) funnels through, so it is also the ONE
+    /// Every row the GPU table receives passes [`derive_gpu_row`]: the full image through this fn
+    /// ([`write_full_image`](Self::write_full_image)), the compact edited rows through the stager
+    /// (`crate::material_upload`). So that one derive is the ONE
     /// place [`MATERIAL_FLAG_TEXTURED`] is made authoritative: the copied `mrr[3]` flags
     /// OR the bit in when `textures.any()` and AND it out otherwise, regardless of
     /// whatever bit `material.gpu.mrr[3]` already carries — a full derive, not a partial
@@ -525,8 +435,8 @@ impl MaterialTable {
     /// valid, writable, mapped host-coherent bytes (NOT `assets.len() * stride` — a
     /// live handle's index can exceed the live count the moment a hole exists; see
     /// [`boot_seed`](Self::boot_seed)'s W1 note), and that no in-flight GPU work reads
-    /// that range concurrently (boot-time seeding, or a fenced staging slot whose
-    /// previous occupant's copy already retired).
+    /// that range concurrently (a fenced staging slot whose previous occupant's copy already
+    /// retired).
     unsafe fn seed_rows(dst: *mut u8, assets: &Assets<Material>, stride: usize) {
         let high_water = assets.high_water();
         for (handle, material) in assets.iter() {
@@ -680,7 +590,7 @@ mod tests {
     /// only exercises `needs_grow`/`rebind_pending`/`take_rebind_pending`/the
     /// capacity arithmetic, none of which reads them.
     fn table_with(capacity_rows: u32, rebind_pending: [bool; FRAMES_IN_FLIGHT]) -> MaterialTable {
-        MaterialTable { table: None, staging: None, seen_gen: 0, capacity_rows, rebind_pending }
+        MaterialTable { table: None, staging: None, capacity_rows, rebind_pending }
     }
 
     fn dummy_buffer(id: u64) -> BoundBuffer {

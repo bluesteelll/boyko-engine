@@ -101,6 +101,15 @@ pub(crate) struct FrameMeta {
     pub origin_mode: Option<u32>,
     /// The uploaded `SHADOW_RASTER_FWD.xyz` (hwrt frames); `None` on software.
     pub raster_fwd: Option<[f32; 3]>,
+    /// Dynamic-materials DM1: `material_upload` passes the RECORDER recorded this frame (`0` or
+    /// `1`) — counted where the pass's barriers are emitted, so a pass declared with no region
+    /// still counts (the idle-frame gate, critique W3).
+    pub mat_pass: u32,
+    /// Dynamic-materials DM1: copy regions the recorder handed to `vkCmdCopyBuffer` this frame.
+    pub mat_regions: u32,
+    /// Dynamic-materials DM1: `true` iff the host planned the FULL image this frame (frame 0, a
+    /// grow, or the frame after a lost edit) rather than the compact edited rows.
+    pub mat_full: bool,
 }
 
 /// The hwrt half of a frame's state line — what the runner's 5d''' step uploaded
@@ -524,7 +533,7 @@ impl HostDump {
         // `String` never fails `fmt::Write`.
         let _ = write!(
             self.line_buf,
-            "hostdump frame={} slot={} phase={} jitter_armed={} csm_armed={} header_csm={} light_uploaded={} seed={} origin_mode={} raster_fwd={} file={}",
+            "hostdump frame={} slot={} phase={} jitter_armed={} csm_armed={} header_csm={} light_uploaded={} seed={} origin_mode={} raster_fwd={} mat_pass={} mat_regions={} mat_full={} file={}",
             meta.frame_index,
             meta.slot,
             meta.jitter_phase,
@@ -535,6 +544,9 @@ impl HostDump {
             OptU32(meta.seed),
             OptU32(meta.origin_mode),
             OptVec3(meta.raster_fwd),
+            meta.mat_pass,
+            meta.mat_regions,
+            u8::from(meta.mat_full),
             file_name
         );
         boyko_log::info!(boyko_log::Host, "{}", boyko_log::dsp!(self.line_buf, 256));
@@ -648,6 +660,9 @@ mod tests {
             seed: None,
             origin_mode: None,
             raster_fwd: None,
+            mat_pass: 0,
+            mat_regions: 0,
+            mat_full: false,
         }
     }
 

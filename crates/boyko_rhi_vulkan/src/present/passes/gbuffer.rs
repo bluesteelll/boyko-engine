@@ -1365,8 +1365,8 @@ impl Renderer<'_> {
                 dst_offset: 0,
                 size: scene.light_upload_bytes,
             };
-            // SAFETY: recording is open; the copy names the live host-coherent staging +
-            // device-local table buffers; the copy region spans `[0, light_upload_bytes)`
+            // SAFETY: recording is open; the copy names the live host-coherent staging + light
+            // table buffers; the copy region spans `[0, light_upload_bytes)`
             // ≤ both buffer sizes (caller contract — the table is sized for MAX_LIGHTS).
             // The seed-WAR barrier recorded ABOVE orders this transfer write after the
             // sibling frame's pipelined table reads; the readers' own graph passes order
@@ -1380,6 +1380,27 @@ impl Renderer<'_> {
                     1,
                     &region,
                 );
+            }
+        }
+
+        // === Dynamic-materials DM1: the material-table upload, at the position
+        // `declare_deferred_graph` declared it (right after `light_upload`, before the marcher,
+        // `shadow_vis` and the resolve read the table). Recorded ONLY on an upload frame: the graph
+        // pass's cross-frame seed-WAR, then ONE multi-region staging → table copy. ===
+        if let Some(material_upload) = self.gbuffer_pass_plan.as_ref().and_then(|p| p.material_upload) {
+            let upload = scene
+                .material_upload
+                .expect("invariant: the material_upload pass is declared iff scene.material_upload is Some");
+            ts.cmd();
+            self.record_graph_pass(material_upload, cmd, targets, scene, fi);
+            if !upload.regions.is_empty() {
+                ts.cmd();
+            }
+            // SAFETY: recording is open, outside any render scope; `upload.staging` and
+            // `scene.material_table` are live buffers of this device (the scene's contract), and every
+            // region lies inside both (`MaterialUploadScene`'s contract).
+            unsafe {
+                self.record_material_copy(cmd, scene.material_table, &upload);
             }
         }
 

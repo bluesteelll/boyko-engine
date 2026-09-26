@@ -415,6 +415,58 @@ pub unsafe fn zero_instance_materials(token: &FrameWriteToken, ring_slot: &Bound
     }
 }
 
+/// Dynamic-materials DM1 (design F1 A4): copies this frame's compact edited material rows
+/// (`MaterialUploadStaging::rows`, packed in drain order) into `[0, rows.len()·48)` of ONE material
+/// staging slot — the bytes this frame's `material_upload` runs copy from. The `light_table`
+/// staging idiom ([`upload_light_table`]): the fenced slot only, one `memcpy`, no allocation.
+///
+/// The slot invariant (design F1) holds by construction: every run this frame records reads only
+/// `[0, rows.len()·48)` of this slot, which this call just wrote.
+///
+/// # Panics
+///
+/// Panics if the rows exceed the slot's size — the stager stages rows `< high_water <= capacity`,
+/// and the slot is sized `capacity·48`, so an overflow is a caller-ordering bug that skipped a
+/// grow, never a clamp.
+///
+/// # Safety
+///
+/// `staging_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+/// (`HostVisibleCoherent`) whose `mapped` pointer targets at least `staging_slot.size` valid,
+/// persistently-mapped bytes, and it is the FENCED slot's buffer — `MaterialTable::staging_slot(
+/// token.slot())` — so the slot's previous occupant's recorded copy has retired.
+pub unsafe fn upload_material_rows(
+    token: &FrameWriteToken,
+    staging_slot: &BoundBuffer,
+    rows: &[crate::material::MaterialGpu],
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    let bytes = core::mem::size_of_val(rows);
+    assert!(
+        bytes as u64 <= staging_slot.size,
+        "material staging overflow: {} staged rows ({bytes} bytes) exceed the {}-byte slot — a row \
+         past the table's capacity was staged without the grow that owes the full image",
+        rows.len(),
+        staging_slot.size
+    );
+    let mapped = staging_slot
+        .mapped
+        .expect("invariant: the material staging slot is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `staging_slot.size` valid mapped
+    // host-coherent bytes, and `bytes <= staging_slot.size` is hard-asserted above — the write is
+    // in-bounds. `MaterialGpu` is `#[repr(C, align(16))]` over three `[f32; 4]` lanes, 48 bytes with
+    // no padding (const-asserted in `material.rs`), so every byte of `rows` is initialized and may
+    // be copied as bytes. The borrowed `FrameWriteToken` + the slot-identity contract prove this
+    // slot's in-flight fence was waited THIS frame (the sibling frame copies from the other slot)
+    // — race-free, lock-free. `rows` is the staging resource's own column, distinct from the
+    // mapped slot.
+    unsafe {
+        core::ptr::copy_nonoverlapping(rows.as_ptr().cast::<u8>(), mapped.as_ptr(), bytes);
+    }
+}
+
 /// Textured-PBR rung T6c: uploads the gathered per-instance
 /// [`MeshRenderScratch::material_tex`] lane (base_color + material id + five bindless
 /// texture slots + the metallic/roughness fallback scalars, a

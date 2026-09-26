@@ -12,6 +12,57 @@
 //! tracks the high-water row count written since the slot was last all-zero, and zero-fills that
 //! prefix once on the falling edge. Zero is exact: on a non-live frame every instance's
 //! material id is 0.
+//!
+//! **The material-table upload plan (design F1/F3, cut C-4).** Each frame the runner copies ONE of:
+//! nothing; this frame's compact edited rows (`MaterialUploadStaging`, drained by the stager);
+//! or the FULL image of the table, rebuilt from the CPU authority. The full image is owed on frame
+//! 0 (the table is created empty), on a grow frame (the grown buffer is created empty — this
+//! frame's runs alone would leave every untouched row unseeded), and on the first recorded frame
+//! after a frame that drained edits but never recorded their copy (a minimized window, or a
+//! swapchain-recreate skip): the stager already cleared those marks, so only a rebuild from the
+//! authority carries them.
+
+/// What the runner copies into the material table this frame ([`material_upload_plan`]'s
+/// verdict).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaterialUploadPlan {
+    /// Nothing staged and no full image owed: no staging write, no pass declared, no copy.
+    Idle,
+    /// This frame's compact edited rows, copied at their runs.
+    Compact,
+    /// The full image `[0, capacity·48)`, rebuilt from the authority.
+    Full,
+}
+
+/// Decides this frame's material-table upload from the host's full-image-owed flag and the number
+/// of rows the stager staged this frame. A full image supersedes the compact rows: it is built
+/// after the stager ran, from the same authority, so it already carries them.
+#[inline]
+pub fn material_upload_plan(full_pending: bool, staged_rows: usize) -> MaterialUploadPlan {
+    if full_pending {
+        MaterialUploadPlan::Full
+    } else if staged_rows > 0 {
+        MaterialUploadPlan::Compact
+    } else {
+        MaterialUploadPlan::Idle
+    }
+}
+
+/// The full-image-owed flag after a frame that planned `plan` and reached the renderer.
+/// `recorded` is `true` iff the frame's commands were recorded and submitted (the render call
+/// returned `Ok(true)`). A frame that planned a copy and did not record it owes a full image: its
+/// staged rows are gone. A recorded frame owes nothing — a planned full image was just copied.
+#[inline]
+pub fn full_pending_after(plan: MaterialUploadPlan, recorded: bool) -> bool {
+    plan != MaterialUploadPlan::Idle && !recorded
+}
+
+/// The full-image-owed flag after a frame skipped BEFORE any upload (a minimized window): the
+/// stager drained `staged_rows` edits into staging this frame will never copy.
+#[inline]
+pub fn full_pending_after_skip(full_pending: bool, staged_rows: usize) -> bool {
+    full_pending || staged_rows > 0
+}
 
 /// What the runner does to the fenced slot's `PerInstanceMaterial` ring this frame
 /// ([`pm_ring_action`]'s verdict).
@@ -100,6 +151,66 @@ mod tests {
         // Idle from then on.
         assert_eq!(pm_ring_action(false, &mut hw[0], 9), PmRingAction::Idle);
         assert_eq!(pm_ring_action(false, &mut hw[1], 9), PmRingAction::Idle);
+    }
+
+    /// Frame 0 (the flag starts `true` because the table is created empty) and a grow frame (the
+    /// grow sets the flag) copy the full image, whatever the stager staged.
+    #[test]
+    fn an_owed_full_image_supersedes_the_compact_rows() {
+        assert_eq!(material_upload_plan(true, 0), MaterialUploadPlan::Full);
+        assert_eq!(material_upload_plan(true, 7), MaterialUploadPlan::Full);
+    }
+
+    #[test]
+    fn staged_rows_alone_give_a_compact_upload_and_nothing_gives_nothing() {
+        assert_eq!(material_upload_plan(false, 1), MaterialUploadPlan::Compact);
+        assert_eq!(material_upload_plan(false, 0), MaterialUploadPlan::Idle);
+    }
+
+    /// A recorded frame owes nothing afterwards — including the full image it just copied.
+    #[test]
+    fn a_recorded_frame_clears_the_flag() {
+        for plan in [MaterialUploadPlan::Idle, MaterialUploadPlan::Compact, MaterialUploadPlan::Full] {
+            assert!(!full_pending_after(plan, true), "{plan:?} recorded");
+        }
+    }
+
+    /// Cut C-4: a frame that planned a copy and did not record it (a recreate skip) lost its staged
+    /// rows, so the next recorded frame owes the full image; an idle skip owes nothing.
+    #[test]
+    fn an_unrecorded_frame_that_planned_a_copy_owes_the_full_image() {
+        assert!(full_pending_after(MaterialUploadPlan::Compact, false));
+        assert!(full_pending_after(MaterialUploadPlan::Full, false));
+        assert!(!full_pending_after(MaterialUploadPlan::Idle, false));
+    }
+
+    /// Cut C-4: a minimized frame skips before any upload, after the stager drained its edits.
+    #[test]
+    fn a_minimized_skip_with_staged_rows_owes_the_full_image() {
+        assert!(full_pending_after_skip(false, 3));
+        assert!(!full_pending_after_skip(false, 0));
+        assert!(full_pending_after_skip(true, 0), "an owed full image stays owed");
+    }
+
+    /// The protocol over a run: frame 0 full; idle; an edit; an edit frame lost to a recreate skip;
+    /// the next frame repays it with a full image; idle again.
+    #[test]
+    fn the_flag_carries_a_lost_edit_to_the_next_recorded_frame() {
+        let mut pending = true;
+        let frames: [(usize, bool, MaterialUploadPlan); 6] = [
+            (4, true, MaterialUploadPlan::Full),
+            (0, true, MaterialUploadPlan::Idle),
+            (2, true, MaterialUploadPlan::Compact),
+            (1, false, MaterialUploadPlan::Compact),
+            (0, true, MaterialUploadPlan::Full),
+            (0, true, MaterialUploadPlan::Idle),
+        ];
+        for (i, (staged, recorded, want)) in frames.into_iter().enumerate() {
+            let plan = material_upload_plan(pending, staged);
+            assert_eq!(plan, want, "frame {i}");
+            pending = full_pending_after(plan, recorded);
+        }
+        assert!(!pending);
     }
 
     /// A rising edge after a falling edge starts a fresh high-water record.
