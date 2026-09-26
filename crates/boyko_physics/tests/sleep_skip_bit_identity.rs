@@ -46,6 +46,30 @@
 //!   configuration and on the Tree with its brute path off (the SDF pipeline's tree seam);
 //! * S5, a coupled soft body landing on a held pile (Grid forced).
 //!
+//! # Mid-step writes (L10 D9b, `levers/L10-sleeping/10-DESIGN-D9B.md`)
+//!
+//! Two writers run in every world of every arm: `mid_early` between the broadphase and the
+//! narrowphase, `mid_late` between the last manifold producer and the solve — the places a
+//! gameplay system with no ordering against the physics block can land. A script queues writes in
+//! them ([`MidWrites`]); each records what it saw before its own write.
+//!
+//! * Suite A (`d9b_defer_*`): deferral equivalence. A world M takes a write inside step `at`'s
+//!   window, a world B takes the same write at the next step boundary, and the two must match
+//!   after every step; a control C, which takes the write before step `at`, must differ from B,
+//!   or the arm is void.
+//! * Suite B (`s3_mid_step_*`, `s4_mid_step_*`): the lockstep compare above under window writes.
+//!
+//! The rig also runs the pipelines without `IslandSleep` (the reference solver), where the
+//! observation keeps the bodies, the views and the soft particles.
+//!
+//! # Warm start as a latched input (L10 D5b, `levers/L10-sleeping/11-DESIGN-D5B.md`)
+//!
+//! A solve runs warm iff the solver's setup flag AND the latched `PhysicsConfig::warm_start` are
+//! both true. Arms A (a boundary toggle while held) and B (the same toggle in the window) run in
+//! lockstep; C is the deferral driver's; D runs six worlds of (setup flag, config) and requires the
+//! four with a false half to match exactly; E drives both solvers directly and pins that a direct
+//! drive resumes after a cold step instead of taking a `Reset`.
+//!
 //! # Anti-vacuity
 //!
 //! Each test states what it must observe (held rows, restores by rule, cross copies, restore
@@ -76,17 +100,22 @@ use boyko_threadpool::ThreadPoolBuilder;
 use boyko_physics::components::{
     Collider, ColliderShape, Kinematic, RigidBody, RigidBodyMass, Sensor, Simulated,
 };
-use boyko_physics::manifold::{BodyIndex, Manifold};
+use boyko_physics::manifold::{BodyIndex, ContactPoint, Manifold, SDF_SENTINEL};
 use boyko_physics::math::{Mat3, Quat, Vec3};
-use boyko_physics::plugin::{add_physics_sdf, add_physics_soft, add_physics_systems};
+use boyko_physics::plugin::{
+    add_physics_sdf, add_physics_soft, add_physics_soft_colored, add_physics_systems,
+};
 use boyko_physics::broadphase_tree::{BroadphaseTree, TreeDiag, all_pairs_into};
 use boyko_physics::resources::{
-    BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
+    BodyState, BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
     PairTagProbe, PhysicsConfig, SdfNarrowphaseKernel, SleepSkip, SolverScratch,
 };
 use boyko_physics::sdf_query::SdfField;
 use boyko_physics::sleep_sets::{SleepRuleCounts, SleepSets, SleepSkipStats};
-use boyko_physics::solver::{ColoredSoftStepSolver, DefaultRigidSolver, WarmSeedStats};
+use boyko_physics::soft::SoftBody;
+use boyko_physics::solver::{
+    ColoredSoftStepSolver, DefaultRigidSolver, SoftStepSolver, WarmSeedStats,
+};
 use boyko_physics::systems::physics_gather;
 
 // ── Constants ──────────────────────────────────────────────────────────────────────────────
@@ -342,6 +371,13 @@ enum Pipeline {
     Sdf,
     /// `add_physics_soft::<DefaultRigidSolver>(.., coupling = true)`.
     SoftCoupled,
+    /// `add_physics_soft::<DefaultRigidSolver>(.., coupling = false)`.
+    Soft,
+    /// `add_physics_soft_colored::<DefaultRigidSolver>`.
+    SoftColored,
+    /// `add_physics_soft::<SoftStepSolver>(.., coupling = true)`: the reference broadphase and
+    /// solve, no `IslandSleep`; sleeping off only.
+    SoftCoupledRef,
 }
 
 /// The configuration knobs a variant sets on top of the pipeline's defaults.
@@ -467,31 +503,85 @@ fn oracle_pairs(
     probe.mismatches += u64::from(probe.oracle.pairs() != pairs.pairs());
 }
 
-/// A configuration write a script schedules for the middle of a step (review W1 of L10 C3c,
-/// design 04 D9): [`mid_step_config`] applies it between the broadphase and the narrowphase, where
-/// a gameplay system with no ordering against the physics block can run, so every later stage of
-/// the step runs after the write. Inert while both fields are `None`.
+/// Writes a script queues for the middle of a step (review W1 of L10 C3c; design 10, Tests A).
+/// Each writer drains its own queue — [`mid_early`] between the broadphase and the narrowphase,
+/// [`mid_late`] between the last manifold producer and the solve — where a gameplay system with no
+/// ordering against the physics block can run. Both writers are registered in every world, so
+/// every world of an arm runs the same schedule graph; a writer with nothing queued only records
+/// what it saw.
+#[derive(Default)]
+struct MidWrites {
+    /// A configuration write, taken by the next run.
+    cfg: Option<fn(&mut PhysicsConfig)>,
+    /// A field assigned wholesale, then taken.
+    field: Option<SdfField>,
+    /// One `IslandSleep::wake_all()`, then cleared.
+    wake: bool,
+    /// Runs that performed a write.
+    applied: u32,
+    /// What this writer read on its latest run, BEFORE its own write: what a stage after it that
+    /// read the resources live would see, an earlier writer's write included.
+    seen: Option<(PhysicsConfig, Option<SdfField>)>,
+}
+
+impl MidWrites {
+    /// Records what the writer sees, then performs its queued writes.
+    fn drain(&mut self, cfg: &mut PhysicsConfig, field: Option<&mut SdfField>, sleep: Option<&mut IslandSleep>) {
+        self.seen = Some((*cfg, field.as_deref().copied()));
+        let mut wrote = false;
+        if let Some(write) = self.cfg.take() {
+            write(cfg);
+            wrote = true;
+        }
+        if let Some(value) = self.field.take() {
+            *field.expect("script: a field write needs an SdfField") = value;
+            wrote = true;
+        }
+        if std::mem::take(&mut self.wake) {
+            sleep.expect("script: a wake needs IslandSleep").wake_all();
+            wrote = true;
+        }
+        self.applied += u32::from(wrote);
+    }
+}
+
+/// The early writer's queue.
 #[derive(Resource, Default)]
-struct MidStep {
-    /// `PhysicsConfig::sleeping` to write, once.
-    sleeping: Option<bool>,
-    /// `PhysicsConfig::sleep_skip` to write, once.
-    sleep_skip: Option<SleepSkip>,
+struct MidEarly(MidWrites);
+
+/// The late writer's queue.
+#[derive(Resource, Default)]
+struct MidLate(MidWrites);
+
+// `clippy::needless_pass_by_value`: `Res` / `ResMut` are by-value `SystemParam`s.
+#[allow(clippy::needless_pass_by_value)]
+fn mid_early(
+    mut cfg: ResMut<PhysicsConfig>,
+    mut field: Option<ResMut<SdfField>>,
+    mut sleep: Option<ResMut<IslandSleep>>,
+    mut mid: ResMut<MidEarly>,
+) {
+    mid.0.drain(&mut cfg, field.as_deref_mut(), sleep.as_deref_mut());
 }
 
 // `clippy::needless_pass_by_value`: `Res` / `ResMut` are by-value `SystemParam`s.
 #[allow(clippy::needless_pass_by_value)]
-fn mid_step_config(mut cfg: ResMut<PhysicsConfig>, mut mid: ResMut<MidStep>) {
-    if mid.sleeping.is_none() && mid.sleep_skip.is_none() {
-        return;
-    }
-    let mid = &mut *mid;
-    if let Some(v) = mid.sleeping.take() {
-        cfg.sleeping = v;
-    }
-    if let Some(v) = mid.sleep_skip.take() {
-        cfg.sleep_skip = v;
-    }
+fn mid_late(
+    mut cfg: ResMut<PhysicsConfig>,
+    mut field: Option<ResMut<SdfField>>,
+    mut sleep: Option<ResMut<IslandSleep>>,
+    mut mid: ResMut<MidLate>,
+) {
+    mid.0.drain(&mut cfg, field.as_deref_mut(), sleep.as_deref_mut());
+}
+
+/// Where a mid-step write lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Place {
+    /// [`mid_early`]: after the broadphase, before the narrowphase.
+    Early,
+    /// [`mid_late`]: after the last manifold producer, before the solve.
+    Late,
 }
 
 /// One world of a lockstep pair.
@@ -501,12 +591,18 @@ struct Rig {
     arch: Archetypes,
     /// Every body spawned, in spawn order (a despawned one stays, its slot stale).
     bodies: Vec<Entity>,
-    /// The world's own mode: `Off` for the oracle, `Sets` for the world under test.
+    /// The world's own mode: `Off` for the oracle, `Sets` for the world under test (`Off` with
+    /// sleeping off).
     mode: SleepSkip,
 }
 
 impl Rig {
     fn new(pipeline: Pipeline, variant: Variant, mode: SleepSkip, specs: &[Spec]) -> Self {
+        Self::with_mode(pipeline, variant, Some(mode), specs)
+    }
+
+    /// A world with sleeping on in `mode`, or off for `None`.
+    fn with_mode(pipeline: Pipeline, variant: Variant, mode: Option<SleepSkip>, specs: &[Spec]) -> Self {
         let mut world = EcsMaster::new();
         let arch = Archetypes::create(&mut world);
         let bodies = specs.iter().map(|s| spawn(&mut world, arch, s)).collect();
@@ -519,6 +615,9 @@ impl Rig {
                 keys
             }
             Pipeline::SoftCoupled => add_physics_soft::<DefaultRigidSolver>(&mut builder, &mut world, true),
+            Pipeline::Soft => add_physics_soft::<DefaultRigidSolver>(&mut builder, &mut world, false),
+            Pipeline::SoftColored => add_physics_soft_colored::<DefaultRigidSolver>(&mut builder, &mut world),
+            Pipeline::SoftCoupledRef => add_physics_soft::<SoftStepSolver>(&mut builder, &mut world, true),
         };
         world.insert_resource(PairOracle::default());
         {
@@ -531,13 +630,24 @@ impl Rig {
             before.0 = keys.narrowphase;
             probe.after(after).before(before);
         }
-        world.insert_resource(MidStep::default());
+        world.insert_resource(MidEarly::default());
+        world.insert_resource(MidLate::default());
         {
-            let writer = builder.add_system(mid_step_config);
+            let writer = builder.add_system(mid_early);
             let mut after = writer.key();
             after.0 = keys.broadphase;
             let mut before = writer.key();
             before.0 = keys.narrowphase;
+            writer.after(after).before(before);
+        }
+        {
+            // After the last manifold producer (`physics_build_graph` shares no resource with
+            // it, so it is not ordered against it), before the solve.
+            let writer = builder.add_system(mid_late);
+            let mut after = writer.key();
+            after.0 = keys.narrowphase_sdf.unwrap_or(keys.narrowphase);
+            let mut before = writer.key();
+            before.0 = keys.solve;
             writer.after(after).before(before);
         }
         world.insert_resource(FixedTime::new(Duration::from_secs_f32(DT)));
@@ -545,13 +655,31 @@ impl Rig {
         {
             let cfg = world.resource_mut::<PhysicsConfig>();
             variant.apply(cfg);
-            cfg.sleeping = true;
-            cfg.sleep_skip = mode;
+            cfg.sleeping = mode.is_some();
+            if let Some(mode) = mode {
+                cfg.sleep_skip = mode;
+            }
         }
         if let Some(rows) = variant.brute_max_rows {
             world.resource_mut::<BroadphaseTree>().set_brute_max_rows(rows);
         }
-        Self { world, schedule, arch, bodies, mode }
+        Self { world, schedule, arch, bodies, mode: mode.unwrap_or(SleepSkip::Off) }
+    }
+
+    /// The queue of the writer at `place`.
+    fn mid(&mut self, place: Place) -> &mut MidWrites {
+        match place {
+            Place::Early => &mut self.world.resource_mut::<MidEarly>().0,
+            Place::Late => &mut self.world.resource_mut::<MidLate>().0,
+        }
+    }
+
+    /// The queue of the writer at `place`, read.
+    fn mid_ref(&self, place: Place) -> &MidWrites {
+        match place {
+            Place::Early => &self.world.resource::<MidEarly>().0,
+            Place::Late => &self.world.resource::<MidLate>().0,
+        }
     }
 
     fn step(&mut self) {
@@ -584,30 +712,35 @@ fn sdf_floor(top: f32) -> SdfField {
 
 // ── The observation ────────────────────────────────────────────────────────────────────────
 
-/// Everything the gate compares after a step (module docs).
+/// Everything the gate compares after a step (module docs). The sleep fields are `None` / empty
+/// in a world without `IslandSleep`, the graph fields in one without a `ConstraintGraph`, and the
+/// warm fields in one without the colored solver.
 #[derive(Debug, PartialEq)]
 struct Obs {
     bodies: Vec<[u32; 13]>,
-    latch: u64,
+    latch: Option<u64>,
     awake: Vec<bool>,
-    contact_wakes: u64,
+    contact_wakes: Option<u64>,
     pairs: Vec<(u32, u32)>,
     manifolds: Vec<[u8; 152]>,
     sensors: Vec<[u8; 152]>,
-    n_islands: u32,
+    n_islands: Option<u32>,
     island_of: Vec<u32>,
     island_len: Vec<u32>,
     /// Per island: the manifolds' positions in the logical view, sorted.
     island_positions: Vec<Vec<usize>>,
     /// Per island: the manifolds by value, sorted by bytes.
     island_values: Vec<Vec<[u8; 152]>>,
-    max_island: u32,
+    max_island: Option<u32>,
     frozen: Vec<bool>,
-    warm: WarmSeedStats,
+    warm: Option<WarmSeedStats>,
     axes: Vec<Option<usize>>,
     /// `(key, fid, seed bits)`, sorted.
     seeds: Vec<(u64, u16, Option<[u32; 3]>)>,
     tags: Vec<PairTagProbe>,
+    /// Every soft particle's position and velocity bits, bodies in query order (design 10, Tests
+    /// A); empty without soft bodies.
+    soft: Vec<[u32; 6]>,
 }
 
 fn manifold_bytes(m: &Manifold) -> [u8; 152] {
@@ -617,6 +750,23 @@ fn manifold_bytes(m: &Manifold) -> [u8; 152] {
 }
 
 fn observe(world: &mut EcsMaster) -> Obs {
+    let soft = {
+        let q = world.query::<&SoftBody, ()>();
+        q.iter()
+            .flat_map(|b| {
+                (0..b.pos_x.len()).map(move |i| {
+                    [
+                        b.pos_x[i].to_bits(),
+                        b.pos_y[i].to_bits(),
+                        b.pos_z[i].to_bits(),
+                        b.vel_x[i].to_bits(),
+                        b.vel_y[i].to_bits(),
+                        b.vel_z[i].to_bits(),
+                    ]
+                })
+            })
+            .collect()
+    };
     let bodies = {
         let q = world.query::<&RigidBody, ()>();
         q.iter()
@@ -642,14 +792,16 @@ fn observe(world: &mut EcsMaster) -> Obs {
     let world = &*world;
     let rows = world.resource::<SolverScratch>().bodies_len();
     let bodies_state = world.resource::<SolverScratch>().bodies();
-    let sleep = world.resource::<IslandSleep>();
-    let graph = world.resource::<ConstraintGraph>();
+    let sleep = world.contains_resource::<IslandSleep>().then(|| world.resource::<IslandSleep>());
+    let graph = world.contains_resource::<ConstraintGraph>().then(|| world.resource::<ConstraintGraph>());
+    let solver = (world.contains_resource::<ColoredSoftStepSolver>() && world.contains_resource::<SleepSets>())
+        .then(|| (world.resource::<ColoredSoftStepSolver>(), world.resource::<SleepSets>()));
     let pairs_res = world.resource::<ContactPairs>();
     let m = world.resource::<Manifolds>();
     let pairs: Vec<(u32, u32)> = pairs_res.pairs().iter().map(|&(a, b)| (a.0, b.0)).collect();
     let manifolds: Vec<[u8; 152]> = m.manifolds().iter().map(|m| manifold_bytes(&m)).collect();
-    let n_islands = graph.n_islands();
-    let island_positions = (0..n_islands)
+    let n_islands = graph.map_or(0, ConstraintGraph::n_islands);
+    let island_positions = graph.map_or_else(Vec::new, |graph| (0..n_islands)
         .map(|i| {
             let mut v: Vec<usize> = graph
                 .island(i)
@@ -659,8 +811,8 @@ fn observe(world: &mut EcsMaster) -> Obs {
             v.sort_unstable();
             v
         })
-        .collect();
-    let island_values = (0..n_islands)
+        .collect());
+    let island_values = graph.map_or_else(Vec::new, |graph| (0..n_islands)
         .map(|i| {
             let mut v: Vec<[u8; 152]> = graph
                 .island(i)
@@ -670,56 +822,65 @@ fn observe(world: &mut EcsMaster) -> Obs {
             v.sort_unstable();
             v
         })
-        .collect();
+        .collect());
     let is_box = |r: u32| matches!(bodies_state[r as usize].shape, ColliderShape::Box { .. });
     let axes = pairs
         .iter()
         .map(|&(a, b)| (is_box(a) && is_box(b)).then(|| m.box_axis_cache.get(BodyIndex(a), BodyIndex(b))).flatten())
         .collect();
     let mut seeds = Vec::new();
-    world.resource::<ColoredSoftStepSolver>().for_each_warm_seed(
-        m,
-        world.resource::<SleepSets>(),
-        |key, fid, seed| seeds.push((key, fid, seed.map(|s| s.map(f32::to_bits)))),
-    );
+    if let Some((solver, sets)) = solver {
+        solver.for_each_warm_seed(m, sets, |key, fid, seed| {
+            seeds.push((key, fid, seed.map(|s| s.map(f32::to_bits))));
+        });
+    }
     seeds.sort_unstable();
     let mut tags = Vec::new();
     m.for_each_pair_tag(pairs_res, |p| tags.push(p));
     Obs {
         bodies,
-        latch: sleep.latch_fingerprint(),
-        awake: (0..rows).map(|r| sleep.is_row_awake(r)).collect(),
-        contact_wakes: sleep.contact_wakes(),
+        latch: sleep.map(IslandSleep::latch_fingerprint),
+        awake: sleep.map_or_else(Vec::new, |sleep| (0..rows).map(|r| sleep.is_row_awake(r)).collect()),
+        contact_wakes: sleep.map(IslandSleep::contact_wakes),
         pairs,
         manifolds,
         sensors: m.sensor_overlaps().iter().map(manifold_bytes).collect(),
-        n_islands,
-        island_of: (0..rows as u32).map(|r| graph.island_of(r)).collect(),
-        island_len: (0..n_islands).map(|i| graph.island_len(i)).collect(),
+        n_islands: graph.map(ConstraintGraph::n_islands),
+        island_of: graph.map_or_else(Vec::new, |graph| (0..rows as u32).map(|r| graph.island_of(r)).collect()),
+        island_len: graph.map_or_else(Vec::new, |graph| (0..n_islands).map(|i| graph.island_len(i)).collect()),
         island_positions,
         island_values,
-        max_island: graph.max_island_constraints(),
-        frozen: (0..n_islands).map(|i| sleep.is_island_frozen(i)).collect(),
-        warm: world.resource::<ColoredSoftStepSolver>().warm_seed_stats(),
+        max_island: graph.map(ConstraintGraph::max_island_constraints),
+        frozen: sleep.map_or_else(Vec::new, |sleep| (0..n_islands).map(|i| sleep.is_island_frozen(i)).collect()),
+        warm: solver.map(|(solver, _)| solver.warm_seed_stats()),
         axes,
         seeds,
         tags,
+        soft,
     }
 }
 
 /// The first difference between `off` and `sets`, named, or `None`.
 fn diff(off: &Obs, sets: &Obs) -> Option<String> {
+    diff_named(off, sets, ("Off", "Sets"), true)
+}
+
+/// The first difference between `off` and `sets` (named `names`), or `None`. With `lockstep` the
+/// tags compare by the held-slot rule (module docs), `off` being the oracle; without it every field
+/// compares exactly (two worlds in the same mode, design 10 Tests A).
+fn diff_named(off: &Obs, sets: &Obs, names: (&str, &str), lockstep: bool) -> Option<String> {
+    let (na, nb) = names;
     macro_rules! list {
         ($f:ident) => {
             if off.$f != sets.$f {
-                return Some(first_diff(stringify!($f), &off.$f, &sets.$f));
+                return Some(first_diff(stringify!($f), names, &off.$f, &sets.$f));
             }
         };
     }
     macro_rules! scalar {
         ($f:ident) => {
             if off.$f != sets.$f {
-                return Some(format!("{}: Off {:?}, Sets {:?}", stringify!($f), off.$f, sets.$f));
+                return Some(format!("{}: {na} {:?}, {nb} {:?}", stringify!($f), off.$f, sets.$f));
             }
         };
     }
@@ -740,6 +901,11 @@ fn diff(off: &Obs, sets: &Obs) -> Option<String> {
     list!(axes);
     list!(seeds);
     scalar!(warm);
+    list!(soft);
+    if !lockstep {
+        list!(tags);
+        return None;
+    }
     if off.tags.len() != sets.tags.len() {
         return Some(format!("tags: {} Off slots, {} Sets slots", off.tags.len(), sets.tags.len()));
     }
@@ -759,11 +925,17 @@ fn diff(off: &Obs, sets: &Obs) -> Option<String> {
 }
 
 /// The first index where two lists differ, with both elements, or their lengths.
-fn first_diff<T: std::fmt::Debug + PartialEq>(name: &str, a: &[T], b: &[T]) -> String {
+fn first_diff<T: std::fmt::Debug + PartialEq>(name: &str, names: (&str, &str), a: &[T], b: &[T]) -> String {
+    let (na, nb) = names;
     match a.iter().zip(b).position(|(x, y)| x != y) {
-        Some(i) => format!("{name}[{i}] of {}/{}: Off {:?}, Sets {:?}", a.len(), b.len(), a[i], b[i]),
-        None => format!("{name}: lengths Off {}, Sets {}", a.len(), b.len()),
+        Some(i) => format!("{name}[{i}] of {}/{}: {na} {:?}, {nb} {:?}", a.len(), b.len(), a[i], b[i]),
+        None => format!("{name}: lengths {na} {}, {nb} {}", a.len(), b.len()),
     }
+}
+
+/// FNV-1a 64 over a list of manifolds' bytes.
+fn manifolds_hash(manifolds: &[[u8; 152]]) -> u64 {
+    manifolds.iter().flatten().fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3))
 }
 
 // ── The lockstep driver ────────────────────────────────────────────────────────────────────
@@ -807,6 +979,16 @@ struct Evidence {
     oracle_with_sleepers: u64,
     /// The per-rule counts at the end.
     rules: SleepRuleCounts,
+    /// Per step: the per-rule counts after the step.
+    rules_at: Vec<SleepRuleCounts>,
+    /// Per step: the `Off` world's reuse hits (`Manifolds::pair_classes().reused`).
+    off_reused: Vec<u64>,
+    /// Per step: the `Off` world's logical pair count (`Manifolds::pair_classes().pairs`).
+    off_pairs: Vec<u64>,
+    /// Per step: a hash of the `Off` world's logical manifolds' bytes.
+    off_manifolds: Vec<u64>,
+    /// Per step: the `Sets` world's warm-seed statistics (equal to `Off`'s: they are compared).
+    warm: Vec<WarmSeedStats>,
 }
 
 impl Evidence {
@@ -832,6 +1014,22 @@ fn lockstep(
     specs: &[Spec],
     steps: usize,
     script: &mut Script<'_>,
+) -> Evidence {
+    lockstep_probed(label, pipeline, variant, specs, steps, script, &mut |_, _, _| {})
+}
+
+/// A probe run after every lockstep step on `(step, off, sets)`.
+type Probe<'a> = dyn FnMut(usize, &Rig, &Rig) + 'a;
+
+/// [`lockstep`] with `probe(step, off, sets)` run after every step and its compare.
+fn lockstep_probed(
+    label: &str,
+    pipeline: Pipeline,
+    variant: Variant,
+    specs: &[Spec],
+    steps: usize,
+    script: &mut Script<'_>,
+    probe: &mut Probe<'_>,
 ) -> Evidence {
     let mut off = Rig::new(pipeline, variant, SleepSkip::Off, specs);
     let mut sets = Rig::new(pipeline, variant, SleepSkip::Sets, specs);
@@ -895,6 +1093,13 @@ fn lockstep(
             (0..scratch.bodies_len()).filter(|&r| scratch.bodies()[r].inv_mass != 0.0).collect();
         ev.frozen_rows.push(dynamic.iter().filter(|&&r| !sleep.is_row_awake(r)).count());
         ev.dynamic_rows.push(dynamic.len());
+        ev.rules_at.push(st.rule_counts());
+        let classes = off.world.resource::<Manifolds>().pair_classes();
+        ev.off_reused.push(classes.reused);
+        ev.off_pairs.push(classes.pairs);
+        ev.off_manifolds.push(manifolds_hash(&o.manifolds));
+        ev.warm.push(s.warm.unwrap_or_default());
+        probe(step, &off, &sets);
     }
     ev.rules = sets.world.resource::<SleepSets>().rule_counts();
     if std::env::var_os("L10_ARM_TRACE").is_some() {
@@ -1347,7 +1552,7 @@ fn s3_sleeping_and_mode_toggles() {
 
 /// Review W1 of L10 C3c (design 04 D9: every stage reads the mode the broadphase recorded, never
 /// the configuration): `sleeping` and the mode written by a system between the broadphase and the
-/// narrowphase ([`MidStep`]). Sleeping on → off on a step whose broadphase held the towers: the
+/// narrowphase ([`mid_early`]). Sleeping on → off on a step whose broadphase held the towers: the
 /// narrowphase has skipped their pairs, so a solve that picked its arm from the configuration
 /// would integrate the held rows at their raw inverse mass with no contacts, where `Off` keeps the
 /// towers' contacts. Then off → on, and the mode `Sets → Off → Sets`, the same way. Each write
@@ -1359,13 +1564,17 @@ fn s3_mid_step_config_writes_take_effect_on_the_next_step() {
         &towers(),
         ARM_STEPS,
         &mut |step, rig: &mut Rig| {
-            let mode = rig.mode;
-            let mid = rig.world.resource_mut::<MidStep>();
+            // The world's own mode, restored by a write that captures nothing.
+            let restore: fn(&mut PhysicsConfig) = match rig.mode {
+                SleepSkip::Off => |c| c.sleep_skip = SleepSkip::Off,
+                SleepSkip::Sets => |c| c.sleep_skip = SleepSkip::Sets,
+            };
+            let mid = rig.mid(Place::Early);
             match step {
-                s if s == HELD_BY => mid.sleeping = Some(false),
-                s if s == HELD_BY + 3 => mid.sleeping = Some(true),
-                s if s == HELD_BY + 120 => mid.sleep_skip = Some(SleepSkip::Off),
-                s if s == HELD_BY + 123 => mid.sleep_skip = Some(mode),
+                s if s == HELD_BY => mid.cfg = Some(|c| c.sleeping = false),
+                s if s == HELD_BY + 3 => mid.cfg = Some(|c| c.sleeping = true),
+                s if s == HELD_BY + 120 => mid.cfg = Some(|c| c.sleep_skip = SleepSkip::Off),
+                s if s == HELD_BY + 123 => mid.cfg = Some(restore),
                 _ => {}
             }
         },
@@ -2019,7 +2228,6 @@ fn s4_sdf_pile_field_edit_and_kernel_toggle() {
 /// coupling); its reaction lands on the tower's top cube, which restores the island (D1).
 #[test]
 fn s5_soft_body_reaction_restores_a_held_tower() {
-    use boyko_physics::soft::SoftBody;
     let specs = {
         let mut v = vec![Spec::floor()];
         v.extend(tower(3, 0.0, 0.0, 0.5));
@@ -2174,4 +2382,1282 @@ fn s3_missed_gather_flushes_by_d7() {
             assert!(back >= 1, "{label}: void: no tower moved back in after the Reset");
         },
     );
+}
+
+// ── Suite A: deferral equivalence (L10 D9b; design 10, Tests A) ────────────────────────────
+
+/// A step-boundary action on one world.
+type Act = Box<dyn Fn(&mut Rig)>;
+
+/// One deferral arm's write in its three forms (design 10, Tests A): M queues it into a writer
+/// during step `at`; B takes the same write directly before step `at + 1`; C, the control, takes
+/// it before step `at`.
+struct Defer {
+    /// Queues M's write(s) before step `at`.
+    m: Act,
+    /// The writers M's write rides; each must have applied exactly one write in step `at`.
+    places: Vec<Place>,
+    /// B's write before step `at + 1`; `None` for a `dt` or transient write, which B does not take.
+    b: Option<Act>,
+    /// C's write before step `at`.
+    c: Act,
+    /// C's undo before step `at + 1` (the `dt` and transient cases).
+    c_undo: Option<Act>,
+    /// A boundary action M and B both take before step `at` (DA8's first wake).
+    both: Option<Act>,
+}
+
+impl Defer {
+    /// A configuration write at `place`.
+    fn cfg(place: Place, write: fn(&mut PhysicsConfig)) -> Self {
+        Self {
+            m: Box::new(move |rig: &mut Rig| rig.mid(place).cfg = Some(write)),
+            places: vec![place],
+            b: Some(Box::new(move |rig: &mut Rig| write(rig.cfg()))),
+            c: Box::new(move |rig: &mut Rig| write(rig.cfg())),
+            c_undo: None,
+            both: None,
+        }
+    }
+
+    /// A field assigned wholesale at `place`.
+    fn field(place: Place, make: fn() -> SdfField) -> Self {
+        Self {
+            m: Box::new(move |rig: &mut Rig| rig.mid(place).field = Some(make())),
+            places: vec![place],
+            b: Some(Box::new(move |rig: &mut Rig| *rig.world.resource_mut::<SdfField>() = make())),
+            c: Box::new(move |rig: &mut Rig| *rig.world.resource_mut::<SdfField>() = make()),
+            c_undo: None,
+            both: None,
+        }
+    }
+
+    /// One `IslandSleep::wake_all()` at `place`.
+    fn wake(place: Place) -> Self {
+        Self {
+            m: Box::new(move |rig: &mut Rig| rig.mid(place).wake = true),
+            places: vec![place],
+            b: Some(Box::new(wake_all)),
+            c: Box::new(wake_all),
+            c_undo: None,
+            both: None,
+        }
+    }
+
+    /// `write`, which sets `PhysicsConfig::dt` to `dt`, at `place`. The gather stamps `dt` from the
+    /// clock every step, so a boundary write is overwritten by design: B takes none, and C runs
+    /// step `at` with the clock itself at `dt`.
+    fn dt(place: Place, write: fn(&mut PhysicsConfig), dt: f32) -> Self {
+        Self {
+            m: Box::new(move |rig: &mut Rig| rig.mid(place).cfg = Some(write)),
+            places: vec![place],
+            b: None,
+            c: Box::new(move |rig: &mut Rig| set_clock(rig, dt)),
+            c_undo: Some(Box::new(|rig: &mut Rig| set_clock(rig, DT))),
+            both: None,
+        }
+    }
+}
+
+/// One explicit wake request.
+fn wake_all(rig: &mut Rig) {
+    rig.world.resource_mut::<IslandSleep>().wake_all();
+}
+
+/// The fixed clock's step, which the gather stamps into `PhysicsConfig::dt`.
+fn set_clock(rig: &mut Rig, dt: f32) {
+    rig.world.resource_mut::<FixedTime>().set_timestep(Duration::from_secs_f32(dt));
+}
+
+/// What a deferral probe sees after a step: the three worlds and B's and C's observations.
+struct Seen<'r> {
+    step: usize,
+    m: &'r Rig,
+    b: &'r Rig,
+    c: &'r Rig,
+    ob: &'r Obs,
+    oc: &'r Obs,
+}
+
+/// A probe run after every deferral step.
+type DeferProbe<'a> = dyn FnMut(&Seen<'_>) + 'a;
+
+/// A per-step setup every world of a deferral run takes (a scene's step-0 edits).
+type Setup<'a> = dyn Fn(usize, &mut Rig) + 'a;
+
+/// Design 10's deferral driver: three worlds of `specs` on `pipeline` / `variant` / `mode` (`None`
+/// = sleeping off) — M takes `write` in step `at`'s window, B at the next boundary, C before step
+/// `at` — run for `at + 11` steps. M must equal B after every step (exactly: the same mode), and
+/// every writer carrying M's write must have applied one write in step `at`. Returns the first step
+/// of `[at, at + 10]` on which C differs from B, with the difference, or `None`.
+#[allow(clippy::too_many_arguments)]
+fn deferral_run(
+    label: &str,
+    pipeline: Pipeline,
+    variant: Variant,
+    mode: Option<SleepSkip>,
+    specs: &[Spec],
+    at: usize,
+    setup: &Setup<'_>,
+    write: &Defer,
+    probe: &mut DeferProbe<'_>,
+) -> Option<(usize, String)> {
+    let mut m = Rig::with_mode(pipeline, variant, mode, specs);
+    let mut b = Rig::with_mode(pipeline, variant, mode, specs);
+    let mut c = Rig::with_mode(pipeline, variant, mode, specs);
+    let mut c_differs = None;
+    for step in 0..=at + 10 {
+        for rig in [&mut m, &mut b, &mut c] {
+            setup(step, rig);
+        }
+        if step == at {
+            if let Some(both) = &write.both {
+                both(&mut m);
+                both(&mut b);
+            }
+            (write.m)(&mut m);
+            (write.c)(&mut c);
+        }
+        if step == at + 1 {
+            if let Some(boundary) = &write.b {
+                boundary(&mut b);
+            }
+            if let Some(undo) = &write.c_undo {
+                undo(&mut c);
+            }
+        }
+        m.step();
+        b.step();
+        c.step();
+        let (om, ob, oc) = (observe(&mut m.world), observe(&mut b.world), observe(&mut c.world));
+        if let Some(why) = diff_named(&om, &ob, ("M", "B"), false) {
+            panic!(
+                "{label}: M (the write in step {at}'s window) diverges from B (the same write at the \
+                 next boundary) after step {step}: {why}"
+            );
+        }
+        if step >= at && c_differs.is_none() {
+            c_differs = diff_named(&ob, &oc, ("B", "C"), false).map(|why| (step, why));
+        }
+        if step == at {
+            for &place in &write.places {
+                let applied = m.mid_ref(place).applied;
+                assert_eq!(applied, 1, "{label}: void: M's {place:?} writer applied {applied} writes in step {at}");
+            }
+        }
+        probe(&Seen { step, m: &m, b: &b, c: &c, ob: &ob, oc: &oc });
+    }
+    c_differs
+}
+
+/// [`deferral_run`], void unless C differs from B in `[at, at + 10]`: the written value must reach
+/// the trajectory.
+#[allow(clippy::too_many_arguments)]
+fn deferral(
+    label: &str,
+    pipeline: Pipeline,
+    variant: Variant,
+    mode: Option<SleepSkip>,
+    specs: &[Spec],
+    setup: &Setup<'_>,
+    write: &Defer,
+    probe: &mut DeferProbe<'_>,
+) {
+    let Some((step, why)) = deferral_run(label, pipeline, variant, mode, specs, AT, setup, write, probe) else {
+        panic!(
+            "{label}: void: the control C (the write before step {AT}) equals B at every step of \
+             [{AT}, {}]: the written value never reaches the trajectory",
+            AT + 10
+        );
+    };
+    println!("{label}: M == B at every step; C differs from B at step {step}: {why}");
+}
+
+/// The step the deferral arms write at: the towers are held by then.
+const AT: usize = HELD_BY;
+
+/// The deferral arms' sleep modes: sleeping off, `Off` and `Sets`.
+const MODES: [Option<SleepSkip>; 3] = [None, Some(SleepSkip::Off), Some(SleepSkip::Sets)];
+
+/// A ball rolling at 2 m/s on the floor, far from the towers: its speed² of 4 keeps it awake in
+/// every mode, so every mode has a body whose contact and integration read the inputs.
+fn witness_ball() -> Spec {
+    Spec::ball(Vec3::new(-40.0, 0.3, 20.0), 0.3).moving(Vec3::new(2.0, 0.0, 0.0))
+}
+
+/// [`towers`] and the witness ball.
+fn towers_and_ball() -> Vec<Spec> {
+    let mut v = towers();
+    v.push(witness_ball());
+    v
+}
+
+/// S4's tower on the SDF floor, and the witness ball rolling on the field.
+fn sdf_tower_and_ball() -> Vec<Spec> {
+    let mut v = tower(3, 0.0, 0.0, 0.5);
+    v.push(witness_ball());
+    v
+}
+
+/// S4's variants: the default configuration and the Tree with its brute path off, at W ∈ {1, 8}.
+fn s4_variants() -> Vec<(&'static str, Variant)> {
+    let tree = |w| Variant { brute_max_rows: Some(0), ..Variant::cell(BroadphaseKind::Tree, true, w) };
+    [1, 8].into_iter().flat_map(|w| [("default", Variant::default_cfg(w)), ("Tree", tree(w))]).collect()
+}
+
+/// The soft scene (design 10, Tests A): the floor, one tower, the witness ball, and — spawned at
+/// step 0 by [`soft_setup`] — S5's braced cube resting on the floor at (3, 0.3, 0), with the SDF
+/// floor at `y = 0` and the soft pass on. On `Soft` and `SoftColored` the field is the particles'
+/// only floor.
+fn soft_scene() -> Vec<Spec> {
+    let mut v = vec![Spec::floor()];
+    v.extend(tower(3, 0.0, 0.0, 0.5));
+    v.push(witness_ball());
+    v
+}
+
+/// S5's braced soft cube of half-extent 0.3 centred at `centre`.
+fn soft_cube(centre: [f32; 3]) -> SoftBody {
+    let half = 0.3f32;
+    let positions: Vec<[f32; 3]> = (0..8u32)
+        .map(|i| {
+            let s = |bit: u32| if i & bit != 0 { half } else { -half };
+            [centre[0] + s(1), centre[1] + s(2), centre[2] + s(4)]
+        })
+        .collect();
+    let edges: Vec<(u32, u32)> = (0..8u32).flat_map(|a| ((a + 1)..8u32).map(move |b| (a, b))).collect();
+    SoftBody::from_mesh(&positions, &[1.0; 8], &edges, None, 1.0e-6, 0.05).expect("construction: a braced cube is a soft body")
+}
+
+/// The soft scene's step-0 edits. A light viscous damping (`soft_damping = 0.02`) settles the
+/// cube on the field well before `at`: undamped, the stiff cube keeps bouncing on the field in the
+/// uncoupled pipelines, where it is in the air at `at` and a field write does not reach it within
+/// ten steps.
+fn soft_setup(step: usize, rig: &mut Rig) {
+    if step == 0 {
+        *rig.world.resource_mut::<SdfField>() = sdf_floor(0.0);
+        rig.cfg().soft_body = true;
+        rig.cfg().soft_damping = 0.02;
+        let arch = rig.world.create_archetype(&[SoftBody::component_id()]);
+        rig.world.spawn_one(arch, soft_cube([3.0, 0.3, 0.0])).expect("construction: the soft archetype accepts it");
+    }
+}
+
+/// A field's edits as bits (centre, params, kind, op), for a value comparison.
+fn field_bits(field: &SdfField) -> Vec<[u32; 10]> {
+    field
+        .edits()
+        .iter()
+        .map(|e| {
+            [
+                e.center[0].to_bits(),
+                e.center[1].to_bits(),
+                e.center[2].to_bits(),
+                e.center[3].to_bits(),
+                e.params[0].to_bits(),
+                e.params[1].to_bits(),
+                e.params[2].to_bits(),
+                e.params[3].to_bits(),
+                e.kind,
+                e.op,
+            ]
+        })
+        .collect()
+}
+
+/// Whether the writer at `place` saw `field` on its latest run (before its own write).
+fn saw_field(rig: &Rig, place: Place, field: &SdfField) -> bool {
+    rig.mid_ref(place).seen.as_ref().and_then(|(_, f)| f.as_ref()).is_some_and(|f| field_bits(f) == field_bits(field))
+}
+
+/// Whether some logical manifold joins a sphere to the SDF field.
+fn sphere_on_the_field(rig: &Rig) -> bool {
+    let bodies = rig.world.resource::<SolverScratch>().bodies();
+    rig.world
+        .resource::<Manifolds>()
+        .manifolds()
+        .iter()
+        .any(|m| m.body_b == SDF_SENTINEL && matches!(bodies[m.body_a.0 as usize].shape, ColliderShape::Sphere { .. }))
+}
+
+/// `rig`'s dynamic rows, and how many of them are frozen (not awake) this step.
+fn frozen_of(rig: &Rig) -> (usize, usize) {
+    let scratch = rig.world.resource::<SolverScratch>();
+    let sleep = rig.world.resource::<IslandSleep>();
+    let dynamic: Vec<usize> = (0..scratch.bodies_len()).filter(|&r| scratch.bodies()[r].inv_mass != 0.0).collect();
+    (dynamic.iter().filter(|&&r| !sleep.is_row_awake(r)).count(), dynamic.len())
+}
+
+/// The run's label.
+fn cell_label(arm: &str, pipeline: Pipeline, variant: &Variant, mode: Option<SleepSkip>) -> String {
+    let mode = mode.map_or_else(|| "sleeping off".to_owned(), |m| format!("{m:?}"));
+    format!("{arm} [{pipeline:?} {:?} reuse {:?} W{}] {mode}", variant.kind, variant.reuse, variant.workers)
+}
+
+/// DA1: an SDF edit in the Early window (the floor lowered 1 mm) lands at the next step, as if
+/// written at the boundary, in every mode. Red before D9b: the SDF stage read the live field.
+#[test]
+fn d9b_defer_sdf_edit() {
+    let write = Defer::field(Place::Early, || sdf_floor(-1.0e-3));
+    for (_, variant) in s4_variants() {
+        for mode in MODES {
+            let label = cell_label("DA1 SDF edit", Pipeline::Sdf, &variant, mode);
+            let mut on_field = false;
+            deferral(&label, Pipeline::Sdf, variant, mode, &sdf_tower_and_ball(), &quiet, &write, &mut |s| {
+                if s.step == AT - 1 {
+                    on_field = sphere_on_the_field(s.b);
+                }
+            });
+            assert!(on_field, "{label}: void: the ball has no field manifold at step {}", AT - 1);
+        }
+    }
+}
+
+/// DA2: an SDF edit made Early (the floor 5 m lower) and reverted Late is invisible — B takes no
+/// write; C edits before `at` and reverts before `at + 1`. Red before D9b at `at`.
+#[test]
+fn d9b_defer_sdf_edit_reverted() {
+    let write = Defer {
+        m: Box::new(|rig: &mut Rig| {
+            rig.mid(Place::Early).field = Some(sdf_floor(-5.0));
+            rig.mid(Place::Late).field = Some(sdf_floor(0.0));
+        }),
+        places: vec![Place::Early, Place::Late],
+        b: None,
+        c: Box::new(|rig: &mut Rig| *rig.world.resource_mut::<SdfField>() = sdf_floor(-5.0)),
+        c_undo: Some(Box::new(|rig: &mut Rig| *rig.world.resource_mut::<SdfField>() = sdf_floor(0.0))),
+        both: None,
+    };
+    for (_, variant) in s4_variants() {
+        for mode in MODES {
+            let label = cell_label("DA2 SDF edit reverted", Pipeline::Sdf, &variant, mode);
+            let mut saw = false;
+            deferral(&label, Pipeline::Sdf, variant, mode, &sdf_tower_and_ball(), &quiet, &write, &mut |s| {
+                if s.step == AT {
+                    saw = saw_field(s.m, Place::Late, &sdf_floor(-5.0));
+                }
+            });
+            assert!(saw, "{label}: void: the Late writer did not see the edited field at step {AT}");
+        }
+    }
+}
+
+/// DA3 / DA4's variants: the Grid and the Tree, contact reuse on, W ∈ {1, 8}.
+fn reuse_variants() -> Vec<Variant> {
+    [BroadphaseKind::Grid, BroadphaseKind::Tree]
+        .into_iter()
+        .flat_map(|kind| [1, 8].map(|w| Variant::cell(kind, true, w)))
+        .collect()
+}
+
+/// DA3 / DA4's body: `write` Early on the towers and the ball, every mode; the `Off`-like worlds
+/// (sleeping off, `Off`) must have reused a contact the step before (the write reaches a reuse).
+fn defer_reuse_write(arm: &str, write: fn(&mut PhysicsConfig)) {
+    let write = Defer::cfg(Place::Early, write);
+    for variant in reuse_variants() {
+        for mode in MODES {
+            let label = cell_label(arm, Pipeline::Default, &variant, mode);
+            let mut reused = 0;
+            deferral(&label, Pipeline::Default, variant, mode, &towers_and_ball(), &quiet, &write, &mut |s| {
+                if s.step == AT - 1 {
+                    reused = s.b.world.resource::<Manifolds>().pair_classes().reused;
+                }
+            });
+            if mode != Some(SleepSkip::Sets) {
+                assert!(reused > 0, "{label}: void: no contact was reused at step {}", AT - 1);
+            }
+        }
+    }
+}
+
+/// DA3: `contact_reuse` flipped Early. Red before D9b in the sleeping-off and `Off` modes (the
+/// narrowphase read the live flag); `Sets` skips the held pairs and the ball's pair is no box pair,
+/// so there the control carries the arm.
+#[test]
+fn d9b_defer_reuse() {
+    defer_reuse_write("DA3 contact_reuse", |c| c.contact_reuse = !c.contact_reuse);
+}
+
+/// DA4: τ = 0 Early, as DA3.
+#[test]
+fn d9b_defer_tau() {
+    defer_reuse_write("DA4 tau", |c| c.contact_reuse_distance = 0.0);
+}
+
+/// DA5: `dt` doubled — run 1 Early (it reaches the ball through the narrowphase and the solve),
+/// run 2 Late (through the solve) — is invisible: the gather stamps `dt` at the next step, so B
+/// takes no write, and C runs step `at` with the clock doubled. Red before D9b at `at`.
+#[test]
+fn d9b_defer_dt() {
+    for place in [Place::Early, Place::Late] {
+        let write = Defer::dt(place, |c| c.dt = 2.0 * DT, 2.0 * DT);
+        for w in [1, 8] {
+            let variant = Variant::default_cfg(w);
+            for mode in MODES {
+                let label = cell_label(&format!("DA5 dt {place:?}"), Pipeline::Default, &variant, mode);
+                // Run 1's anti-vacuity: the Late writer saw the Early write, which a solve reading
+                // the configuration live would take. Run 2's is its writer's `applied == 1`.
+                let mut saw = place == Place::Late;
+                deferral(&label, Pipeline::Default, variant, mode, &towers_and_ball(), &quiet, &write, &mut |s| {
+                    if s.step == AT && place == Place::Early {
+                        saw = s.m.mid_ref(Place::Late).seen.is_some_and(|(c, _)| c.dt == 2.0 * DT);
+                    }
+                });
+                assert!(saw, "{label}: void: the Late writer did not see dt = 2 DT at step {AT}");
+            }
+        }
+    }
+}
+
+/// DA6 (W1's witness): run 1 halves gravity Late (it reaches the rigid solve and the soft step),
+/// run 2 raises the field 5 cm Late (the soft step alone), on every soft shape — the coupled, the
+/// plain and the colored soft step, and the reference pipeline — in every mode the shape runs. C
+/// must differ from B in the soft particles themselves. Red before D9b at `at`: the soft steps
+/// read the live configuration and field.
+#[test]
+fn d9b_defer_soft() {
+    let runs: [(&str, Defer); 2] = [
+        ("gravity", Defer::cfg(Place::Late, |c| c.gravity.y *= 0.5)),
+        ("field", Defer::field(Place::Late, || sdf_floor(0.05))),
+    ];
+    let shapes = [
+        (Pipeline::SoftCoupled, &MODES[..]),
+        (Pipeline::Soft, &MODES[..]),
+        (Pipeline::SoftColored, &MODES[..]),
+        (Pipeline::SoftCoupledRef, &MODES[..1]),
+    ];
+    for (run, write) in &runs {
+        for (pipeline, modes) in shapes {
+            for w in [1, 8] {
+                let variant = Variant::default_cfg(w);
+                for &mode in modes {
+                    let label = cell_label(&format!("DA6 soft {run}"), pipeline, &variant, mode);
+                    let mut soft_differs = false;
+                    deferral(&label, pipeline, variant, mode, &soft_scene(), &soft_setup, write, &mut |s| {
+                        soft_differs |= s.step >= AT && s.ob.soft != s.oc.soft;
+                    });
+                    assert!(soft_differs, "{label}: void: C equals B in the soft particles over [{AT}, {}]", AT + 10);
+                }
+            }
+        }
+    }
+}
+
+/// DA7 (C1): `wake_all()` Early, and again Late, while the towers are frozen. Red before D9b at
+/// `at`: the solve served the live request.
+#[test]
+fn d9b_defer_wake_all() {
+    for place in [Place::Early, Place::Late] {
+        let write = Defer::wake(place);
+        for variant in arm_variants() {
+            for mode in [SleepSkip::Off, SleepSkip::Sets] {
+                let label = cell_label(&format!("DA7 wake_all {place:?}"), Pipeline::Default, &variant, Some(mode));
+                let mut frozen = (0, 1);
+                deferral(&label, Pipeline::Default, variant, Some(mode), &towers(), &quiet, &write, &mut |s| {
+                    if s.step == AT - 1 {
+                        frozen = frozen_of(s.b);
+                    }
+                });
+                assert_eq!(frozen.0, frozen.1, "{label}: void: frozen / dynamic rows at step {}", AT - 1);
+            }
+        }
+    }
+}
+
+/// DA8: with `sleep_frames = 1`, M and B take a wake before `at`; M takes a second one in `at`'s
+/// window, B before `at + 1`. A request raised after the latch must not be swallowed by one already
+/// pending: the rows `end_step(at)` re-latches are woken again at `at + 1`. Red before D9b at
+/// `at + 1` (M's second request is served with the first, at `at`).
+#[test]
+fn d9b_defer_wake_all_twice() {
+    let write = Defer {
+        m: Box::new(|rig: &mut Rig| rig.mid(Place::Early).wake = true),
+        places: vec![Place::Early],
+        b: Some(Box::new(wake_all)),
+        c: Box::new(|rig: &mut Rig| {
+            wake_all(rig);
+            wake_all(rig);
+        }),
+        c_undo: None,
+        both: Some(Box::new(wake_all)),
+    };
+    // A threshold two orders above the default, so the towers re-latch on the step a wake is
+    // served, whatever the variant; with the default one the woken towers of some variants stay
+    // above it for a step, and the arm is void.
+    let setup = |step: usize, rig: &mut Rig| {
+        if step == 0 {
+            rig.cfg().sleep_frames = 1;
+            rig.cfg().sleep_threshold = 1.0e-2;
+        }
+    };
+    for variant in arm_variants() {
+        for mode in [SleepSkip::Off, SleepSkip::Sets] {
+            let label = cell_label("DA8 wake_all twice", Pipeline::Default, &variant, Some(mode));
+            let mut relatched = (0, 1);
+            deferral(&label, Pipeline::Default, variant, Some(mode), &towers(), &setup, &write, &mut |s| {
+                // C took both wakes before `at` and none after: its rows frozen at `at + 1` are
+                // the ones `end_step(at)` re-latched, as in B, whose latch after `at` is C's.
+                if s.step == AT + 1 {
+                    relatched = frozen_of(s.c);
+                }
+            });
+            assert!(relatched.0 > 0, "{label}: void: no row re-latched at step {AT} ({relatched:?} frozen / dynamic)");
+        }
+    }
+}
+
+// ── DA9: every `PhysicsConfig` field, one at a time ────────────────────────────────────────
+
+/// A field's class on a DA9 shape (design 10, Tests A, DA9).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Class {
+    /// Perturbed; M == B, and C ≠ B in at least one mode of the shape.
+    Observable,
+    /// Perturbed (it exercises the latch copy); M == B; no C ≠ B requirement. The reason is at
+    /// the row.
+    Unobservable,
+    /// Not perturbed: it records the pipeline's wiring. The reason is at the row.
+    Wiring,
+}
+
+/// One DA9 row.
+struct Row {
+    name: &'static str,
+    write: fn(&mut PhysicsConfig),
+    class: Class,
+}
+
+/// DA9's shapes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shape {
+    /// The towers and the ball on the SDF pipeline.
+    Sdf,
+    /// The soft scene on the coupled soft pipeline.
+    SoftCoupled,
+    /// The soft scene on the colored soft pipeline.
+    SoftColored,
+}
+
+/// Every `PhysicsConfig` field with its perturbation and its class on `shape`. The destructure is
+/// exhaustive, so a field added to `PhysicsConfig` fails to compile until it is classified here,
+/// and [`da9`] checks the rows against the fields `Debug` prints.
+fn da9_rows(shape: Shape) -> Vec<Row> {
+    use Class::{Observable as O, Unobservable as U, Wiring as W};
+    let PhysicsConfig {
+        gravity: _,
+        dt: _,
+        substeps: _,
+        relax_iterations: _,
+        contact_hertz: _,
+        contact_damping: _,
+        broadphase: _,
+        broadphase_select: _,
+        simd: _,
+        simd_solve: _,
+        sdf_narrowphase: _,
+        parallel_broadphase: _,
+        colored: _,
+        parallel_solve: _,
+        parallel_narrowphase: _,
+        contact_reuse: _,
+        contact_reuse_distance: _,
+        sleeping: _,
+        sleep_skip: _,
+        sleep_threshold: _,
+        sleep_frames: _,
+        soft_body: _,
+        soft_damping: _,
+        soft_rest_clamp: _,
+        soft_rigid_coupling: _,
+        self_collision_iters: _,
+        soft_body_colored: _,
+        soft_self_collision_colored: _,
+        warm_start: _,
+    } = PhysicsConfig::default();
+    let soft = shape != Shape::Sdf;
+    let coupled = shape == Shape::SoftCoupled;
+    // `pick(yes, no)`: the class on the shapes `yes` holds for.
+    let pick = |yes: bool, a: Class, b: Class| if yes { a } else { b };
+    vec![
+        Row { name: "gravity", write: |c| c.gravity.y *= 0.5, class: O },
+        // The special case: the gather stamps `dt` (`Defer::dt`).
+        Row { name: "dt", write: |c| c.dt = 2.0 * DT, class: O },
+        Row { name: "substeps", write: |c| c.substeps += 1, class: O },
+        Row { name: "relax_iterations", write: |c| c.relax_iterations += 1, class: O },
+        Row { name: "contact_hertz", write: |c| c.contact_hertz *= 0.5, class: O },
+        Row { name: "contact_damping", write: |c| c.contact_damping *= 0.5, class: O },
+        // The coupling path requires the grid (`soft/solver.rs`): wiring there. Elsewhere every
+        // kind emits the same pair set (the tree's `PairOracle` checks it).
+        Row { name: "broadphase", write: |c| c.broadphase = BroadphaseKind::Tree, class: pick(coupled, W, U) },
+        Row { name: "broadphase_select", write: |c| c.broadphase_select = BroadphaseSelectMode::Auto, class: pick(coupled, W, U) },
+        // The bit-identity theorems: each changes cost, never a result bit.
+        Row { name: "simd", write: |c| c.simd = !c.simd, class: U },
+        Row { name: "simd_solve", write: |c| c.simd_solve = !c.simd_solve, class: U },
+        // The AVX2 fold differs from the scalar one only in ±0 ties (`resources.rs`), which these
+        // scenes do not reach.
+        Row { name: "sdf_narrowphase", write: |c| c.sdf_narrowphase = SdfNarrowphaseKernel::Avx2, class: U },
+        Row { name: "parallel_broadphase", write: |c| c.parallel_broadphase = !c.parallel_broadphase, class: U },
+        // It records the schedule's shape and nothing reads it (`resources.rs`).
+        Row { name: "colored", write: |c| c.colored = !c.colored, class: W },
+        Row { name: "parallel_solve", write: |c| c.parallel_solve = !c.parallel_solve, class: U },
+        Row { name: "parallel_narrowphase", write: |c| c.parallel_narrowphase = !c.parallel_narrowphase, class: U },
+        Row { name: "contact_reuse", write: |c| c.contact_reuse = !c.contact_reuse, class: O },
+        Row { name: "contact_reuse_distance", write: |c| c.contact_reuse_distance = 0.0, class: O },
+        Row { name: "sleeping", write: |c| c.sleeping = !c.sleeping, class: O },
+        // Off ≡ Sets (L10's invariant), and inert with sleeping off.
+        Row { name: "sleep_skip", write: |c| c.sleep_skip = SleepSkip::Off, class: U },
+        Row { name: "sleep_threshold", write: |c| c.sleep_threshold = 0.0, class: O },
+        Row { name: "sleep_frames", write: |c| c.sleep_frames += 10, class: O },
+        // No soft body on the SDF shape; the soft step is not registered there.
+        Row { name: "soft_body", write: |c| c.soft_body = !c.soft_body, class: pick(soft, O, U) },
+        Row { name: "soft_damping", write: |c| c.soft_damping = 0.5, class: pick(soft, O, U) },
+        Row { name: "soft_rest_clamp", write: |c| c.soft_rest_clamp = !c.soft_rest_clamp, class: pick(soft, O, U) },
+        // Read by the coupled step only.
+        Row { name: "soft_rigid_coupling", write: |c| c.soft_rigid_coupling = !c.soft_rigid_coupling, class: pick(coupled, O, U) },
+        // The cube's particles are 0.6 apart, past twice their radius (0.1): the self-collision
+        // pass finds no pair to push (measured by DA9's first run).
+        Row { name: "self_collision_iters", write: |c| c.self_collision_iters += 1, class: U },
+        // Read by the colored soft step only.
+        Row { name: "soft_body_colored", write: |c| c.soft_body_colored = !c.soft_body_colored, class: pick(shape == Shape::SoftColored, O, U) },
+        // Self-collision is off in these scenes (`self_collision_iters` is 0).
+        Row { name: "soft_self_collision_colored", write: |c| c.soft_self_collision_colored = !c.soft_self_collision_colored, class: U },
+        // L10 D5b (design 11 §4.3 C): the ball's contact is warm-started on every shape.
+        Row { name: "warm_start", write: |c| c.warm_start = !c.warm_start, class: O },
+    ]
+}
+
+/// The top-level field names `Debug` prints for a struct value.
+fn debug_field_names(printed: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    let mut depth = 0u32;
+    let mut start = None;
+    for (i, ch) in printed.char_indices() {
+        match ch {
+            '{' | '(' | '[' => {
+                depth += 1;
+                start = None;
+            }
+            '}' | ')' | ']' => {
+                depth -= 1;
+                start = None;
+            }
+            ':' if depth == 1 && printed[i + 1..].starts_with(' ') => {
+                if let Some(s) = start.take() {
+                    names.push(&printed[s..i]);
+                }
+            }
+            c if c.is_alphanumeric() || c == '_' => {
+                start.get_or_insert(i);
+            }
+            _ => start = None,
+        }
+    }
+    names
+}
+
+/// DA9 on `shape`: every perturbable field, one at a time, Early at `at`, sleeping off and `Sets`.
+fn da9(shape: Shape) {
+    let (pipeline, specs) = match shape {
+        Shape::Sdf => (Pipeline::Sdf, sdf_tower_and_ball()),
+        Shape::SoftCoupled => (Pipeline::SoftCoupled, soft_scene()),
+        Shape::SoftColored => (Pipeline::SoftColored, soft_scene()),
+    };
+    let setup: &Setup<'_> = if shape == Shape::Sdf { &quiet } else { &soft_setup };
+    let rows = da9_rows(shape);
+    // Completeness against the type itself: `Debug` prints every field, once, at depth 1.
+    let mut names: Vec<&str> = rows.iter().map(|r| r.name).collect();
+    let printed = format!("{:?}", PhysicsConfig::default());
+    let mut fields = debug_field_names(&printed);
+    names.sort_unstable();
+    fields.sort_unstable();
+    assert_eq!(names, fields, "DA9: the rows are not PhysicsConfig's fields");
+    let variant = Variant::default_cfg(1);
+    let mut unobservable = Vec::new();
+    for row in rows.iter().filter(|r| r.class != Class::Wiring) {
+        let write = if row.name == "dt" { Defer::dt(Place::Early, row.write, 2.0 * DT) } else { Defer::cfg(Place::Early, row.write) };
+        let mut seen = Vec::new();
+        for mode in [None, Some(SleepSkip::Sets)] {
+            let label = format!("DA9 {shape:?} {} {}", row.name, mode.map_or("sleeping off", |_| "Sets"));
+            if let Some((step, _)) = deferral_run(&label, pipeline, variant, mode, &specs, AT, setup, &write, &mut |_| {}) {
+                seen.push(format!("{} at {step}", mode.map_or("off", |_| "Sets")));
+            }
+        }
+        match row.class {
+            Class::Observable => assert!(
+                !seen.is_empty(),
+                "DA9 {shape:?}: {} is misclassified: C equals B in every mode, so it is not observable in this scene",
+                row.name
+            ),
+            Class::Unobservable => {
+                if seen.is_empty() {
+                    unobservable.push(row.name);
+                } else {
+                    println!("DA9 {shape:?}: {} (classed unobservable) differs: {seen:?}", row.name);
+                }
+            }
+            Class::Wiring => unreachable!("wiring rows are filtered"),
+        }
+    }
+    println!("DA9 {shape:?}: every perturbed field deferred exactly; unobservable here: {unobservable:?}");
+}
+
+/// DA9 on the towers and the ball, SDF pipeline.
+#[test]
+fn d9b_defer_every_field_sdf() {
+    da9(Shape::Sdf);
+}
+
+/// DA9 on the soft scene, coupled soft pipeline.
+#[test]
+fn d9b_defer_every_field_soft_coupled() {
+    da9(Shape::SoftCoupled);
+}
+
+/// DA9 on the soft scene, colored soft pipeline.
+#[test]
+fn d9b_defer_every_field_soft_colored() {
+    da9(Shape::SoftColored);
+}
+
+// ── Suite B: Off ≡ Sets under window writes (L10's invariant; design 10, Tests B) ──────────
+
+/// Queues `write` into the writer at `place` of the world `rig` at `step == at`.
+fn queue_cfg(rig: &mut Rig, place: Place, write: fn(&mut PhysicsConfig)) {
+    rig.mid(place).cfg = Some(write);
+}
+
+/// LB1: an SDF edit (the floor lowered 1 mm) Early while the tower is held lands at the next
+/// step: that step's epoch flushes, and `Off` recomputes the pile's field manifolds. Red before
+/// D9b at `HELD_BY`: `Off`'s SDF stage read the new field while `Sets` kept the held manifolds.
+#[test]
+fn s4_mid_step_sdf_edit_lands_next_step() {
+    for (kind, variant) in s4_variants() {
+        let label = format!("LB1 [{kind}] W{}", variant.workers);
+        let mut script = |step: usize, rig: &mut Rig| {
+            if step == HELD_BY {
+                rig.mid(Place::Early).field = Some(sdf_floor(-1.0e-3));
+            }
+        };
+        let ev = lockstep(&label, Pipeline::Sdf, variant, &tower(3, 0.0, 0.0, 0.5), HELD_BY + 11, &mut script);
+        let k = HELD_BY;
+        assert_eq!(ev.stats[k].held_rows, 3, "{label}: void: the tower was not held at the write's step");
+        assert!(
+            ev.stats[k + 1].flushes == 1 && ev.rules_at[k + 1].d5_epoch == ev.rules_at[k].d5_epoch + 1,
+            "{label}: void: the next step did not flush on the epoch: {:?}",
+            ev.stats[k + 1]
+        );
+        assert_ne!(ev.off_manifolds[k + 1], ev.off_manifolds[k - 1], "{label}: void: Off's manifolds did not change");
+    }
+}
+
+/// LB2: an SDF edit Early (the floor 5 m lower) reverted Late is invisible to both modes. Red
+/// before D9b at `HELD_BY`, permanently: `Off`'s SDF stage saw the lowered floor.
+#[test]
+fn s4_mid_step_sdf_edit_reverted_is_invisible() {
+    for (kind, variant) in s4_variants() {
+        let label = format!("LB2 [{kind}] W{}", variant.workers);
+        let mut script = |step: usize, rig: &mut Rig| {
+            if step == HELD_BY {
+                rig.mid(Place::Early).field = Some(sdf_floor(-5.0));
+                rig.mid(Place::Late).field = Some(sdf_floor(0.0));
+            }
+        };
+        let mut saw = false;
+        let ev = lockstep_probed(&label, Pipeline::Sdf, variant, &tower(3, 0.0, 0.0, 0.5), HELD_BY + 11, &mut script, &mut |step, _, sets| {
+            if step == HELD_BY {
+                saw = saw_field(sets, Place::Late, &sdf_floor(-5.0));
+            }
+        });
+        assert!(saw, "{label}: void: the Late writer did not see the edited field");
+        let d5 = ev.rules_at[HELD_BY - 1].d5_epoch;
+        assert!((HELD_BY..=HELD_BY + 10).all(|k| ev.rules_at[k].d5_epoch == d5), "{label}: the reverted edit changed the epoch");
+        assert!(
+            (HELD_BY..=HELD_BY + 10).all(|k| ev.frozen_rows[k] == ev.dynamic_rows[k]),
+            "{label}: the pile did not stay latched through step {}",
+            HELD_BY + 10
+        );
+    }
+}
+
+/// LB3 / LB4's body: `write` Early at `HELD_BY` on the towers, on the Tree and the Grid with
+/// contact reuse on; the next step flushes and `Off` recomputes the reused pairs.
+fn mid_step_reuse_write(arm: &str, write: fn(&mut PhysicsConfig)) {
+    for variant in [BroadphaseKind::Tree, BroadphaseKind::Grid].into_iter().flat_map(|k| [1, 8].map(|w| Variant::cell(k, true, w))) {
+        let label = format!("{arm} [{:?} W{}]", variant.kind, variant.workers);
+        let mut script = |step: usize, rig: &mut Rig| {
+            if step == HELD_BY {
+                queue_cfg(rig, Place::Early, write);
+            }
+        };
+        let ev = lockstep(&label, Pipeline::Default, variant, &towers(), HELD_BY + 11, &mut script);
+        let k = HELD_BY;
+        assert!(ev.off_reused[k - 1] > 0, "{label}: void: Off reused no contact before the write");
+        assert_eq!(ev.stats[k + 1].flushes, 1, "{label}: void: the next step did not flush: {:?}", ev.stats[k + 1]);
+        assert_ne!(ev.off_manifolds[k + 1], ev.off_manifolds[k - 1], "{label}: void: Off's manifolds did not change");
+    }
+}
+
+/// LB3: `contact_reuse` flipped Early while the towers are held. Red before D9b at `HELD_BY`:
+/// `Off` recomputed the frozen pairs with the flag the write set, while `Sets` skipped them.
+#[test]
+fn s3_mid_step_reuse_toggle_lands_next_step() {
+    mid_step_reuse_write("LB3 contact_reuse", |c| c.contact_reuse = !c.contact_reuse);
+}
+
+/// LB4: τ = 0 Early, as LB3.
+#[test]
+fn s3_mid_step_reuse_distance_lands_next_step() {
+    mid_step_reuse_write("LB4 tau", |c| c.contact_reuse_distance = 0.0);
+}
+
+/// LB5's written step: long enough that L9's `is_fast` classes the held towers' box pairs as fast
+/// (checked by the reach world, below).
+const DT_W: f32 = 1.0e3;
+
+/// LB5: `dt = DT_W` Early, then `dt = DT` Late, at `HELD_BY`: the solve runs with `DT` on either
+/// tree, so only the narrowphase's `is_fast` can see `DT_W`. Red before D9b at `HELD_BY`: `Off`'s
+/// narrowphase classed the frozen box pairs as fast and ran their full collision, while `Sets`
+/// skipped them.
+///
+/// Anti-vacuity, per run: (i) the Late writer saw `DT_W`; (ii) a reach world R (`Off`, idle
+/// writers) run with the clock at `DT_W` on step `HELD_BY` loses a reuse among an unchanged or
+/// larger pair set while every row is frozen (poses unchanged: the reuse criterion reads only
+/// shapes and poses, so that is an `is_fast` flip); (iii) the epoch is unchanged at `HELD_BY + 1`.
+#[test]
+fn s3_mid_step_dt_write_is_invisible() {
+    for variant in [BroadphaseKind::Tree, BroadphaseKind::Grid].into_iter().flat_map(|k| [1, 8].map(|w| Variant::cell(k, true, w))) {
+        let label = format!("LB5 dt [{:?} W{}]", variant.kind, variant.workers);
+        let mut script = |step: usize, rig: &mut Rig| {
+            if step == HELD_BY {
+                queue_cfg(rig, Place::Early, |c| c.dt = DT_W);
+                queue_cfg(rig, Place::Late, |c| c.dt = DT);
+            }
+        };
+        let mut saw = false;
+        let ev = lockstep_probed(&label, Pipeline::Default, variant, &towers(), HELD_BY + 11, &mut script, &mut |step, _, sets| {
+            if step == HELD_BY {
+                saw = sets.mid_ref(Place::Late).seen.is_some_and(|(c, _)| c.dt == DT_W);
+            }
+        });
+        assert!(saw, "{label}: void (i): the Late writer did not see dt = DT_W");
+        assert_eq!(
+            ev.rules_at[HELD_BY + 1].d5_epoch,
+            ev.rules_at[HELD_BY].d5_epoch,
+            "{label}: (iii) the restored dt changed the epoch"
+        );
+        let mut reach = Rig::new(Pipeline::Default, variant, SleepSkip::Off, &towers());
+        let (mut frozen, mut pairs, mut reused) = ((0, 1), [0; 2], [0; 2]);
+        for step in 0..=HELD_BY {
+            if step == HELD_BY {
+                set_clock(&mut reach, DT_W);
+            }
+            reach.step();
+            if step + 1 >= HELD_BY {
+                let c = reach.world.resource::<Manifolds>().pair_classes();
+                (pairs[step + 1 - HELD_BY], reused[step + 1 - HELD_BY]) = (c.pairs, c.reused);
+            }
+            if step == HELD_BY - 1 {
+                frozen = frozen_of(&reach);
+            }
+        }
+        assert!(
+            frozen.0 == frozen.1 && pairs[1] >= pairs[0] && reused[1] < reused[0],
+            "{label}: void (ii): DT_W does not flip is_fast here: frozen {frozen:?}, pairs {pairs:?}, reused {reused:?}"
+        );
+    }
+}
+
+/// LB6 (C1): `wake_all()` while the towers are held, Early and (a second run) Late, lands at the
+/// next step in both modes: its broadphase flushes (D6) and the solve clears every latch. Red
+/// before D9b at `HELD_BY`: `Off`'s solve served the live request and solved the piles, while the
+/// held rows stayed at inverse mass 0 under `Sets`.
+#[test]
+fn s3_mid_step_wake_all_lands_next_step() {
+    for place in [Place::Early, Place::Late] {
+        arm(
+            &format!("LB6 wake_all {place:?}"),
+            &towers(),
+            HELD_BY + 11,
+            &mut |step, rig: &mut Rig| {
+                if step == HELD_BY {
+                    rig.mid(place).wake = true;
+                }
+            },
+            &|label, ev| {
+                let k = HELD_BY;
+                assert_eq!(ev.stats[k].held_rows as usize, ev.dynamic_rows[k], "{label}: void: not every row held at the write");
+                assert!(
+                    ev.stats[k + 1].flushes == 1 && ev.rules_at[k + 1].d6_wake_all == ev.rules_at[k].d6_wake_all + 1,
+                    "{label}: void: the next step did not flush on the wake: {:?}",
+                    ev.stats[k + 1]
+                );
+                assert_eq!(ev.frozen_rows[k + 1], 0, "{label}: void: rows stayed frozen after the wake");
+            },
+        );
+    }
+}
+
+/// The control: `sleep_threshold = 0` Early. The solve reads it in `end_step`, which does not
+/// depend on the mode, so this is green on either tree; the wake it causes lands in both worlds.
+#[test]
+fn s3_mid_step_sleep_threshold_is_mode_independent() {
+    arm(
+        "LB control sleep_threshold",
+        &towers(),
+        HELD_BY + 11,
+        &mut |step, rig: &mut Rig| {
+            if step == HELD_BY {
+                queue_cfg(rig, Place::Early, |c| c.sleep_threshold = 0.0);
+            }
+        },
+        &|label, ev| {
+            assert!(
+                (HELD_BY + 1..=HELD_BY + 3).any(|k| ev.frozen_rows[k] < ev.dynamic_rows[k]),
+                "{label}: void: no wake within steps {}..={}",
+                HELD_BY + 1,
+                HELD_BY + 3
+            );
+        },
+    );
+}
+
+// ── D5b: warm start as a latched input (L10 C3e; design 11, §4) ────────────────────────────
+
+/// The step the warm-start toggle writes at, and the one it is restored at.
+const WARM_OFF: usize = HELD_BY;
+/// See [`WARM_OFF`].
+const WARM_ON: usize = HELD_BY + 60;
+
+/// The warm-start arms' scenes: the towers and the ball on the default pipeline, over
+/// [`arm_variants`], and S4's tower and the ball on the SDF pipeline, over [`s4_variants`] — each
+/// with its held-row count (the ball is dynamic and never held).
+fn warm_arm_cells() -> Vec<(String, Pipeline, Variant, Vec<Spec>, u32)> {
+    let mut cells = Vec::new();
+    for v in arm_variants() {
+        let label = format!("[{:?} reuse {:?} W{}]", v.kind, v.reuse, v.workers);
+        cells.push((label, Pipeline::Default, v, towers_and_ball(), 9));
+    }
+    for (kind, v) in s4_variants() {
+        cells.push((format!("[S4 {kind} W{}]", v.workers), Pipeline::Sdf, v, sdf_tower_and_ball(), 3));
+    }
+    cells
+}
+
+/// Arm A (design 11 §4.3): `warm_start` off at [`WARM_OFF`] and back on at [`WARM_ON`] as boundary
+/// writes while the towers are held, then `wake_all()` at `HELD_BY + 120`; `Off` and `Sets` in
+/// lockstep. The epoch carries the effective warm start (the solver's flag AND the latched field),
+/// so each toggle flushes; the first warm step after the cold period is a `Reset` (L3), so no warm
+/// record captured before it is ever read again, in either mode.
+#[test]
+fn s3_warm_start_toggle_while_held_flushes() {
+    for (cell, pipeline, variant, specs, held) in warm_arm_cells() {
+        let label = format!("D5b A {cell}");
+        let mut script = |step: usize, rig: &mut Rig| {
+            if step == WARM_OFF {
+                rig.cfg().warm_start = false;
+            }
+            if step == WARM_ON {
+                rig.cfg().warm_start = true;
+            }
+            if step == HELD_BY + 120 {
+                wake_all(rig);
+            }
+        };
+        let ev = lockstep(&label, pipeline, variant, &specs, ARM_STEPS + 60, &mut script);
+        let (w, k) = (&ev.warm, WARM_OFF);
+        // (a) held and warm before the toggle.
+        assert_eq!(ev.stats[k - 1].held_rows, held, "{label}: void (a): not held before the toggle");
+        assert!(w[k - 1].carry_hits > 0, "{label}: void (a): no warm carry before the toggle: {:?}", w[k - 1]);
+        // (b) the toggle's step is cold and flushes.
+        assert!(
+            w[k].points > 0 && w[k].point_hits == 0 && ev.stats[k].flushes == 1,
+            "{label}: (b) the toggle's step: warm {:?}, stats {:?}",
+            w[k],
+            ev.stats[k]
+        );
+        // (c) held again inside the cold period, with no warm carry.
+        let reheld = (k + 1..WARM_ON).find(|&j| ev.stats[j].held_rows == held);
+        let j = WARM_ON - 1;
+        assert!(
+            reheld.is_some() && ev.stats[j].held_rows == held && w[j].carry_points == 0 && w[j].carry_hits == 0,
+            "{label}: (c) not held again with an empty carry by step {j}: stats {:?}, warm {:?}",
+            ev.stats[j],
+            w[j]
+        );
+        println!("{label}: re-held first at step {reheld:?} (predicted {})", k + 1);
+        // (d) the Reset lands on the toggle-back step.
+        let r = w[k - 1].remap_resets;
+        assert_eq!(ev.stats[WARM_ON].flushes, 1, "{label}: (d) the toggle back did not flush");
+        assert!(
+            (k - 1..WARM_ON).all(|j| w[j].remap_resets == r) && w[WARM_ON].remap_resets == r + 1,
+            "{label}: (d) remap_resets over [{}, {WARM_ON}]: {:?}",
+            k - 1,
+            (k - 1..=WARM_ON).map(|j| w[j].remap_resets).collect::<Vec<_>>()
+        );
+        assert!(
+            w[WARM_ON].point_hits == 0 && w[WARM_ON + 1].point_hits > 0,
+            "{label}: (d) point hits at the Reset and after: {} then {}",
+            w[WARM_ON].point_hits,
+            w[WARM_ON + 1].point_hits
+        );
+        // (e) the cold period erased the frozen islands' warm memory.
+        let e = HELD_BY + 100;
+        assert!(w[e].carry_points > 0 && w[e].carry_hits == 0, "{label}: (e) warm at step {e}: {:?}", w[e]);
+        // (f)
+        assert!(
+            ev.rules.d5_epoch >= 2 && ev.rules.d6_wake_all >= 1,
+            "{label}: void (f): {} epoch flushes, {} wake flushes",
+            ev.rules.d5_epoch,
+            ev.rules.d6_wake_all
+        );
+    }
+}
+
+/// Arm B: the same toggle written in the Early window (and, a second run, the Late one): the
+/// write's own step runs warm in both modes, and the next step is the cold, flushing one.
+#[test]
+fn s3_mid_step_warm_start_toggle_lands_next_step() {
+    for place in [Place::Early, Place::Late] {
+        for (cell, pipeline, variant, specs, held) in warm_arm_cells() {
+            let label = format!("D5b B {place:?} {cell}");
+            let mut script = |step: usize, rig: &mut Rig| {
+                if step == WARM_OFF {
+                    rig.mid(place).cfg = Some(|c| c.warm_start = false);
+                }
+                if step == WARM_ON {
+                    rig.mid(place).cfg = Some(|c| c.warm_start = true);
+                }
+            };
+            let mut applied = Vec::new();
+            let ev = lockstep_probed(&label, pipeline, variant, &specs, WARM_ON + 3, &mut script, &mut |_, _, sets| {
+                applied.push(sets.mid_ref(place).applied);
+            });
+            let (w, k) = (&ev.warm, WARM_OFF);
+            for s in [WARM_OFF, WARM_ON] {
+                assert_eq!(applied[s], applied[s - 1] + 1, "{label}: void: the write at step {s} was not applied");
+            }
+            assert!(w[k].point_hits > 0, "{label}: the write's own step ran cold: {:?}", w[k]);
+            assert!(
+                ev.stats[k].held_rows == held && ev.stats[k].flushes == 0,
+                "{label}: void: the write's step was not a held, unflushed one: {:?}",
+                ev.stats[k]
+            );
+            assert!(
+                w[k + 1].point_hits == 0 && ev.stats[k + 1].flushes == 1,
+                "{label}: the next step: warm {:?}, stats {:?}",
+                w[k + 1],
+                ev.stats[k + 1]
+            );
+            assert!(w[WARM_ON].point_hits == 0, "{label}: the toggle-back write's own step ran warm");
+            assert_eq!(
+                w[WARM_ON + 1].remap_resets,
+                w[WARM_ON].remap_resets + 1,
+                "{label}: the first warm step after the write is not a Reset"
+            );
+            assert!(w[WARM_ON + 2].point_hits > 0, "{label}: no warm hit after the Reset");
+        }
+    }
+}
+
+/// Arm C (D9b's deferral driver): `warm_start = false` in the Early and the Late window. On the
+/// default pipeline in every mode, and on the reference pipeline with sleeping off.
+#[test]
+fn d5b_defer_warm_start() {
+    for place in [Place::Early, Place::Late] {
+        let write = Defer::cfg(place, |c| c.warm_start = false);
+        for w in [1, 8] {
+            let variant = Variant::default_cfg(w);
+            for mode in MODES {
+                let label = cell_label(&format!("D5b C {place:?}"), Pipeline::Default, &variant, mode);
+                deferral(&label, Pipeline::Default, variant, mode, &towers_and_ball(), &quiet, &write, &mut |_| {});
+            }
+            let label = cell_label(&format!("D5b C {place:?}"), Pipeline::SoftCoupledRef, &variant, None);
+            deferral(&label, Pipeline::SoftCoupledRef, variant, None, &soft_scene(), &soft_setup, &write, &mut |_| {});
+        }
+    }
+}
+
+/// The last solve's warm-seed statistics of whichever solver `rig` runs.
+fn warm_stats_of(rig: &Rig) -> WarmSeedStats {
+    if rig.world.contains_resource::<ColoredSoftStepSolver>() {
+        rig.world.resource::<ColoredSoftStepSolver>().warm_seed_stats()
+    } else {
+        rig.world.resource::<SoftStepSolver>().warm_seed_stats()
+    }
+}
+
+/// Arm D, two knobs and one rule: warm start runs iff the solver's setup flag AND the latched
+/// `PhysicsConfig::warm_start` are both true. Six worlds per shape, as (solver flag, config):
+/// (t,t), (t,f), (f,t), (f,f), (f, toggled f→t→f) and (t, toggled t→f→t), the toggles at
+/// [`WARM_OFF`] and [`WARM_ON`]; the solver flag is set at setup by inserting
+/// `with_warm_start(false)` before the first step. Every world with a false half runs cold and they
+/// match exactly; (t,t) differs from them; and the sixth world, on the reference solver too, takes
+/// its `Reset` on the toggle-back step (L3).
+#[test]
+fn d5b_two_knobs_one_rule() {
+    let shapes = [(Pipeline::Default, Some(SleepSkip::Sets)), (Pipeline::SoftCoupledRef, None)];
+    // (solver flag, config at start, config toggled at WARM_OFF and back at WARM_ON)
+    let worlds = [(true, true, false), (true, false, false), (false, true, false), (false, false, false), (false, false, true), (true, true, true)];
+    for (pipeline, mode) in shapes {
+        let label = format!("D5b D [{pipeline:?}]");
+        let mut rigs: Vec<Rig> = worlds
+            .iter()
+            .map(|&(solver, cfg, _)| {
+                let mut rig = Rig::with_mode(pipeline, Variant::default_cfg(1), mode, &towers_and_ball());
+                if !solver {
+                    if pipeline == Pipeline::Default {
+                        rig.world.insert_resource(ColoredSoftStepSolver::with_warm_start(false));
+                    } else {
+                        rig.world.insert_resource(SoftStepSolver::with_warm_start(false));
+                    }
+                }
+                rig.cfg().warm_start = cfg;
+                // A cold solve settles the towers more slowly: with the default threshold the
+                // worlds that start cold never freeze before the first toggle. Two orders above it,
+                // every world holds its towers before each toggle.
+                rig.cfg().sleep_threshold = 1.0e-2;
+                rig
+            })
+            .collect();
+        let mut bodies_differ = false;
+        let mut sixth = Vec::new();
+        for step in 0..=WARM_ON + 1 {
+            for (rig, &(_, _, toggled)) in rigs.iter_mut().zip(&worlds) {
+                if toggled && (step == WARM_OFF || step == WARM_ON) {
+                    let on = rig.cfg().warm_start;
+                    rig.cfg().warm_start = !on;
+                }
+                rig.step();
+                if toggled && mode.is_some() && (step == WARM_OFF - 1 || step == WARM_ON - 1) {
+                    let held = rig.world.resource::<SleepSets>().stats().held_rows;
+                    assert!(held > 0, "{label}: void: a toggled world holds nothing before its toggle at step {}", step + 1);
+                }
+            }
+            let obs: Vec<Obs> = rigs.iter_mut().map(|rig| observe(&mut rig.world)).collect();
+            for k in [2, 3, 4] {
+                if let Some(why) = diff_named(&obs[1], &obs[k], ("(t,f)", "other"), false) {
+                    panic!("{label}: world {k} of the cold four differs from (t,f) after step {step}: {why}");
+                }
+            }
+            if mode.is_some() {
+                let d5: Vec<u64> = rigs[1..5].iter().map(|r| r.world.resource::<SleepSets>().rule_counts().d5_epoch).collect();
+                assert!(d5.iter().all(|&d| d == d5[0]), "{label}: the cold four's epoch flushes differ after step {step}: {d5:?}");
+            }
+            bodies_differ |= obs[0].bodies != obs[1].bodies;
+            sixth.push(warm_stats_of(&rigs[5]));
+        }
+        assert!(bodies_differ, "{label}: void: (t,t) equals (t,f): warm start changed nothing");
+        let r = sixth[WARM_OFF - 1].remap_resets;
+        assert!(
+            (WARM_OFF..WARM_ON).all(|j| sixth[j].point_hits == 0),
+            "{label}: the sixth world hit a warm record inside its cold period"
+        );
+        assert!(
+            (WARM_OFF - 1..WARM_ON).all(|j| sixth[j].remap_resets == r) && sixth[WARM_ON].remap_resets == r + 1,
+            "{label}: the sixth world's remap_resets over [{}, {WARM_ON}]: {:?}",
+            WARM_OFF - 1,
+            (WARM_OFF - 1..=WARM_ON).map(|j| sixth[j].remap_resets).collect::<Vec<_>>()
+        );
+        assert!(
+            sixth[WARM_ON].point_hits == 0 && sixth[WARM_ON + 1].point_hits > 0,
+            "{label}: the sixth world's point hits at the Reset and after: {} then {}",
+            sixth[WARM_ON].point_hits,
+            sixth[WARM_ON + 1].point_hits
+        );
+    }
+}
+
+/// Arm E's scene: a row of spheres of radius 0.5 resting on a static floor whose top is `y = 0`,
+/// the floor the last row.
+fn direct_drive_scene() -> Vec<BodyState> {
+    let sphere = |x: f32| BodyState {
+        inv_inertia: Mat3::from_diagonal(Vec3::new(10.0, 10.0, 10.0)),
+        inv_inertia_local: Mat3::from_diagonal(Vec3::new(10.0, 10.0, 10.0)),
+        position: Vec3::new(x, 0.5, 0.0),
+        linear_velocity: Vec3::ZERO,
+        angular_velocity: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        inv_mass: 1.0,
+        restitution: 0.0,
+        friction: 0.5,
+        simulated: true,
+        kinematic: false,
+        is_sensor: false,
+        shape: ColliderShape::Sphere { radius: 0.5 },
+    };
+    let mut bodies: Vec<BodyState> = (0..6).map(|i| sphere(2.0 * i as f32)).collect();
+    bodies.push(BodyState {
+        inv_inertia: Mat3::ZERO,
+        inv_inertia_local: Mat3::ZERO,
+        position: Vec3::new(0.0, -1.0, 0.0),
+        inv_mass: 0.0,
+        simulated: false,
+        shape: ColliderShape::Box { half_extents: FLOOR_HALF_EXTENTS },
+        ..sphere(0.0)
+    });
+    bodies
+}
+
+/// Each sphere's contact with the floor, rebuilt from the current positions, in `(sphere, floor)`
+/// row order.
+fn direct_drive_manifolds(bodies: &[BodyState]) -> Vec<Manifold> {
+    let floor = bodies.len() - 1;
+    bodies[..floor]
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| {
+            let separation = b.position.y - 0.5;
+            (separation < 0.01).then(|| {
+                let mut m = Manifold::new(BodyIndex(i as u32), BodyIndex(floor as u32));
+                m.normal = Vec3::new(0.0, -1.0, 0.0);
+                let anchor = Vec3::new(b.position.x, b.position.y - 0.5, b.position.z);
+                m.points[0] = ContactPoint { anchor_a: anchor, anchor_b: anchor, separation, feature_id: 0 };
+                m.count = 1;
+                m
+            })
+        })
+        .collect()
+}
+
+/// Arm E (L3′): a direct-drive caller never gathers rows, so its warm store's cursor classifies
+/// every step `Identity`: after a cold step it resumes from the impulses its last warm solve
+/// stored — no `Reset`. Both solvers, 30 steps, cold on step 20.
+#[test]
+fn d5b_direct_drive_resumes_after_a_cold_step() {
+    use boyko_physics::solver::RigidSolver;
+    let bodies = direct_drive_scene();
+    for drive in ["colored", "reference"] {
+        let mut scratch = SolverScratch::with_capacity(bodies.len());
+        scratch.set_bodies(&bodies);
+        let mut colored = ColoredSoftStepSolver::default();
+        let mut reference = SoftStepSolver::default();
+        let mut stats = Vec::new();
+        for step in 0..30 {
+            let cfg = PhysicsConfig { dt: DT, warm_start: step != 20, ..PhysicsConfig::default() };
+            let manifolds = direct_drive_manifolds(scratch.bodies());
+            scratch.touched.reset(scratch.bodies().len());
+            if drive == "colored" {
+                let mut graph = ConstraintGraph::with_capacity(bodies.len());
+                let inv_mass: Vec<f32> = scratch.bodies().iter().map(|b| b.inv_mass).collect();
+                graph.build(&manifolds, inv_mass.len(), |row| inv_mass.get(row as usize).is_some_and(|&m| m != 0.0));
+                colored.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+                stats.push((colored.warm_seed_stats(), colored.solved_steps()));
+            } else {
+                reference.solve(&cfg, &manifolds, &mut scratch);
+                stats.push((reference.warm_seed_stats(), reference.solved_steps()));
+            }
+        }
+        let label = format!("D5b E [{drive}]");
+        assert!(stats[19].0.point_hits > 0, "{label}: void: no warm hit at step 19: {:?}", stats[19].0);
+        assert!(
+            stats[20].1 == stats[19].1 + 1 && stats[20].0.point_hits == 0,
+            "{label}: step 20 did not run cold past the early return: {:?}",
+            stats[20]
+        );
+        assert!(
+            stats[21].0.point_hits > 0 && stats[21].0.remap_resets == 0,
+            "{label}: step 21 did not resume: {:?}",
+            stats[21].0
+        );
+    }
 }

@@ -3462,7 +3462,8 @@ fn frame_allocation_census() {
     class_predicates_match_the_threadpool_receipt();
     worker_thread_allocations_are_counted();
 
-    let mut rows: Vec<Row> = Vec::with_capacity(17);
+    // One row per pinned scene, so the capacity cannot fall behind the pin list.
+    let mut rows: Vec<Row> = Vec::with_capacity(pins().len());
     s0_executor_floor_per_system(&mut rows);
     s0b_executor_floor_with_fixed_substep(&mut rows);
     s2_spawn_despawn_churn_and_par_iter(&mut rows);

@@ -42,6 +42,7 @@ use crate::scratch_ids::{
 };
 use crate::resources::PhysicsConfig;
 use crate::sdf_query::SdfField;
+use crate::step_inputs::StepInputs;
 use crate::soft::collide::collide_sdf;
 use crate::soft::component::SoftBody;
 use crate::soft::self_collision::{build_hash, project_self_pair, project_self_pair_raw, sweep};
@@ -669,16 +670,19 @@ unsafe impl Send for SoftColorPtrs {}
 unsafe impl Sync for SoftColorPtrs {}
 
 /// Advances every opted-in [`SoftBody`] by one COLORED-PARALLEL XPBD step (SP4) —
-/// the sibling of [`physics_soft_step`](crate::soft::physics_soft_step), registered
-/// in its place by
-/// [`add_physics_soft_colored`](crate::plugin::add_physics_soft_colored) (the two
-/// never both run).
+/// the sibling of [`physics_soft_step`](crate::soft::physics_soft_step) (the two never both
+/// run).
 ///
 /// Early-returns when [`PhysicsConfig::soft_body`] is `false` (the soft 0%-gate).
 /// When [`PhysicsConfig::soft_body_colored`] is `false` it runs the SERIAL
 /// `step_body` per body (byte-identical to
 /// `physics_soft_step` — the SP4 0%-gate); when `true` it runs the colored projection
 /// per body via [`step_body_colored`].
+///
+/// This is the standalone form, which reads the live resources:
+/// [`add_physics_soft_colored`](crate::plugin::add_physics_soft_colored) registers
+/// `physics_soft_step_colored_latched` in the soft slot, which reads the configuration and the
+/// field the step's broadphase latched (L10 D9b).
 //
 // `clippy::needless_pass_by_value`: `Res<_>` is a by-value `SystemParam` read via a
 // `&*` reborrow — the same false-positive the rigid + serial soft systems document.
@@ -689,19 +693,44 @@ pub fn physics_soft_step_colored(
     field: Res<SdfField>,
     mut scratch: ResMut<SoftColorScratch>,
 ) {
+    soft_step_colored(&mut query, &cfg, &field, &mut scratch);
+}
+
+/// [`physics_soft_step_colored`]'s step-record form (L10 D9b), the one the plugin registers: the
+/// configuration and the field are the ones this step's broadphase latched into [`StepInputs`].
+//
+// `clippy::needless_pass_by_value`: see `physics_soft_step_colored`.
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn physics_soft_step_colored_latched(
+    mut query: Query<&mut SoftBody>,
+    inputs: Res<StepInputs>,
+    mut scratch: ResMut<SoftColorScratch>,
+) {
+    let field = inputs
+        .sdf_field()
+        .expect("invariant: the soft pipeline inserts SdfField, which its broadphase latched");
+    soft_step_colored(&mut query, inputs.config(), field, &mut scratch);
+}
+
+/// The body of both colored soft-step forms.
+#[inline]
+fn soft_step_colored(
+    query: &mut Query<&mut SoftBody>,
+    cfg: &PhysicsConfig,
+    field: &SdfField,
+    scratch: &mut SoftColorScratch,
+) {
     if !cfg.soft_body {
         // The 0%-gate: an un-opted world does no soft-body work.
         return;
     }
-    let field = &*field;
-    let p = step_params(&cfg);
-    let scratch = &mut *scratch;
+    let p = step_params(cfg);
     for body in query.iter_mut() {
         if cfg.soft_body_colored {
-            step_body_colored(body, field, &p, &cfg, scratch);
+            step_body_colored(body, field, &p, cfg, scratch);
         } else {
             // The SP4 0%-gate: behave exactly like the serial `physics_soft_step`.
-            step_body_serial(body, field, &p, &cfg);
+            step_body_serial(body, field, &p, cfg);
         }
     }
 }

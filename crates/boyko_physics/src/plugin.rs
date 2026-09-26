@@ -52,10 +52,12 @@ use crate::scene_sync::{
 use crate::sdf_query::SdfField;
 use crate::sleep_sets::SleepSets;
 use crate::soft::{
-    SoftColorScratch, SoftRigidReaction, physics_soft_rigid_apply, physics_soft_step,
-    physics_soft_step_colored, physics_soft_step_coupled,
+    SoftColorScratch, SoftRigidReaction, physics_soft_rigid_apply,
+    physics_soft_step_colored_latched, physics_soft_step_coupled_latched,
+    physics_soft_step_latched,
 };
 use crate::solver::colored::ColoredSoftStepSolver;
+use crate::step_inputs::StepInputs;
 use crate::solver::{DefaultRigidSolver, RigidSolver};
 use crate::systems::{
     physics_apply, physics_broadphase, physics_broadphase_colored,
@@ -128,13 +130,20 @@ pub struct PhysicsStageKeys {
     /// pipeline was wired with `S = `[`ColoredSoftStepSolver`], else
     /// [`physics_solve_step::<S>`](physics_solve_step).
     pub solve: usize,
-    /// Descriptor index of the [`physics_soft_step`](crate::soft::physics_soft_step)
-    /// SP1 XPBD soft-body pass, or `None` for the non-soft paths (plan O11 SP1).
+    /// Descriptor index of the SP1 XPBD soft-body pass, or `None` for the non-soft paths
+    /// (plan O11 SP1).
     ///
     /// Present only when the pipeline was wired by
-    /// [`add_physics_soft`](crate::plugin::add_physics_soft); it runs AFTER `solve`
-    /// and BEFORE `apply` as a separate position pass on the
-    /// [`SoftBody`](crate::soft::SoftBody) columns.
+    /// [`add_physics_soft`](crate::plugin::add_physics_soft) or
+    /// [`add_physics_soft_colored`](crate::plugin::add_physics_soft_colored); it runs AFTER
+    /// `solve` and BEFORE `apply` as a separate position pass on the
+    /// [`SoftBody`](crate::soft::SoftBody) columns. The registered system is the step-record
+    /// form (`physics_soft_step_latched`, `physics_soft_step_coupled_latched` or
+    /// `physics_soft_step_colored_latched`, L10 D9b) of the public
+    /// [`physics_soft_step`](crate::soft::physics_soft_step),
+    /// [`physics_soft_step_coupled`](crate::soft::physics_soft_step_coupled) or
+    /// [`physics_soft_step_colored`](crate::soft::physics_soft_step_colored), which are the
+    /// standalone forms.
     pub soft_step: Option<usize>,
     /// Descriptor index of the [`physics_apply`] stage.
     pub apply: usize,
@@ -388,9 +397,11 @@ pub fn add_physics_sdf<S: RigidSolver + Default>(
 ///   `Res<SdfField>` resolves (the caller fills it with the same edit list the GPU
 ///   renders — soft particles collide one-sided against it, sharing the rigid SDF
 ///   evaluator);
-/// - registers [`physics_soft_step`](crate::soft::physics_soft_step) AFTER `solve`
-///   and BEFORE `apply`, so it runs as a SEPARATE position pass on the
-///   [`SoftBody`](crate::soft::SoftBody) columns once the rigid solve has finished.
+/// - registers the step-record form of [`physics_soft_step`](crate::soft::physics_soft_step)
+///   (`physics_soft_step_latched`, which reads the configuration and the field the step's
+///   broadphase latched, L10 D9b) AFTER `solve` and BEFORE `apply`, so it runs as a SEPARATE
+///   position pass on the [`SoftBody`](crate::soft::SoftBody) columns once the rigid solve has
+///   finished.
 ///
 /// The soft step is a STRICTLY DISJOINT integrator: it never WRITES the rigid
 /// [`SolverScratch`], never sets a touched bit, and never enters `physics_apply`,
@@ -401,11 +412,10 @@ pub fn add_physics_sdf<S: RigidSolver + Default>(
 ///
 /// # Soft↔rigid coupling (`coupling`, SP2 D6/D7)
 ///
-/// When `coupling == false` the WHOLE schedule shape is byte-identical to SP1: the
-/// uncoupled [`physics_soft_step`](crate::soft::physics_soft_step) is registered
-/// (no extra params, no extra resources) and no apply-side reaction stage exists.
+/// When `coupling == false` the uncoupled step's step-record form is registered (no extra
+/// resources) and no apply-side reaction stage exists.
 ///
-/// When `coupling == true` the coupled
+/// When `coupling == true` the step-record form of the coupled
 /// [`physics_soft_step_coupled`](crate::soft::physics_soft_step_coupled) is
 /// registered in its place (it additionally READS the rigid frame-N snapshot +
 /// broadphase grid and accumulates the rigid reaction), a
@@ -433,9 +443,10 @@ pub fn add_physics_soft<S: RigidSolver + Default>(
 }
 
 /// Inserts the physics resources INCLUDING the SP4 [`SoftColorScratch`] and registers
-/// the physics pipeline with the COLORED-PARALLEL soft step
-/// ([`physics_soft_step_colored`](crate::soft::physics_soft_step_colored)) in place of
-/// the uncoupled [`physics_soft_step`](crate::soft::physics_soft_step) (the two never
+/// the physics pipeline with the COLORED-PARALLEL soft step (the step-record form of
+/// [`physics_soft_step_colored`](crate::soft::physics_soft_step_colored),
+/// `physics_soft_step_colored_latched`, L10 D9b) in place of the uncoupled
+/// [`physics_soft_step`](crate::soft::physics_soft_step)'s (the two never
 /// both run), in the SAME `.after(solve)` `.before(apply)` slot — mirroring how
 /// [`add_physics_colored_solve`] stands in for the default solve (plan O11 SP4).
 ///
@@ -451,7 +462,8 @@ pub fn add_physics_soft<S: RigidSolver + Default>(
 /// The colored step is a strict SIBLING: when
 /// [`PhysicsConfig::soft_body_colored`](crate::resources::PhysicsConfig) is the
 /// default `false` it runs the SERIAL `step_body` per body — byte-identical to
-/// [`physics_soft_step`]. The colored projection turns on only when the caller sets
+/// [`physics_soft_step`](crate::soft::physics_soft_step). The colored projection turns on only
+/// when the caller sets
 /// `soft_body_colored = true` (and, for the highest-risk self-collision surface,
 /// `soft_self_collision_colored = true`). The colored result is run-to-run
 /// bit-deterministic and `{1, N}`-worker bit-identical, but its value DIFFERS from the
@@ -631,6 +643,9 @@ fn insert_physics_resources<S: RigidSolver + Default>(world: &mut EcsMaster, opt
     // CSR buffers above are preallocated to `INITIAL_BODY_CAPACITY`, so an Auto
     // AllPairs→Grid flip is a FILL, not a frame-path `Vec::new`/grow (Principle 5).
     world.insert_resource(PhysicsStats::default());
+    // L10 D9b: the step record every broadphase variant latches its inputs into and every later
+    // stage reads. Inserted unconditionally: every pipeline registers a broadphase.
+    world.insert_resource(StepInputs::new());
     if colored {
         // O4: the islands + coloring scratch (capacity-reused). Inserted only on
         // the colored path so `physics_build_graph`'s `ResMut<ConstraintGraph>`
@@ -654,10 +669,10 @@ fn insert_physics_resources<S: RigidSolver + Default>(world: &mut EcsMaster, opt
     if with_sdf || soft {
         // The CPU-authoritative SDF scene (empty by default; the caller fills it
         // with the same edit list the GPU renders). Inserted for the SDF
-        // narrowphase path (`with_sdf`) AND the soft pass (`soft`), whose
-        // `physics_soft_step` reads `Res<SdfField>` for one-sided particle
-        // collision. An empty field collides nothing, so a soft-only world that
-        // never fills it is unaffected.
+        // narrowphase path (`with_sdf`) AND the soft pass (`soft`), which collides
+        // particles one-sided against it (the broadphase latches it into `StepInputs`, L10
+        // D9b). An empty field collides nothing, so a soft-only world that never fills it is
+        // unaffected.
         world.insert_resource(SdfField::default());
     }
     if coupling {
@@ -890,17 +905,21 @@ fn register_physics_pipeline<S: RigidSolver + Default>(
     // registered IN PLACE of the uncoupled step (the non-coupling path; the two never
     // both run). When `soft_body_colored` is the default `false` the colored step runs
     // the SERIAL `step_body` (the SP4 0%-gate), so the schedule output is unchanged.
+    //
+    // L10 D9b: each slot registers the step-record form of its step, which reads the
+    // configuration and the field the broadphase latched, so the soft pass runs with the inputs
+    // the rigid step ran with and no configuration or field writer conflicts with it.
     let soft_step_key = if soft {
         let cfg = if coupling {
-            joined(builder.add_system(physics_soft_step_coupled), set)
+            joined(builder.add_system(physics_soft_step_coupled_latched), set)
                 .after(solve)
                 .before(apply)
         } else if soft_colored {
-            joined(builder.add_system(physics_soft_step_colored), set)
+            joined(builder.add_system(physics_soft_step_colored_latched), set)
                 .after(solve)
                 .before(apply)
         } else {
-            joined(builder.add_system(physics_soft_step), set)
+            joined(builder.add_system(physics_soft_step_latched), set)
                 .after(solve)
                 .before(apply)
         };

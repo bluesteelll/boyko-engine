@@ -34,7 +34,9 @@
 //! * G-LL3: on the three G4 scenes the counts equal the design's model, which was validated
 //!   row by row against this replay (`sim.py`, 0 mismatching rows of 1 240 / 1 000 / 1 004). The
 //!   max-row cut is the pin's reason: the oracle and G-LL1 cannot see it (a candidate it drops
-//!   emits nothing), and without it J keeps 20 377 exact tests, not 15 575.
+//!   emits nothing), and without it J keeps 20 377 exact tests, not 15 575. Since L10b C0 the
+//!   model's J figures are pinned on the J snapshot with contact reuse off, the default's until
+//!   L9 C4; the default snapshot's J pin is the tree's reading (`G_LL3_PINS`).
 //!
 //! A second test counts the same at the G4 small sizes (17, 64, 128, 256), over a scene with a
 //! multi-leaf static tree, and at 10k and 100k (the leaf list's fallback count; no oracle there),
@@ -61,7 +63,10 @@ use boyko_physics::systems::body_bounding_radius;
 /// kernel can be checked against this replay row by row before it counts anything else.
 const DUMP_DIR_VAR: &str = "BP_QUERY_COUNTS_DUMP";
 
-use scenes::{J_SNAPSHOT_STEPS, TREE_WARM_STEPS, disparity_scene, j_snapshot, make_dynamic, scene};
+use scenes::{
+    J_SNAPSHOT_STEPS, TREE_WARM_STEPS, disparity_scene, j_snapshot, j_snapshot_with_reuse,
+    make_dynamic, scene,
+};
 
 /// The design's 8-wide tests per query at J (`04-DESIGN-REV2.md`, the Query row of the
 /// critical-path table): "~10–17".
@@ -234,11 +239,40 @@ fn count(label: &str, bodies: &[BodyState], oracle: bool) -> Counted {
 /// The design's model of the leaf-list pass on the three G4 scenes (`sim.py`, C3b design §7,
 /// G-LL3): collection box tests (active tree), active candidates, static candidates, prefilter
 /// chunks, kept exact tests (static included), emitted partners.
+///
+/// **Re-pinned at L10b C0; reason: L9 C4: contact reuse on by default.** [`j_snapshot`] takes the
+/// default configuration, so C4 moved the J snapshot's [`J_SNAPSHOT_STEPS`]-step trajectory and
+/// J's figures with it. C4 did not re-pin this feature-gated leg, which compiles to `running 0
+/// tests` in the workspace run. All three scenes were re-derived by this test's own rule, the
+/// G-LL3 assert below, from its `left` line, on msvc release and debug, with
+/// `cargo test -p boyko-physics --features bp-query-counts --test bp_query_counts`:
+/// * `bp_g4_scene/tree/j100`: old `[1953, 5663, 155, 6216, 15575, 9564]`, new
+///   `[1983, 5787, 155, 6368, 16120, 9549]`. The new figures are the tree's reading on the
+///   reuse-on snapshot. `sim.py` lives out of tree and was not re-run, so they are not the
+///   model's. The old figures are [`G_LL3_J_REUSE_OFF`], which the reuse-off snapshot must still
+///   match bit for bit.
+/// * `bp_g4_uniform/tree/1000` and `bp_g4_disparity/tree/1000`: re-derived and unchanged. Their
+///   bodies are built directly, with no schedule, so contact reuse cannot reach them.
+///
+/// **Re-pin rule.** The figures move only with a commit that changes the J trajectory or the
+/// leaf-list kernel by design. That commit re-reads all three from the G-LL3 assert's `left`
+/// line and records old, new, the command and the reason here. In a commit that claims bit
+/// identity, a change is a defect, never a re-pin.
 const G_LL3_PINS: [(&str, [u64; 6]); 3] = [
-    ("bp_g4_scene/tree/j100", [1953, 5663, 155, 6216, 15575, 9564]),
+    ("bp_g4_scene/tree/j100", [1983, 5787, 155, 6368, 16120, 9549]),
     ("bp_g4_uniform/tree/1000", [1228, 3465, 0, 3848, 7200, 2400]),
     ("bp_g4_disparity/tree/1000", [1487, 4096, 0, 4560, 11252, 6706]),
 ];
+
+/// G-LL3 on the J snapshot with contact reuse OFF (`j_snapshot_with_reuse(Some(false))`): the
+/// exact narrowphase's trajectory, the default's until L9 C4. These are the design model's
+/// figures (`sim.py`) that [`G_LL3_PINS`] held for J until L10b C0, and this snapshot must
+/// still reproduce them bit for bit.
+///
+/// **Re-pin rule.** [`G_LL3_PINS`]'s, except that no contact-reuse change may move it: with reuse
+/// off no reuse code runs.
+const G_LL3_J_REUSE_OFF: (&str, [u64; 6]) =
+    ("bp_g4_scene/tree/j100/reuse-off", [1953, 5663, 155, 6216, 15575, 9564]);
 
 /// The six G-LL3 figures of a pass.
 fn g_ll3_figures(c: &LeafListCounts) -> [u64; 6] {
@@ -403,6 +437,7 @@ fn query_counts_on_the_g4_scenes() {
     let mut disparity = disparity_scene(1_000);
     make_dynamic(&mut disparity);
     let snapshot = j_snapshot();
+    let snapshot_reuse_off = j_snapshot_with_reuse(Some(false));
 
     let counted = [
         count(&format!("bp_g4_scene/tree/j{J_SNAPSHOT_STEPS}"), &snapshot, true),
@@ -422,6 +457,26 @@ fn query_counts_on_the_g4_scenes() {
             c.leaf_list
         );
     }
+
+    // G-LL3 on the reuse-off J snapshot: the pre-C4 figures, bit for bit.
+    let (label, pins) = G_LL3_J_REUSE_OFF;
+    let reuse_off = count(&format!("bp_g4_scene/tree/j{J_SNAPSHOT_STEPS}/reuse-off"), &snapshot_reuse_off, true);
+    assert_eq!(reuse_off.label, label, "the reuse-off pin names its scene");
+    assert_eq!(reuse_off.fallback_leaves, 0, "{label}: no fallback at 1 241 rows");
+    assert_eq!(reuse_off.leaf_list.collect_box_static, 0, "{label}: a one-level static tree needs no box test");
+    assert_eq!(
+        g_ll3_figures(&reuse_off.leaf_list),
+        pins,
+        "{label}: G-LL3 with contact reuse off, the pre-C4 figures; full counts {:?}",
+        reuse_off.leaf_list
+    );
+    // Anti-vacuity: the reuse setting reaches the snapshot, so the two J arms count different
+    // bodies.
+    assert_ne!(
+        g_ll3_figures(&counted[0].leaf_list),
+        pins,
+        "anti-vacuity: the default J snapshot (contact reuse on) differs from the reuse-off one"
+    );
 
     println!("\n## Summary against the design (04-DESIGN-REV2.md)\n");
     println!(
@@ -455,7 +510,7 @@ fn query_counts_on_the_g4_scenes() {
         print_shape(&c.label, "static", &c.statics);
     }
     print_before_after(&counted);
-    for c in &counted {
+    for c in counted.iter().chain([&reuse_off]) {
         println!("\n{}: leaf-list pass {:?}", c.label, c.leaf_list);
     }
 }

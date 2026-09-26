@@ -8,6 +8,16 @@
 //! shared state read is the gather-stamped [`PhysicsConfig`] (`dt` / `gravity` /
 //! `substeps`) and the [`SdfField`].
 //!
+//! # Two forms of each step (L10 D9b)
+//!
+//! The plugin's pipelines register the step-record forms (`physics_soft_step_latched`,
+//! `physics_soft_step_coupled_latched`, `physics_soft_step_colored_latched`), which read the
+//! configuration and the field the step's broadphase latched into
+//! [`StepInputs`](crate::step_inputs::StepInputs), so the soft pass runs with exactly the inputs
+//! the rigid step ran with. The public forms read the live [`PhysicsConfig`] and [`SdfField`]:
+//! they are the standalone forms, for a caller that drives the soft step without a broadphase
+//! (a standalone call is its own latch). Both forms forward to one `#[inline]` body.
+//!
 //! # Determinism boundary (INVIOLABLE)
 //!
 //! Every floating-point operation here is EXACT `mul`/`add`/`sub`/`div`/`sqrt` —
@@ -25,6 +35,7 @@ use boyko_ecs::ecs::core::system::{Res, ResMut};
 use crate::math::Vec3;
 use crate::resources::{BroadphaseGrid, PhysicsConfig, SolverScratch};
 use crate::sdf_query::SdfField;
+use crate::step_inputs::StepInputs;
 use crate::solver::contact::is_dynamic_row;
 use crate::soft::collide::collide_sdf;
 use crate::soft::component::SoftBody;
@@ -74,9 +85,13 @@ pub const REST_CLAMP_EPS: f32 = 2e-3;
 /// → velocity update, all in place on the body's SoA columns (zero per-step alloc).
 ///
 /// `dt` / `gravity` / `substeps` come from the gather-stamped [`PhysicsConfig`]; the
-/// shared [`SdfField`] is read-only. This system is registered `.after(solve)` and
-/// `.before(apply)` by [`add_physics_soft`](crate::plugin::add_physics_soft), and is
-/// a strictly disjoint integrator (it never touches the rigid scratch).
+/// shared [`SdfField`] is read-only. It is a strictly disjoint integrator (it never touches the
+/// rigid scratch).
+///
+/// This is the standalone form, which reads the live resources: the plugin registers
+/// `physics_soft_step_latched` in its place `.after(solve)` and `.before(apply)`
+/// ([`add_physics_soft`](crate::plugin::add_physics_soft)), which reads the configuration and the
+/// field the step's broadphase latched (L10 D9b).
 //
 // `clippy::needless_pass_by_value`: `Res<_>` is a by-value `SystemParam` read via a
 // `&*` reborrow — the same false-positive the rigid systems document.
@@ -86,23 +101,41 @@ pub fn physics_soft_step(
     cfg: Res<PhysicsConfig>,
     field: Res<SdfField>,
 ) {
+    soft_step(&mut query, &cfg, &field);
+}
+
+/// [`physics_soft_step`]'s step-record form (L10 D9b), the one the plugin registers: the
+/// configuration and the field are the ones this step's broadphase latched into [`StepInputs`].
+//
+// `clippy::needless_pass_by_value`: see `physics_soft_step`.
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn physics_soft_step_latched(mut query: Query<&mut SoftBody>, inputs: Res<StepInputs>) {
+    let field = inputs
+        .sdf_field()
+        .expect("invariant: the soft pipeline inserts SdfField, which its broadphase latched");
+    soft_step(&mut query, inputs.config(), field);
+}
+
+/// The body of both uncoupled soft-step forms.
+#[inline]
+fn soft_step(query: &mut Query<&mut SoftBody>, cfg: &PhysicsConfig, field: &SdfField) {
     if !cfg.soft_body {
         // The 0%-gate: an un-opted world does no soft-body work.
         return;
     }
-    let field = &*field;
-    let p = step_params(&cfg);
+    let p = step_params(cfg);
     for body in query.iter_mut() {
         // No coupling context: byte-identical to SP1 on a body with no tets (the
         // volume sweep is `0..0`) and `soft_damping == 0` / `soft_rest_clamp ==
         // false` (the clamp is a `* 1.0` identity then a disabled floor).
-        step_body(body, field, &p, &cfg, None);
+        step_body(body, field, &p, cfg, None);
     }
 }
 
-/// The soft↔rigid-COUPLED XPBD soft-body step (SP2 D6/D7) — registered in place of
-/// [`physics_soft_step`] ONLY on the coupling-wired path
-/// ([`add_physics_soft`](crate::plugin::add_physics_soft) with `coupling == true`).
+/// The soft↔rigid-COUPLED XPBD soft-body step (SP2 D6/D7) — the standalone form of the step the
+/// coupling-wired path registers in place of [`physics_soft_step`]
+/// ([`add_physics_soft`](crate::plugin::add_physics_soft) with `coupling == true`); the plugin
+/// registers its step-record form, `physics_soft_step_coupled_latched` (L10 D9b).
 ///
 /// Identical to [`physics_soft_step`] but additionally reads the read-only rigid
 /// snapshot ([`SolverScratch::bodies`], the SAME frame-N gather the rigid solve
@@ -126,20 +159,49 @@ pub fn physics_soft_step_coupled(
     grid: Res<BroadphaseGrid>,
     mut reaction: ResMut<SoftRigidReaction>,
 ) {
+    soft_step_coupled(&mut query, &cfg, &field, &scratch, &grid, &mut reaction);
+}
+
+/// [`physics_soft_step_coupled`]'s step-record form (L10 D9b), the one the plugin registers on the
+/// coupling path: the configuration and the field are the ones this step's broadphase latched
+/// into [`StepInputs`], so the reaction lands on a rigid state solved with the same inputs.
+//
+// `clippy::needless_pass_by_value`: see `physics_soft_step_coupled`.
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn physics_soft_step_coupled_latched(
+    mut query: Query<&mut SoftBody>,
+    inputs: Res<StepInputs>,
+    scratch: Res<SolverScratch>,
+    grid: Res<BroadphaseGrid>,
+    mut reaction: ResMut<SoftRigidReaction>,
+) {
+    let inputs = inputs.for_gather(&scratch.rows);
+    let field = inputs
+        .sdf_field()
+        .expect("invariant: the soft pipeline inserts SdfField, which its broadphase latched");
+    soft_step_coupled(&mut query, inputs.config(), field, &scratch, &grid, &mut reaction);
+}
+
+/// The body of both coupled soft-step forms.
+#[inline]
+fn soft_step_coupled(
+    query: &mut Query<&mut SoftBody>,
+    cfg: &PhysicsConfig,
+    field: &SdfField,
+    scratch: &SolverScratch,
+    grid: &BroadphaseGrid,
+    reaction: &mut SoftRigidReaction,
+) {
     if !cfg.soft_body {
         // The 0%-gate: an un-opted world does no soft-body work.
         return;
     }
-    let field = &*field;
-    let scratch = &*scratch;
-    let grid = &*grid;
-    let reaction = &mut *reaction;
     // Reset the reaction accumulator for this frame (CLEARED, never resized — the
     // dense per-body rows are reserved to body capacity at wire-up; zero per-step
     // alloc). Sized to the current snapshot row count.
     reaction.reset(scratch.bodies().len());
 
-    let p = step_params(&cfg);
+    let p = step_params(cfg);
     let couple = cfg.soft_rigid_coupling;
     // SP2 M1: `resolve_coupling`/`deepest_contact` read the broadphase grid's CSR
     // cell slices + oversized list, populated ONLY by the `BroadphaseKind::Grid`
@@ -167,7 +229,7 @@ pub fn physics_soft_step_coupled(
             // non-coupling path (no coupling reads/writes).
             None
         };
-        step_body(body, field, &p, &cfg, ctx);
+        step_body(body, field, &p, cfg, ctx);
     }
 }
 
