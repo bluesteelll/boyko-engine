@@ -477,13 +477,13 @@ dependencies = [
  "boyko-diag",
  "boyko-log",
  "boyko-macros",
+ "boyko-memory",
  "boyko-threadpool",
  "boyko-utils",
  "criterion",
  "crossbeam-queue",
  "crossbeam-utils",
  "fixedbitset",
- "libc",
  "loom",
  "mimalloc",
  "proptest",
@@ -544,6 +544,13 @@ dependencies = [
 [[package]]
 name = "boyko-math"
 version = "0.1.0"
+
+[[package]]
+name = "boyko-memory"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "boyko-physics"

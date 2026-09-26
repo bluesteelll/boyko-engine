@@ -208,8 +208,8 @@ fn bench_res_get_param_hot(c: &mut Criterion) {
 
 // --- §18.5 #2: bench_resmut_get_param_hot ---
 //
-// Mirror of #1 with `ResMut<R>` — measures `resources_mut()` +
-// `get_mut_ptr_by_id` + `&mut *ptr`.
+// Mirror of #1 with `ResMut<R>` — measures `resource_ptr_mut()` +
+// `get_ptr_by_id` + `&mut *ptr`.
 //
 // Target: ≤ 3 ns/op for the get_param call itself.
 fn bench_resmut_get_param_hot(c: &mut Criterion) {

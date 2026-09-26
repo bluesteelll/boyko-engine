@@ -2,7 +2,7 @@
 ComponentPool	DropFn	crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs
 ComponentPool	Layout	crates/boyko_ecs/src/ecs/core/profiling/store.rs
 ComponentPool	PoolBacking	crates/boyko_ecs/src/ecs/memory/component_pool.rs
-ComponentPool	VmReservation	crates/boyko_ecs/src/ecs/memory/vm.rs
+ComponentPool	VmReservation	crates/boyko_memory/src/vm.rs
 EcsMaster	ArchetypeBundle	crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs
 EcsMaster	ArchetypeGeneration	crates/boyko_ecs/src/ecs/core/archetype/generation.rs
 EcsMaster	ArchetypeMaster	crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs
@@ -26,8 +26,8 @@ EcsMaster	Resources	crates/boyko_ecs/src/ecs/core/resources/resources.rs
 EcsMaster	SparseMap	crates/boyko_utils/src/sparse_map/sparse_map.rs
 EcsMaster	Tick	crates/boyko_ecs/src/ecs/core/change_detection/tick.rs
 EcsMaster	TriggerRegistry	crates/boyko_ecs/src/ecs/core/component/observers/trigger.rs
-EcsMaster	VmColumn	crates/boyko_ecs/src/ecs/memory/vm_column.rs
-EcsMaster	VmReservation	crates/boyko_ecs/src/ecs/memory/vm.rs
+EcsMaster	VmColumn	crates/boyko_memory/src/vm_column.rs
+EcsMaster	VmReservation	crates/boyko_memory/src/vm.rs
 EcsMaster	WorldId	crates/boyko_ecs/src/ecs/identifiers/primitives.rs
 Scope	Cell	crates/boyko_diag/src/storage.rs,crates/boyko_ecs/src/ecs/core/profiling/store.rs
 Scope	CellLabel	crates/boyko_ecs/src/ecs/core/profiling/store.rs

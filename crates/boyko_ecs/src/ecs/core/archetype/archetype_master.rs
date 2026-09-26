@@ -256,17 +256,17 @@ impl ArchetypeMaster {
     /// fast-path dereferences through this pointer under `&EcsMaster`.
     ///
     /// # Provenance contract
-    /// The returned pointer carries read-only provenance under Tree Borrows
-    /// (minted via `&self` flavour of [`ArchetypeBundle::get_archetype_ptr`]).
-    /// Callers may dereference for reads (`&*ptr`) as long as the
-    /// `ArchetypeMaster` is borrowed at least immutably; the pointer is
-    /// stable for the master's lifetime by bundle invariant U1 (slab base
-    /// is heap-stable, slot addresses never move).
+    /// Post-F4 the returned pointer carries the SAME write-capable provenance as
+    /// [`Self::archetype_ptr_for`]: both mint through `ArchetypeBundle::slot_ptr_mut`'s
+    /// `UnsafeCell::raw_get` (see [`ArchetypeBundle::get_archetype_ptr`]), so `*const` is a
+    /// caller contract, not a provenance one. Callers may read through it (`&*ptr`) while the
+    /// `ArchetypeMaster` is borrowed at least immutably; the pointer is stable for the master's
+    /// lifetime by bundle invariant U1 (slab base is heap-stable, slot addresses never move).
     ///
-    /// The returned `*const Archetype` MUST NOT be cast to `*mut Archetype`
-    /// and dereferenced for writing — under Tree Borrows the cast does
-    /// not grant write capability and the child-write traps as retag UB.
-    /// Use [`Self::archetype_ptr_for`] for write access.
+    /// A worker casts this pointer to `*mut` when it needs write capability, as
+    /// `UnsafeEcsCell::archetype_ptr_mut` does (PC-24, W0); exclusivity is its declared write.
+    /// [`Self::archetype_ptr_for`] takes `&mut self`, whose retag covers the whole master
+    /// (`enable_generation` included): `&mut EcsMaster` / apply-window callers only.
     #[inline]
     pub fn get_archetype_ptr(&self, archetype_id: ArchetypeId) -> Option<*const Archetype> {
         self.archetypes.get_archetype_ptr(archetype_id)
@@ -1056,11 +1056,11 @@ impl ArchetypeMaster {
 //
 // `ArchetypeMaster` becomes `Send + Sync` under the Phase 9 contract:
 //
-//   - Internal `ArchetypeBundle` uses a stable-address slab
-//     (`Box<[MaybeUninit<Archetype>; _]>`); slot addresses do not move once
-//     written. Worker reads via `archetype_ptr_for` / `get_archetype` are
-//     sound because pointer-stable archetypes are immutable to workers
-//     (mutations are gated on `&mut self`).
+//   - Internal `ArchetypeBundle` uses a stable-address slab; slot addresses do not move
+//     once written. Workers reach it only through `&self` paths (`get_archetype_ptr` /
+//     `get_archetype`, via `UnsafeEcsCell::archetype_ptr[_mut]`), never `archetype_ptr_for`
+//     or another `&mut self` method: that retag covers `enable_generation`, and from a cell
+//     the whole `EcsMaster` with its reservoir atomics (PC-24; W0 in `unsafe_ecs_cell.rs`).
 //   - Archetype creation (`create_archetype`, `get_or_create_archetype`,
 //     `remove_archetype`, `clear`) takes `&mut self` and runs only on the
 //     dispatcher under the apply window (SCH7); no worker holds a live

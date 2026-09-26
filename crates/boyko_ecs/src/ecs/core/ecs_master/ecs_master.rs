@@ -98,7 +98,7 @@ pub struct EcsMaster {
     /// methods (`insert_resource`, `remove_resource`, `resource`,
     /// `resource_mut`) are deferred to Step 9; this minimal field addition
     /// unblocks Step 7's `Res<R>` / `ResMut<R>` `get_param` via
-    /// `UnsafeEcsCell::resources()` / `resources_mut()`.
+    /// `UnsafeEcsCell::resources()` / `resource_ptr_mut()`.
     pub(crate) resources: Resources,
 
     /// Phase 4 Seam 2 (D6 / CR-A / P5) — world-global **non-`Send`** resource

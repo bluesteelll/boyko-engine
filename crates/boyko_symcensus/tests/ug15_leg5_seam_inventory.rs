@@ -1,4 +1,4 @@
-//! UG-15 leg (5), the seam inventory and S-1 shape (03 §6; 05 §3, §6), over the six census
+//! UG-15 leg (5), the seam inventory and S-1 shape (03 §6; 05 §3, §6), over the census
 //! crates of this tree. Prints what it read; a walk under the floor or a marker set that is not
 //! `SEAM_INVENTORY` exactly is RED.
 
