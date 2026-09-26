@@ -168,11 +168,18 @@ mod tests;
 
 /// Row counts at or below which the Tree runs the brute all-pairs loop instead of the tree.
 ///
-/// PROVISIONAL: the design takes this from the G4 bench (commit C3), which has not run. The
-/// value is the arithmetic crossover — at 64 rows the all-pairs loop is 2 016 predicate
-/// evaluations, about the cost of building and querying a one-node tree — and the G4 output
-/// replaces it.
-pub const TREE_BRUTE_MAX_ROWS: u32 = 64;
+/// `[MEASURED 2026-09-25, window 7 wave 2 (Q3), bench profile, K=3]`: the largest G4 size at
+/// which `all_pairs` is not claimed slower than the shipped [`QueryKernel::LeafList`] `tree`,
+/// the smaller of the `bp_g4_uniform` and `bp_g4_disparity` answers — 144 in both (all_pairs/tree
+/// 1.0076 and 0.9929 there, neither claimed; the tree is claimed faster from 152 on). The
+/// recipe's rule (`treebp/g4_g5_recipe.md`), ruled in `levers/00-RULINGS.md` on 2026-09-25; the
+/// record is `docs/measurements/2026-09-25-physics-window7/wave2/`. It replaces the provisional
+/// 64, the arithmetic crossover. Measured on the Morton leaf order, so it is re-derived by the
+/// same rule if the default [`QueryKernel`] changes (`levers/broadphase/06-DESIGN-F3.md`).
+///
+/// Value-neutral: the brute loop ([`all_pairs_into`]) and the tree path write the same pairs in
+/// the same `(min, max)` order (module docs, "What it computes").
+pub const TREE_BRUTE_MAX_ROWS: u32 = 144;
 
 /// In a previous-row map handed to [`BroadphaseTree::step_translated`]: the row had no previous
 /// row (a spawn). The gather's own sentinel.

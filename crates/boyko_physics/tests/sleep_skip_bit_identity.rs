@@ -40,7 +40,13 @@
 //!   `contact_reuse` ∈ {on, off} × W ∈ {1, 8}; S1 also on AllPairs, and at W ∈ {2, 4, 16} in
 //!   release. On a Tree cell the `Sets` world must withhold pairs (a void otherwise), and at
 //!   W = 8 a step whose stream is empty must dispatch no narrowphase chunk though its logical
-//!   pairs would (design 06 N13, "Tree all-held dispatch = 0");
+//!   pairs would (design 06 N13, "Tree all-held dispatch = 0"). That holds where the pile is on
+//!   the tree path: a Tree cell at the default threshold whose pile has at most
+//!   `TREE_BRUTE_MAX_ROWS` rows (debug's 92-row piles, since the threshold became 144 in window 7
+//!   wave 2) runs the brute loop on every step, so the cell checks the brute regime instead —
+//!   nothing withheld, no sleeper, no tree counter moved (T6) — and the brute-0 arms
+//!   (`s1_rest_pile_tree_path_every_step`, debug's `s2_jolt_pile_tree_path_every_step`) keep the
+//!   tree regime covered;
 //! * S3, the adversarial arms (each its own test, named for what it drives);
 //! * S4, a pile on an SDF floor with a mid-run field edit and a kernel toggle, on the default
 //!   configuration and on the Tree with its brute path off (the SDF pipeline's tree seam);
@@ -105,7 +111,7 @@ use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::{
     add_physics_sdf, add_physics_soft, add_physics_soft_colored, add_physics_systems,
 };
-use boyko_physics::broadphase_tree::{BroadphaseTree, TreeDiag, all_pairs_into};
+use boyko_physics::broadphase_tree::{BroadphaseTree, TREE_BRUTE_MAX_ROWS, TreeDiag, all_pairs_into};
 use boyko_physics::resources::{
     BodyState, BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
     PairTagProbe, PhysicsConfig, SdfNarrowphaseKernel, SleepSkip, SolverScratch,
@@ -1176,6 +1182,46 @@ fn assert_tree_withholds(label: &str, ev: &Evidence, workers: usize) {
     );
 }
 
+/// The Tree cell's regime at the brute threshold `brute_max_rows` for a scene of `rows` rows (no
+/// row changes): above it, [`assert_tree_withholds`]; at or below it, the brute regime — the step
+/// runs `all_pairs_into`, which dissolves the sleeper set (L10 C3c, T6), so on every step
+/// nothing is withheld, no row is a sleeper and no tree counter moves, while the pair-set oracle
+/// still compares every step. Debug's 92-row piles are in the brute regime at the default
+/// threshold since `TREE_BRUTE_MAX_ROWS` = 144 (window 7 wave 2, Q3); the brute-0 arms keep
+/// their tree regime covered.
+fn assert_tree_regime(label: &str, ev: &Evidence, workers: usize, rows: usize, brute_max_rows: u32) {
+    if rows > brute_max_rows as usize {
+        assert_tree_withholds(label, ev, workers);
+        return;
+    }
+    for k in 0..ev.steps {
+        assert_eq!(
+            (ev.withheld[k], ev.sleepers[k]),
+            (0, 0),
+            "{label} step {k}: the brute regime ({rows} rows ≤ brute_max_rows {brute_max_rows}) withholds \
+             no pair and holds no sleeper"
+        );
+        assert_eq!(
+            ev.tree[k],
+            TreeDiag::default(),
+            "{label} step {k}: the brute regime ({rows} rows ≤ brute_max_rows {brute_max_rows}) moves no \
+             tree counter"
+        );
+    }
+    assert!(
+        ev.oracle_compared == ev.steps as u64 && ev.oracle_with_sleepers == 0,
+        "{label}: the pair-set oracle compared {} of {} steps, {} with a live sleeper set",
+        ev.oracle_compared,
+        ev.steps,
+        ev.oracle_with_sleepers
+    );
+    println!(
+        "{label}: the brute regime ({rows} rows ≤ brute_max_rows {brute_max_rows}) on all {} steps: \
+         nothing withheld, no sleeper, no tree counter moved",
+        ev.steps
+    );
+}
+
 // ── The fixture scenes ─────────────────────────────────────────────────────────────────────
 
 fn rest_pile() -> Vec<Spec> {
@@ -1236,10 +1282,12 @@ fn s1_rest_pile_matrix() {
             for w in [1, 8] {
                 let label = format!("S1 {kind:?} reuse {reuse} W{w}");
                 let variant = Variant::cell(kind, reuse, w);
-                let ev = lockstep(&label, Pipeline::Default, variant, &rest_pile(), matrix_steps(), &mut quiet);
+                let pile = rest_pile();
+                let ev = lockstep(&label, Pipeline::Default, variant, &pile, matrix_steps(), &mut quiet);
                 assert_all_held_when_frozen(&label, &ev);
                 if kind == BroadphaseKind::Tree {
-                    assert_tree_withholds(&label, &ev, w);
+                    let threshold = variant.brute_max_rows.unwrap_or(TREE_BRUTE_MAX_ROWS);
+                    assert_tree_regime(&label, &ev, w, pile.len(), threshold);
                 }
             }
         }
@@ -1254,10 +1302,12 @@ fn s1_rest_pile_more_workers() {
         for kind in [BroadphaseKind::Tree, BroadphaseKind::Grid] {
             let label = format!("S1 {kind:?} W{w}");
             let variant = Variant::cell(kind, true, w);
-            let ev = lockstep(&label, Pipeline::Default, variant, &rest_pile(), matrix_steps(), &mut quiet);
+            let pile = rest_pile();
+            let ev = lockstep(&label, Pipeline::Default, variant, &pile, matrix_steps(), &mut quiet);
             assert_all_held_when_frozen(&label, &ev);
             if kind == BroadphaseKind::Tree {
-                assert_tree_withholds(&label, &ev, w);
+                let threshold = variant.brute_max_rows.unwrap_or(TREE_BRUTE_MAX_ROWS);
+                assert_tree_regime(&label, &ev, w, pile.len(), threshold);
             }
         }
     }
@@ -1285,13 +1335,32 @@ fn s2_jolt_pile_matrix() {
             for w in [1, 8] {
                 let label = format!("S2 {kind:?} reuse {reuse} W{w}");
                 let variant = Variant::cell(kind, reuse, w);
-                let ev = lockstep(&label, Pipeline::Default, variant, &jolt_pile(), steps, &mut quiet);
+                let pile = jolt_pile();
+                let ev = lockstep(&label, Pipeline::Default, variant, &pile, steps, &mut quiet);
                 assert_all_held_when_frozen(&label, &ev);
                 if kind == BroadphaseKind::Tree {
-                    assert_tree_withholds(&label, &ev, w);
+                    let threshold = variant.brute_max_rows.unwrap_or(TREE_BRUTE_MAX_ROWS);
+                    assert_tree_regime(&label, &ev, w, pile.len(), threshold);
                 }
             }
         }
+    }
+}
+
+/// S2 on the Tree with `brute_max_rows = 0`, in a debug build: debug's 92-row Jolt pile is at or
+/// below `TREE_BRUTE_MAX_ROWS` since window 7 wave 2 (Q3), so the matrix's Tree cells check the
+/// brute regime there. This arm keeps the tree regime covered on the Jolt pile — the withheld
+/// pairs and, at W = 8, the empty-stream dispatch — as `s1_rest_pile_tree_path_every_step` does on
+/// the rest pile. A release build's 1 241-row pile is on the tree path in the matrix itself.
+#[test]
+#[cfg(debug_assertions)]
+fn s2_jolt_pile_tree_path_every_step() {
+    for w in [1, 8] {
+        let label = format!("S2 Tree brute 0 W{w}");
+        let variant = Variant { brute_max_rows: Some(0), ..Variant::cell(BroadphaseKind::Tree, true, w) };
+        let ev = lockstep(&label, Pipeline::Default, variant, &jolt_pile(), 300, &mut quiet);
+        assert_all_held_when_frozen(&label, &ev);
+        assert_tree_withholds(&label, &ev, w);
     }
 }
 

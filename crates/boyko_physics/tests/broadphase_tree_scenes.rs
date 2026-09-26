@@ -22,6 +22,19 @@
 //! The sleeping-on churn arms of the design's G2 table are not built here: L10's plan for C3c
 //! names the J-Son and R-S rows (its T7) only.
 //!
+//! # G-TH1: the brute threshold's band (window 7 wave 2, Q3; `levers/broadphase/06-DESIGN-F3.md`)
+//!
+//! The one rig here at the DEFAULT `brute_max_rows` ([`TREE_BRUTE_MAX_ROWS`]): ten three-layer
+//! rest piles (141 rows) and a script that spawns one box every [`BAND_PERIOD`] steps up to 150
+//! rows and despawns back, twice, so the row count crosses the threshold both ways, with sleeping
+//! off and on. On every step the oracle and the pose bytes of the AllPairs twin hold, and the
+//! path derived from the row count against `brute_max_rows()` is the path the step took — a
+//! tree-path step answers leaf-list leaves or holds sleepers, a brute step moves no counter and
+//! holds no sleeper (T6). Void unless brute and tree steps both ran, the crossings happened, and
+//! (sleeping on) a descent crossed with a live sleeper set. Shown red: at the provisional 64 (no
+//! brute step); with `all_pairs_into`'s inner loop reversed (the pose: the stream's order reaches
+//! it); with `n < brute_max_rows` in `step_hinted` (the step at 144 rows takes the tree path).
+//!
 //! # Scene size per profile
 //!
 //! Release runs Jolt's full pyramid (height 15, 1 240 boxes) for 600 steps, as the design
@@ -53,7 +66,7 @@ use boyko_ecs::ecs::identifiers::primitives::ArchetypeId;
 use boyko_macros::{Component, Resource};
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
-use boyko_physics::broadphase_tree::{BroadphaseTree, TreeDiag, all_pairs_into};
+use boyko_physics::broadphase_tree::{BroadphaseTree, TREE_BRUTE_MAX_ROWS, TreeDiag, all_pairs_into};
 use boyko_physics::components::{
     Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
@@ -575,6 +588,187 @@ fn g2_tower_matches_all_pairs_and_pose_bytes() {
     assert_eq!(d.static_rebuilds, 1);
     assert_eq!(d.members, 1);
     assert_eq!(d.evictions, 0);
+}
+
+// ── G-TH1: the brute threshold's band (module docs) ──────────────────────────
+
+/// Rest piles of the band scene.
+const BAND_PILES: usize = 10;
+/// Layers of a band pile (9 + 4 + 1 boxes). Its boxes touch their neighbours, so a box has
+/// several dynamic partners and the stream's order reaches the colouring.
+const BAND_PILE_LAYERS: i32 = 3;
+/// Boxes per band pile.
+const BAND_PILE_BOXES: usize = 14;
+/// Boxes the script spawns and despawns: 141 rows → 150 and back, across 144 ↔ 145.
+const BAND_EXTRAS: usize = 9;
+/// Steps between two row changes of the script.
+const BAND_PERIOD: usize = 10;
+/// Steps before the first climb; the sleeping-on arm's piles fall asleep in them.
+const BAND_SETTLE: usize = 300;
+/// Steps held at the top and at the bottom of a cycle.
+const BAND_HOLD: usize = 30;
+/// Climbs and descents.
+const BAND_CYCLES: usize = 2;
+
+/// The band scene on `kind`, sleeping `sleeping`, at the default brute threshold.
+fn band_rig(kind: BroadphaseKind, sleeping: bool) -> Rig {
+    let mut world = EcsMaster::new();
+    spawn_box(&mut world, Vec3::new(0.0, -1.0, 0.0), REST_FRICTION, false);
+    let mut boxes = Vec::with_capacity(BAND_PILES * BAND_PILE_BOXES + BAND_EXTRAS);
+    for p in 0..BAND_PILES {
+        let (ox, oz) = (-20.0 + 10.0 * (p % 5) as f32, -10.0 + 20.0 * (p / 5) as f32);
+        for i in 0..BAND_PILE_LAYERS {
+            let lo = i / 2;
+            let hi = BAND_PILE_LAYERS - (i + 1) / 2;
+            for j in lo..hi {
+                for k in lo..hi {
+                    let odd = if i & 1 != 0 { HALF_BOX } else { 0.0 };
+                    let position = Vec3::new(
+                        ox + BOX_SIZE * j as f32 + odd,
+                        1.0 + BOX_SIZE * i as f32,
+                        oz + BOX_SIZE * k as f32 + odd,
+                    );
+                    boxes.push(spawn_box(&mut world, position, REST_FRICTION, true));
+                }
+            }
+        }
+    }
+    assert_eq!(boxes.len(), BAND_PILES * BAND_PILE_BOXES, "construction: ten piles of 14 boxes");
+    let physics = wire_sleeping(&mut world, kind, sleeping);
+    // G-TH1 is about the default threshold, which `wire_sleeping` sets to 0.
+    world.resource_mut::<BroadphaseTree>().set_brute_max_rows(TREE_BRUTE_MAX_ROWS);
+    Rig { world, physics, boxes }
+}
+
+/// The band script, one entry per step: `1` spawns the next extra box, `-1` despawns the last
+/// one, `0` holds.
+fn band_script() -> Vec<i8> {
+    let mut script = vec![0i8; BAND_SETTLE];
+    for _ in 0..BAND_CYCLES {
+        for edit in [1i8, -1] {
+            for _ in 0..BAND_EXTRAS {
+                script.push(edit);
+                script.extend(std::iter::repeat_n(0, BAND_PERIOD - 1));
+            }
+            script.extend(std::iter::repeat_n(0, BAND_HOLD));
+        }
+    }
+    script
+}
+
+/// Applies one band-script entry to `rig`: an extra box resting on the floor clear of the piles
+/// and of each other, or the despawn of the last one.
+fn band_edit(rig: &mut Rig, edit: i8) {
+    match edit {
+        1 => {
+            let k = rig.boxes.len() - BAND_PILES * BAND_PILE_BOXES;
+            let position = Vec3::new(-20.0 + 5.0 * k as f32, 1.0, 30.0);
+            let e = spawn_box(&mut rig.world, position, REST_FRICTION, true);
+            rig.boxes.push(e);
+        }
+        -1 => {
+            let e = rig.boxes.pop().expect("script: an extra box to despawn");
+            assert!(rig.world.delete_entity(e), "script: the extra box is live");
+        }
+        _ => {}
+    }
+}
+
+/// G-TH1 on the band scene, sleeping `sleeping` (module docs).
+fn assert_threshold_band(sleeping: bool) {
+    let label = if sleeping { "band, sleeping on" } else { "band, sleeping off" };
+    let mut tree = band_rig(BroadphaseKind::Tree, sleeping);
+    let mut all = band_rig(BroadphaseKind::AllPairs, sleeping);
+    let threshold = tree.world.resource::<BroadphaseTree>().brute_max_rows() as usize;
+    let script = band_script();
+    let (mut wt, mut wa) = (Witness::START, Witness::START);
+    let mut prev = tree.diag();
+    let (mut prev_rows, mut prev_sleepers) = (0usize, 0u64);
+    let (mut brute_steps, mut tree_steps, mut ups, mut downs, mut downs_held) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut first_sleeper = None;
+    for (step, &edit) in script.iter().enumerate() {
+        band_edit(&mut tree, edit);
+        band_edit(&mut all, edit);
+        tree.step();
+        all.step();
+        let (p_steps, mism, first) = tree.probe();
+        assert_eq!(p_steps, step as u64 + 1, "{label}: the probe runs once per step");
+        assert_eq!(mism, 0, "{label} step {step}: the Tree's pairs differ from all-pairs' (first at {first:?})");
+        assert!(
+            tree.pose_bits() == all.pose_bits(),
+            "{label} step {step}: the Tree's pose bytes differ from the AllPairs twin's"
+        );
+        wt.fold(&tree);
+        wa.fold(&all);
+
+        let rows = tree.world.resource::<SolverScratch>().bodies_len();
+        let d = tree.diag();
+        let sleepers = tree.world.resource::<BroadphaseTree>().sleeper_members();
+        // The Q rows and the sleepers are the dynamic boxes, never all empty: a tree-path step
+        // either answers a leaf-list leaf or holds a sleeper; a brute step does neither (T6).
+        let derived_tree = rows > threshold;
+        let answered = d.leaf_list_leaves - prev.leaf_list_leaves;
+        let took_tree = answered > 0 || sleepers > 0;
+        assert_eq!(
+            took_tree, derived_tree,
+            "{label} step {step}: rows {rows} against brute_max_rows {threshold} derive the {} path, \
+             but the step answered {answered} leaf-list leaves and holds {sleepers} sleepers",
+            if derived_tree { "tree" } else { "brute" }
+        );
+        if derived_tree {
+            tree_steps += 1;
+        } else {
+            brute_steps += 1;
+            assert_eq!(
+                TreeDiag { members: 0, ..d },
+                TreeDiag { members: 0, ..prev },
+                "{label} step {step}: the brute path moves no counter"
+            );
+        }
+        ups += usize::from(prev_rows <= threshold && rows > threshold && step > 0);
+        if prev_rows > threshold && rows <= threshold {
+            downs += 1;
+            downs_held += usize::from(prev_sleepers > 0);
+        }
+        if first_sleeper.is_none() && sleepers > 0 {
+            first_sleeper = Some(step);
+        }
+        (prev, prev_rows, prev_sleepers) = (d, rows, sleepers);
+    }
+    assert!(
+        brute_steps > 0,
+        "{label}: void: the band scene ran no brute step (every step had rows > brute_max_rows = {threshold})"
+    );
+    assert!(
+        tree_steps > 0,
+        "{label}: void: the band scene ran no tree-path step (every step had rows <= brute_max_rows = {threshold})"
+    );
+    assert_eq!((ups, downs), (BAND_CYCLES, BAND_CYCLES), "{label}: the script crosses the threshold each way per cycle");
+    if sleeping {
+        assert!(
+            downs_held > 0,
+            "{label}: void: no descent crossed the threshold with a live sleeper set (first sleeper at step {first_sleeper:?})"
+        );
+    }
+    println!(
+        "{label}: {} steps, {brute_steps} brute, {tree_steps} tree-path; crossings up {ups}, down {downs} \
+         ({downs_held} with a live sleeper set); first sleeper at step {first_sleeper:?}; tree {:?}",
+        script.len(),
+        tree.diag()
+    );
+    report_witness(label, script.len(), wt, wa);
+}
+
+/// G-TH1, sleeping off (module docs).
+#[test]
+fn tree_threshold_band_is_value_neutral() {
+    assert_threshold_band(false);
+}
+
+/// G-TH1, sleeping on: the brute steps dissolve the sleeper set the tree-path steps built (T6).
+#[test]
+fn tree_threshold_band_is_value_neutral_sleeping_on() {
+    assert_threshold_band(true);
 }
 
 // ── The churn scene (`benches/row_identity_churn.rs`, transcribed) ───────────
