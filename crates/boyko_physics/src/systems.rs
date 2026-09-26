@@ -92,6 +92,7 @@ use crate::resources::{
 use crate::row_identity::{RowIdentity, RowKey};
 use crate::sdf_query::{SdfField, sample_sdf};
 use crate::narrowphase::dispatch::debug_assert_computed;
+use crate::step_inputs::StepInputs;
 use crate::sleep_sets::{
     Epilogue, HeldHint, NpCounts, NpSets, Prologue, Route, RowCls, SleepSets, mirror_held,
     np_route,
@@ -345,21 +346,32 @@ pub fn physics_gather(
 ///
 /// This is the reference pipeline's broadphase. A world wired with the colored pipeline runs
 /// [`physics_broadphase_colored`] instead, which adds L10's sleep-skip around the same arms.
+///
+/// # The step record (L10 D9b)
+///
+/// Every broadphase variant begins by latching [`PhysicsConfig`], the [`SdfField`] (when the world
+/// has one) and the wake request count into [`StepInputs`]; the kind arms and every later stage of
+/// the step read the record, so a write to either resource after this point takes effect at the
+/// next broadphase. This variant runs in worlds without `IslandSleep`, so it latches no request.
 //
 // `clippy::needless_pass_by_value`: see `physics_gather`.
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_broadphase(
     scratch: Res<SolverScratch>,
     cfg: Res<PhysicsConfig>,
+    field: Option<Res<SdfField>>,
+    mut inputs: ResMut<StepInputs>,
     mut grid: ResMut<BroadphaseGrid>,
     mut tree: ResMut<BroadphaseTree>,
     mut pairs: ResMut<ContactPairs>,
 ) {
+    // L10 D9b: the step's one latch point, before anything reads an input.
+    inputs.latch(&cfg, field.as_deref(), scratch.rows.gather_seq(), 0);
     let pairs = &mut *pairs;
     // L9 D9: before the kind match, so every arm fills the swapped-in list. On a step whose
     // rows moved it also rebuilds the carry's jumper bitset (L10 C0, design 06 Δ9).
     pairs.rotate(&scratch.rows);
-    broadphase_arms(scratch.bodies(), &scratch.rows, &cfg, &mut grid, &mut tree, pairs, None);
+    broadphase_arms(scratch.bodies(), &scratch.rows, inputs.config(), &mut grid, &mut tree, pairs, None);
 }
 
 /// The colored pipeline's broadphase (L10 design 04 D15, A1/A2): [`physics_broadphase`]'s
@@ -368,12 +380,17 @@ pub fn physics_broadphase(
 /// while every other pipeline keeps [`physics_broadphase`].
 ///
 /// The prologue records the step's sleep-skip mode — `Off` when sleeping is off, else
-/// [`PhysicsConfig::sleep_skip`] — which every later stage reads instead of the configuration
-/// (design 04 D9), classifies every row and restores the held islands whose inputs changed; the
-/// epilogue restores the islands this step's pairs disturb and moves the clean frozen ones in
-/// (`sleep_sets.rs`). With sleeping off it records the mode and returns, so the pair list is the
-/// reference broadphase's, bit for bit. A world with the SDF stage runs
+/// [`PhysicsConfig::sleep_skip`] — classifies every row and restores the held islands whose inputs
+/// changed; the epilogue restores the islands this step's pairs disturb and moves the clean frozen
+/// ones in (`sleep_sets.rs`). With sleeping off it records the mode and returns, so the pair list
+/// is the reference broadphase's, bit for bit. A world with the SDF stage runs
 /// [`physics_broadphase_colored_sdf`], whose sleep epoch also covers the field.
+///
+/// Like every broadphase variant it first latches the step record ([`StepInputs`], L10 D9b):
+/// the configuration, the field when the world has one (the soft pipelines insert it for their
+/// soft step), and the `IslandSleep::wake_all` request count. The prologue, the epoch, the D6 test
+/// and every later stage read the record, so every decision that can differ between the sleep-skip
+/// modes is a function of the same latched values (design 10).
 //
 // `clippy::needless_pass_by_value`: see `physics_gather`. `too_many_arguments`: a system's
 // parameters are its access set.
@@ -381,6 +398,8 @@ pub fn physics_broadphase(
 pub fn physics_broadphase_colored(
     scratch: Res<SolverScratch>,
     cfg: Res<PhysicsConfig>,
+    field: Option<Res<SdfField>>,
+    mut inputs: ResMut<StepInputs>,
     mut grid: ResMut<BroadphaseGrid>,
     mut tree: ResMut<BroadphaseTree>,
     mut pairs: ResMut<ContactPairs>,
@@ -390,6 +409,8 @@ pub fn physics_broadphase_colored(
     sleep: Res<IslandSleep>,
     mut solver: Option<ResMut<ColoredSoftStepSolver>>,
 ) {
+    // L10 D9b: the step's one latch point, before anything reads an input.
+    inputs.latch(&cfg, field.as_deref(), scratch.rows.gather_seq(), sleep.wake_requests());
     let stages = BroadphaseStages {
         grid: &mut grid,
         tree: &mut tree,
@@ -398,11 +419,14 @@ pub fn physics_broadphase_colored(
         manifolds: &mut manifolds,
         solver: solver.as_deref_mut(),
     };
-    broadphase_sets(&scratch, &cfg, stages, &graph, &sleep, None);
+    // No SDF stage in this world: the sleep epoch covers no field (design 04 D10).
+    broadphase_sets(&scratch, &inputs, stages, &graph, &sleep, false);
 }
 
 /// [`physics_broadphase_colored`] in a world with the SDF stage: the sleep epoch also covers the
 /// field's edit list and the kernel choice (design 04 D10), so an edit flushes every held island.
+/// The field the epoch covers is the one latched into the step record (L10 D9b), which the SDF
+/// stage then reads.
 //
 // `clippy::needless_pass_by_value`: see `physics_gather`. `too_many_arguments`: a system's
 // parameters are its access set.
@@ -410,6 +434,7 @@ pub fn physics_broadphase_colored(
 pub fn physics_broadphase_colored_sdf(
     scratch: Res<SolverScratch>,
     cfg: Res<PhysicsConfig>,
+    mut inputs: ResMut<StepInputs>,
     mut grid: ResMut<BroadphaseGrid>,
     mut tree: ResMut<BroadphaseTree>,
     mut pairs: ResMut<ContactPairs>,
@@ -420,6 +445,8 @@ pub fn physics_broadphase_colored_sdf(
     mut solver: Option<ResMut<ColoredSoftStepSolver>>,
     field: Res<SdfField>,
 ) {
+    // L10 D9b: the step's one latch point, before anything reads an input.
+    inputs.latch(&cfg, Some(&field), scratch.rows.gather_seq(), sleep.wake_requests());
     let stages = BroadphaseStages {
         grid: &mut grid,
         tree: &mut tree,
@@ -428,7 +455,7 @@ pub fn physics_broadphase_colored_sdf(
         manifolds: &mut manifolds,
         solver: solver.as_deref_mut(),
     };
-    broadphase_sets(&scratch, &cfg, stages, &graph, &sleep, Some(&field));
+    broadphase_sets(&scratch, &inputs, stages, &graph, &sleep, true);
 }
 
 /// The resources the sleep-skip broadphase writes.
@@ -443,24 +470,27 @@ struct BroadphaseStages<'a> {
     solver: Option<&'a mut ColoredSoftStepSolver>,
 }
 
-/// The body of both colored broadphase systems: the rotation, L10's prologue (A1), the kind arm,
-/// L10's epilogue (A2) and the tree's release (A2.3, T4), and — on a D-H flush with the mode
-/// `Off` — the drain of the restored warm records into the solver's read side (ruling open
-/// question 2: L10's own system, never the solve).
+/// The body of both colored broadphase systems, after the latch: the rotation, L10's prologue
+/// (A1), the kind arm, L10's epilogue (A2) and the tree's release (A2.3, T4), and — on a D-H flush
+/// with the mode `Off` — the drain of the restored warm records into the solver's read side
+/// (ruling open question 2: L10's own system, never the solve). Every input it reads comes from
+/// `inputs`, the record its system just latched; `sdf_epoch` says whether the sleep epoch covers
+/// the latched field (the SDF pipeline only, design 04 D10).
 fn broadphase_sets(
     scratch: &SolverScratch,
-    cfg: &PhysicsConfig,
+    inputs: &StepInputs,
     stages: BroadphaseStages<'_>,
     graph: &ConstraintGraph,
     sleep: &IslandSleep,
-    field: Option<&SdfField>,
+    sdf_epoch: bool,
 ) {
     let BroadphaseStages { grid, tree, pairs, sets, manifolds, solver } = stages;
+    let cfg = inputs.config();
     // L9 D9 and L10 C0: the prologue reads the jumper bitset the rotation builds.
     pairs.rotate(&scratch.rows);
     let plan = {
         let prologue = Prologue {
-            cfg,
+            inputs,
             rows: &scratch.rows,
             bodies: scratch.bodies(),
             baseline: scratch.baseline(),
@@ -470,7 +500,7 @@ fn broadphase_sets(
             jumpers_valid: pairs.jumper_seq() == scratch.rows.gather_seq(),
             carry: manifolds.pair_carry.peek(&scratch.rows),
             warm: solver.as_deref().map(ColoredSoftStepSolver::warm_start_enabled),
-            field,
+            field: if sdf_epoch { inputs.sdf_field() } else { None },
         };
         sets.prologue(&prologue, &mut manifolds.held)
     };
@@ -659,10 +689,12 @@ fn broadphase_arms(
 pub fn physics_narrowphase(
     scratch: Res<SolverScratch>,
     pairs: Res<ContactPairs>,
-    cfg: Res<PhysicsConfig>,
+    inputs: Res<StepInputs>,
     mut manifolds: ResMut<Manifolds>,
 ) {
-    let _ = narrowphase_step::<false>(&scratch, &pairs, &cfg, &mut manifolds, NpSets::OFF);
+    // L10 D9b: the configuration the broadphase latched, never the live resource.
+    let cfg = inputs.for_gather(&scratch.rows).config();
+    let _ = narrowphase_step::<false>(&scratch, &pairs, cfg, &mut manifolds, NpSets::OFF);
 }
 
 /// The colored pipeline's narrowphase (L10 design 04 D15, 08 D1′/D-H): [`physics_narrowphase`]
@@ -677,19 +709,21 @@ pub fn physics_narrowphase(
 pub fn physics_narrowphase_colored(
     scratch: Res<SolverScratch>,
     pairs: Res<ContactPairs>,
-    cfg: Res<PhysicsConfig>,
+    inputs: Res<StepInputs>,
     mut manifolds: ResMut<Manifolds>,
     mut sets: ResMut<SleepSets>,
 ) {
+    // L10 D9b: the configuration the broadphase latched, never the live resource.
+    let cfg = inputs.for_gather(&scratch.rows).config();
     if sets.np_sets() {
         let (keys, tags, reuse) = sets.restore_pairs(&scratch.rows);
         let np = NpSets { cls: sets.row_cls(), keys, tags, reuse };
         let (counts, (mirrored, all)) =
-            narrowphase_step::<true>(&scratch, &pairs, &cfg, &mut manifolds, np);
+            narrowphase_step::<true>(&scratch, &pairs, cfg, &mut manifolds, np);
         sets.note_np(pairs.pairs_stream().len(), counts);
         sets.note_mirror(mirrored, all);
     } else {
-        let _ = narrowphase_step::<false>(&scratch, &pairs, &cfg, &mut manifolds, NpSets::OFF);
+        let _ = narrowphase_step::<false>(&scratch, &pairs, cfg, &mut manifolds, NpSets::OFF);
     }
 }
 
@@ -1348,7 +1382,7 @@ fn flip_manifold(mut m: Manifold) -> Manifold {
 ///   so a box manifold never exceeds [`MAX_CONTACT_POINTS`](crate::math::MAX_CONTACT_POINTS).
 ///   Which fold builds those corners is
 ///   [`PhysicsConfig::sdf_narrowphase`](crate::resources::PhysicsConfig::sdf_narrowphase),
-///   read ONCE per step here — default
+///   read ONCE per step here, from the step record — default
 ///   [`Scalar`](crate::resources::SdfNarrowphaseKernel::Scalar), the oracle the GPU
 ///   goldens are blessed against.
 ///
@@ -1360,23 +1394,30 @@ fn flip_manifold(mut m: Manifold) -> Manifold {
 /// [`physics_solve_step`] (see [`add_physics_sdf`](crate::plugin::add_physics_sdf)),
 /// so the solver sees both contact kinds. This stage does NOT clear `Manifolds`
 /// (the body-body stage already cleared it this step); it only appends.
+///
+/// The field and the kernel choice are the ones this step's broadphase latched into
+/// [`StepInputs`] (L10 D9b), never the live resources: an edit made after the broadphase lands on
+/// the next step.
 //
 // `clippy::needless_pass_by_value`: see `physics_gather`.
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_narrowphase_sdf(
     scratch: Res<SolverScratch>,
-    field: Res<SdfField>,
-    cfg: Res<PhysicsConfig>,
+    inputs: Res<StepInputs>,
     mut manifolds: ResMut<Manifolds>,
     sets: Option<Res<SleepSets>>,
 ) {
+    let inputs = inputs.for_gather(&scratch.rows);
+    let field = inputs
+        .sdf_field()
+        .expect("invariant: the SDF pipeline inserts SdfField, which its broadphase latched");
     // Nothing to collide against an empty field (samples to +far everywhere).
     if field.is_empty() {
         return;
     }
     // O9: which box kernel folds the field. Hoisted out of the body loop — one
-    // resource read per step, not per body.
-    let kernel = cfg.sdf_narrowphase;
+    // record read per step, not per body.
+    let kernel = inputs.config().sdf_narrowphase;
     let bodies = scratch.bodies();
     // L10 A4 (design 04 D10): a held row's SDF manifold is kept in the held store, so the
     // stage skips the row. Empty on a step the sleep-skip did not classify, and on a pipeline
@@ -1407,12 +1448,12 @@ pub fn physics_narrowphase_sdf(
         let dst = if body.is_sensor { &mut sensor_out } else { &mut out };
         match body.shape {
             ColliderShape::Sphere { radius } => {
-                if let Some(m) = sphere_sdf_manifold(a, body, radius, &field) {
+                if let Some(m) = sphere_sdf_manifold(a, body, radius, field) {
                     dst.push(m);
                 }
             }
             ColliderShape::Box { half_extents } => {
-                if let Some(m) = box_sdf_manifold(a, body, half_extents, &field, kernel) {
+                if let Some(m) = box_sdf_manifold(a, body, half_extents, field, kernel) {
                     dst.push(m);
                 }
             }
@@ -1914,11 +1955,13 @@ pub fn physics_build_graph(
 /// [`solve_colored`](crate::solver::ColoredSoftStepSolver::solve_colored) (the
 /// `IslandSleep` resource is read but untouched — the 0%-gate).
 ///
-/// The arm is the one [`SleepSets`] recorded at the broadphase, never the configuration as it
-/// stands at the solve (L10 design 04 D9): the narrowphase, the SDF stage and the graph already
-/// followed the broadphase's classification, so a write to `sleeping` between the broadphase and
-/// the solve would otherwise solve held rows at their raw inverse mass with their contacts
-/// skipped. Such a write takes effect on the next step.
+/// The configuration — the arm included — is the one this step's broadphase latched into
+/// [`StepInputs`] (L10 D9b), never the configuration as it stands at the solve: the narrowphase,
+/// the SDF stage and the graph already followed the broadphase's classification, so a write to
+/// `sleeping` between the broadphase and the solve would otherwise solve held rows at their raw
+/// inverse mass with their contacts skipped. Such a write takes effect on the next step. The
+/// sleeping arm serves exactly the `IslandSleep::wake_all` requests the record latched; a request
+/// raised after the broadphase is served by the next step, in every sleep-skip mode.
 //
 // `clippy::needless_pass_by_value`: `ResMut<_>` / `Res<_>` are by-value
 // `SystemParam`s used through reborrows — the same false-positive as the other
@@ -1926,32 +1969,35 @@ pub fn physics_build_graph(
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_solve_colored(
     mut solver: ResMut<ColoredSoftStepSolver>,
-    cfg: Res<PhysicsConfig>,
+    inputs: Res<StepInputs>,
     manifolds: Res<Manifolds>,
     graph: Res<ConstraintGraph>,
     mut scratch: ResMut<SolverScratch>,
     mut sleep: ResMut<IslandSleep>,
     mut sets: ResMut<SleepSets>,
 ) {
-    if sets.solve_sleeping(&scratch.rows) {
+    let inputs = inputs.for_gather(&scratch.rows);
+    let cfg = inputs.config();
+    if cfg.sleeping {
         // L10 A6 (design 04, 06 A1–A3, 08 A1′): the held rows, the restore warm source and the
         // move-in capture of the step the broadphase classified; nothing on a step it did not.
         let held = sets.solve_inputs(&scratch.rows, manifolds.held.view());
         solver.solve_colored_held(
-            &cfg,
+            cfg,
             manifolds.solver_manifolds(),
             &graph,
             &mut scratch,
             &mut sleep,
             held,
+            inputs.wake_requests(),
         );
     } else {
         // Sleeping off at the broadphase: byte-identical to the O6/O7 colored path;
-        // `IslandSleep` is resolved (so the param exists) but never read or written, and
-        // `SleepSets` is read only for the arm — a D-H flush into this arm was drained by the
-        // broadphase (ruling on L10 rev 2.3, open question 2).
-        let _ = &mut sleep;
-        solver.solve_colored(&cfg, manifolds.solver_manifolds(), &graph, &mut scratch);
+        // `IslandSleep` and `SleepSets` are resolved (so the params exist) but never read or
+        // written — a D-H flush into this arm was drained by the broadphase (ruling on L10 rev
+        // 2.3, open question 2).
+        let _ = (&mut sleep, &mut sets);
+        solver.solve_colored(cfg, manifolds.solver_manifolds(), &graph, &mut scratch);
     }
 }
 
@@ -1962,21 +2008,23 @@ pub fn physics_solve_colored(
 /// (zero vtable, principle 1). A no-op solver (the foundation default
 /// [`NoopSolver`](crate::solver::NoopSolver)) returns before touching the
 /// scratch/manifolds (the 0%-gate). A real solver mutates `scratch.bodies` in
-/// place and flags `scratch.touched`.
+/// place and flags `scratch.touched`. The configuration it solves with is the one this step's
+/// broadphase latched into [`StepInputs`] (L10 D9b).
 //
 // `clippy::needless_pass_by_value`: `ResMut<S>` / `Res<_>` are by-value
 // `SystemParam`s; the body uses them through reborrows.
 #[allow(clippy::needless_pass_by_value)]
 pub fn physics_solve_step<S: RigidSolver>(
     mut solver: ResMut<S>,
-    cfg: Res<PhysicsConfig>,
+    inputs: Res<StepInputs>,
     manifolds: Res<Manifolds>,
     mut scratch: ResMut<SolverScratch>,
 ) {
     if solver.is_noop() {
         return;
     }
-    solver.solve(&cfg, manifolds.solver_manifolds(), &mut scratch);
+    let cfg = inputs.for_gather(&scratch.rows).config();
+    solver.solve(cfg, manifolds.solver_manifolds(), &mut scratch);
 }
 
 /// Writes the solved snapshot back into the [`RigidBody`] column for touched

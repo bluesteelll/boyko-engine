@@ -1494,6 +1494,9 @@ fn debug_assert_padding_zero(
 /// [`SoftStepSolver`](super::SoftStepSolver) it
 /// [`owns_integration`](RigidSolver::owns_integration), so the pipeline's
 /// `physics_integrate` is gated off.
+///
+/// Step state: replacing or removing it after the first step is not supported, because the step
+/// keeps state in it that one sleep-skip mode carries and the other rebuilds.
 #[derive(ResourceDerive)]
 pub struct ColoredSoftStepSolver {
     /// Per-body solver view, parallel to `scratch.bodies` — refreshed each
@@ -3990,7 +3993,7 @@ impl ColoredSoftStepSolver {
         scratch: &mut SolverScratch,
     ) {
         // Sleeping OFF (or no resource): the byte-identical O6/O7 colored path.
-        self.solve_colored_inner(config, manifolds, graph, scratch, None, None);
+        self.solve_colored_inner(config, manifolds, graph, scratch, None, None, None);
     }
 
     /// The colored solve with O8 sleeping (plan O8 / Decision 5), with no L10 held inputs. The
@@ -4009,6 +4012,8 @@ impl ColoredSoftStepSolver {
     /// no state, and still builds the columns (the store's keys and tags), carries every frozen
     /// manifold's record, swaps the store and advances the sleep state. Its values are the full
     /// path's, bit for bit.
+    ///
+    /// Direct drive: the solve serves every `IslandSleep::wake_all` request made so far.
     pub fn solve_colored_sleeping(
         &mut self,
         config: &PhysicsConfig,
@@ -4017,7 +4022,7 @@ impl ColoredSoftStepSolver {
         scratch: &mut SolverScratch,
         sleep: &mut IslandSleep,
     ) {
-        self.solve_colored_inner(config, manifolds, graph, scratch, Some(sleep), None);
+        self.solve_colored_inner(config, manifolds, graph, scratch, Some(sleep), None, None);
     }
 
     /// [`solve_colored_sleeping`](Self::solve_colored_sleeping) with L10's sleep-skip (design
@@ -4025,7 +4030,10 @@ impl ColoredSoftStepSolver {
     /// `0` (D8), P-a searches the restore source after the read side (A3), and the kept
     /// manifolds moved in this step take their warm records before the swap (A1′); the logical
     /// [`WarmSeedStats`] add the held store's points and hits (E6′). The
-    /// [`physics_solve_colored`](crate::systems::physics_solve_colored) stage's sleeping arm.
+    /// [`physics_solve_colored`](crate::systems::physics_solve_colored) stage's sleeping arm,
+    /// which passes the `IslandSleep::wake_all` request count its broadphase latched as
+    /// `wake_upto`: the step serves exactly those requests (L10 D9b, Decision 5).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn solve_colored_held(
         &mut self,
         config: &PhysicsConfig,
@@ -4034,14 +4042,26 @@ impl ColoredSoftStepSolver {
         scratch: &mut SolverScratch,
         sleep: &mut IslandSleep,
         held: HeldSolve<'_>,
+        wake_upto: u64,
     ) {
-        self.solve_colored_inner(config, manifolds, graph, scratch, Some(sleep), Some(held));
+        self.solve_colored_inner(
+            config,
+            manifolds,
+            graph,
+            scratch,
+            Some(sleep),
+            Some(held),
+            Some(wake_upto),
+        );
     }
 
     /// Shared body of the colored solve — `sleep == None` is the byte-identical
     /// O6/O7 path (the 0%-gate), `sleep == Some(_)` adds the O8 solve+integrate skip
     /// for slept islands (gather stays full — IM-1), and `held == Some(_)` L10's
-    /// sleep-skip on top of it.
+    /// sleep-skip on top of it. `wake_upto` is the wake request count the step serves: `Some` of
+    /// the count the pipeline's broadphase latched, or `None` in direct drive, which serves every
+    /// request made so far.
+    #[allow(clippy::too_many_arguments)]
     fn solve_colored_inner(
         &mut self,
         config: &PhysicsConfig,
@@ -4050,6 +4070,7 @@ impl ColoredSoftStepSolver {
         scratch: &mut SolverScratch,
         mut sleep: Option<&mut IslandSleep>,
         mut held: Option<HeldSolve<'_>>,
+        wake_upto: Option<u64>,
     ) {
         let substeps = config.substeps.max(1);
         let h = config.dt / substeps as f32;
@@ -4085,7 +4106,10 @@ impl ColoredSoftStepSolver {
         let sleeping_active = sleep.is_some();
         if let Some(sleep) = sleep.as_mut() {
             let _z = zone!(PHYS_SLEEP_BEGIN);
-            sleep.begin_step(graph, n_rows);
+            match wake_upto {
+                Some(upto) => sleep.begin_step_upto(graph, n_rows, upto),
+                None => sleep.begin_step(graph, n_rows),
+            }
             // L10 A1.1 (design 04 D9): the awake mask is now this gather's; the next
             // broadphase's resting test trusts it only with this stamp.
             sleep.stamp_mask(&scratch.rows);

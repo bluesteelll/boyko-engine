@@ -153,6 +153,8 @@ pub enum SdfNarrowphaseKernel {
 /// Every mode yields the same observables — poses, velocities, sleep latches, the logical
 /// contact views, island ids and queries, warm-start seeds — bit for bit: [`Off`](Self::Off) is
 /// the oracle the other mode is gated against.
+///
+/// A write to `PhysicsConfig::sleep_skip` takes effect at the next broadphase.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SleepSkip {
     /// A frozen island is still collided every step; only its solve and integrate are
@@ -173,6 +175,12 @@ pub enum SleepSkip {
 /// (`contact_hertz` / `contact_damping`) are user-set; `dt` is NOT — it is
 /// stamped by [`physics_gather`](crate::systems::physics_gather) from the
 /// fixed clock each step (OQ-1), so a hand-set value is overwritten.
+///
+/// Read once per step, by the broadphase; every later stage of that step runs with the value
+/// read then ([`StepInputs`](crate::step_inputs::StepInputs), L10 D9b). A write takes effect at
+/// the next broadphase, whether it writes a field, assigns a new value, or calls
+/// `insert_resource`. A value must keep the pipeline's wiring (`broadphase == Grid` on the
+/// coupling path). Removing this resource after setup is not supported.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct PhysicsConfig {
     /// Constant acceleration applied to dynamic bodies each step (world
@@ -3869,6 +3877,9 @@ fn occ_set(occ: &mut [u64], base: usize, body: u32) {
 /// design D14): the per-row latch and the per-island scratch are `ScratchColumn`s, resized
 /// in place to the live row and island counts, and the `awake_rows` mask reuses the
 /// engine's growable [`TouchedMask`] bitset. No per-step heap allocation in steady state.
+///
+/// Step state: replacing or removing it after the first step is not supported, because the step
+/// keeps state in it that one sleep-skip mode carries and the other rebuilds.
 #[derive(Resource)]
 pub struct IslandSleep {
     /// Per-ROW sleep latch, one 8 B [`SleepLatch`] per row (L10 C0, design D14):
@@ -3907,10 +3918,16 @@ pub struct IslandSleep {
     /// out-of-island) is awake (immovable bodies cost nothing to "integrate" — the
     /// kernels no-op them).
     awake_rows: TouchedMask,
-    /// Whether a global wake was requested (config change / explicit
-    /// [`wake_all`](Self::wake_all)) — consumed once on the next solve, which clears
-    /// every row's latch before deciding afresh.
-    wake_all: bool,
+    /// Whether a `Reset` re-key left a global wake pending (`rekey_rows`) — served by the next
+    /// `begin_step` that runs, which clears every row's latch before deciding afresh.
+    reset_wake: bool,
+    /// The explicit [`wake_all`](Self::wake_all) requests since construction; never reset (L10
+    /// D9b, Decision 5). The broadphase latches it into the step record, and the solve serves
+    /// exactly the latched count.
+    wake_requests: u64,
+    /// The request count the last `begin_step` served: a request is pending while
+    /// `wake_served` is below the count a step latched.
+    wake_served: u64,
     /// Carry scratch for `rekey_rows`: the previous gather's latch, copied out before the
     /// latch is permuted to the current rows. 8 B/row, written on change steps only
     /// (defect A, interim; U6 deletes it).
@@ -3981,7 +3998,9 @@ impl IslandSleep {
                 islands.max(scratch_reserve_rows(size_of::<IslandScratch>())),
             ),
             awake_rows: TouchedMask::with_capacity(touched_awake_id(), rows),
-            wake_all: false,
+            reset_wake: false,
+            wake_requests: 0,
+            wake_served: 0,
             latch_prev: ScratchColumn::new(sleep_latch_prev_id(), latch_reserve),
             contact_wakes: 0,
             cursor: RemapCursor::default(),
@@ -4016,10 +4035,19 @@ impl IslandSleep {
         self.latch.as_read_slice()
     }
 
-    /// Whether a global wake is pending (L10 D6 flushes every held island on it).
+    /// Whether a global wake is pending for a step that latched `upto` requests: a `Reset` wake,
+    /// or a request the last `begin_step` did not serve (L10 D6 flushes every held island on it;
+    /// D9b Decision 5).
     #[inline]
-    pub(crate) fn wake_all_pending(&self) -> bool {
-        self.wake_all
+    pub(crate) fn wake_pending(&self, upto: u64) -> bool {
+        self.reset_wake || upto != self.wake_served
+    }
+
+    /// The explicit [`wake_all`](Self::wake_all) requests since construction: the count the
+    /// broadphase latches into the step record (L10 D9b).
+    #[inline]
+    pub(crate) fn wake_requests(&self) -> u64 {
+        self.wake_requests
     }
 
     /// Diagnostic: rows unlatched by wake-on-contact-change (see `begin_step`) since
@@ -4045,16 +4073,20 @@ impl IslandSleep {
         })
     }
 
-    /// Requests that EVERY row wake on the next solve (the explicit-wake /
-    /// config-change substrate, plan O8 / Decision 5 (ii)/(iii)).
+    /// Requests that EVERY row wake (the explicit-wake / config-change substrate, plan O8 /
+    /// Decision 5 (ii)/(iii)).
+    ///
+    /// Wakes every island at the next broadphase. A call made after this step's broadphase is
+    /// served by the next step, in every sleep-skip mode (L10 D9b): the broadphase latches the
+    /// request count, and the step's solve serves exactly that count.
     ///
     /// A pure signal the solver does NOT itself trip — unlike `Changed<RigidBody>`,
     /// which the solver sets every frame by writing velocities back (W6), so it is a
-    /// sound wake key. Consumed once: the next solve clears every row's latch, then
+    /// sound wake key. Served once: the solve clears every row's latch, then
     /// re-evaluates the energy/debounce from scratch.
     #[inline]
     pub fn wake_all(&mut self) {
-        self.wake_all = true;
+        self.wake_requests += 1;
     }
 
     /// Returns `true` if island `island` is FROZEN this frame (its solve + integrate
@@ -4157,7 +4189,7 @@ impl IslandSleep {
             }
             RowRemap::Reset => {
                 self.sync_rows(rows.rows_len());
-                self.wake_all = true;
+                self.reset_wake = true;
                 debug_assert_eq!(
                     self.latch.len(),
                     rows.rows_len(),
@@ -4224,8 +4256,10 @@ impl IslandSleep {
     /// which `rekey_rows` has aligned with this gather's rows, so a re-island'd scene
     /// cannot spuriously freeze a moving island (no volatile-id carry).
     ///
-    /// `wake_all` (explicit [`wake_all`](Self::wake_all) / a config change) clears
-    /// every row's latch first, so no island can be frozen this frame.
+    /// A pending wake — an explicit [`wake_all`](Self::wake_all) request this call serves, or a
+    /// `Reset` re-key's — clears every row's latch first, so no island can be frozen this frame.
+    /// This entry serves every request made so far (direct drive);
+    /// [`begin_step_upto`](Self::begin_step_upto) serves a latched count (the pipeline).
     ///
     /// The `Changed<RigidBody>` route is intentionally NOT a wake condition: the
     /// solver writes velocities back through `Mut<RigidBody>` every step for every
@@ -4299,12 +4333,28 @@ impl IslandSleep {
     /// with no island (static / out-of-island bodies — they cost nothing to keep
     /// "awake" since the integrate kernels no-op an `inv_mass == 0` row).
     pub(crate) fn begin_step(&mut self, graph: &ConstraintGraph, n_rows: usize) {
+        let upto = self.wake_requests;
+        self.begin_step_upto(graph, n_rows, upto);
+    }
+
+    /// [`begin_step`](Self::begin_step) serving the requests counted up to `upto` (L10 D9b,
+    /// Decision 5): the count the step's broadphase latched. A request raised after the latch
+    /// stays pending, and the next step serves it in every sleep-skip mode.
+    pub(crate) fn begin_step_upto(&mut self, graph: &ConstraintGraph, n_rows: usize, upto: u64) {
+        debug_assert!(
+            self.wake_served <= upto && upto <= self.wake_requests,
+            "invariant: a step serves a request count between the last one served and the count              requested (served {}, upto {upto}, requested {})",
+            self.wake_served,
+            self.wake_requests
+        );
         self.sync_rows(n_rows);
+        let wake = self.reset_wake || upto != self.wake_served;
+        self.wake_served = upto;
+        self.reset_wake = false;
         let Self {
             latch,
             island_scratch,
             awake_rows,
-            wake_all,
             contact_wakes,
             ..
         } = self;
@@ -4319,12 +4369,11 @@ impl IslandSleep {
 
         // Explicit / config-change wake: clear every row's latch before deciding, so
         // no island can be frozen this frame.
-        if *wake_all {
+        if wake {
             for l in latches.iter_mut() {
                 l.asleep = false;
                 l.below_count = 0;
             }
-            *wake_all = false;
         }
 
         // One pass per row: compare and store the island contact key (unlatching a row

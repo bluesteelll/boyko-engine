@@ -157,3 +157,9 @@ boyko_diag::profiling_partition!(Engine);
 /// [`Manifolds`](resources::Manifolds). Internal; declared last so no line the internal docs cite
 /// moves.
 pub(crate) mod held_store;
+
+/// L10 D9b: the step record ([`StepInputs`]) — the inputs one physics step runs with, latched by
+/// its broadphase and read by every later stage. Declared last so no line the internal docs cite
+/// moves.
+pub mod step_inputs;
+pub use step_inputs::StepInputs;

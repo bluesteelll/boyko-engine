@@ -44,3 +44,6 @@ pub use colored::{ParticleColorGraph, SoftColorScratch, physics_soft_step_colore
 pub use component::{SoftBody, SoftBodyError};
 pub use coupling::{SoftRigidReaction, physics_soft_rigid_apply};
 pub use solver::{physics_soft_step, physics_soft_step_coupled};
+// L10 D9b: the step-record forms the plugin registers.
+pub(crate) use colored::physics_soft_step_colored_latched;
+pub(crate) use solver::{physics_soft_step_coupled_latched, physics_soft_step_latched};

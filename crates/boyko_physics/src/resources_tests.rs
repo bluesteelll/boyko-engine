@@ -855,9 +855,9 @@
             assert_eq!(classify(&sleep, &rows), "Identity", "construction: rows unchanged one gather on");
             sleep.rekey_rows(&rows);
             assert_eq!(
-                (latch(&sleep), sleep.cursor.synced_seq(), sleep.remap_resets(), sleep.wake_all),
+                (latch(&sleep), sleep.cursor.synced_seq(), sleep.remap_resets(), sleep.reset_wake),
                 (vec![(true, 8), (false, 2), (true, 8)], gather_seq(&rows), 0, false),
-                "T7 Identity: (latch, synced_seq, remap_resets, wake_all)"
+                "T7 Identity: (latch, synced_seq, remap_resets, reset_wake)"
             );
         }
 
@@ -914,9 +914,9 @@
             assert_eq!(classify(&sleep, &rows), "Reset", "construction: one gather was missed");
             sleep.rekey_rows(&rows);
             assert_eq!(
-                (sleep.remap_resets(), sleep.wake_all, sleep.latch.len(), sleep.cursor.synced_seq()),
+                (sleep.remap_resets(), sleep.reset_wake, sleep.latch.len(), sleep.cursor.synced_seq()),
                 (1, true, 4, gather_seq(&rows)),
-                "T7 Reset: (remap_resets, wake_all, latch length, synced_seq)"
+                "T7 Reset: (remap_resets, reset_wake, latch length, synced_seq)"
             );
 
             gather(&mut rows, &[1, 2, 3, 4], &[]);
@@ -962,9 +962,74 @@
             assert_eq!(classify(&sleep, &rows), "Identity", "construction: never gathered");
             sleep.rekey_rows(&rows);
             assert_eq!(
-                (latch(&sleep), sleep.cursor.synced_seq(), sleep.remap_resets(), sleep.wake_all),
+                (latch(&sleep), sleep.cursor.synced_seq(), sleep.remap_resets(), sleep.reset_wake),
                 (vec![(true, 8), (false, 1)], gather_seq(&rows), 0, false),
-                "T7 direct drive: (latch, synced_seq, remap_resets, wake_all)"
+                "T7 direct drive: (latch, synced_seq, remap_resets, reset_wake)"
             );
+        }
+    }
+
+    // L10 D9b, Decision 5: the explicit wake is a request count, latched by the broadphase and
+    // served by the solve up to the latched count; the internal `Reset` wake is served by
+    // whichever `begin_step` runs next.
+    mod wake_requests {
+        use crate::resources::{ConstraintGraph, IslandSleep};
+
+        /// A sleep state over `rows` rows whose row 0 is latched asleep, with no island (an empty
+        /// graph wakes no row by contact change).
+        fn slept(graph: &ConstraintGraph, rows: usize) -> IslandSleep {
+            let mut sleep = IslandSleep::with_capacity(0, 0);
+            sleep.begin_step(graph, rows);
+            sleep.force_sleep_row(0);
+            sleep
+        }
+
+        #[test]
+        fn wake_request_after_the_latch_stays_pending() {
+            let graph = ConstraintGraph::with_capacity(0);
+            let mut sleep = slept(&graph, 2);
+            sleep.wake_all();
+            // The broadphase latches the count; a second request lands after the latch.
+            let upto = sleep.wake_requests();
+            sleep.wake_all();
+            sleep.begin_step_upto(&graph, 2, upto);
+            assert!(!sleep.is_row_asleep(0), "the latched request is served: row 0 wakes");
+            assert_eq!(sleep.wake_served, upto, "the step served exactly the latched count");
+            let count = sleep.wake_requests();
+            assert!(
+                sleep.wake_pending(count),
+                "the request raised after the latch is still pending for the next step"
+            );
+            sleep.force_sleep_row(0);
+            sleep.begin_step_upto(&graph, 2, count);
+            assert!(!sleep.is_row_asleep(0), "the next step serves the late request");
+            assert!(!sleep.wake_pending(count), "nothing is pending once every request is served");
+            // Anti-vacuity: with nothing pending the latch survives a step.
+            sleep.force_sleep_row(0);
+            sleep.begin_step_upto(&graph, 2, count);
+            assert!(sleep.is_row_asleep(0), "anti-vacuity: no pending request, no wake");
+        }
+
+        #[test]
+        fn reset_wake_is_served_whatever_upto() {
+            let graph = ConstraintGraph::with_capacity(0);
+            let mut sleep = slept(&graph, 2);
+            sleep.reset_wake = true;
+            let upto = sleep.wake_served;
+            assert!(sleep.wake_pending(upto), "a Reset wake is pending at the served count");
+            sleep.begin_step_upto(&graph, 2, upto);
+            assert!(!sleep.is_row_asleep(0), "the Reset wake is served with no request pending");
+            assert!(!sleep.reset_wake && !sleep.wake_pending(upto), "the Reset wake is spent");
+        }
+
+        #[test]
+        fn direct_drive_begin_step_serves_every_request() {
+            let graph = ConstraintGraph::with_capacity(0);
+            let mut sleep = slept(&graph, 2);
+            sleep.wake_all();
+            sleep.wake_all();
+            sleep.begin_step(&graph, 2);
+            assert!(!sleep.is_row_asleep(0), "the live count is served");
+            assert_eq!(sleep.wake_served, 2, "both requests are served");
         }
     }

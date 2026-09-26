@@ -64,6 +64,7 @@ use crate::scratch_ids::{
     sleep_row_cls_id, sleep_scratch_id,
 };
 use crate::sdf_query::SdfField;
+use crate::step_inputs::StepInputs;
 use crate::solver::warm_records::{WarmRecord, WarmRecords, ord};
 
 /// One row's sleep-skip classification for the step (design 04 A1.3, 06, 08 D-F), 8 B. Read by
@@ -555,8 +556,9 @@ pub(crate) struct HeldSolve<'a> {
 
 /// What the colored broadphase hands the sleep-skip's prologue (design 04 A1).
 pub(crate) struct Prologue<'a> {
-    /// The step's configuration.
-    pub(crate) cfg: &'a PhysicsConfig,
+    /// The step record the broadphase just latched (L10 D9b): the configuration, the mode and the
+    /// wake request count the prologue decides from, which every later stage reads too.
+    pub(crate) inputs: &'a StepInputs,
     /// The gather's row identity.
     pub(crate) rows: &'a RowIdentity,
     /// This step's gathered bodies.
@@ -576,7 +578,8 @@ pub(crate) struct Prologue<'a> {
     /// The colored solver's warm-start flag, or `None` in a world whose solve is not the colored
     /// one (the graph-only shape), where the sleep-skip never runs.
     pub(crate) warm: Option<bool>,
-    /// The SDF field, in a world with the SDF stage.
+    /// The latched SDF field the sleep epoch covers: the record's, in a world with the SDF stage
+    /// only (design 04 D10).
     pub(crate) field: Option<&'a SdfField>,
 }
 
@@ -646,9 +649,10 @@ const CAND_COUNT: u32 = CAND_SEEN - 1;
 ///
 /// Written by the colored broadphase ([`physics_broadphase_colored`], which records the step
 /// mode and runs the prologue and the epilogue), the colored narrowphase (its counts) and the
-/// colored solve (the warm capture); every stage reads the step mode and the classification the
-/// broadphase recorded, never the configuration, so a configuration write between two stages
-/// cannot split a step (design 04 D9).
+/// colored solve (the warm capture); every stage reads the classification the broadphase recorded
+/// and the configuration it latched into the step record
+/// ([`StepInputs`](crate::step_inputs::StepInputs), L10 D9b), never the live configuration, so a
+/// configuration write between two stages cannot split a step (design 04 D9).
 ///
 /// [`physics_broadphase_colored`]: crate::systems::physics_broadphase_colored
 #[derive(Resource)]
@@ -685,11 +689,6 @@ pub struct SleepSets {
     epoch: SleepEpoch,
     /// The mode the broadphase recorded for this step.
     step_mode: SleepSkip,
-    /// Whether sleeping was on at the broadphase that recorded `step_mode`: the colored solve
-    /// picks its sleeping or plain arm from it, never from the configuration (design 04 D9).
-    step_sleeping: bool,
-    /// The gather sequence `step_mode` and `step_sleeping` were recorded on.
-    step_seq: u64,
     /// Whether the narrowphase runs its `Sets` arm this step (design 08 D-H: the step mode is
     /// `Sets`, or a restore set is non-empty).
     np_sets: bool,
@@ -758,8 +757,6 @@ impl SleepSets {
             cursor: RemapCursor::default(),
             epoch: SleepEpoch::UNSET,
             step_mode: SleepSkip::Off,
-            step_sleeping: false,
-            step_seq: 0,
             np_sets: false,
             cls_seq: 0,
             restore_rec_seq: 0,
@@ -790,20 +787,6 @@ impl SleepSets {
     #[inline]
     pub fn step_mode(&self) -> SleepSkip {
         self.step_mode
-    }
-
-    /// Whether the colored solve of `rows`' gather runs its sleeping arm: sleeping as this
-    /// gather's broadphase read it (design 04 D9). A configuration write between the broadphase
-    /// and the solve takes effect on the next step, as it does for every other stage, so the
-    /// solve never integrates rows the narrowphase skipped for a held island (review W1 of C3c).
-    #[inline]
-    pub(crate) fn solve_sleeping(&self, rows: &RowIdentity) -> bool {
-        debug_assert_eq!(
-            self.step_seq,
-            rows.gather_seq(),
-            "invariant: the colored solve runs after its gather's colored broadphase"
-        );
-        self.step_sleeping
     }
 
     /// Whether row `row` is held this step: its pairs are skipped and its island is not solved.
@@ -934,13 +917,12 @@ impl SleepSets {
     /// cursors, the translation, the classification, the per-record rules and the D-H flush.
     /// Returns what the epilogue needs.
     pub(crate) fn prologue(&mut self, p: &Prologue<'_>, held: &mut HeldStore) -> StepPlan {
+        let cfg = p.inputs.config();
         let mode = match p.warm {
-            Some(_) if p.cfg.sleeping => p.cfg.sleep_skip,
+            Some(_) if cfg.sleeping => cfg.sleep_skip,
             _ => SleepSkip::Off,
         };
         self.step_mode = mode;
-        self.step_sleeping = p.cfg.sleeping;
-        self.step_seq = p.rows.gather_seq();
         self.np_sets = false;
         self.drain = false;
         if mode == SleepSkip::Off && held.live_records() == 0 {
@@ -971,11 +953,12 @@ impl SleepSets {
             && p.baseline.is_some()
             && (!rows_step || p.jumpers_valid);
 
-        // D5: the epoch; D6: a pending global wake.
-        let epoch = SleepEpoch::of(mode, p.warm.unwrap_or(false), p.cfg, p.field);
+        // D5: the epoch; D6: a pending global wake — a `Reset` wake, or a request the step
+        // record latched that no solve has served (D9b Decision 5).
+        let epoch = SleepEpoch::of(mode, p.warm.unwrap_or(false), cfg, p.field);
         let epoch_changed = epoch != self.epoch;
         self.epoch = epoch;
-        let wake_all = p.sleep.wake_all_pending();
+        let wake_all = p.sleep.wake_pending(p.inputs.wake_requests());
         let flush = mode != SleepSkip::Sets || !cursors_ok || epoch_changed || wake_all;
         if held.live_records() > 0 && flush {
             self.stats.flushes = 1;
