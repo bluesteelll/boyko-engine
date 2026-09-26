@@ -30,20 +30,24 @@
 //! One `#[test]` in this binary, on purpose: the counter is process-global, and a second test in
 //! the same binary would commit concurrently into every window.
 //!
-//! # One worker, and Miri
+//! # Two workers, and Miri
 //!
-//! The schedule runs on a one-thread pool. The counter does not depend on parallelism, and with two
-//! workers Miri reports a data race (Stacked and Tree Borrows alike) that is not this census's
-//! subject: the `Query<&mut Body>` fetch reborrows the world as `&mut EcsMaster`
-//! (`UnsafeEcsCell::archetype_ptr_mut`) while the canary system's `Commands::spawn` runs
-//! `EntityReservoir::mint_fresh`'s atomic add in the same allocation. With one worker the scene
-//! runs under Miri and reads the native numbers (the fallback arm commits nothing but counts the
-//! same ranges):
+//! The schedule runs on a two-thread pool, so the `Query<&mut Body>` pass and the canary's
+//! `Commands` spawn can run in one round, as they would in a game frame. The counter itself does
+//! not depend on parallelism. Under Miri the scene reads the native numbers (the fallback arm
+//! commits nothing but counts the same ranges):
 //!
 //! ```text
 //! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-ignore-leaks" \
 //!   cargo +nightly miri test -p boyko-ecs --test ug04_committed_bytes_census
 //! ```
+//!
+//! That recipe is Tree Borrows, the one model this scene runs under. Until PC-24 closed, two
+//! workers raced here under Tree Borrows (measured twice; Stacked Borrows was never run on two
+//! workers), so the scene ran on one. A pool-backed Stacked Borrows run stops inside
+//! crossbeam-epoch before any kernel system executes (measured on one worker); the kernel's
+//! Stacked Borrows leg for this pair of systems is the pool-free `pc24_` matrix in the
+//! `UnsafeEcsCell` module.
 //!
 //! `-Zmiri-ignore-leaks` for the reason every pool-backed test here gives: the pool's
 //! crossbeam-epoch handles and the per-bundle column cache are still allocated at process exit.
@@ -120,7 +124,7 @@ fn delta(before: [usize; 3], after: [usize; 3]) -> [usize; 3] {
 /// The frame: a read/write pass over every `Body` row, and the canary system, which spawns one
 /// `Canary` entity through `Commands` on the one frame it is armed.
 fn build_schedule(world: &mut EcsMaster) -> Schedule {
-    let pool = ThreadPoolBuilder::new().num_threads(1).build();
+    let pool = ThreadPoolBuilder::new().num_threads(2).build();
     let mut builder = ScheduleBuilder::new(Arc::clone(&pool));
     builder.add_system(|mut q: Query<&mut Body>| {
         for body in q.iter_mut() {
