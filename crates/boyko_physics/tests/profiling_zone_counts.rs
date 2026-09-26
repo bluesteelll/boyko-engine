@@ -21,7 +21,20 @@
 //! | `phys_bp_verify` / `phys_bp_build` / `phys_bp_query` / `phys_bp_assemble` | 1 each on a tree-path step, 0 on the AllPairs step |
 //! | each of the ten step counters | 1, with the step's value as its total |
 //! | `phys_bp_queried` / `phys_bp_members` / `phys_bp_rebuilds` | tree path: (1, N − members) / (1, [step ≥ 2]) / (1, [step == 2]); AllPairs: (0, 0) |
+//! | `phys_sb_bodies` / `phys_sb_pa` / `phys_sb_pb` / `phys_sb_pc` (W8S) | 1 each |
+//! | `phys_wave_ramp` / `_tail` / `_inflight` / `_lanes` (W8S) | 1 each, the sum over the step's dispatched colour waves (wide colors × 12 sweeps); the in-flight and lane sums each in `[waves, waves × (W + 1)]` |
+//! | `phys_wave_overflow` / `phys_color_scopes` / `phys_color_tasks` (W8S) | (1, 0) / (1, the waves) / (1, the tasks the solver's cut walk makes, recomputed) |
+//! | `phys_route_worker` + `phys_route_external` (W8S) | 1 each, summing to the waves |
+//! | the ten `phys_hist_*` counters (W8S) | 1 each, the colours and slots per bin, recomputed |
+//! | `phys_s6_graph_hit` / `phys_s6_pb_hit` (W8S) | 1 each, 0 or 1, the P-b hit never without the graph hit, both 0 on the first armed step |
+//! | `phys_np_wave_*` (W8S) | 1 each when the narrowphase dispatched; in-flight and lanes in `[1, W + 1]`, overflow 0 |
 //! | every system of the schedule (its `SystemSpan`) | 1 |
+//!
+//! The W8S dispatch counters are recomputed from the same graph and manifolds: a colour
+//! dispatches when `parallel_solve` is on, the pool has two workers and the step's widest colour
+//! reaches `WIDE_COLOR_MIN_SLOTS` (the scene's wide colour, on every step), and its task count is
+//! [`expected_color_tasks`], this test's copy of the solver's cut walk. The S6 counter must hit on
+//! some step of the run, or its 0 would be the only value ever checked.
 //!
 //! The first [`STEPS_OFF`] steps run with sleeping off, the parity configuration; summed over
 //! them the counts are the plan's literals — build 3, gravity = warm = integrate = biased = 12,
@@ -93,16 +106,22 @@ use boyko_diag::profiling_abi::{ZoneHandle, zone_id};
 use boyko_ecs::ecs::core::profiling::SYSTEM_ZONES_COMPILED;
 use boyko_physics::narrowphase::{NP_CHUNKS_PER_LANE, NP_MAX_CHUNKS, NP_MIN_PAIRS_PER_CHUNK};
 use boyko_physics::profiling::{
-    COUNTER_ZONE_COUNT, COUNTER_ZONES, PHYS_BP_ASSEMBLE, PHYS_BP_BUILD, PHYS_BP_MEMBERS,
-    PHYS_BP_PAIRS, PHYS_BP_QUERIED, PHYS_BP_QUERY, PHYS_BP_REBUILDS, PHYS_BP_VERIFY,
-    PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY, PHYS_INTEGRATE, PHYS_NP_AXIS_COMMIT,
-    PHYS_NP_CHUNKS, PHYS_NP_COMPACT, PHYS_NP_DISPATCH, PHYS_NP_FULL, PHYS_NP_MANIFOLDS,
-    PHYS_NP_PAIRS, PHYS_NP_POINTS, PHYS_NP_REUSED, PHYS_NP_SEP_HITS, PHYS_PASS_BIASED,
-    PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_SLEEP_BEGIN, PHYS_SLEEP_CLASSIFY,
-    PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE,
-    PHYS_SOLVE_BUILD,
-    PHYS_STORE, PHYS_WARM_APPLY, PHYS_WRITE_BACK, SPAN_ZONE_COUNT, SPAN_ZONES,
-    WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED,
+    COUNTER_ZONE_COUNT, COUNTER_ZONES, HIST_BINS, PHYS_BP_ASSEMBLE, PHYS_BP_BUILD,
+    PHYS_BP_MEMBERS, PHYS_BP_PAIRS, PHYS_BP_QUERIED, PHYS_BP_QUERY, PHYS_BP_REBUILDS,
+    PHYS_BP_VERIFY, PHYS_COLOR_NARROW, PHYS_COLOR_SCOPES, PHYS_COLOR_TASKS, PHYS_COLOR_WIDE,
+    PHYS_GRAVITY, PHYS_HIST_COLORS_GE256, PHYS_HIST_COLORS_LT32, PHYS_HIST_COLORS_LT64,
+    PHYS_HIST_COLORS_LT128, PHYS_HIST_COLORS_LT256, PHYS_HIST_SLOTS_GE256, PHYS_HIST_SLOTS_LT32,
+    PHYS_HIST_SLOTS_LT64, PHYS_HIST_SLOTS_LT128, PHYS_HIST_SLOTS_LT256, PHYS_INTEGRATE,
+    PHYS_NP_AXIS_COMMIT, PHYS_NP_CHUNKS, PHYS_NP_COMPACT, PHYS_NP_DISPATCH, PHYS_NP_FULL,
+    PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS, PHYS_NP_REUSED, PHYS_NP_SEP_HITS,
+    PHYS_NP_WAVE_INFLIGHT, PHYS_NP_WAVE_LANES, PHYS_NP_WAVE_OVERFLOW, PHYS_NP_WAVE_RAMP,
+    PHYS_NP_WAVE_TAIL, PHYS_PASS_BIASED, PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_ROUTE_EXTERNAL,
+    PHYS_ROUTE_WORKER, PHYS_S6_GRAPH_HIT, PHYS_S6_PB_HIT, PHYS_SB_BODIES, PHYS_SB_PA,
+    PHYS_SB_PB, PHYS_SB_PC, PHYS_SLEEP_BEGIN, PHYS_SLEEP_CLASSIFY, PHYS_SLEEP_END,
+    PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD,
+    PHYS_STORE, PHYS_WARM_APPLY, PHYS_WAVE_INFLIGHT, PHYS_WAVE_LANES, PHYS_WAVE_OVERFLOW,
+    PHYS_WAVE_RAMP, PHYS_WAVE_TAIL, PHYS_WRITE_BACK, SPAN_ZONE_COUNT, SPAN_ZONES,
+    WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED, hist_bin,
 };
 use boyko_physics::broadphase_tree::BroadphaseTree;
 use boyko_physics::components::ColliderShape;
@@ -132,6 +151,13 @@ fn main() {
     run_single_test(TEST_NAME, physics_zones_count_exactly);
 }
 
+/// The solver's colour cut constants (`solver/colored.rs`: `CHUNKS_PER_WORKER`,
+/// `MIN_SLOTS_PER_CHUNK`, `COHORT`), copied: the task count below is a second derivation, not a
+/// read of the solver.
+const COLOR_CHUNKS_PER_WORKER: usize = 6;
+const COLOR_MIN_SLOTS_PER_CHUNK: usize = 64;
+const COLOR_COHORT: usize = 8;
+
 /// One step's structure, recomputed from the world after the step.
 #[derive(Debug)]
 struct StepShape {
@@ -142,6 +168,42 @@ struct StepShape {
     pairs: u64,
     manifolds: u64,
     points: u64,
+    /// W8S: the tasks one sweep's wide colours cut into.
+    wide_tasks: u64,
+    /// W8S: colours per histogram bin.
+    hist_colors: [u64; HIST_BINS],
+    /// W8S: their slots.
+    hist_slots: [u64; HIST_BINS],
+}
+
+/// The tasks one dispatched colour spawns, its laid-out groups holding `groups` points each in
+/// order: the solver's chunk count and cut walk (`solve_color_parallel`) over the copied
+/// constants, SIMD cohort snapping included.
+fn expected_color_tasks(groups: &[u32], lanes: usize, simd_solve: bool) -> u64 {
+    let n_groups = groups.len();
+    if n_groups == 0 {
+        return 0;
+    }
+    let total: usize = groups.iter().map(|&g| g as usize).sum();
+    let by_work = (total / COLOR_MIN_SLOTS_PER_CHUNK).max(1);
+    let n_chunks = (lanes * COLOR_CHUNKS_PER_WORKER).min(by_work).clamp(1, n_groups);
+    let target = total.div_ceil(n_chunks).max(1);
+    let step = if simd_solve { COLOR_COHORT } else { 1 };
+    let mut start = Vec::with_capacity(n_groups + 1);
+    start.push(0usize);
+    for &g in groups {
+        start.push(start.last().copied().unwrap_or(0) + g as usize);
+    }
+    let (mut lo, mut tasks) = (0usize, 0u64);
+    while lo < n_groups {
+        let mut hi = (lo + step).min(n_groups);
+        while hi < n_groups && start[hi] - start[lo] < target {
+            hi = (hi + step).min(n_groups);
+        }
+        tasks += 1;
+        lo = hi;
+    }
+    tasks
 }
 
 /// Recomputes this step's color classes and narrowphase output from the graph and manifold
@@ -149,6 +211,7 @@ struct StepShape {
 fn step_shape(scene: &Scene) -> StepShape {
     let graph = scene.world.resource::<ConstraintGraph>();
     let manifolds = scene.world.resource::<Manifolds>().solver_manifolds();
+    let simd_solve = scene.world.resource::<PhysicsConfig>().simd_solve;
     let mut shape = StepShape {
         wide_colors: 0,
         narrow_colors: 0,
@@ -157,19 +220,31 @@ fn step_shape(scene: &Scene) -> StepShape {
         pairs: scene.world.resource::<ContactPairs>().pairs().len() as u64,
         manifolds: manifolds.len() as u64,
         points: manifolds.iter().map(|m| u64::from(m.count)).sum(),
+        wide_tasks: 0,
+        hist_colors: [0; HIST_BINS],
+        hist_slots: [0; HIST_BINS],
     };
     for c in 0..graph.n_colors() {
-        let slots: u32 = graph
+        // The colour's laid-out groups: its manifolds in order, empty ones skipped (no island
+        // of this scene freezes within its steps, asserted per step).
+        let groups: Vec<u32> = graph
             .color(c)
             .iter()
             .map(|&mi| u32::from(manifolds[mi as usize].count))
-            .sum();
+            .filter(|&n| n != 0)
+            .collect();
+        let slots: u32 = groups.iter().sum();
         if slots >= WIDE_COLOR_MIN_SLOTS {
             shape.wide_colors += 1;
             shape.wide_slots += u64::from(slots);
+            shape.wide_tasks += expected_color_tasks(&groups, WORKERS, simd_solve);
         } else {
             shape.narrow_colors += 1;
             shape.narrow_slots += u64::from(slots);
+        }
+        if let Some(bin) = hist_bin(slots) {
+            shape.hist_colors[bin] += 1;
+            shape.hist_slots[bin] += u64::from(slots);
         }
     }
     shape
@@ -238,6 +313,10 @@ fn physics_zones_count_exactly() {
 
     let mut literal = [0u64; 6]; // build, gravity, warm, integrate, biased, relax over STEPS_OFF
     let mut reused_total = 0u64;
+    // W8S: the S6 graph hits over the run (some step must hit).
+    let mut s6_hits = 0u64;
+    let parallel_solve = scene.world.resource::<PhysicsConfig>().parallel_solve;
+    assert!(parallel_solve, "the harness requests the parallel solve");
 
     for step in 0..STEPS {
         let sleeping = step >= STEPS_OFF;
@@ -378,6 +457,10 @@ fn physics_zones_count_exactly() {
             (&PHYS_BP_BUILD, tp),
             (&PHYS_BP_QUERY, tp),
             (&PHYS_BP_ASSEMBLE, tp),
+            (&PHYS_SB_BODIES, 1),
+            (&PHYS_SB_PA, 1),
+            (&PHYS_SB_PB, 1),
+            (&PHYS_SB_PC, 1),
         ];
         for (k, &(handle, want)) in expected_spans.iter().enumerate() {
             assert!(
@@ -395,26 +478,59 @@ fn physics_zones_count_exactly() {
             );
         }
 
+        // W8S: every wide colour of every sweep dispatches (parallel_solve on, four workers, a
+        // wide colour on every step); the in-flight and lane readings lie in [1, W + 1].
+        let waves = shape.wide_colors * sweeps;
+        let tasks = shape.wide_tasks * sweeps;
+        let threads = WORKERS as u64 + 1;
         // (samples per step, value): the ten step counters sample once per step; the three
-        // tree counters once per tree-path step and never otherwise.
-        let expected_counters: [(&ZoneHandle, u64, u64); COUNTER_ZONE_COUNT] = [
-            (&PHYS_SLOTS_WIDE, 1, shape.wide_slots),
-            (&PHYS_SLOTS_NARROW, 1, shape.narrow_slots),
-            (&PHYS_NP_PAIRS, 1, shape.pairs),
-            (&PHYS_NP_MANIFOLDS, 1, shape.manifolds),
-            (&PHYS_NP_POINTS, 1, shape.points),
-            (&PHYS_BP_PAIRS, 1, shape.pairs),
-            (&PHYS_NP_CHUNKS, 1, np_chunks),
-            (&PHYS_BP_QUERIED, tp, bp_queried),
-            (&PHYS_BP_MEMBERS, tp, bp_members),
-            (&PHYS_BP_REBUILDS, tp, bp_rebuilds),
-            (&PHYS_NP_REUSED, 1, classes.reused),
-            (&PHYS_NP_SEP_HITS, 1, classes.sep_hits),
-            (&PHYS_NP_FULL, 1, classes.full),
+        // tree counters once per tree-path step and never otherwise; the W8S rows as the table
+        // in the module docs says. `None` is a value checked below, or a timing.
+        let expected_counters: [(&ZoneHandle, u64, Option<u64>); COUNTER_ZONE_COUNT] = [
+            (&PHYS_SLOTS_WIDE, 1, Some(shape.wide_slots)),
+            (&PHYS_SLOTS_NARROW, 1, Some(shape.narrow_slots)),
+            (&PHYS_NP_PAIRS, 1, Some(shape.pairs)),
+            (&PHYS_NP_MANIFOLDS, 1, Some(shape.manifolds)),
+            (&PHYS_NP_POINTS, 1, Some(shape.points)),
+            (&PHYS_BP_PAIRS, 1, Some(shape.pairs)),
+            (&PHYS_NP_CHUNKS, 1, Some(np_chunks)),
+            (&PHYS_BP_QUERIED, tp, Some(bp_queried)),
+            (&PHYS_BP_MEMBERS, tp, Some(bp_members)),
+            (&PHYS_BP_REBUILDS, tp, Some(bp_rebuilds)),
+            (&PHYS_NP_REUSED, 1, Some(classes.reused)),
+            (&PHYS_NP_SEP_HITS, 1, Some(classes.sep_hits)),
+            (&PHYS_NP_FULL, 1, Some(classes.full)),
             // L10: once per sleeping step (the classification's); no island of this scene is
             // held within its steps.
-            (&PHYS_SLEEP_HELD, sl, 0),
+            (&PHYS_SLEEP_HELD, sl, Some(0)),
+            (&PHYS_WAVE_RAMP, 1, None),
+            (&PHYS_WAVE_TAIL, 1, None),
+            (&PHYS_WAVE_INFLIGHT, 1, None),
+            (&PHYS_WAVE_LANES, 1, None),
+            (&PHYS_WAVE_OVERFLOW, 1, Some(0)),
+            (&PHYS_COLOR_SCOPES, 1, Some(waves)),
+            (&PHYS_COLOR_TASKS, 1, Some(tasks)),
+            (&PHYS_ROUTE_WORKER, 1, None),
+            (&PHYS_ROUTE_EXTERNAL, 1, None),
+            (&PHYS_HIST_COLORS_LT32, 1, Some(shape.hist_colors[0])),
+            (&PHYS_HIST_COLORS_LT64, 1, Some(shape.hist_colors[1])),
+            (&PHYS_HIST_COLORS_LT128, 1, Some(shape.hist_colors[2])),
+            (&PHYS_HIST_COLORS_LT256, 1, Some(shape.hist_colors[3])),
+            (&PHYS_HIST_COLORS_GE256, 1, Some(shape.hist_colors[4])),
+            (&PHYS_HIST_SLOTS_LT32, 1, Some(shape.hist_slots[0])),
+            (&PHYS_HIST_SLOTS_LT64, 1, Some(shape.hist_slots[1])),
+            (&PHYS_HIST_SLOTS_LT128, 1, Some(shape.hist_slots[2])),
+            (&PHYS_HIST_SLOTS_LT256, 1, Some(shape.hist_slots[3])),
+            (&PHYS_HIST_SLOTS_GE256, 1, Some(shape.hist_slots[4])),
+            (&PHYS_S6_GRAPH_HIT, 1, None),
+            (&PHYS_S6_PB_HIT, 1, None),
+            (&PHYS_NP_WAVE_RAMP, np, None),
+            (&PHYS_NP_WAVE_TAIL, np, None),
+            (&PHYS_NP_WAVE_INFLIGHT, np, None),
+            (&PHYS_NP_WAVE_LANES, np, None),
+            (&PHYS_NP_WAVE_OVERFLOW, np, Some(0)),
         ];
+        let mut totals = [0u64; COUNTER_ZONE_COUNT];
         for (k, &(handle, samples, value)) in expected_counters.iter().enumerate() {
             assert!(
                 std::ptr::eq(handle, COUNTER_ZONES[k]),
@@ -422,14 +538,51 @@ fn physics_zones_count_exactly() {
             );
             let count = counters_after[k].0 - counters_before[k].0;
             let total = counters_after[k].1 - counters_before[k].1;
+            totals[k] = total;
             assert_eq!(
-                (count, total),
-                (samples * on, value * samples * on),
-                "step {step}: counter `{}` recorded (samples, total) = ({count}, {total}), the \
-                 step has ({samples}, {value})",
+                count,
+                samples * on,
+                "step {step}: counter `{}` recorded {count} samples, the step has {samples}",
                 name_of(handle)
             );
+            if let Some(value) = value {
+                assert_eq!(
+                    total,
+                    value * samples * on,
+                    "step {step}: counter `{}` totalled {total}, the step has {value} a sample \
+                     ({samples} samples)",
+                    name_of(handle)
+                );
+            }
         }
+        // The W8S rows whose value is a range or a relation (module docs' table).
+        let total_of = |h: &ZoneHandle| {
+            totals[COUNTER_ZONES.iter().position(|&z| std::ptr::eq(z, h)).expect("a listed counter")]
+        };
+        for (h, n) in [
+            (&PHYS_WAVE_INFLIGHT, waves),
+            (&PHYS_WAVE_LANES, waves),
+            (&PHYS_NP_WAVE_INFLIGHT, np),
+            (&PHYS_NP_WAVE_LANES, np),
+        ] {
+            let t = total_of(h);
+            assert!(
+                (n * on..=n * threads * on).contains(&t),
+                "step {step}: `{}` totalled {t} over {n} waves, outside [1, W + 1] a wave",
+                name_of(h)
+            );
+        }
+        assert_eq!(
+            total_of(&PHYS_ROUTE_WORKER) + total_of(&PHYS_ROUTE_EXTERNAL),
+            waves * on,
+            "step {step}: the route counters sum to the solve scopes"
+        );
+        let (g, pb) = (total_of(&PHYS_S6_GRAPH_HIT), total_of(&PHYS_S6_PB_HIT));
+        assert!(g <= 1 && pb <= g, "step {step}: S6 hits (graph {g}, P-b {pb}) are 0/1, P-b under graph");
+        if step == 0 {
+            assert_eq!(g, 0, "the first armed step has no witness to hit");
+        }
+        s6_hits += g;
 
         for (k, &(name, _)) in systems.iter().enumerate() {
             let got = systems_after[k].0 - systems_before[k].0;
@@ -451,6 +604,10 @@ fn physics_zones_count_exactly() {
         reused_total > 0,
         "no step reused a contact record (contact reuse is on by default since L9 C4), so the \
          reused counter was only ever checked against zero"
+    );
+    assert!(
+        s6_hits > 0 || !ZONES_COMPILED,
+        "S6's graph counter never hit on a resting scene, so it was only ever checked against zero"
     );
     // The whole session since the arm, not a sum of diffs: nothing reached the store before the
     // first step or between the per-step snapshots.

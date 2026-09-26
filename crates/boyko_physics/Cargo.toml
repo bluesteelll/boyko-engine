@@ -261,6 +261,14 @@ name = "jolt_parity_pyramid"
 harness = false
 
 [[bench]]
+# W8S (docs/physics/perf-campaign/levers/scaling/01-DESIGN.md §7): the ω_b stage-barrier
+# microbench (a bench-only copy of the S1 region protocol) and ω(W, gap), a zero-work scope after
+# a serial gap, on the worker and external routes. Custom main: without `--bench` it runs an
+# untimed functional self-check of the protocol; the timed modes are run in a quiet window only.
+name = "omega_b_region"
+harness = false
+
+[[bench]]
 # L9 C0: the narrowphase class bench (levers/L9-contact-reuse/02-DESIGN-REV1.md) - J and R
 # snapshots at step 300 and a moving rain scene, every candidate pair classed separated /
 # touching / fast with structural asserts (closure, a SAT replica, the step's manifold count, the

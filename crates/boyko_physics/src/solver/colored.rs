@@ -84,6 +84,7 @@
 use std::marker::PhantomData;
 use std::ptr;
 
+use boyko_diag::profiling_abi::{ZoneGuard, ZoneHandle};
 use boyko_diag::{zone, zone_enabled};
 use boyko_ecs::ecs::core::component::scratch::{ScratchColumn, ScratchSolveView};
 use boyko_macros::Resource as ResourceDerive;
@@ -106,10 +107,14 @@ use super::RigidSolver;
 use crate::manifold::{Manifold, SDF_SENTINEL};
 use crate::math::{Mat3, Vec3};
 use crate::profiling::{
-    PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY, PHYS_INTEGRATE, PHYS_PASS_BIASED,
-    PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_SLEEP_BEGIN, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE,
+    HIST_BINS, PHYS_COLOR_NARROW, PHYS_COLOR_SCOPES, PHYS_COLOR_WIDE, PHYS_GRAVITY,
+    PHYS_HIST_COLORS_GE256, PHYS_HIST_COLORS_LT32, PHYS_HIST_COLORS_LT64, PHYS_HIST_COLORS_LT128,
+    PHYS_HIST_COLORS_LT256, PHYS_HIST_SLOTS_GE256, PHYS_HIST_SLOTS_LT32, PHYS_HIST_SLOTS_LT64,
+    PHYS_HIST_SLOTS_LT128, PHYS_HIST_SLOTS_LT256, PHYS_INTEGRATE, PHYS_PASS_BIASED,
+    PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_S6_GRAPH_HIT, PHYS_S6_PB_HIT, PHYS_SB_BODIES,
+    PHYS_SB_PA, PHYS_SB_PB, PHYS_SB_PC, PHYS_SLEEP_BEGIN, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE,
     PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY,
-    PHYS_WRITE_BACK, counter,
+    PHYS_WRITE_BACK, WaveStamps, WaveTally, ZoneCanary, counter, hist_bin,
 };
 use crate::resources::{
     BodyState, ConstraintGraph, IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
@@ -777,6 +782,9 @@ impl SetupCounters {
 #[cfg(test)]
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
+/// The same basis for the W8S S6 witness, which exists in every build.
+const FNV_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+
 /// FNV-1a 64 prime.
 #[cfg(test)]
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -1248,6 +1256,33 @@ impl CohortColumns {
         })
     }
 
+    /// W8S instrument 3: pushes this step's colour histogram — per bin of
+    /// [`crate::profiling::HIST_BIN_EDGES`], the colours whose width lies in it and their slots
+    /// — ten counters, each once. One pass over `color_offsets`, armed only; a colour with no
+    /// slot (every manifold of it frozen) is in no bin.
+    #[cold]
+    #[inline(never)]
+    fn push_histogram(&self) {
+        let mut colors = [0u64; HIST_BINS];
+        let mut slots = [0u64; HIST_BINS];
+        for w in self.color_offsets().windows(2) {
+            if let Some(bin) = hist_bin(w[1] - w[0]) {
+                colors[bin] += 1;
+                slots[bin] += u64::from(w[1] - w[0]);
+            }
+        }
+        counter!(PHYS_HIST_COLORS_LT32, colors[0]);
+        counter!(PHYS_HIST_COLORS_LT64, colors[1]);
+        counter!(PHYS_HIST_COLORS_LT128, colors[2]);
+        counter!(PHYS_HIST_COLORS_LT256, colors[3]);
+        counter!(PHYS_HIST_COLORS_GE256, colors[4]);
+        counter!(PHYS_HIST_SLOTS_LT32, slots[0]);
+        counter!(PHYS_HIST_SLOTS_LT64, slots[1]);
+        counter!(PHYS_HIST_SLOTS_LT128, slots[2]);
+        counter!(PHYS_HIST_SLOTS_LT256, slots[3]);
+        counter!(PHYS_HIST_SLOTS_GE256, slots[4]);
+    }
+
     /// The per-group point CSR (`group_start`) as a read slice.
     #[inline]
     fn group_start(&self) -> &[u32] {
@@ -1486,6 +1521,31 @@ fn debug_assert_padding_zero(
     assert!(head._p == 0 && head._pad == [0; 16], "invariant: the head's padding bytes are zero");
 }
 
+/// W8S instrument 4 (S6's hit-rate counter, `levers/scaling/01-DESIGN.md` §6.6): what the
+/// previous ARMED step's graph and layout inputs were, as far as the solve sees them. The design
+/// keyed the memo on a `StepInputs` epoch and an L10 held-store epoch; neither exists on this tree
+/// (cut §1.1), so the witness compares the inputs themselves: the gather, the stream's pair
+/// ordinals, every row's dynamic and held flags, the sleeping arm and the held store's size. A
+/// hit is a step whose inputs equal the witness's, taken on the gather just before it. 24 B,
+/// written only while armed.
+#[derive(Clone, Copy, Debug, Default)]
+struct S6Witness {
+    /// The gather the witness was taken on; `0` before the first armed step.
+    gather_seq: u64,
+    /// FNV-1a 64 of the stream's pair ordinals, the count first.
+    stream: u64,
+    /// FNV-1a 64 of every row's (dynamic, held) flags, the row count first, then the sleeping
+    /// arm and the held store's live points.
+    rows: u64,
+}
+
+/// One word folded into an FNV-1a 64 hash (the S6 witness's hash: a word at a time, which is
+/// all a witness needs; it is not the runner's pose hash).
+#[inline]
+fn fnv_word(h: u64, v: u64) -> u64 {
+    (h ^ v).wrapping_mul(0x0000_0100_0000_01b3)
+}
+
 /// The colored TGS-Soft rigid-body solver (Phase O5, Decision 7).
 ///
 /// A `Resource` owning its [`CohortColumns`] tables + the double-buffered
@@ -1546,6 +1606,12 @@ pub struct ColoredSoftStepSolver {
     fast_path_steps: u64,
     /// The G1 anti-vacuity counters (L11 C0). Zero-sized outside `cfg(test)`.
     counters: SetupCounters,
+    /// W8S instrument 4: the previous armed step's graph and layout inputs. Written only while
+    /// the profiler is armed.
+    s6: S6Witness,
+    /// W8S: the in-zone canary ([`set_zone_canary`](Self::set_zone_canary)); spins nowhere by
+    /// default.
+    canary: ZoneCanary,
     /// The last solve's setup digest (L11 C0): the built columns' logical values,
     /// then the step's [`WarmSeedStats`], folded after the store. Test-only.
     #[cfg(test)]
@@ -1590,6 +1656,8 @@ impl ColoredSoftStepSolver {
             solved_steps: 0,
             fast_path_steps: 0,
             counters: SetupCounters::default(),
+            s6: S6Witness::default(),
+            canary: ZoneCanary::default(),
             #[cfg(test)]
             step_digest: 0,
         }
@@ -1633,6 +1701,89 @@ impl ColoredSoftStepSolver {
     #[inline]
     pub fn fast_path_steps(&self) -> u64 {
         self.fast_path_steps
+    }
+
+    /// W8S's in-zone canary (the profiling module's docs, "The in-zone canary"): from the next
+    /// solve on, `zone` busy-waits `ns` nanoseconds on the calling thread each time it opens
+    /// armed. `zone` must be one of [`crate::profiling::CANARY_ZONES`] (the solve build and its
+    /// four sub-zones); any other is refused with `false` and changes nothing. `ns == 0` removes
+    /// the canary. A measurement instrument for the parity runner, not an engine feature: it
+    /// changes no value, and a disarmed zone never spins.
+    #[doc(hidden)]
+    pub fn set_zone_canary(&mut self, zone: &'static ZoneHandle, ns: u64) -> bool {
+        match ZoneCanary::new(zone, ns) {
+            Some(canary) => {
+                self.canary = canary;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// W8S: the in-zone canary's busy-waits since [`set_zone_canary`](Self::set_zone_canary) —
+    /// one per armed opening of its zone. The parity runner compares it with the zone's sample
+    /// count, so a canary that never ran cannot pass as one whose zone was slow anyway.
+    #[doc(hidden)]
+    pub fn zone_canary_spins(&self) -> u64 {
+        self.canary.spins()
+    }
+
+    /// W8S instrument 4, armed only: S6's graph and P-b hits for this step, pushed as
+    /// [`PHYS_S6_GRAPH_HIT`] and [`PHYS_S6_PB_HIT`], and the witness the next armed step
+    /// compares with. Runs before P-a overwrites the tag column, which still holds the previous
+    /// step's tags, and after `IslandSleep::begin_step`, which decides this step's frozen
+    /// islands.
+    ///
+    /// The graph hit: the witness was taken on the gather just before this one, the rows did not
+    /// change, and the stream's pair ordinals, every row's dynamic and held flags, the sleeping
+    /// arm and the held store's size are equal, with no held-store transition this step (no
+    /// kept manifold moved in, no restore source). The P-b hit adds that every manifold's tag
+    /// `(count, FROZEN)` equals the one the previous step wrote, which is all the layout reads
+    /// besides the graph. Hash equality stands in for equality of the two word streams (FNV-1a
+    /// 64; a collision would read a miss as a hit, at a rate no window resolves).
+    #[cold]
+    #[inline(never)]
+    fn s6_probe(
+        &mut self,
+        manifolds: &[Manifold],
+        graph: &ConstraintGraph,
+        scratch: &SolverScratch,
+        held: Option<&HeldSolve<'_>>,
+        sleep: Option<&IslandSleep>,
+        sleeping: bool,
+    ) {
+        let seq = scratch.rows.gather_seq();
+        let stream = manifolds
+            .iter()
+            .fold(fnv_word(FNV_BASIS, manifolds.len() as u64), |h, m| fnv_word(h, ord(m.body_a.0, m.body_b.0)));
+        let cls: &[RowCls] = held.map_or(&[], |h| h.cls);
+        let bodies = scratch.bodies();
+        let mut rows = fnv_word(FNV_BASIS, bodies.len() as u64);
+        for (row, b) in bodies.iter().enumerate() {
+            let held_row = cls.get(row).is_some_and(|c| c.is_held());
+            rows = fnv_word(rows, u64::from(is_dynamic_row(b.inv_mass)) | (u64::from(held_row) << 1));
+        }
+        rows = fnv_word(rows, u64::from(sleeping));
+        rows = fnv_word(rows, u64::from(held.map_or(0, |h| h.held.live_points())));
+        let transition = held.is_some_and(|h| !h.capture.is_empty() || h.restore.is_some_and(|r| !r.keys().is_empty()));
+        let prev = self.s6;
+        let graph_hit = prev.gather_seq != 0
+            && prev.gather_seq + 1 == seq
+            && !scratch.rows.rows_changed()
+            && prev.stream == stream
+            && prev.rows == rows
+            && !transition;
+        let pb_hit = graph_hit && {
+            let tags = self.columns.tags();
+            tags.len() == manifolds.len()
+                && manifolds.iter().zip(tags).all(|(m, t)| {
+                    let frozen = sleep.is_some_and(|s| Self::manifold_frozen(m, graph, s));
+                    t.count == m.count && t.frozen() == frozen
+                })
+        };
+        self.s6 = S6Witness { gather_seq: seq, stream, rows };
+        counter!(PHYS_S6_GRAPH_HIT, u64::from(graph_hit));
+        counter!(PHYS_S6_PB_HIT, u64::from(pb_hit));
     }
 
     /// Diagnostic (L10's bit-identity gate, design 04 "What is compared", 06 §7): calls
@@ -1871,6 +2022,7 @@ impl ColoredSoftStepSolver {
             warm_cursor,
             warm_stats,
             counters,
+            canary,
             ..
         } = self;
         debug_assert!(
@@ -1878,6 +2030,9 @@ impl ColoredSoftStepSolver {
             "invariant: warm start runs only if the setup flag allows it"
         );
         let n = manifolds.len();
+        // W8S: P-a's span, from the sizing through the source search.
+        let pa_zone = zone!(PHYS_SB_PA);
+        canary.at(&PHYS_SB_PA, pa_zone.is_some());
 
         // P-a (D4): stream order. The write side takes this step's ordinals; every
         // manifold's warm source run goes to `plan`. The read side is `warm[cur]`,
@@ -1945,12 +2100,17 @@ impl ColoredSoftStepSolver {
             )
         };
         counters.plan(plan_counts);
+        drop(pa_zone);
         let index: &WarmIndex = warm_index;
         let lookup = WarmLookup { read, index };
         let restore_lookup = restore.map(|read| WarmLookup { read, index });
 
         // P-b (D4): the layout, in color order.
-        let seeded = cols.layout(graph);
+        let seeded = {
+            let pb_zone = zone!(PHYS_SB_PB);
+            canary.at(&PHYS_SB_PB, pb_zone.is_some());
+            cols.layout(graph)
+        };
         debug_assert_eq!(points, cols.len() as u32, "invariant: the tags and the layout agree on the point count");
 
         // P-c (D4): the fill, per cohort. The `BodyEffective` rows the fill reads are
@@ -1962,6 +2122,8 @@ impl ColoredSoftStepSolver {
         let mut point_hits = 0u32;
         // The build views commit their lengths on drop, so the fill's borrows end here.
         {
+            let pc_zone = zone!(PHYS_SB_PC);
+            canary.at(&PHYS_SB_PC, pc_zone.is_some());
             let sources = WarmSources {
                 lookup,
                 restore: restore_lookup,
@@ -3339,6 +3501,8 @@ impl ColoredSoftStepSolver {
     /// and distinct groups in a color touch DISJOINT dynamic bodies, so the
     /// parallel result is bit-identical to the sequential one for any worker count
     /// (see [`solve_color_parallel`](Self::solve_color_parallel)).
+    ///
+    /// `tally` takes the step's W8S dispatch totals, written only in a wave's armed arm.
     #[allow(clippy::too_many_arguments)]
     fn solve_all_colors(
         cols: &CohortColumns,
@@ -3349,6 +3513,7 @@ impl ColoredSoftStepSolver {
         bias_active: bool,
         parallel: bool,
         simd: bool,
+        tally: &mut WaveTally,
     ) {
         // B4 re-create-before-view-live: the tables are FROZEN by now (the last
         // build-time grow happened in `build_columns`, before the substep loop), so
@@ -3363,7 +3528,7 @@ impl ColoredSoftStepSolver {
             // Profiling: one span per color, on this (the calling) thread and never inside a
             // worker's chunk task, classed by the inline floor's own predicate so the class
             // does not depend on `parallel` or on the worker count.
-            let _color_zone =
+            let color_zone =
                 if color_offsets[c + 1] - color_offsets[c] < MIN_PARALLEL_SLOTS_PER_COLOR {
                     zone!(PHYS_COLOR_NARROW)
                 } else {
@@ -3376,7 +3541,30 @@ impl ColoredSoftStepSolver {
             };
             let g_hi = color_group_start[c + 1] as usize;
             if parallel {
-                Self::solve_color_parallel(
+                // W8S (armed only): a wide colour's wave is stamped, its span handed over so it
+                // closes before the stamps are reduced. The armed test reads the span's own
+                // guard, so a disarmed colour adds no load; the width test runs only armed.
+                if color_zone.is_some()
+                    && color_offsets[c + 1] - color_offsets[c] >= MIN_PARALLEL_SLOTS_PER_COLOR
+                {
+                    Self::solve_color_stamped(
+                        color_zone,
+                        cols,
+                        view,
+                        bodies_eff,
+                        c,
+                        ctx,
+                        g_hi,
+                        bias_rate,
+                        mass_coeff,
+                        impulse_coeff,
+                        bias_active,
+                        simd,
+                        tally,
+                    );
+                    continue;
+                }
+                Self::solve_color_parallel::<false>(
                     cols,
                     view,
                     bodies_eff,
@@ -3388,6 +3576,7 @@ impl ColoredSoftStepSolver {
                     impulse_coeff,
                     bias_active,
                     simd,
+                    None,
                 );
             } else {
                 // O7 dispatch fork (the 0%-gate): `simd == false` runs the byte-
@@ -3483,8 +3672,18 @@ impl ColoredSoftStepSolver {
     /// body-disjoint (each is 8 disjoint groups; distinct cohorts are pairwise
     /// disjoint), so cross-worker disjointness — and thus the {1, N}×{simd}
     /// bit-identity — is unchanged from O6.
+    ///
+    /// # The W8S stamps (armed only)
+    ///
+    /// `STAMPED == false` is every disarmed wave: `stamps` is `None`, and the function is the one
+    /// that was here, spawning exactly the task above — a separate instantiation, so the
+    /// disarmed caller inlines it as it always did and no stamped branch exists in it. With
+    /// `STAMPED` and a record ([`solve_color_stamped`](Self::solve_color_stamped)) the same task
+    /// is spawned wrapped by `WaveStamps::task`, and the caller stamps the scope's opening, the
+    /// end of its spawn loop and the join's return; the cut, the chunk count and the task body
+    /// are the disarmed wave's.
     #[allow(clippy::too_many_arguments)]
-    fn solve_color_parallel(
+    fn solve_color_parallel<const STAMPED: bool>(
         cols: &CohortColumns,
         view: CohortSolveView<'_>,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
@@ -3496,6 +3695,7 @@ impl ColoredSoftStepSolver {
         impulse_coeff: f32,
         bias_active: bool,
         simd: bool,
+        stamps: Option<&WaveStamps>,
     ) {
         // The color's manifold-group range (indices into `group_start`).
         let color_offsets = cols.color_offsets();
@@ -3672,6 +3872,9 @@ impl ColoredSoftStepSolver {
                 })
             };
 
+            if STAMPED && let Some(stamps) = stamps {
+                stamps.begin(lanes);
+            }
             pool.scope(|scope| {
                 // The chunk task: a `Fn` over a cut that hands back that chunk's
                 // body, one spawn per cut. Every capture is `Copy` (the solve
@@ -3738,10 +3941,24 @@ impl ColoredSoftStepSolver {
                     }
                 };
 
-                for cut in cuts() {
-                    scope.spawn(task(cut));
+                // W8S (armed only): the same task, stamped. The wrapper adds one reference to
+                // the stack-local record (the task's 104 B plus 8, inside row D's 112 B cell
+                // budget), and the record outlives the scope.
+                if STAMPED && let Some(stamps) = stamps {
+                    for cut in cuts() {
+                        let task = task(cut);
+                        scope.spawn(move || stamps.task(task));
+                    }
+                    stamps.spawned();
+                } else {
+                    for cut in cuts() {
+                        scope.spawn(task(cut));
+                    }
                 }
             });
+            if STAMPED && let Some(stamps) = stamps {
+                stamps.joined();
+            }
             true
         });
 
@@ -3765,6 +3982,51 @@ impl ColoredSoftStepSolver {
                 bias_active,
                 simd,
             );
+        }
+    }
+
+    /// W8S (armed only): one wide colour's wave, stamped. Runs
+    /// [`solve_color_parallel`](Self::solve_color_parallel) with a stack-local record, closes
+    /// the colour's span (`color_zone`, moved in) once the join has returned, and only then
+    /// reduces the record and adds it to the step's `tally` — so the span reads the wave and not
+    /// its bookkeeping. A wave that ran inline (no pool, or a single chunk) leaves no reading.
+    /// Out of line and cold: the disarmed colour loop never reaches it.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn solve_color_stamped(
+        color_zone: Option<ZoneGuard>,
+        cols: &CohortColumns,
+        view: CohortSolveView<'_>,
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
+        color: usize,
+        ctx: ColorCtx,
+        g_hi: usize,
+        bias_rate: f32,
+        mass_coeff: f32,
+        impulse_coeff: f32,
+        bias_active: bool,
+        simd: bool,
+        tally: &mut WaveTally,
+    ) {
+        let stamps = WaveStamps::new();
+        Self::solve_color_parallel::<true>(
+            cols,
+            view,
+            bodies_eff,
+            color,
+            ctx,
+            g_hi,
+            bias_rate,
+            mass_coeff,
+            impulse_coeff,
+            bias_active,
+            simd,
+            Some(&stamps),
+        );
+        drop(color_zone);
+        if let Some(reading) = stamps.reduce() {
+            tally.add(&reading, true);
         }
     }
 
@@ -4156,23 +4418,34 @@ impl ColoredSoftStepSolver {
         // freeze; `None` when sleeping is off so the path is byte-identical.
         let sleep_view: Option<&IslandSleep> = sleep.as_deref();
 
+        // W8S instrument 4, armed only: S6's hit counter, read while the tag column still holds
+        // the previous step's tags.
+        if zone_enabled!(PHYS_S6_GRAPH_HIT) {
+            self.s6_probe(manifolds, graph, scratch, held.as_ref(), sleep_view, config.sleeping);
+        }
+
         {
-            let _z = zone!(PHYS_SOLVE_BUILD);
+            let build_zone = zone!(PHYS_SOLVE_BUILD);
+            self.canary.at(&PHYS_SOLVE_BUILD, build_zone.is_some());
             let cls: &[RowCls] = held.as_ref().map_or(&[], |h| h.cls);
-            self.build_bodies(scratch.bodies(), cls);
-            // Ruling W1: the write guards read the effective inverse mass of the flag the
-            // colouring read, so a held row is immovable to both.
-            debug_assert!(
-                cls.iter().zip(self.bodies.as_read_slice()).all(|(c, e)| !c.is_held() || e.inv_mass == 0.0),
-                "invariant: a held row's effective inverse mass is 0 (design 04 D8, ruling W1)"
-            );
-            // Warm start is classified only on a warm step: a cold step never reads or stores
-            // the records, so `Identity` is a placeholder that takes no per-manifold branch, and
-            // its cursor never counts a phantom `Reset`.
-            let warm_remap = if self.warm_effective {
-                self.warm_cursor.remap(&scratch.rows)
-            } else {
-                RowRemap::Identity
+            let warm_remap = {
+                let bodies_zone = zone!(PHYS_SB_BODIES);
+                self.canary.at(&PHYS_SB_BODIES, bodies_zone.is_some());
+                self.build_bodies(scratch.bodies(), cls);
+                // Ruling W1: the write guards read the effective inverse mass of the flag the
+                // colouring read, so a held row is immovable to both.
+                debug_assert!(
+                    cls.iter().zip(self.bodies.as_read_slice()).all(|(c, e)| !c.is_held() || e.inv_mass == 0.0),
+                    "invariant: a held row's effective inverse mass is 0 (design 04 D8, ruling W1)"
+                );
+                // Warm start is classified only on a warm step: a cold step never reads or stores
+                // the records, so `Identity` is a placeholder that takes no per-manifold branch, and
+                // its cursor never counts a phantom `Reset`.
+                if self.warm_effective {
+                    self.warm_cursor.remap(&scratch.rows)
+                } else {
+                    RowRemap::Identity
+                }
             };
             let restore = held.as_ref().and_then(|h| h.restore);
             let (searches, hits) =
@@ -4194,6 +4467,8 @@ impl ColoredSoftStepSolver {
             let (wide, narrow) = self.columns.slots_by_width();
             counter!(PHYS_SLOTS_WIDE, wide);
             counter!(PHYS_SLOTS_NARROW, narrow);
+            // W8S instrument 3: the colour histogram, from the same CSR.
+            self.columns.push_histogram();
         }
 
         // L10 C3a (design 06 D-A, 08 A1′/O10): the no-awake fast path. With sleeping on, no
@@ -4295,6 +4570,10 @@ impl ColoredSoftStepSolver {
             && self.columns.widest_color_slots() >= MIN_PARALLEL_SLOTS_PER_COLOR
             && try_with_active_pool(|pool| pool.num_threads() >= 2) == Some(true);
 
+        // W8S: the step's dispatch totals, written only in a wave's armed arm and pushed once
+        // after the substep loop.
+        let mut tally = WaveTally::default();
+
         // L10 C3a: the fast path runs no substep.
         let passes = if fast { 0 } else { substeps };
         for _ in 0..passes {
@@ -4332,6 +4611,7 @@ impl ColoredSoftStepSolver {
                     true,
                     parallel,
                     use_simd_solve,
+                    &mut tally,
                 );
             }
 
@@ -4368,8 +4648,13 @@ impl ColoredSoftStepSolver {
                     false,
                     parallel,
                     use_simd_solve,
+                    &mut tally,
                 );
             }
+        }
+
+        if zone_enabled!(PHYS_COLOR_SCOPES) {
+            tally.push();
         }
 
         // Post-loop restitution (ONCE, velocity-only, bias-free); not on the fast path, which
