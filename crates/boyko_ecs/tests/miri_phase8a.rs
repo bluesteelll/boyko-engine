@@ -225,7 +225,7 @@ fn miri_resources_replace_panic_in_drop_no_ub() {
 // ── Test 4: miri_unsafe_ecs_cell_no_retag_via_by_value_methods (C1) ────────
 //
 // C1 RESOLUTION verification: `UnsafeEcsCell` is `Copy` and its accessors
-// take `self` by value. Calling `resources()` / `resources_mut()` on
+// take `self` by value. Calling `resources()` / `resource_ptr_mut()` on
 // successive copies must NOT trigger Tree Borrows / Stacked Borrows retag
 // UB. Under Miri (which models both borrow stacks) a regression would
 // surface as a retag failure inside `run_closure_once` when the closure

@@ -543,6 +543,32 @@ jobs:
         run: cargo +nightly miri test --locked --package boyko-ecs --test event_attribute
       - name: cargo miri test (drop_fn — known clean)
         run: cargo +nightly miri test --locked --package boyko-ecs --test drop_fn
+      # PC-24: the world-retag matrix (`unsafe_ecs_cell.rs`, `pc24_` tests) under STACKED Borrows.
+      # Every other Miri step runs Tree Borrows through `.cargo/config.toml`'s `[env]`, and TB is
+      # blind to a worker-side `&mut` over the world that only reads (TB: retag read vs retag read).
+      # An explicitly set MIRIFLAGS wins over `[env]` unless that entry is `force`d, so the step
+      # prints the flags and REDs on a forced entry rather than silently running TB. The force
+      # check asks cargo itself: `cargo config get env` merges every config file and prints any
+      # spelling of the entry (inline table, `[env.MIRIFLAGS]` sub-table, dotted keys) as one
+      # `env.MIRIFLAGS.force = true` line, where a text match on one spelling missed the others.
+      # An unresolvable config is RED too; only "`env` is not set" means nothing can be forced.
+      # The matrix is pool-free on purpose: crossbeam-epoch's own SB violation ends a pool-backed
+      # SB run first.
+      - name: cargo miri test (PC-24 world-retag matrix — Stacked Borrows leg)
+        shell: bash
+        env:
+          MIRIFLAGS: "-Zmiri-strict-provenance"
+        run: |
+          echo "MIRIFLAGS=$MIRIFLAGS"
+          if cfg_env=$(cargo +nightly -Zunstable-options config get env 2>&1); then
+            printf '%s\n' "$cfg_env"
+            if grep -qE '^env\.MIRIFLAGS\.force[[:space:]]*=[[:space:]]*true[[:space:]]*$' <<< "$cfg_env"; then
+              echo "RED: env.MIRIFLAGS is forced in cargo's config; this step would silently run Tree Borrows"; exit 1; fi
+          elif ! grep -qF 'config value `env` is not set' <<< "$cfg_env"; then
+            printf '%s\n' "$cfg_env"; echo "RED: cargo cannot resolve its [env] config"; exit 1
+          fi
+          cargo +nightly miri test --locked -p boyko-ecs --lib -- pc24_ 2>&1 | tee pc24_sb.log
+          grep -q 'running 7 tests' pc24_sb.log && grep -q 'test result: ok. 7 passed; 0 failed' pc24_sb.log
       # 2026-07 audit: this step's `--all-targets` was the vacuous root-package form (it
       # interpreted nothing). Miri CANNOT execute FFI calls, so a literal workspace sweep
       # would fault the instant it reached `boyko_rhi_vulkan`'s raw `vk*` calls (and the
