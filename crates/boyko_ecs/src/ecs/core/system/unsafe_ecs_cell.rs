@@ -588,6 +588,34 @@ mod tests {
         let _ = unsafe { cell.world_mut() };
     }
 
+    /// The W0 tripwire (G-a) is load-bearing: `world_mut` reached from inside a
+    /// system body — the `InSystemRunGuard` a worker holds around `run_unsafe`
+    /// — must panic in debug builds. Nothing else REQUIRES the tripwire: on
+    /// this tree no worker path calls `world_mut`, so deleting the
+    /// `debug_assert!` leaves every other native gate, the source census and the
+    /// `pc24_` Miri matrix green.
+    ///
+    /// The targets that red natively on a scratch revert of the F1 route
+    /// (`archetype_ptr_mut` back on `world_mut()`) are this module's `pc24_`
+    /// T1–T4, `relations_query_parallel` and `phase10_change_detection`: each
+    /// runs a `Query<&mut T>` body under the guard. A read-only target such as
+    /// `scheduler_par_iter_concurrent_systems` cannot red that way, because
+    /// the read mint (`archetype_ptr`) never reaches `world_mut`.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "invariant W0 (PC-24)")]
+    fn world_mut_inside_a_system_body_panics_in_debug() {
+        let mut ecs = EcsMaster::new();
+        // SAFETY (U_C1): the cell does not outlive the `&mut ecs` borrow; it
+        //   is consumed by the one call below and never escapes.
+        let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
+        let _in_body = InSystemRunGuard::enter();
+        // SAFETY: deliberately violates W0 to verify the debug tripwire fires;
+        //   the assert panics before `&mut *ptr` is formed, and even without
+        //   it this thread holds the only reference to `ecs`.
+        let _ = unsafe { cell.world_mut() };
+    }
+
     /// `UnsafeEcsCell` is `Copy` — the by-value receiver pattern relies on
     /// this.
     #[test]
