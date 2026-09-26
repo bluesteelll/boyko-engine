@@ -18,10 +18,12 @@
 //!   (`NonNull::from(`, `*mut/*const EcsMaster` / `NonNull<EcsMaster>`, `&raw const/mut *…`) over
 //!   `src/**` equal an allowlist whose every row carries its reason class; `as *mut/*const Self`
 //!   must stay absent.
-//! - **R4** — the `.world_mut()` call lines in non-test `src/**` are exactly the dispatcher-solo
-//!   sites, each with its gate.
-//! - **R5** — no `.world_mut()` call in the non-test part of `unsafe_ecs_cell.rs`: the exact
-//!   PC-24 shape.
+//! - **R4** — the `world_mut` use lines in non-test `src/**` are exactly the dispatcher-solo
+//!   sites, each with its gate. A use is the word called in any spelling (`.world_mut()`,
+//!   `Self::world_mut(self)`, `UnsafeEcsCell::world_mut(cell)`) or named as a method path; a
+//!   definition, a local that shares the name and a string literal are not.
+//! - **R5** — no `world_mut` use in the non-test part of `unsafe_ecs_cell.rs`: the exact PC-24
+//!   shape.
 //!
 //! It is a grep census and knows it. R1′ does not see a mint through an inferred cast
 //! (`world as *const _ as *mut _`), `ptr::from_mut`, a helper or a generic; a macro defined
@@ -29,9 +31,10 @@
 //! The behavioural backstops are the `world_mut` tripwire (G-a) and the `pc24_` Miri matrix in
 //! `unsafe_ecs_cell.rs`, run on both borrow models.
 //!
-//! Scope: non-test code only. A file is cut at the first `#[cfg(test)]` that applies to a
-//! `mod … {`; a file declared `#[cfg(test)] mod x;` is skipped whole; comments are removed
-//! before any rule looks at a line. Every rule is a function over `&str` input, and each has a
+//! Scope: non-test code only. Each `#[cfg(test)]` that applies to a `mod … {` removes that module
+//! from the attribute through its matching `}` (braces in comments and literals do not count), and
+//! code after it is scanned; a file declared `#[cfg(test)] mod x;` is skipped whole; comments are
+//! removed before any rule looks at a line. Every rule is a function over `&str` input, and each has a
 //! fixture that must RED at a named line — so an empty glob, a broken reader or a rule that
 //! cannot fire fails here instead of passing.
 //!
@@ -132,7 +135,7 @@ const R1_ALLOW: [(&str, [usize; 3], &str); 18] = [
     ("ecs/core/bundle/self_bundle.rs", [0, 0, 1], "not a world pointer: `&raw const *this`"),
 ];
 
-/// R4: the `.world_mut()` call lines in non-test `src/**`, per file, each with its solo gate.
+/// R4: the `world_mut` use lines in non-test `src/**`, per file, each with its solo gate.
 const R4_ALLOW: [(&str, usize, &str); 2] = [
     (
         "ecs/core/schedule/schedule.rs",
@@ -171,8 +174,22 @@ fn red(rule: &'static str, file: &str, line: usize, msg: String) -> Red {
 /// Returns `text` with every comment (line, doc and nested block) replaced by spaces, string and
 /// char literal contents kept verbatim, and every newline kept, so line numbers survive.
 fn strip_comments(text: &str) -> String {
+    lex(text, false)
+}
+
+/// [`strip_comments`] with the contents of every string and char literal blanked as well
+/// (delimiters and line breaks kept). Its characters line up one for one with
+/// [`strip_comments`]' output. The test-module extent and the `world_mut` census read this form:
+/// a `{` inside a string is not a brace, and the tripwire's own panic message, which names
+/// `world_mut()`, is not a call.
+fn strip_comments_and_literals(text: &str) -> String {
+    lex(text, true)
+}
+
+fn lex(text: &str, blank_literals: bool) -> String {
     let b: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
+    let lit = |c: char| if blank_literals && c != '\n' && c != '\r' { ' ' } else { c };
     let mut i = 0;
     while i < b.len() {
         let c = b[i];
@@ -200,8 +217,8 @@ fn strip_comments(text: &str) -> String {
                     i += 1;
                 }
             }
-        } else if c == 'r' && (next == Some('"') || next == Some('#')) && !prev_is_ident(&b, i) {
-            // Raw string `r"…"` / `r#"…"#`: copied verbatim to its matching close.
+        } else if c == 'r' && (next == Some('"') || next == Some('#')) && starts_raw_string(&b, i) {
+            // Raw string `r"…"` / `r#"…"#` (and `br…` / `cr…`): delimiters verbatim.
             let mut j = i + 1;
             let mut hashes = 0;
             while b.get(j) == Some(&'#') {
@@ -209,19 +226,17 @@ fn strip_comments(text: &str) -> String {
                 j += 1;
             }
             if b.get(j) == Some(&'"') {
-                let start = i;
+                out.extend(&b[i..=j]);
                 j += 1;
-                loop {
-                    if j >= b.len() {
-                        break;
-                    }
+                while j < b.len() {
                     if b[j] == '"' && (0..hashes).all(|k| b.get(j + 1 + k) == Some(&'#')) {
+                        out.extend(&b[j..=j + hashes]);
                         j += 1 + hashes;
                         break;
                     }
+                    out.push(lit(b[j]));
                     j += 1;
                 }
-                out.extend(&b[start..j.min(b.len())]);
                 i = j;
             } else {
                 out.push(c);
@@ -231,18 +246,21 @@ fn strip_comments(text: &str) -> String {
             out.push(c);
             i += 1;
             while i < b.len() {
-                out.push(b[i]);
                 if b[i] == '\\' {
+                    out.push(lit(b[i]));
                     if let Some(&e) = b.get(i + 1) {
-                        out.push(e);
+                        out.push(lit(e));
                     }
                     i += 2;
                     continue;
                 }
-                i += 1;
-                if b[i - 1] == '"' {
+                if b[i] == '"' {
+                    out.push('"');
+                    i += 1;
                     break;
                 }
+                out.push(lit(b[i]));
+                i += 1;
             }
         } else if c == '\'' {
             // A char literal is `'x'` or `'\…'`; anything else is a lifetime or label.
@@ -252,10 +270,16 @@ fn strip_comments(text: &str) -> String {
                 while j < b.len() && b[j] != '\'' {
                     j += 1;
                 }
-                out.extend(&b[i..(j + 1).min(b.len())]);
-                i = j + 1;
+                out.push('\'');
+                out.extend(b[i + 1..j.min(b.len())].iter().map(|&x| lit(x)));
+                if j < b.len() {
+                    out.push('\'');
+                }
+                i = (j + 1).min(b.len());
             } else if b.get(i + 2) == Some(&'\'') {
-                out.extend(&b[i..i + 3]);
+                out.push('\'');
+                out.push(lit(b[i + 1]));
+                out.push('\'');
                 i += 3;
             } else {
                 out.push(c);
@@ -273,30 +297,139 @@ fn prev_is_ident(b: &[char], i: usize) -> bool {
     i > 0 && (b[i - 1].is_alphanumeric() || b[i - 1] == '_')
 }
 
+/// `b[i] == 'r'` opens a raw string: it does not end an identifier, except as the `r` of a byte
+/// or C raw string (`br"…"`, `cr"…"`).
+fn starts_raw_string(b: &[char], i: usize) -> bool {
+    !prev_is_ident(b, i) || (matches!(b[i - 1], 'b' | 'c') && !prev_is_ident(b, i - 1))
+}
+
+// ─── The test-module cut ───────────────────────────────────────────────────────
+
 /// `(1-based line number, code)` for every non-blank line of the non-test part of `text`,
-/// comments removed. The file is cut at the first `#[cfg(test)]` that applies to a `mod … {`
-/// (blank lines and further attributes may sit between the two).
+/// comments removed, literals kept.
 fn nontest_code(text: &str) -> Vec<(usize, String)> {
-    let stripped = strip_comments(text);
-    let lines: Vec<&str> = stripped.lines().collect();
-    let mut out = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        if let Some(tail) = line.trim().strip_prefix("#[cfg(test)]") {
-            let inline_here = mod_decl(tail).is_some_and(|(_, inline)| inline);
-            if inline_here || (tail.trim().is_empty() && next_item_is_inline_mod(&lines[i + 1..])) {
-                break;
+    nontest_lines(text).into_iter().map(|(n, kept, _)| (n, kept)).collect()
+}
+
+/// [`nontest_code`] with the contents of string and char literals blanked.
+fn nontest_code_blank(text: &str) -> Vec<(usize, String)> {
+    nontest_lines(text).into_iter().map(|(n, _, blank)| (n, blank)).collect()
+}
+
+/// `(1-based line, code with literals, code without literals)` for every non-blank line of
+/// `text` outside its inline test modules, comments removed.
+///
+/// An inline test module is a `#[cfg(test)]` that applies to a `mod … {`; further attributes and
+/// blank lines may sit between the two. It is removed from the attribute through its matching
+/// `}` and nothing more, so code AFTER a test module is scanned like any other. The braces are
+/// matched on the literal-blanked text, so a brace inside a string or char literal does not
+/// count. A module whose braces never balance is not removed: the lexer misread it, and scanning
+/// test code fails loud where hiding the rest of the file would not.
+fn nontest_lines(text: &str) -> Vec<(usize, String, String)> {
+    let mut kept: Vec<char> = strip_comments(text).chars().collect();
+    let mut blank: Vec<char> = strip_comments_and_literals(text).chars().collect();
+    assert_eq!(kept.len(), blank.len(), "invariant: the two lexer modes align char for char");
+    for (start, end) in test_module_extents(&blank) {
+        for k in start..=end {
+            if kept[k] != '\n' {
+                kept[k] = ' ';
+                blank[k] = ' ';
             }
         }
-        if !line.trim().is_empty() {
-            out.push((i + 1, (*line).to_owned()));
+    }
+    let kept: String = kept.into_iter().collect();
+    let blank: String = blank.into_iter().collect();
+    kept.lines()
+        .zip(blank.lines())
+        .enumerate()
+        .filter(|(_, (k, _))| !k.trim().is_empty())
+        .map(|(i, (k, b))| (i + 1, k.to_owned(), b.to_owned()))
+        .collect()
+}
+
+/// Char ranges `[attribute start, closing brace]` of every inline test module in the
+/// literal-blanked text `b`.
+fn test_module_extents(b: &[char]) -> Vec<(usize, usize)> {
+    let text: String = b.iter().collect();
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut starts = Vec::with_capacity(lines.len());
+    let mut at = 0;
+    for line in &lines {
+        starts.push(at);
+        at += line.chars().count() + 1;
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let Some((m, true)) = cfg_test_mod(&lines, i) else {
+            i += 1;
+            continue;
+        };
+        let open = starts[m]
+            + lines[m].chars().position(|c| c == '{').expect("invariant: an inline `mod` has its `{`");
+        let mut depth = 0usize;
+        let mut close = None;
+        for (k, &c) in b.iter().enumerate().skip(open) {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(k);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match close {
+            Some(end) => {
+                out.push((starts[i], end));
+                i = starts.partition_point(|&s| s <= end);
+            }
+            None => i += 1,
         }
     }
     out
 }
 
-/// The item after an attribute: the first line that is neither blank nor another attribute.
-fn next_item<'a>(rest: &[&'a str]) -> Option<&'a str> {
-    rest.iter().map(|l| l.trim()).find(|l| !l.is_empty() && !l.starts_with("#["))
+/// If line `i` of `lines` is a `#[cfg(test)]` that applies to a module declaration, returns
+/// (the declaration's line index, whether the module is inline).
+fn cfg_test_mod(lines: &[&str], i: usize) -> Option<(usize, bool)> {
+    let tail = skip_attrs(lines[i].trim().strip_prefix("#[cfg(test)]")?);
+    if !tail.is_empty() {
+        return mod_decl(tail).map(|(_, inline)| (i, inline));
+    }
+    let (m, item) = next_item(lines, i + 1)?;
+    mod_decl(item).map(|(_, inline)| (m, inline))
+}
+
+/// The item after an attribute: `(line index, text after its leading attributes)` of the first
+/// line from `from` on that is neither blank nor only attributes.
+fn next_item<'a>(lines: &[&'a str], from: usize) -> Option<(usize, &'a str)> {
+    (from..lines.len()).map(|k| (k, skip_attrs(lines[k].trim()))).find(|(_, rest)| !rest.is_empty())
+}
+
+/// `s` without its leading `#[…]` attributes (bracket-balanced) and the whitespace around them.
+fn skip_attrs(mut s: &str) -> &str {
+    loop {
+        s = s.trim_start();
+        let Some(body) = s.strip_prefix("#[") else {
+            return s;
+        };
+        let mut depth = 1usize;
+        let Some(end) = body.char_indices().find_map(|(k, c)| {
+            match c {
+                '[' => depth += 1,
+                ']' => depth -= 1,
+                _ => {}
+            }
+            (depth == 0).then_some(k)
+        }) else {
+            return s;
+        };
+        s = &body[end + 1..];
+    }
 }
 
 fn mod_decl(line: &str) -> Option<(&str, bool)> {
@@ -321,28 +454,18 @@ fn mod_decl(line: &str) -> Option<(&str, bool)> {
     }
 }
 
-fn next_item_is_inline_mod(rest: &[&str]) -> bool {
-    next_item(rest).and_then(mod_decl).is_some_and(|(_, inline)| inline)
-}
-
 /// Files declared as `#[cfg(test)] mod x;` somewhere in `files` (paths relative to `src/`).
 fn test_module_files(files: &BTreeMap<String, String>) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for (rel, text) in files {
-        let stripped = strip_comments(text);
+        let stripped = strip_comments_and_literals(text);
         let lines: Vec<&str> = stripped.lines().collect();
-        for (i, line) in lines.iter().enumerate() {
-            let Some(tail) = line.trim().strip_prefix("#[cfg(test)]") else {
+        for i in 0..lines.len() {
+            let Some((m, false)) = cfg_test_mod(&lines, i) else {
                 continue;
             };
-            let decl = if tail.trim().is_empty() {
-                next_item(&lines[i + 1..]).and_then(mod_decl)
-            } else {
-                mod_decl(tail)
-            };
-            let Some((name, false)) = decl else {
-                continue;
-            };
+            let (name, _) = mod_decl(skip_attrs(lines[m].trim()))
+                .expect("invariant: cfg_test_mod found a declaration on this line");
             let dir = match rel.rsplit_once('/') {
                 Some((d, f)) if f == "mod.rs" || f == "lib.rs" => d.to_owned(),
                 Some((d, f)) => format!("{d}/{}", f.trim_end_matches(".rs")),
@@ -548,13 +671,37 @@ fn check_r1(files: &BTreeMap<String, String>, allow: &[(&str, [usize; 3], &str)]
     reds
 }
 
-// ─── R4 / R5: `.world_mut()` call sites ────────────────────────────────────────
+// ─── R4 / R5: `world_mut` use sites ────────────────────────────────────────────
 
+/// The line of every `world_mut` use in the non-test code of `text`, once per use.
 fn world_mut_lines(text: &str) -> Vec<usize> {
-    nontest_code(text)
+    nontest_code_blank(text)
         .into_iter()
-        .flat_map(|(n, code)| std::iter::repeat_n(n, code.matches(".world_mut()").count()))
+        .flat_map(|(n, code)| std::iter::repeat_n(n, world_mut_uses(&code)))
         .collect()
+}
+
+/// `world_mut` uses on one literal-blanked line: the whole word called (`.world_mut()`,
+/// `Self::world_mut(self)`, `UnsafeEcsCell::world_mut(cell)`, whatever the spacing) or named as a
+/// method path (`.map(UnsafeEcsCell::world_mut)`). Not its definition (`fn world_mut`), and not a
+/// local that only shares the name (`let world_mut = …`, `drain(world_mut)`), which forms no new
+/// reference.
+fn world_mut_uses(code: &str) -> usize {
+    const NAME: &str = "world_mut";
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    code.match_indices(NAME)
+        .filter(|&(at, _)| {
+            let (before, after) = (&code[..at], &code[at + NAME.len()..]);
+            if before.ends_with(is_ident) || after.starts_with(is_ident) {
+                return false;
+            }
+            let before = before.trim_end();
+            let defined = before.strip_suffix("fn").is_some_and(|r| !r.ends_with(is_ident));
+            let called = after.trim_start().starts_with('(');
+            let pathed = before.ends_with('.') || before.ends_with("::");
+            !defined && (called || pathed)
+        })
+        .count()
 }
 
 fn check_r4(files: &BTreeMap<String, String>, allow: &[(&str, usize, &str)]) -> Vec<Red> {
@@ -576,7 +723,7 @@ fn check_r4(files: &BTreeMap<String, String>, allow: &[(&str, usize, &str)]) -> 
                 rel,
                 lines.first().copied().unwrap_or(0),
                 format!(
-                    "{} `.world_mut()` call(s) at lines {lines:?}, allowlisted {}: a whole-world \
+                    "{} `world_mut` use(s) at lines {lines:?}, allowlisted {}: a whole-world \
                      `&mut` may be formed only where no worker is live — name the solo gate",
                     lines.len(),
                     want.unwrap_or(0)
@@ -605,8 +752,9 @@ fn check_r5(file: &str, text: &str) -> Vec<Red> {
                 "R5",
                 file,
                 n,
-                "`.world_mut()` inside the cell's non-test code: the PC-24 shape — a worker-side \
-                 accessor re-forming `&mut EcsMaster` (use a shared projection, W0)"
+                "`world_mut` used inside the cell's non-test code (a method call, a UFCS call or \
+                 a method path): the PC-24 shape — a worker-side accessor re-forming \
+                 `&mut EcsMaster` (use a shared projection, W0)"
                     .to_owned(),
             )
         })
@@ -741,7 +889,7 @@ fn fx2_naive_field_projection_rewrite_reds_r2a() {
         "        unsafe { (*self.ptr).archetype_master.archetype_ptr_for(id) }",
     );
     assert_eq!(new_rows(&check_r2a(CELL, &text, &R2A_ALLOW)), vec![3]);
-    assert!(check_r5(CELL, &text).is_empty(), "no `.world_mut()` in the naive rewrite");
+    assert!(check_r5(CELL, &text).is_empty(), "no `world_mut` use in the naive rewrite");
 }
 
 /// FX3 — any method through the `entity_master` field projection.
@@ -795,7 +943,7 @@ fn fx9_new_minting_file_reds_r1() {
     );
 }
 
-/// FX10 — a new `.world_mut()` call site REDs R4; one inside a file declared
+/// FX10 — a new `world_mut` call site REDs R4; one inside a file declared
 /// `#[cfg(test)] mod x;` is not counted.
 #[test]
 fn fx10_new_world_mut_site_reds_r4_and_test_module_file_is_skipped() {
@@ -840,6 +988,53 @@ fn nontest_cut_sees_through_attributes_and_ignores_test_items() {
     assert!(world_mut_lines(one_line).is_empty());
     let test_item = "#[cfg(test)]\nfn helper() {}\nfn b(cell: C) { cell.world_mut(); }\n";
     assert_eq!(world_mut_lines(test_item), vec![3], "a cfg(test) fn does not cut the file");
+    let same_line_attrs = "#[cfg(test)] #[cfg(not(miri))] mod tests { fn t() { cell.world_mut(); } }\nfn after(cell: C) { cell.world_mut(); }\n";
+    assert_eq!(world_mut_lines(same_line_attrs), vec![2], "attributes on the `mod` line");
+    let attr_then_mod = "#[cfg(test)]\n#[cfg(not(miri))] mod tests {\n    fn t() { cell.world_mut(); }\n}\nfn after(cell: C) { cell.world_mut(); }\n";
+    assert_eq!(world_mut_lines(attr_then_mod), vec![5], "an attribute and the `mod` on one line");
+    let unbalanced = "#[cfg(test)]\nmod tests {\n    fn t() { cell.world_mut(); }\n";
+    assert_eq!(world_mut_lines(unbalanced), vec![3], "an unbalanced module is scanned, not hidden");
+}
+
+/// FX11 — the PC-24 line in its UFCS spelling, and a method path: R5 and R4 RED. The literal
+/// `.world_mut()` matcher missed both (tester round 1, mutation M2). A definition, a local that
+/// shares the name and a string literal naming `world_mut()` are not uses.
+#[test]
+fn fx11_ufcs_and_method_path_spellings_red_r5_and_r4() {
+    let ufcs = cell_fixture(
+        "archetype_ptr_mut",
+        "        unsafe { Self::world_mut(self).archetype_master_mut().archetype_ptr_for(id) }",
+    );
+    assert_red_at(&check_r5(CELL, &ufcs), "R5", 3);
+    let new_site = "fn f(cell: UnsafeEcsCell<'_>) {\n    let w = unsafe { UnsafeEcsCell::world_mut (cell) };\n    let g = cells.map(UnsafeEcsCell::world_mut);\n}\n";
+    assert_eq!(world_mut_lines(new_site), vec![2, 3]);
+    let files = BTreeMap::from([
+        (CELL.to_owned(), ufcs),
+        ("ecs/core/new_site.rs".to_owned(), new_site.to_owned()),
+    ]);
+    let reds = check_r4(&files, &R4_ALLOW);
+    for (file, line) in [(CELL, 3), ("ecs/core/new_site.rs", 2)] {
+        assert!(
+            reds.iter().any(|r| r.rule == "R4" && r.file == file && r.line == line),
+            "expected RED [R4] {file}:{line}, got:\n{}",
+            reds.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    let not_uses = "pub(crate) unsafe fn world_mut(self) -> &'w mut EcsMaster {\n    debug_assert!(ok, \"invariant W0: world_mut() inside a body\");\n    let world_mut: &mut EcsMaster = unsafe { cell.world_mut() };\n    drain(world_mut, c);\n    let s = r#\"x.world_mut()\"#;\n}\n";
+    assert_eq!(world_mut_lines(not_uses), vec![3], "only the call on line 3 is a use");
+}
+
+/// FX12 — code AFTER a test module is scanned: the trunk `resources_mut` body in an `impl`
+/// placed after `mod tests` (tester round 1, mutation M4) REDs R2′(a), and a `world_mut()` there
+/// REDs R5. The module ends at its matching brace; the `}` in a string and in a char literal
+/// inside it do not end it early.
+#[test]
+fn fx12_code_after_the_test_module_is_scanned() {
+    let text = "impl<'w> UnsafeEcsCell<'w> {\n    fn world(self) -> &'w EcsMaster {\n        unsafe { &*self.ptr }\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    fn t() { let s = \"}\"; let c = '}'; let p = cell.ptr; cell.world_mut(); }\n}\n\nimpl<'w> UnsafeEcsCell<'w> {\n    pub(crate) unsafe fn resources_mut(self) -> &'w mut Resources {\n        unsafe { &mut (*self.ptr).resources }\n    }\n    fn again(self) { let _ = unsafe { self.world_mut() }; }\n}\n";
+    assert_eq!(new_rows(&check_r2a(CELL, text, &R2A_ALLOW)), vec![14]);
+    assert_eq!(world_mut_lines(text), vec![16]);
+    assert_red_at(&check_r5(CELL, text), "R5", 16);
 }
 
 /// The lexer the rules stand on: comments go, strings and line numbers stay.
@@ -852,4 +1047,13 @@ fn strip_comments_keeps_code_strings_and_lines() {
     assert!(s.contains("\"// not a comment\""));
     assert!(!s.contains("world_mut"));
     assert_eq!(has_word(s.lines().nth(4).expect("line 5"), "ptr"), 1);
+
+    let blank = strip_comments_and_literals(text);
+    assert_eq!(blank.chars().count(), s.chars().count(), "the two modes align char for char");
+    assert_eq!(blank.lines().count(), text.lines().count());
+    assert!(!blank.contains("not a comment") && blank.contains("let b = \""));
+    let literals = "let r = br#\"{ world_mut() }\"#; let c = '{'; let e = '\\u{7B}'; let s = \"a\\\"{\";";
+    let lb = strip_comments_and_literals(literals);
+    assert!(!lb.contains('{') && !lb.contains("world_mut"), "literal contents survive: {lb}");
+    assert_eq!(lb.chars().count(), strip_comments(literals).chars().count());
 }
