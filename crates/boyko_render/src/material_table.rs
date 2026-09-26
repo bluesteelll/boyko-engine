@@ -27,7 +27,8 @@
 //!
 //! # How the table's bytes arrive (dynamic-materials DM1)
 //!
-//! The host never writes the table itself. Every byte reaches it through a recorded
+//! The host never writes the table itself: it is `DeviceLocal`, and only the staging ring is
+//! host-visible. Every byte reaches the table through a recorded
 //! `staging → table` copy (the `material_upload` pass every render path declares right after
 //! `light_upload`), from the FENCED in-flight slot of the staging ring:
 //!
@@ -66,7 +67,7 @@ pub const MAX_MATERIAL_ROWS: usize = 1 << 16;
 /// mirror of the world's [`Assets<Material>`] CPU authority (only each row's `gpu`
 /// field is mirrored; `textures` stays host-side).
 pub struct MaterialTable {
-    /// The device SSBO (`STORAGE | TRANSFER_DST`), hard-sized to
+    /// The device-local SSBO (`STORAGE | TRANSFER_DST`), hard-sized to
     /// `assets.high_water()` (NOT `assets.len()` — see [`boot_seed`](Self::boot_seed)'s
     /// doc) at [`boot_seed`](Self::boot_seed). `None` before the boot seed runs —
     /// there is no valid binding target yet. Written ONLY by recorded copies (the module doc).
@@ -118,7 +119,7 @@ impl MaterialTable {
     /// ([`write_full_image`](Self::write_full_image) into the fenced staging slot, then the
     /// recorded copy — the host's full-image flag starts `true`), and the copy is ordered before
     /// every reader of the table on every render path, so no shader ever reads it unwritten. That
-    /// is also why the table can be device-local: nothing needs its mapping.
+    /// is also why the table is device-local: nothing needs its mapping.
     ///
     /// # Why `high_water()`, not `len()` (the W1 fix)
     ///
@@ -128,7 +129,7 @@ impl MaterialTable {
     /// is the LIVE count, which can be smaller than `handle.index() + 1` the moment a
     /// hole exists (some OTHER row was freed without being reused) — sizing the buffer
     /// by `len()` and then writing at `handle.index()` is an out-of-bounds write past
-    /// the mapped block the instant a hole exists elsewhere.
+    /// the full image's staging slot the instant a hole exists elsewhere.
     /// [`Assets::high_water`](boyko_ecs::ecs::core::asset::Assets::high_water) is the
     /// slot-row high-water mark (`records.len()`, including holes), so every live
     /// handle's index is unconditionally in range — no append-only assumption needed.
@@ -163,15 +164,16 @@ impl MaterialTable {
         self.capacity_rows = capacity as u32;
     }
 
-    /// The device table buffer for `rows` materials (`STORAGE | TRANSFER_DST`), created EMPTY
-    /// — its bytes arrive only through the recorded `material_upload` copy.
+    /// The device table buffer for `rows` materials (`STORAGE | TRANSFER_DST`, `DeviceLocal`),
+    /// created EMPTY — its bytes arrive only through the recorded `material_upload` copy, so
+    /// nothing ever maps it (dynamic-materials DM1, design F3: the shaders' reads stay in VRAM).
     fn create_table(ctx: &VulkanContext, rows: usize) -> BoundBuffer {
         RhiDevice::create_buffer(
             ctx,
             &BufferDesc {
                 size: (rows * core::mem::size_of::<MaterialGpu>()) as u64,
                 usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
-                location: MemoryLocation::HostVisibleCoherent,
+                location: MemoryLocation::DeviceLocal,
             },
         )
         .expect("invariant: material table storage buffer create")
