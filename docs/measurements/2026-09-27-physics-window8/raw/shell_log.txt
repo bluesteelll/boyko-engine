@@ -1,0 +1,3 @@
+2026-09-27 18:45:27 run_window8.sh start: --cutoff 21:00
+2026-09-27 19:55:23 driver exit 0
+2026-09-27 19:55:23 WINDOW_DONE written: exit 0 complete 

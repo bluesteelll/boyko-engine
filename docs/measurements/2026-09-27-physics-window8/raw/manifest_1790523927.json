@@ -1,0 +1,348 @@
+{
+ "generated": "2026-09-27T18:45:27.187+03:00",
+ "rows_json": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8\\rows8.json",
+ "binaries": {
+  "instr": {
+   "exe": "bin/runner_226bd99e.exe",
+   "commit": "226bd99efba61c73886826eee4ab977af551bc23",
+   "kind": "runner",
+   "what": "u/phys-w8s commit (1): the W8S instrument (armed-only) + omega_b bench; jolt_parity_pyramid, --profile parity",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8\\bin\\runner_226bd99e.exe",
+   "sha256": "c3cef91c3de75bc86c227a41a65c192d1a6ccacdc1278b7402fcabb2ac46aba0"
+  },
+  "omega": {
+   "exe": "bin/omega_b_region_226bd99e.exe",
+   "commit": "226bd99efba61c73886826eee4ab977af551bc23",
+   "kind": "micro",
+   "what": "omega_b_region bench at the same commit, --profile parity",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8\\bin\\omega_b_region_226bd99e.exe",
+   "sha256": "ffcac12f8b1fdded714619c756c98bb375df639de70864ce1d540f2bf1fa96e5"
+  },
+  "j56": {
+   "exe": "D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe",
+   "commit": "Jolt v5.6.0 (wt-v5.6.0-parity, repository patch)",
+   "kind": "jolt",
+   "what": "window 7's j56 (P0 Distribution build), run in place",
+   "path": "D:\\tmp\\jolt\\build-v5.6.0-dist\\PerformanceTest.exe",
+   "sha256": "918fd2b70ecc634cc0574cb676c56a3c929a46a51173cf9aa76fdd628e2ef0ad"
+  },
+  "j56p": {
+   "exe": "bin/jolt56prof8/PerformanceTest.exe",
+   "commit": "Jolt v5.6.0 build copy + tools/patch_jolt_w8.py",
+   "kind": "joltprof",
+   "what": "window 7's j56p recipe (PROFILER_IN_DISTRIBUTION=ON) on a build copy with the lighter profile + the WaitingForBatch per-thread counter (-wfb)",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8\\bin\\jolt56prof8\\PerformanceTest.exe",
+   "sha256": "b35986ef2b793735da119d5b465fee1ccc762c08283be4f41297c67d431ef495"
+  },
+  "dmA": {
+   "exe": "bin/dm1_A.exe",
+   "commit": "cad5439b61ba6f07739523901aab90edf7079433",
+   "kind": "dm1",
+   "what": "DM1 A = trunk-sync merge cad5439b (host-visible table)",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8\\bin\\dm1_A.exe",
+   "sha256": "47cb2c9b6f419948cc773d7da392a1d7dc4ebe218875e66180b07fddf3a52c75"
+  },
+  "dmB": {
+   "exe": "bin/dm1_B.exe",
+   "commit": "97ee830f754e008032992fcd8a928cd29c04936f",
+   "kind": "dm1",
+   "what": "DM1 B = C6 97ee830f (device-local table)",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8\\bin\\dm1_B.exe",
+   "sha256": "79bba864480255c2e90a1067d91e8bea7ed891e7916f760791854d01ef2b40ad"
+  }
+ },
+ "fixtures": {
+  "JT500": {
+   "hash": "0x30c5438bc6ad9ffa",
+   "known": "0x30c5438bc6ad9ffa",
+   "recorded_by": "J-T@W1",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--workers",
+    "1",
+    "--steps",
+    "500",
+    "--window",
+    "0..500",
+    "--csv",
+    "CWD\\run.csv",
+    "--label",
+    "L",
+    "--pose-out",
+    "CWD\\pose.bin"
+   ],
+   "sha256": "e268d7a5e9ffc4c6b25d403601e119d20b490cbaed5cec4a910e3159f28a5b89",
+   "fail": []
+  },
+  "JToff500": {
+   "hash": "0x32d5e235342b4143",
+   "known": "0x32d5e235342b4143",
+   "recorded_by": "J-T-off@W1",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--contact-reuse",
+    "off",
+    "--workers",
+    "1",
+    "--steps",
+    "500",
+    "--window",
+    "0..500",
+    "--csv",
+    "CWD\\run.csv",
+    "--label",
+    "L",
+    "--pose-out",
+    "CWD\\pose.bin"
+   ],
+   "sha256": "eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f",
+   "fail": []
+  },
+  "JA500": {
+   "hash": "0x30c5438bc6ad9ffa",
+   "known": null,
+   "recorded_by": "J-A@W1",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--workers",
+    "1",
+    "--steps",
+    "500",
+    "--window",
+    "0..500",
+    "--csv",
+    "CWD\\run.csv",
+    "--label",
+    "L",
+    "--pose-out",
+    "CWD\\pose.bin"
+   ],
+   "sha256": "e268d7a5e9ffc4c6b25d403601e119d20b490cbaed5cec4a910e3159f28a5b89",
+   "fail": []
+  },
+  "JSon500": {
+   "hash": "0x3db47fae414b655c",
+   "known": null,
+   "recorded_by": "J-Son-a@W8",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--sleeping",
+    "on",
+    "--workers",
+    "8",
+    "--steps",
+    "500",
+    "--window",
+    "0..500",
+    "--csv",
+    "CWD\\run.csv",
+    "--label",
+    "L",
+    "--pose-out",
+    "CWD\\pose.bin",
+    "--arm-profiler"
+   ],
+   "sha256": "205bc5448ea03caa9a8757265fdd74f87f6e93b9aa1346e90f9ec447aa1f1abf",
+   "fail": []
+  }
+ },
+ "protocol": {
+  "k_per_cell": 6,
+  "passes": 2,
+  "rounds_per_pass": 3,
+  "order": "pass 0: W ascending, inside a W group row by row (this file's order), each row's binaries in order; pass 1: the whole list reversed; one untimed warm-up per pass",
+  "receipt_s_between_processes": 5.0,
+  "receipt_s_before_pass": 10.0,
+  "busy_pct_limit": 5.0,
+  "others_busy_pct_limit": 2.0,
+  "rerun_once_at_end_of_pass": "receipt before/after > 5 %, OR the during-process witness others_busy_pct > 2 % (window 7 FOLLOW-UP 8; design 01-DESIGN.md \u00a77 \"the witness is gated\"), OR invalid; a slot whose re-run is also hot is dropped by the reduction",
+  "void_pass_on_build_process": true,
+  "placement": "P-none",
+  "idle_rule": "tools/wait_idle8.ps1 (window 7 wait_idle7.ps1 + the window-8 exe names): 0 build procs AND 0 procs under D:/wt/_targets or D:/wt/mq-* on 3 consecutive 60-s polls, 10-s cpu < 5 %; up to 30 polls per wait; a timeout STOPS the window (exit 3)",
+  "hard_stop": "--cutoff HH:MM (no process starts whose estimated end passes it); the STOP flag file win8/STOP",
+  "windowed_hang_s": 300,
+  "dm1": "ABBA per (path, RES); noise band O3 = max(|A1-A2|, |B1-B2|); a clamped RES is \"not measured\" (the harness asserts the client area after the run)"
+ },
+ "blocks": [
+  {
+   "name": "W8S-A",
+   "item": "W8S",
+   "priority": 1,
+   "warmup": [
+    "J-T",
+    "instr",
+    8
+   ]
+  },
+  {
+   "name": "W8S-R",
+   "item": "W8S",
+   "priority": 2,
+   "warmup": [
+    "R-J-T",
+    "instr",
+    8
+   ]
+  },
+  {
+   "name": "micro",
+   "item": "W8S",
+   "priority": 3,
+   "warmup": [
+    "omega-worker",
+    "omega",
+    0
+   ]
+  },
+  {
+   "name": "DM1",
+   "item": "DM1",
+   "priority": 4,
+   "warmup": [
+    "dm-vb-1920x1080-idle",
+    "dmA",
+    0
+   ],
+   "passes": 1,
+   "rounds": 1,
+   "order": [
+    [
+     "dm-vb-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmA",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-edit100",
+     "dmA",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-edit100",
+     "dmB",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-edit100",
+     "dmB",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-edit100",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-grow150",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-grow150",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-grow150",
+     "dmB",
+     0
+    ]
+   ]
+  },
+  {
+   "name": "P-jolt56-prof",
+   "item": "W8S",
+   "priority": 5,
+   "warmup": [
+    "P-jolt56-prof",
+    "j56p",
+    8
+   ]
+  }
+ ],
+ "cutoff": "2026-09-27T21:00:00",
+ "test": false,
+ "resume": false
+}

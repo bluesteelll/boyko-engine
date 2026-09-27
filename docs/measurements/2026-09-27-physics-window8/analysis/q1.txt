@@ -1,0 +1,120 @@
+# Q1 headline, ours (J-T, 226bd99e, reuse ON, tree, sleeping off) vs H-jolt56 (918fd2b7)
+
+## window [0..500)
+W1: J-T(A) 4.4701 [4.4169-4.6098] K=6 (r 4.32 / i 0.90 / s 0.76 %)
+     R-J-T(R) 4.3893 [4.3497-4.4466] K=6 (r 2.21 / i 1.51 / s 0.48 %)
+     J-T pooled A+R 4.4372 [4.3497-4.6098] K=12 (r 5.86 / i 1.57 / s 0.59 %)
+     H-jolt56(A) 9.9612 [9.6319-12.1530] K=6 (r 25.31 / i 13.95 / s 5.51 %)
+     ours/Jolt block A: 0.4487 (-55.13 %, d -5.4911) Y/Y/Y bars r 51.35 / i 27.96 / s 11.12 %
+     ours(R)/Jolt(A) cross-block: 0.4406 (-55.94 %, d -5.5719) Y/Y/Y bars r 50.81 / i 28.07 / s 11.06 %
+     ours pooled/Jolt(A): 0.4454 (-55.46 %, d -5.5240) Y/Y/Y bars r 51.96 / i 28.08 / s 11.08 %
+     block term R-J-T/J-T: 0.9819 (-1.81 %, d -0.0808) n/n/Y bars r 9.69 / i 3.52 / s 1.80 %
+     pass 0 only (K=3, diag): ours 4.5043 Jolt 9.9890 ratio 0.4509
+     pass 1 only (K=3, diag): ours 4.4685 Jolt 9.9334 ratio 0.4498
+W8: J-T(A) 2.0357 [1.9872-2.1359] K=6 (r 7.30 / i 6.15 / s 1.78 %)
+     R-J-T(R) 1.9944 [1.9749-2.1079] K=6 (r 6.67 / i 1.89 / s 1.28 %)
+     J-T pooled A+R 1.9944 [1.9749-2.1359] K=12 (r 8.07 / i 4.97 / s 1.11 %)
+     H-jolt56(A) 2.5598 [2.4544-3.6614] K=6 (r 47.15 / i 4.49 / s 9.22 %)
+     ours/Jolt block A: 0.7953 (-20.47 %, d -0.5241) n/Y/Y bars r 95.42 / i 15.23 / s 18.78 %
+     ours(R)/Jolt(A) cross-block: 0.7791 (-22.09 %, d -0.5654) n/Y/Y bars r 95.24 / i 9.75 / s 18.61 %
+     ours pooled/Jolt(A): 0.7791 (-22.09 %, d -0.5654) n/Y/Y bars r 95.67 / i 13.40 / s 18.57 %
+     block term R-J-T/J-T: 0.9797 (-2.03 %, d -0.0413) n/n/n bars r 19.78 / i 12.87 / s 4.39 %
+     pass 0 only (K=3, diag): ours 1.9883 Jolt 2.5352 ratio 0.7843
+     pass 1 only (K=3, diag): ours 2.1254 Jolt 2.6380 ratio 0.8057
+W16: J-T(A) 2.2233 [2.2023-2.3364] K=6 (r 6.03 / i 1.06 / s 1.14 %)
+     R-J-T(R) 2.2120 [2.1840-2.2759] K=6 (r 4.16 / i 0.85 / s 0.75 %)
+     J-T pooled A+R 2.2152 [2.1840-2.3364] K=12 (r 6.88 / i 1.05 / s 0.68 %)
+     H-jolt56(A) 2.5674 [2.3486-2.9016] K=6 (r 21.54 / i 14.01 / s 4.60 %)
+     ours/Jolt block A: 0.8660 (-13.40 %, d -0.3441) n/n/Y bars r 44.74 / i 28.10 / s 9.47 %
+     ours(R)/Jolt(A) cross-block: 0.8616 (-13.84 %, d -0.3554) n/n/Y bars r 43.87 / i 28.08 / s 9.31 %
+     ours pooled/Jolt(A): 0.8628 (-13.72 %, d -0.3522) n/n/Y bars r 45.22 / i 28.10 / s 9.29 %
+     block term R-J-T/J-T: 0.9949 (-0.51 %, d -0.0113) n/n/n bars r 14.66 / i 2.72 / s 2.72 %
+     pass 0 only (K=3, diag): ours 2.2102 Jolt 2.6062 ratio 0.8480
+     pass 1 only (K=3, diag): ours 2.2296 Jolt 2.5286 ratio 0.8818
+
+## window [100..500)
+W1: J-T(A) 4.2515 [4.1677-4.2985] K=6 (r 3.07 / i 1.34 / s 0.59 %)
+     R-J-T(R) 4.1686 [4.1212-4.2209] K=6 (r 2.39 / i 1.38 / s 0.48 %)
+     J-T pooled A+R 4.2088 [4.1212-4.2985] K=12 (r 4.21 / i 2.03 / s 0.51 %)
+     H-jolt56(A) 9.8987 [9.5411-12.2864] K=6 (r 27.73 / i 15.45 / s 6.06 %)
+     ours/Jolt block A: 0.4295 (-57.05 %, d -5.6472) Y/Y/Y bars r 55.81 / i 31.01 / s 12.18 %
+     ours(R)/Jolt(A) cross-block: 0.4211 (-57.89 %, d -5.7301) Y/Y/Y bars r 55.67 / i 31.01 / s 12.16 %
+     ours pooled/Jolt(A): 0.4252 (-57.48 %, d -5.6899) Y/Y/Y bars r 56.10 / i 31.16 / s 12.17 %
+     block term R-J-T/J-T: 0.9805 (-1.95 %, d -0.0829) n/n/Y bars r 7.79 / i 3.84 / s 1.52 %
+     pass 0 only (K=3, diag): ours 4.2966 Jolt 9.9215 ratio 0.4331
+     pass 1 only (K=3, diag): ours 4.2464 Jolt 9.8759 ratio 0.4300
+W8: J-T(A) 2.0010 [1.9419-2.0955] K=6 (r 7.68 / i 6.64 / s 1.91 %)
+     R-J-T(R) 1.9497 [1.9358-2.0591] K=6 (r 6.32 / i 1.93 / s 1.23 %)
+     J-T pooled A+R 1.9497 [1.9358-2.0955] K=12 (r 8.19 / i 5.69 / s 1.17 %)
+     H-jolt56(A) 2.6108 [2.5006-3.8575] K=6 (r 51.97 / i 4.56 / s 10.20 %)
+     ours/Jolt block A: 0.7664 (-23.36 %, d -0.6098) n/Y/Y bars r 105.08 / i 16.12 / s 20.75 %
+     ours(R)/Jolt(A) cross-block: 0.7468 (-25.32 %, d -0.6611) n/Y/Y bars r 104.72 / i 9.91 / s 20.55 %
+     ours pooled/Jolt(A): 0.7468 (-25.32 %, d -0.6611) n/Y/Y bars r 105.23 / i 14.59 / s 20.53 %
+     block term R-J-T/J-T: 0.9744 (-2.56 %, d -0.0513) n/n/n bars r 19.89 / i 13.84 / s 4.56 %
+     pass 0 only (K=3, diag): ours 1.9439 Jolt 2.5850 ratio 0.7520
+     pass 1 only (K=3, diag): ours 2.0846 Jolt 2.6933 ratio 0.7740
+W16: J-T(A) 2.1828 [2.1585-2.2936] K=6 (r 6.19 / i 1.09 / s 1.15 %)
+     R-J-T(R) 2.1715 [2.1434-2.2408] K=6 (r 4.49 / i 0.69 / s 0.80 %)
+     J-T pooled A+R 2.1730 [2.1434-2.2936] K=12 (r 6.91 / i 1.17 / s 0.70 %)
+     H-jolt56(A) 2.6464 [2.4007-3.0110] K=6 (r 23.06 / i 15.22 / s 4.95 %)
+     ours/Jolt block A: 0.8248 (-17.52 %, d -0.4636) n/n/Y bars r 47.76 / i 30.51 / s 10.17 %
+     ours(R)/Jolt(A) cross-block: 0.8205 (-17.95 %, d -0.4750) n/n/Y bars r 46.99 / i 30.47 / s 10.04 %
+     ours pooled/Jolt(A): 0.8211 (-17.89 %, d -0.4735) n/n/Y bars r 48.15 / i 30.53 / s 10.01 %
+     block term R-J-T/J-T: 0.9948 (-0.52 %, d -0.0113) n/n/n bars r 15.29 / i 2.58 / s 2.80 %
+     pass 0 only (K=3, diag): ours 2.1725 Jolt 2.6830 ratio 0.8097
+     pass 1 only (K=3, diag): ours 2.1921 Jolt 2.6099 ratio 0.8399
+
+## window [0..100)
+W1: J-T(A) 5.3680 [5.3159-5.8551] K=6 (r 10.04 / i 1.14 / s 1.95 %)
+     R-J-T(R) 5.2936 [5.2219-5.3517] K=6 (r 2.45 / i 1.72 / s 0.53 %)
+     J-T pooled A+R 5.3424 [5.2219-5.8551] K=12 (r 11.85 / i 1.22 / s 1.11 %)
+     H-jolt56(A) 10.2111 [9.9689-11.6192] K=6 (r 16.16 / i 7.96 / s 3.37 %)
+     ours/Jolt block A: 0.5257 (-47.43 %, d -4.8432) Y/Y/Y bars r 38.06 / i 16.08 / s 7.79 %
+     ours(R)/Jolt(A) cross-block: 0.5184 (-48.16 %, d -4.9175) Y/Y/Y bars r 32.69 / i 16.29 / s 6.82 %
+     ours pooled/Jolt(A): 0.5232 (-47.68 %, d -4.8687) Y/Y/Y bars r 40.08 / i 16.11 / s 7.09 %
+     block term R-J-T/J-T: 0.9861 (-1.39 %, d -0.0744) n/n/n bars r 20.68 / i 4.13 / s 4.05 %
+     pass 0 only (K=3, diag): ours 5.4134 Jolt 10.2590 ratio 0.5277
+     pass 1 only (K=3, diag): ours 5.3632 Jolt 10.1633 ratio 0.5277
+W8: J-T(A) 2.1760 [2.1605-2.3410] K=6 (r 8.30 / i 2.61 / s 1.65 %)
+     R-J-T(R) 2.1734 [2.1311-2.3033] K=6 (r 7.92 / i 2.04 / s 1.47 %)
+     J-T pooled A+R 2.1760 [2.1311-2.3410] K=12 (r 9.65 / i 1.86 / s 1.08 %)
+     H-jolt56(A) 2.3559 [2.2698-2.8766] K=6 (r 25.76 / i 4.18 / s 4.90 %)
+     ours/Jolt block A: 0.9237 (-7.63 %, d -0.1798) n/n/n bars r 54.12 / i 9.86 / s 10.34 %
+     ours(R)/Jolt(A) cross-block: 0.9226 (-7.74 %, d -0.1824) n/n/n bars r 53.90 / i 9.31 / s 10.23 %
+     ours pooled/Jolt(A): 0.9237 (-7.63 %, d -0.1798) n/n/n bars r 55.01 / i 9.15 / s 10.03 %
+     block term R-J-T/J-T: 0.9988 (-0.12 %, d -0.0026) n/n/n bars r 22.94 / i 6.63 / s 4.43 %
+     pass 0 only (K=3, diag): ours 2.1710 Jolt 2.3359 ratio 0.9294
+     pass 1 only (K=3, diag): ours 2.2453 Jolt 2.4170 ratio 0.9290
+W16: J-T(A) 2.3856 [2.3612-2.5080] K=6 (r 6.15 / i 0.70 / s 1.14 %)
+     R-J-T(R) 2.3744 [2.3463-2.4165] K=6 (r 2.96 / i 1.46 / s 0.58 %)
+     J-T pooled A+R 2.3807 [2.3463-2.5080] K=12 (r 6.79 / i 1.14 / s 0.65 %)
+     H-jolt56(A) 2.2513 [2.1405-2.4640] K=6 (r 14.37 / i 8.34 / s 2.96 %)
+     ours/Jolt block A: 1.0596 (+5.96 %, d +0.1343) n/n/n bars r 31.26 / i 16.74 / s 6.34 %
+     ours(R)/Jolt(A) cross-block: 1.0547 (+5.47 %, d +0.1230) n/n/n bars r 29.34 / i 16.93 / s 6.03 %
+     ours pooled/Jolt(A): 1.0575 (+5.75 %, d +0.1293) n/n/n bars r 31.79 / i 16.83 / s 6.06 %
+     block term R-J-T/J-T: 0.9953 (-0.47 %, d -0.0112) n/n/n bars r 13.65 / i 3.24 / s 2.56 %
+     pass 0 only (K=3, diag): ours 2.3774 Jolt 2.2992 ratio 1.0340
+     pass 1 only (K=3, diag): ours 2.3917 Jolt 2.2034 ratio 1.0854
+
+## per manifold [100,500), each side own count
+W1: our manifolds/step 4467.6650-4467.6650; ours ns/manifold A 951.6 [932.9-962.1] K=6 (r 3.07 / i 1.34 / s 0.59 %); R 933.1 [922.5-944.8] K=6 (r 2.39 / i 1.38 / s 0.48 %); Jolt 1166.1 [1123.9-1447.3] K=6 (r 27.73 / i 15.45 / s 6.06 %)
+     ours/Jolt per manifold (A): 0.8161 (-18.39 %, d -214.4458) n/n/Y bars r 55.81 / i 31.01 / s 12.18 %
+     ours(R)/Jolt per manifold: 0.8002 (-19.98 %, d -232.9998) n/n/Y bars r 55.67 / i 31.01 / s 12.16 %
+W8: our manifolds/step 4467.6650-4467.6650; ours ns/manifold A 447.9 [434.7-469.0] K=6 (r 7.68 / i 6.64 / s 1.91 %); R 436.4 [433.3-460.9] K=6 (r 6.32 / i 1.93 / s 1.23 %); Jolt 307.6 [294.6-454.4] K=6 (r 51.97 / i 4.56 / s 10.20 %)
+     ours/Jolt per manifold (A): 1.4563 (+45.63 %, d +140.3289) n/Y/Y bars r 105.08 / i 16.12 / s 20.75 %
+     ours(R)/Jolt per manifold: 1.4190 (+41.90 %, d +128.8565) n/Y/Y bars r 104.72 / i 9.91 / s 20.55 %
+W16: our manifolds/step 4467.6650-4467.6650; ours ns/manifold A 488.6 [483.1-513.4] K=6 (r 6.19 / i 1.09 / s 1.15 %); R 486.0 [479.8-501.6] K=6 (r 4.49 / i 0.69 / s 0.80 %); Jolt 311.7 [282.8-354.7] K=6 (r 23.06 / i 15.22 / s 4.95 %)
+     ours/Jolt per manifold (A): 1.5672 (+56.72 %, d +176.8261) Y/Y/Y bars r 47.76 / i 30.51 / s 10.17 %
+     ours(R)/Jolt per manifold: 1.5591 (+55.91 %, d +174.2901) Y/Y/Y bars r 46.99 / i 30.47 / s 10.04 %
+
+## scaling T(1)/T(W), block A [0,500)
+J-T (W8S-A): T1 4.4701; W8 2.196 (E 0.27); W16 2.011 (E 0.13)
+H-jolt56 (W8S-A): T1 9.9612; W8 3.891 (E 0.49); W16 3.880 (E 0.24)
+R-J-T (W8S-R): T1 4.3893; W2 1.417 (E 0.71); W4 1.872 (E 0.47); W8 2.201 (E 0.28); W16 1.984 (E 0.12)
+
+## W16 vs W8 per row
+J-T: W16/W8 1.0922 (+9.22 %, d +0.1876) n/n/Y bars r 18.95 / i 12.48 / s 4.23 %
+H-jolt56: W16/W8 1.0030 (+0.30 %, d +0.0076) n/n/n bars r 103.67 / i 29.43 / s 20.60 %
+R-J-T: W16/W8 1.1091 (+10.91 %, d +0.2176) n/Y/Y bars r 15.72 / i 4.15 / s 2.96 %
+J-T-off: W16/W8 1.0715 (+7.15 %, d +0.1589) n/Y/Y bars r 15.48 / i 5.30 / s 3.10 %
+J-A: W16/W8 0.9907 (-0.93 %, d -0.0513) n/n/n bars r 10.13 / i 6.12 / s 2.18 %

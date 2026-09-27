@@ -1,0 +1,168 @@
+schema_version = 10
+session_lo = 1429100093270055422
+session_hi = 7993969329841626167
+run_token = ""
+workload_tag = "visibilitybuffer_mesh#5faec573"
+content_tag = ""
+instrument = "live"
+precision_decimals = 1
+regimes = "none"
+modes = "off"
+regime_n_distinct = 1
+present_mode = "fifo"
+subsystems_tag = "neither"
+alloc_shim = false
+alloc_allocs = 0
+alloc_deallocs = 0
+alloc_bytes = 0
+cpu_gpu_offset = "-1790443522686849792"
+cpu_gpu_bracket_ns = 11
+cpu_gpu_driver_ns = 1
+cpu_gpu_probes = 10
+cpu_gpu_rejected = 22
+cpu_gpu_epoch = 0
+cpu_gpu_drift_ns = 113152
+cpu_gpu_span_ns = 1704023098
+census_measured = 2420
+census_not_bracketed = 0
+census_lost = 0
+census_torn = 0
+
+[order]
+frames_checked = 220
+frames_skipped = 0
+violations = 0
+worst_ns = 0.0
+derived_inconclusive = []
+
+[[zone]]
+id = 0
+label = "measured"
+n = 220
+median_ns = 96.0
+mean_ns = 112.0
+p95_ns = 160.0
+stddev_ns = 28.5
+begin_off_ns = 0.0
+end_off_ns = 96.0
+
+[[zone]]
+id = 1
+label = "measured"
+n = 220
+median_ns = 96.0
+mean_ns = 105.2
+p95_ns = 128.0
+stddev_ns = 14.5
+begin_off_ns = 224.0
+end_off_ns = 320.0
+
+[[zone]]
+id = 2
+label = "measured"
+n = 220
+median_ns = 223232.0
+mean_ns = 286473.3
+p95_ns = 547840.0
+stddev_ns = 124065.7
+begin_off_ns = 701872.0
+end_off_ns = 924960.0
+
+[[zone]]
+id = 3
+label = "measured"
+n = 220
+median_ns = 0.0
+mean_ns = 14.0
+p95_ns = 0.0
+stddev_ns = 118.8
+begin_off_ns = 120592.0
+end_off_ns = 120592.0
+
+[[zone]]
+id = 4
+label = "measured"
+n = 220
+median_ns = 520192.0
+mean_ns = 541789.1
+p95_ns = 629760.0
+stddev_ns = 43978.5
+begin_off_ns = 120592.0
+end_off_ns = 640416.0
+
+[[zone]]
+id = 5
+label = "measured"
+n = 220
+median_ns = 61440.0
+mean_ns = 62087.0
+p95_ns = 65536.0
+stddev_ns = 1731.7
+begin_off_ns = 640416.0
+end_off_ns = 701872.0
+
+[[zone]]
+id = 6
+label = "measured"
+n = 220
+median_ns = 0.0
+mean_ns = 158.3
+p95_ns = 1024.0
+stddev_ns = 370.1
+begin_off_ns = 925088.0
+end_off_ns = 925088.0
+
+[[zone]]
+id = 7
+label = "measured"
+n = 220
+median_ns = 0.0
+mean_ns = 9.3
+p95_ns = 0.0
+stddev_ns = 97.2
+begin_off_ns = 701872.0
+end_off_ns = 701872.0
+
+[[zone]]
+id = 8
+label = "measured"
+n = 220
+median_ns = 0.0
+mean_ns = 0.0
+p95_ns = 0.0
+stddev_ns = 0.0
+begin_off_ns = 701872.0
+end_off_ns = 701872.0
+
+[[zone]]
+id = 9
+label = "measured"
+n = 220
+median_ns = 581632.0
+mean_ns = 604076.2
+p95_ns = 696320.0
+stddev_ns = 45283.3
+begin_off_ns = 120592.0
+end_off_ns = 701872.0
+
+[[zone]]
+id = 12
+label = "measured"
+n = 220
+median_ns = 224256.0
+mean_ns = 286952.7
+p95_ns = 548864.0
+stddev_ns = 124095.4
+begin_off_ns = 701872.0
+end_off_ns = 925232.0
+
+[[zone]]
+id = 14
+label = "measured"
+n = 220
+median_ns = 224256.0
+mean_ns = 286952.7
+p95_ns = 548864.0
+stddev_ns = 124095.4
+begin_off_ns = 701872.0
+end_off_ns = 925232.0

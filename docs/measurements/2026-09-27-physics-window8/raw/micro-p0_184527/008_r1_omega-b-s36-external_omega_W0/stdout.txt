@@ -1,0 +1,4 @@
+SUMMARY {"bench":"omega_b","route":"external","participants":2,"regions":2000,"stages":36,"blocks":8,"block_slots":16,"region_ns_median":15300,"region_ns_mean":15304.6,"stage_ns_median":425}
+SUMMARY {"bench":"omega_b","route":"external","participants":4,"regions":2000,"stages":36,"blocks":16,"block_slots":16,"region_ns_median":43000,"region_ns_mean":42624.7,"stage_ns_median":1194.4444444444443}
+SUMMARY {"bench":"omega_b","route":"external","participants":8,"regions":2000,"stages":36,"blocks":32,"block_slots":16,"region_ns_median":114600,"region_ns_mean":113034.4,"stage_ns_median":3183.3333333333335}
+SUMMARY {"bench":"omega_b","route":"external","participants":16,"regions":2000,"stages":36,"blocks":64,"block_slots":16,"region_ns_median":199400,"region_ns_mean":199234.6,"stage_ns_median":5538.888888888889}

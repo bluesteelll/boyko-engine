@@ -1,0 +1,85 @@
+# Q4 resolution (block W8S-R; reference R-J-T at the same W; the rise must be claimed Y under r AND s, ratio > 1)
+
+## window [0..500)
+W8 reference R-J-T: 1.9944 [1.9749-2.1079] K=6 (r 6.67 / i 1.89 / s 1.28 %)
+  ladder8-F0.5: 2.0366 [2.0349-2.0475] K=6 (r 0.62 / i 0.21 / s 0.12 %); rise +0.0422 ms (injected 0.0300; rise/inj 1.407) = +2.12 %; n/n/n bars r 13.40 / s 2.56 % -> not seen
+      pass 0 (K=3, diag): rise +0.0017 n/n/n bars r 11.09 s 4.07
+      pass 1 (K=3, diag): rise +0.0512 Y/Y/Y bars r 2.21 s 0.83
+  ladder8-F1: 2.0557 [2.0402-2.1449] K=6 (r 5.09 / i 1.47 / s 0.98 %); rise +0.0613 ms (injected 0.0600; rise/inj 1.022) = +3.07 %; n/n/n bars r 16.79 / s 3.22 % -> not seen
+      pass 0 (K=3, diag): rise +0.0455 n/n/n bars r 13.50 s 5.03
+      pass 1 (K=3, diag): rise +0.0608 Y/Y/Y bars r 2.00 s 0.73
+  ladder8-F1.5: 2.0882 [2.0667-2.1491] K=6 (r 3.94 / i 1.19 / s 0.74 %); rise +0.0938 ms (injected 0.0900; rise/inj 1.042) = +4.70 %; n/Y/Y bars r 15.50 / s 2.95 % -> not seen
+      pass 0 (K=3, diag): rise +0.0660 n/n/n bars r 12.01 s 4.50
+      pass 1 (K=3, diag): rise +0.0907 Y/Y/Y bars r 2.09 s 0.78
+  ladder8-F2: 2.1307 [2.1058-2.1899] K=6 (r 3.95 / i 1.99 / s 0.80 %); rise +0.1363 ms (injected 0.1200; rise/inj 1.136) = +6.83 %; n/Y/Y bars r 15.50 / s 3.01 % -> not seen
+      pass 0 (K=3, diag): rise +0.1134 n/n/Y bars r 11.83 s 4.37
+      pass 1 (K=3, diag): rise +0.1277 n/Y/Y bars r 8.18 s 3.27
+  R_8: smallest rung seen with every larger rung seen: None x 60 us = none
+W16 reference R-J-T: 2.2120 [2.1840-2.2759] K=6 (r 4.16 / i 0.85 / s 0.75 %)
+  ladder16-F0.5: 2.2606 [2.2500-2.2875] K=6 (r 1.66 / i 0.65 / s 0.31 %); rise +0.0485 ms (injected 0.0525; rise/inj 0.924) = +2.19 %; n/Y/Y bars r 8.96 / s 1.62 % -> not seen
+      pass 0 (K=3, diag): rise +0.0544 n/n/Y bars r 5.98 s 2.41
+      pass 1 (K=3, diag): rise +0.0622 Y/Y/Y bars r 2.50 s 0.92
+  ladder16-F1: 2.3098 [2.2973-2.3406] K=6 (r 1.88 / i 1.28 / s 0.42 %); rise +0.0978 ms (injected 0.1050; rise/inj 0.931) = +4.42 %; n/Y/Y bars r 9.13 / s 1.71 % -> not seen
+      pass 0 (K=3, diag): rise +0.1198 n/Y/Y bars r 6.66 s 2.69
+      pass 1 (K=3, diag): rise +0.1138 Y/Y/Y bars r 2.79 s 1.03
+  ladder16-F1.5: 2.3680 [2.3524-2.4108] K=6 (r 2.47 / i 1.38 / s 0.52 %); rise +0.1559 ms (injected 0.1575; rise/inj 0.990) = +7.05 %; n/Y/Y bars r 9.67 / s 1.81 % -> not seen
+      pass 0 (K=3, diag): rise +0.1807 Y/Y/Y bars r 6.68 s 2.65
+      pass 1 (K=3, diag): rise +0.1614 Y/Y/Y bars r 2.77 s 1.04
+  ladder16-F2: 2.4248 [2.4047-2.4682] K=6 (r 2.62 / i 1.33 / s 0.52 %); rise +0.2128 ms (injected 0.2100; rise/inj 1.013) = +9.62 %; n/Y/Y bars r 9.83 / s 1.81 % -> not seen
+      pass 0 (K=3, diag): rise +0.2306 Y/Y/Y bars r 7.43 s 2.90
+      pass 1 (K=3, diag): rise +0.2256 Y/Y/Y bars r 3.28 s 1.20
+  R_16: smallest rung seen with every larger rung seen: None x 105 us = none
+
+  rung at W 1/2/4 (0.060 ms, F=1 x 60000):
+  W1: ref 4.3893 [4.3497-4.4466] K=6 (r 2.21 / i 1.51 / s 0.48 %); rung 4.4530 [4.4378-4.4919] K=6 (r 1.21 / i 0.45 / s 0.23 %); rise +0.0638 ms (+1.45 %) n/n/Y bars r 5.04 / s 1.06 % -> NOT SEEN: unresolved above 5.04 %
+  W2: ref 3.0972 [3.0717-3.1460] K=6 (r 2.40 / i 1.18 / s 0.48 %); rung 3.1893 [3.1325-3.2939] K=6 (r 5.06 / i 2.02 / s 0.96 %); rise +0.0920 ms (+2.97 %) n/n/Y bars r 11.20 / s 2.15 % -> NOT SEEN: unresolved above 11.20 %
+  W4: ref 2.3442 [2.3402-2.3704] K=6 (r 1.29 / i 0.31 / s 0.25 %); rung 2.4299 [2.3832-2.5129] K=6 (r 5.34 / i 1.21 / s 0.95 %); rise +0.0857 ms (+3.66 %) n/Y/Y bars r 10.98 / s 1.96 % -> NOT SEEN: unresolved above 10.98 %
+
+## window [100..500)
+W8 reference R-J-T: 1.9497 [1.9358-2.0591] K=6 (r 6.32 / i 1.93 / s 1.23 %)
+  ladder8-F0.5: 1.9950 [1.9876-2.0015] K=6 (r 0.70 / i 0.23 / s 0.13 %); rise +0.0453 ms (injected 0.0300; rise/inj 1.510) = +2.32 %; n/n/n bars r 12.72 / s 2.48 % -> not seen
+      pass 0 (K=3, diag): rise -0.0001 n/n/n bars r 10.72 s 3.90
+      pass 1 (K=3, diag): rise +0.0474 Y/Y/Y bars r 1.82 s 0.70
+  ladder8-F1: 2.0128 [1.9978-2.1061] K=6 (r 5.38 / i 1.62 / s 1.04 %); rise +0.0631 ms (injected 0.0600; rise/inj 1.052) = +3.24 %; n/n/Y bars r 16.60 / s 3.23 % -> not seen
+      pass 0 (K=3, diag): rise +0.0449 n/n/n bars r 13.63 s 5.04
+      pass 1 (K=3, diag): rise +0.0548 Y/Y/Y bars r 1.41 s 0.56
+  ladder8-F1.5: 2.0450 [2.0254-2.1136] K=6 (r 4.31 / i 1.17 / s 0.81 %); rise +0.0952 ms (injected 0.0900; rise/inj 1.058) = +4.88 %; n/Y/Y bars r 15.31 / s 2.96 % -> not seen
+      pass 0 (K=3, diag): rise +0.0606 n/n/n bars r 12.08 s 4.54
+      pass 1 (K=3, diag): rise +0.0846 Y/Y/Y bars r 1.43 s 0.58
+  ladder8-F2: 2.0893 [2.0642-2.1442] K=6 (r 3.83 / i 2.12 / s 0.79 %); rise +0.1396 ms (injected 0.1200; rise/inj 1.163) = +7.16 %; n/Y/Y bars r 14.78 / s 2.93 % -> not seen
+      pass 0 (K=3, diag): rise +0.1108 n/n/Y bars r 11.58 s 4.23
+      pass 1 (K=3, diag): rise +0.1240 n/Y/Y bars r 7.81 s 3.13
+  R_8: smallest rung seen with every larger rung seen: None x 60 us = none
+W16 reference R-J-T: 2.1715 [2.1434-2.2408] K=6 (r 4.49 / i 0.69 / s 0.80 %)
+  ladder16-F0.5: 2.2155 [2.2082-2.2532] K=6 (r 2.03 / i 0.79 / s 0.40 %); rise +0.0440 ms (injected 0.0525; rise/inj 0.838) = +2.03 %; n/n/Y bars r 9.85 / s 1.79 % -> not seen
+      pass 0 (K=3, diag): rise +0.0574 n/n/n bars r 7.52 s 2.98
+      pass 1 (K=3, diag): rise +0.0600 Y/Y/Y bars r 2.74 s 1.00
+  ladder16-F1: 2.2707 [2.2591-2.3001] K=6 (r 1.81 / i 1.33 / s 0.41 %); rise +0.0993 ms (injected 0.1050; rise/inj 0.945) = +4.57 %; n/Y/Y bars r 9.67 / s 1.80 % -> not seen
+      pass 0 (K=3, diag): rise +0.1234 n/Y/Y bars r 7.33 s 2.99
+      pass 1 (K=3, diag): rise +0.1130 Y/Y/Y bars r 2.92 s 1.06
+  ladder16-F1.5: 2.3266 [2.3106-2.3726] K=6 (r 2.67 / i 1.63 / s 0.58 %); rise +0.1551 ms (injected 0.1575; rise/inj 0.985) = +7.14 %; n/Y/Y bars r 10.44 / s 1.97 % -> not seen
+      pass 0 (K=3, diag): rise +0.1894 Y/Y/Y bars r 7.55 s 3.04
+      pass 1 (K=3, diag): rise +0.1596 Y/Y/Y bars r 3.02 s 1.12
+  ladder16-F2: 2.3854 [2.3616-2.4292] K=6 (r 2.84 / i 1.52 / s 0.56 %); rise +0.2140 ms (injected 0.2100; rise/inj 1.019) = +9.85 %; n/Y/Y bars r 10.62 / s 1.96 % -> not seen
+      pass 0 (K=3, diag): rise +0.2360 Y/Y/Y bars r 8.22 s 3.24
+      pass 1 (K=3, diag): rise +0.2233 Y/Y/Y bars r 3.75 s 1.36
+  R_16: smallest rung seen with every larger rung seen: None x 105 us = none
+
+  rung at W 1/2/4 (0.060 ms, F=1 x 60000):
+  W1: ref 4.1686 [4.1212-4.2209] K=6 (r 2.39 / i 1.38 / s 0.48 %); rung 4.2271 [4.2058-4.2676] K=6 (r 1.46 / i 0.73 / s 0.29 %); rise +0.0584 ms (+1.40 %) n/n/Y bars r 5.61 / s 1.12 % -> NOT SEEN: unresolved above 5.61 %
+  W2: ref 2.9727 [2.9483-3.0321] K=6 (r 2.82 / i 0.74 / s 0.50 %); rung 3.0658 [3.0046-3.1621] K=6 (r 5.14 / i 2.02 / s 0.96 %); rise +0.0931 ms (+3.13 %) n/n/Y bars r 11.72 / s 2.17 % -> NOT SEEN: unresolved above 11.72 %
+  W4: ref 2.2697 [2.2686-2.2957] K=6 (r 1.20 / i 0.30 / s 0.24 %); rung 2.3497 [2.3081-2.4462] K=6 (r 5.88 / i 1.21 / s 1.04 %); rise +0.0799 ms (+3.52 %) n/Y/Y bars r 12.00 / s 2.14 % -> NOT SEEN: unresolved above 12.00 %
+
+## zone canary on phys_solve_build (armed, W8; reference R-J-T-a W8)
+[100..500) ref span 0.3108 [0.3080-0.3616] K=6 (r 17.27 / i 1.26 / s 3.42 %); ref wall 2.0316 [2.0070-2.0964] K=6 (r 4.40 / i 0.68 / s 0.78 %)
+  zone-N30000: span 0.3527 [0.3371-0.4293] K=6 (r 26.14 / i 18.30 / s 6.05 %); span rise +0.0419 ms (inj 0.030) n/n/n bars r 62.65 / s 13.90 % -> not seen
+      wall 2.0717 [2.0364-2.1806] K=6 (r 6.96 / i 4.88 / s 1.57 %); wall rise +0.0402 ms n/n/n bars r 16.47 / s 3.51 % -> not seen
+  zone-N60000: span 0.3828 [0.3697-0.5523] K=6 (r 47.70 / i 8.81 / s 9.49 %); span rise +0.0720 ms (inj 0.060) n/Y/Y bars r 101.45 / s 20.18 % -> not seen
+      wall 2.1060 [2.0741-2.3253] K=6 (r 11.93 / i 2.47 / s 2.33 %); wall rise +0.0744 ms n/n/n bars r 25.43 / s 4.92 % -> not seen
+[0..500) ref span 0.3152 [0.3121-0.3700] K=6 (r 18.37 / i 1.26 / s 3.65 %); ref wall 2.0753 [2.0522-2.1450] K=6 (r 4.47 / i 0.74 / s 0.81 %)
+  zone-N30000: span 0.3571 [0.3420-0.4338] K=6 (r 25.70 / i 18.81 / s 6.07 %); span rise +0.0419 ms (inj 0.030) n/n/n bars r 63.18 / s 14.17 % -> not seen
+      wall 2.1154 [2.0822-2.2246] K=6 (r 6.74 / i 4.69 / s 1.52 %); wall rise +0.0401 ms n/n/n bars r 16.17 / s 3.45 % -> not seen
+  zone-N60000: span 0.3872 [0.3736-0.5557] K=6 (r 47.03 / i 8.62 / s 9.36 %); span rise +0.0720 ms (inj 0.060) n/Y/Y bars r 100.99 / s 20.09 % -> not seen
+      wall 2.1491 [2.1178-2.3698] K=6 (r 11.73 / i 2.38 / s 2.30 %); wall rise +0.0738 ms n/n/n bars r 25.10 / s 4.87 % -> not seen
+
+## armed vs disarmed J-T at W8 (block R): wall 1.0406 (+4.06 %, d +0.0809) n/n/Y bars r 16.06 / i 4.06 / s 3.02 %

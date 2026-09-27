@@ -1,0 +1,258 @@
+2026-09-27T18:20:32.766+03:00 === gate8 fixtures start
+2026-09-27T18:20:34.989+03:00 fixture JT500 (J-T W1): pose 0x30c5438bc6ad9ffa known 0x30c5438bc6ad9ffa OK
+2026-09-27T18:20:38.022+03:00 fixture JToff500 (J-T-off W1): pose 0x32d5e235342b4143 known 0x32d5e235342b4143 OK
+2026-09-27T18:20:46.290+03:00 fixture JA500 (J-A W1): pose 0x30c5438bc6ad9ffa known None OK
+2026-09-27T18:20:48.352+03:00 fixture JSon500 (J-Son-a W8): pose 0x3db47fae414b655c known None OK
+2026-09-27T18:20:48.355+03:00 === gate8 fixtures end
+2026-09-27T18:20:57.280+03:00 === gate8 runner start
+2026-09-27T18:20:59.523+03:00 runner J-T            W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:01.128+03:00 runner J-T            W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:02.328+03:00 runner J-T            W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:03.344+03:00 runner J-T            W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:04.475+03:00 runner J-T            W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:06.813+03:00 runner J-T-a          W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:08.491+03:00 runner J-T-a          W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:09.800+03:00 runner J-T-a          W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:10.921+03:00 runner J-T-a          W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:12.165+03:00 runner J-T-a          W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:15.308+03:00 runner J-T-off        W1  exit 0 pose 0x32d5e235342b4143 expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:17.321+03:00 runner J-T-off        W2  exit 0 pose 0x32d5e235342b4143 expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:18.748+03:00 runner J-T-off        W4  exit 0 pose 0x32d5e235342b4143 expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:19.881+03:00 runner J-T-off        W8  exit 0 pose 0x32d5e235342b4143 expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:21.097+03:00 runner J-T-off        W16 exit 0 pose 0x32d5e235342b4143 expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:24.249+03:00 runner J-T-off-a      W1  exit 0 pose 0x32d5e235342b4143 expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:26.380+03:00 runner J-T-off-a      W2  exit 0 pose 0x32d5e235342b4143 expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:27.926+03:00 runner J-T-off-a      W4  exit 0 pose 0x32d5e235342b4143 expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:29.155+03:00 runner J-T-off-a      W8  exit 0 pose 0x32d5e235342b4143 expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:30.467+03:00 runner J-T-off-a      W16 exit 0 pose 0x32d5e235342b4143 expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:38.763+03:00 runner J-A            W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:43.886+03:00 runner J-A            W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:47.479+03:00 runner J-A            W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:50.315+03:00 runner J-A            W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:21:53.032+03:00 runner J-A            W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:01.443+03:00 runner J-A-a          W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:06.686+03:00 runner J-A-a          W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:10.389+03:00 runner J-A-a          W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:13.260+03:00 runner J-A-a          W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:16.103+03:00 runner J-A-a          W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:21.252+03:00 runner J-Son-a        W1  exit 0 pose 0x3db47fae414b655c expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:24.648+03:00 runner J-Son-a        W2  exit 0 pose 0x3db47fae414b655c expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:27.147+03:00 runner J-Son-a        W4  exit 0 pose 0x3db47fae414b655c expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:29.223+03:00 runner J-Son-a        W8  exit 0 pose 0x3db47fae414b655c expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:31.281+03:00 runner J-Son-a        W16 exit 0 pose 0x3db47fae414b655c expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:33.530+03:00 runner R-J-T          W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:35.110+03:00 runner R-J-T          W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:36.325+03:00 runner R-J-T          W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:37.368+03:00 runner R-J-T          W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:38.505+03:00 runner R-J-T          W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:40.769+03:00 runner ladder8-F0.5   W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:42.390+03:00 runner ladder8-F0.5   W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:43.606+03:00 runner ladder8-F0.5   W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:44.653+03:00 runner ladder8-F0.5   W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:45.808+03:00 runner ladder8-F0.5   W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:48.101+03:00 runner ladder8-F1     W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:49.725+03:00 runner ladder8-F1     W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:50.960+03:00 runner ladder8-F1     W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:52.020+03:00 runner ladder8-F1     W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:53.191+03:00 runner ladder8-F1     W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:55.482+03:00 runner ladder8-F1.5   W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:57.174+03:00 runner ladder8-F1.5   W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:58.604+03:00 runner ladder8-F1.5   W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:22:59.677+03:00 runner ladder8-F1.5   W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:00.869+03:00 runner ladder8-F1.5   W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:03.193+03:00 runner ladder8-F2     W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:04.962+03:00 runner ladder8-F2     W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:06.297+03:00 runner ladder8-F2     W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:07.395+03:00 runner ladder8-F2     W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:08.601+03:00 runner ladder8-F2     W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:11.015+03:00 runner ladder16-F0.5  W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:12.654+03:00 runner ladder16-F0.5  W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:13.891+03:00 runner ladder16-F0.5  W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:14.967+03:00 runner ladder16-F0.5  W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:16.136+03:00 runner ladder16-F0.5  W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:18.464+03:00 runner ladder16-F1    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:20.165+03:00 runner ladder16-F1    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:21.437+03:00 runner ladder16-F1    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:22.531+03:00 runner ladder16-F1    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:23.723+03:00 runner ladder16-F1    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:26.090+03:00 runner ladder16-F1.5  W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:27.771+03:00 runner ladder16-F1.5  W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:29.095+03:00 runner ladder16-F1.5  W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:30.208+03:00 runner ladder16-F1.5  W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:31.423+03:00 runner ladder16-F1.5  W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:33.815+03:00 runner ladder16-F2    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:35.533+03:00 runner ladder16-F2    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:36.896+03:00 runner ladder16-F2    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:38.047+03:00 runner ladder16-F2    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:39.295+03:00 runner ladder16-F2    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:41.677+03:00 runner rung           W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:43.392+03:00 runner rung           W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:44.670+03:00 runner rung           W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:45.735+03:00 runner rung           W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:46.903+03:00 runner rung           W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:49.225+03:00 runner R-J-T-a        W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:50.933+03:00 runner R-J-T-a        W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:52.311+03:00 runner R-J-T-a        W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:53.435+03:00 runner R-J-T-a        W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:54.676+03:00 runner R-J-T-a        W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:57.031+03:00 runner zone-N30000    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:23:58.748+03:00 runner zone-N30000    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:24:00.086+03:00 runner zone-N30000    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:24:01.308+03:00 runner zone-N30000    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:24:02.578+03:00 runner zone-N30000    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:24:04.981+03:00 runner zone-N60000    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:24:06.716+03:00 runner zone-N60000    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:24:08.071+03:00 runner zone-N60000    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:24:09.228+03:00 runner zone-N60000    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:24:10.495+03:00 runner zone-N60000    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:24:10.500+03:00 runner gate: 100 processes, 0 failing (38 are timed cells)
+2026-09-27T18:24:10.501+03:00 === gate8 runner end
+2026-09-27T18:24:54.997+03:00 === gate8 micro start
+2026-09-27T18:24:55.014+03:00 micro --help: exit 0, self-check ok True
+2026-09-27T18:24:55.025+03:00 micro small-omega-b-worker   exit 0 summaries 1/1 PASS
+2026-09-27T18:24:55.035+03:00 micro small-omega-b-external exit 0 summaries 1/1 PASS
+2026-09-27T18:24:55.046+03:00 micro small-omega-worker     exit 0 summaries 1/1 PASS
+2026-09-27T18:24:55.057+03:00 micro small-omega-external   exit 0 summaries 1/1 PASS
+2026-09-27T18:24:55.824+03:00 micro omega-b-worker         exit 0 summaries 4/4 PASS
+2026-09-27T18:24:56.595+03:00 micro omega-b-external       exit 0 summaries 4/4 PASS
+2026-09-27T18:24:57.222+03:00 micro omega-worker           exit 0 summaries 8/8 PASS
+2026-09-27T18:24:57.842+03:00 micro omega-external         exit 0 summaries 8/8 PASS
+2026-09-27T18:24:57.844+03:00 === gate8 micro end
+2026-09-27T18:24:57.970+03:00 === gate8 jolt start
+2026-09-27T18:25:02.906+03:00 jolt H-jolt56       j56   W1  exit 0 hash 0xb8522b4e3fc62cfe {} PASS
+2026-09-27T18:25:04.187+03:00 jolt H-jolt56       j56   W8  exit 0 hash 0xb8522b4e3fc62cfe {} PASS
+2026-09-27T18:25:05.446+03:00 jolt H-jolt56       j56   W16 exit 0 hash 0xb8522b4e3fc62cfe {} PASS
+2026-09-27T18:25:10.604+03:00 jolt P-jolt56-prof  j56p  W1  exit 0 hash 0xb8522b4e3fc62cfe {'dumps': [0, 100, 200, 300, 400], 'wfb_jobs_per_frame': [1]} PASS
+2026-09-27T18:25:12.018+03:00 jolt P-jolt56-prof  j56p  W8  exit 0 hash 0xb8522b4e3fc62cfe {'dumps': [0, 100, 200, 300, 400], 'wfb_jobs_per_frame': [8]} PASS
+2026-09-27T18:25:13.294+03:00 jolt P-jolt56-prof  j56p  W16 exit 0 hash 0xb8522b4e3fc62cfe {'dumps': [0, 100, 200, 300, 400], 'wfb_jobs_per_frame': [16]} PASS
+2026-09-27T18:25:13.296+03:00 === gate8 jolt end
+2026-09-27T18:26:11 dm1 crash_A_vb_1280x720          dmA vb       1280x720  frames  10 exit 0 hang False passed True line 'DM1 timing: path=VisibilityBuffer res=1280x720 edit_rows=0 grow_at=None frames=31' artifact 2648 came_up None PASS
+2026-09-27T18:26:20 dm1 crash_B_vb_1280x720          dmB vb       1280x720  frames  10 exit 0 hang False passed True line 'DM1 timing: path=VisibilityBuffer res=1280x720 edit_rows=0 grow_at=None frames=31' artifact 2650 came_up None PASS
+2026-09-27T18:26:35 dm1 res_A_vb_1920x1080           dmA vb       1920x1080 frames  10 exit 0 hang False passed True line 'DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=31' artifact 2674 came_up None PASS
+2026-09-27T18:26:38 dm1 res_A_vb_2560x1440           dmA vb       2560x1440 frames  10 exit 101 hang False passed False line None artifact 2669 came_up 2052x1133 FAIL
+2026-09-27T18:26:41 dm1 res_A_vb_3840x2160           dmA vb       3840x2160 frames  10 exit 101 hang False passed False line None artifact 2653 came_up 2052x1133 FAIL
+2026-09-27T18:26:54 dm1 sample_A_vb_idle             dmA vb       1920x1080 frames 220 exit 0 hang False passed True line 'DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241' artifact 2673 came_up None PASS
+2026-09-27T18:26:58 dm1 sample_A_deferred_idle       dmA deferred 1920x1080 frames 220 exit 0 hang False passed True line 'DM1 timing: path=Deferred res=1920x1080 edit_rows=0 grow_at=None frames=241' artifact 920 came_up None PASS
+2026-09-27T18:27:02 dm1 sample_A_vb_edit100          dmA vb       1920x1080 frames 220 exit 0 hang False passed True line 'DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=100 grow_at=None frames=241' artifact 2678 came_up None PASS
+2026-09-27T18:27:11 dm1 sample_B_vb_grow150          dmB vb       1920x1080 frames 220 exit 0 hang False passed True line 'DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=Some(150) frames=241' artifact 2679 came_up None PASS
+2026-09-27T18:33:18.645+03:00 === gate8 runner start
+2026-09-27T18:33:20.898+03:00 runner J-T            W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:22.502+03:00 runner J-T            W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:23.746+03:00 runner J-T            W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:24.841+03:00 runner J-T            W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:25.975+03:00 runner J-T            W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:28.388+03:00 runner J-T-a          W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:30.072+03:00 runner J-T-a          W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:31.399+03:00 runner J-T-a          W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:32.524+03:00 runner J-T-a          W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:33.782+03:00 runner J-T-a          W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:36.878+03:00 runner J-T-off        W1  exit 0 pose 0x32d5e235342b4143 expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:38.912+03:00 runner J-T-off        W2  exit 0 pose 0x32d5e235342b4143 expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:40.338+03:00 runner J-T-off        W4  exit 0 pose 0x32d5e235342b4143 expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:41.478+03:00 runner J-T-off        W8  exit 0 pose 0x32d5e235342b4143 expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:42.691+03:00 runner J-T-off        W16 exit 0 pose 0x32d5e235342b4143 expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:45.857+03:00 runner J-T-off-a      W1  exit 0 pose 0x32d5e235342b4143 expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:47.998+03:00 runner J-T-off-a      W2  exit 0 pose 0x32d5e235342b4143 expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:49.531+03:00 runner J-T-off-a      W4  exit 0 pose 0x32d5e235342b4143 expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:50.919+03:00 runner J-T-off-a      W8  exit 0 pose 0x32d5e235342b4143 expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:33:52.241+03:00 runner J-T-off-a      W16 exit 0 pose 0x32d5e235342b4143 expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:34:00.573+03:00 runner J-A            W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:34:05.741+03:00 runner J-A            W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:34:09.336+03:00 runner J-A            W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:34:12.147+03:00 runner J-A            W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:34:14.908+03:00 runner J-A            W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:34:23.289+03:00 runner J-A-a          W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:34:28.534+03:00 runner J-A-a          W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:34:32.200+03:00 runner J-A-a          W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:34:35.094+03:00 runner J-A-a          W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:34:37.905+03:00 runner J-A-a          W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:34:43.005+03:00 runner J-Son          W1  exit 0 pose 0x3db47fae414b655c expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:34:46.333+03:00 runner J-Son          W2  exit 0 pose 0x3db47fae414b655c expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:34:48.781+03:00 runner J-Son          W4  exit 0 pose 0x3db47fae414b655c expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:34:50.782+03:00 runner J-Son          W8  exit 0 pose 0x3db47fae414b655c expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:34:52.802+03:00 runner J-Son          W16 exit 0 pose 0x3db47fae414b655c expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:34:57.979+03:00 runner J-Son-a        W1  exit 0 pose 0x3db47fae414b655c expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:01.378+03:00 runner J-Son-a        W2  exit 0 pose 0x3db47fae414b655c expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:03.892+03:00 runner J-Son-a        W4  exit 0 pose 0x3db47fae414b655c expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:05.969+03:00 runner J-Son-a        W8  exit 0 pose 0x3db47fae414b655c expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:08.038+03:00 runner J-Son-a        W16 exit 0 pose 0x3db47fae414b655c expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:10.291+03:00 runner R-J-T          W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:11.916+03:00 runner R-J-T          W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:13.124+03:00 runner R-J-T          W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:14.158+03:00 runner R-J-T          W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:15.295+03:00 runner R-J-T          W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:17.602+03:00 runner ladder8-F0.5   W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:19.207+03:00 runner ladder8-F0.5   W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:20.433+03:00 runner ladder8-F0.5   W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:21.475+03:00 runner ladder8-F0.5   W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:22.629+03:00 runner ladder8-F0.5   W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:24.942+03:00 runner ladder8-F1     W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:26.584+03:00 runner ladder8-F1     W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:27.824+03:00 runner ladder8-F1     W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:28.884+03:00 runner ladder8-F1     W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:30.068+03:00 runner ladder8-F1     W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:32.413+03:00 runner ladder8-F1.5   W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:34.043+03:00 runner ladder8-F1.5   W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:35.331+03:00 runner ladder8-F1.5   W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:36.428+03:00 runner ladder8-F1.5   W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:37.613+03:00 runner ladder8-F1.5   W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:39.964+03:00 runner ladder8-F2     W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:41.612+03:00 runner ladder8-F2     W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:42.889+03:00 runner ladder8-F2     W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:44.029+03:00 runner ladder8-F2     W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:45.229+03:00 runner ladder8-F2     W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:47.512+03:00 runner ladder16-F0.5  W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:49.111+03:00 runner ladder16-F0.5  W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:50.343+03:00 runner ladder16-F0.5  W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:51.396+03:00 runner ladder16-F0.5  W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:52.566+03:00 runner ladder16-F0.5  W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:54.893+03:00 runner ladder16-F1    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:56.527+03:00 runner ladder16-F1    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:57.790+03:00 runner ladder16-F1    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:35:58.884+03:00 runner ladder16-F1    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:00.079+03:00 runner ladder16-F1    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:02.390+03:00 runner ladder16-F1.5  W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:04.045+03:00 runner ladder16-F1.5  W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:05.321+03:00 runner ladder16-F1.5  W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:06.426+03:00 runner ladder16-F1.5  W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:07.638+03:00 runner ladder16-F1.5  W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:10.032+03:00 runner ladder16-F2    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:11.720+03:00 runner ladder16-F2    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:13.027+03:00 runner ladder16-F2    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:14.181+03:00 runner ladder16-F2    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:15.436+03:00 runner ladder16-F2    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:17.753+03:00 runner rung           W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:19.385+03:00 runner rung           W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:20.644+03:00 runner rung           W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:21.728+03:00 runner rung           W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:22.894+03:00 runner rung           W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed False setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:25.263+03:00 runner R-J-T-a        W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:26.956+03:00 runner R-J-T-a        W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:28.276+03:00 runner R-J-T-a        W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:29.453+03:00 runner R-J-T-a        W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:30.691+03:00 runner R-J-T-a        W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:33.112+03:00 runner zone-N30000    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:34.831+03:00 runner zone-N30000    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:36.155+03:00 runner zone-N30000    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:37.294+03:00 runner zone-N30000    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:38.548+03:00 runner zone-N30000    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:40.911+03:00 runner zone-N60000    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:42.628+03:00 runner zone-N60000    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:43.969+03:00 runner zone-N60000    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:45.144+03:00 runner zone-N60000    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:46.409+03:00 runner zone-N60000    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 armed True setup_chunks_cols ABSENT PASS
+2026-09-27T18:36:46.412+03:00 runner gate: 105 processes, 0 failing (41 are timed cells)
+2026-09-27T18:36:46.412+03:00 === gate8 runner end
+2026-09-27T18:36:46.563+03:00 === gate8 micro start
+2026-09-27T18:36:46.576+03:00 micro --help: exit 0, self-check ok True
+2026-09-27T18:36:46.586+03:00 micro small-omega-b-worker   exit 0 summaries 1/1 PASS
+2026-09-27T18:36:46.595+03:00 micro small-omega-b-external exit 0 summaries 1/1 PASS
+2026-09-27T18:36:46.605+03:00 micro small-omega-worker     exit 0 summaries 1/1 PASS
+2026-09-27T18:36:46.615+03:00 micro small-omega-external   exit 0 summaries 1/1 PASS
+2026-09-27T18:36:47.436+03:00 micro omega-b-s36-worker     exit 0 summaries 4/4 PASS
+2026-09-27T18:36:48.159+03:00 micro omega-b-s36-external   exit 0 summaries 4/4 PASS
+2026-09-27T18:36:49.635+03:00 micro omega-b-s72-worker     exit 0 summaries 4/4 PASS
+2026-09-27T18:36:51.154+03:00 micro omega-b-s72-external   exit 0 summaries 4/4 PASS
+2026-09-27T18:36:51.782+03:00 micro omega-worker           exit 0 summaries 8/8 PASS
+2026-09-27T18:36:52.401+03:00 micro omega-external         exit 0 summaries 8/8 PASS
+2026-09-27T18:36:52.403+03:00 === gate8 micro end

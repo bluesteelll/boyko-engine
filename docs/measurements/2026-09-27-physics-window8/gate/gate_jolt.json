@@ -1,0 +1,92 @@
+[
+ {
+  "row": "H-jolt56",
+  "binary": "j56",
+  "W": 1,
+  "exit": 0,
+  "hash": "0xb8522b4e3fc62cfe",
+  "files": 3,
+  "wall_s_for_schedule": 4.933,
+  "fail": []
+ },
+ {
+  "row": "H-jolt56",
+  "binary": "j56",
+  "W": 8,
+  "exit": 0,
+  "hash": "0xb8522b4e3fc62cfe",
+  "files": 3,
+  "wall_s_for_schedule": 1.28,
+  "fail": []
+ },
+ {
+  "row": "H-jolt56",
+  "binary": "j56",
+  "W": 16,
+  "exit": 0,
+  "hash": "0xb8522b4e3fc62cfe",
+  "files": 3,
+  "wall_s_for_schedule": 1.256,
+  "fail": []
+ },
+ {
+  "row": "P-jolt56-prof",
+  "binary": "j56p",
+  "W": 1,
+  "exit": 0,
+  "hash": "0xb8522b4e3fc62cfe",
+  "files": 9,
+  "wall_s_for_schedule": 5.142,
+  "fail": [],
+  "dumps": [
+   0,
+   100,
+   200,
+   300,
+   400
+  ],
+  "wfb_jobs_per_frame": [
+   1
+  ]
+ },
+ {
+  "row": "P-jolt56-prof",
+  "binary": "j56p",
+  "W": 8,
+  "exit": 0,
+  "hash": "0xb8522b4e3fc62cfe",
+  "files": 9,
+  "wall_s_for_schedule": 1.395,
+  "fail": [],
+  "dumps": [
+   0,
+   100,
+   200,
+   300,
+   400
+  ],
+  "wfb_jobs_per_frame": [
+   8
+  ]
+ },
+ {
+  "row": "P-jolt56-prof",
+  "binary": "j56p",
+  "W": 16,
+  "exit": 0,
+  "hash": "0xb8522b4e3fc62cfe",
+  "files": 9,
+  "wall_s_for_schedule": 1.255,
+  "fail": [],
+  "dumps": [
+   0,
+   100,
+   200,
+   300,
+   400
+  ],
+  "wfb_jobs_per_frame": [
+   16
+  ]
+ }
+]

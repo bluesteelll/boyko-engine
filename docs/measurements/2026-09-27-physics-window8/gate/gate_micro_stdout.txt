@@ -1,0 +1,11 @@
+2026-09-27T18:24:54.997+03:00 === gate8 micro start
+2026-09-27T18:24:55.014+03:00 micro --help: exit 0, self-check ok True
+2026-09-27T18:24:55.025+03:00 micro small-omega-b-worker   exit 0 summaries 1/1 PASS
+2026-09-27T18:24:55.035+03:00 micro small-omega-b-external exit 0 summaries 1/1 PASS
+2026-09-27T18:24:55.046+03:00 micro small-omega-worker     exit 0 summaries 1/1 PASS
+2026-09-27T18:24:55.057+03:00 micro small-omega-external   exit 0 summaries 1/1 PASS
+2026-09-27T18:24:55.824+03:00 micro omega-b-worker         exit 0 summaries 4/4 PASS
+2026-09-27T18:24:56.595+03:00 micro omega-b-external       exit 0 summaries 4/4 PASS
+2026-09-27T18:24:57.222+03:00 micro omega-worker           exit 0 summaries 8/8 PASS
+2026-09-27T18:24:57.842+03:00 micro omega-external         exit 0 summaries 8/8 PASS
+2026-09-27T18:24:57.844+03:00 === gate8 micro end
