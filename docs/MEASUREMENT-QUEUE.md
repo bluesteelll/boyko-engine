@@ -1867,6 +1867,67 @@ used (1 by its re-run), 0 are dropped and 0 passes voided. Every used process pa
 
 ---
 
+## 16. Physics — the W8S instrument on the W8 gap, Jolt's critical path, omega_b, sleeping at cfg a, and DM1 C6 — TIMED 2026-09-27 (window 8)
+
+**RESULT, 2026-09-27, window 8:**
+- ours/Jolt 5.6 on the wall is **0.449x at W1, claimed** (ours faster). It is 0.795x at W8 and 0.866x at W16, neither
+  claimed under min-max. Per manifold it is 0.816x / 1.456x / 1.567x, and only W16 is claimed, with Jolt cheaper;
+- the W8 excess over T(1)/8 is 70 % serial: our serial chain is 1.31 ms against Jolt's 0.63 ms, and Jolt's jobs run
+  strictly in sequence;
+- S4 is larger than designed (f = 0.82, about 0.19-0.22 ms). **S6 is NOT BUILT:** its build-if fails at 3.5-3.8 % of
+  T(8), against 5 %;
+- omega_b as benched is 2.8-3.0 µs per stage at 8 participants, and the S1+S2+S3 decision is deferred to window 8b;
+- no W >= 2 resolution was demonstrated under the two-spread rule; W8S-R's pass 0 prevented it;
+- sleeping at cfg a reads -49 % (W1) and -36 % (W8) over [100,500), both claimed. The awake cost is not resolved;
+- **DM1 C6 is KEPT** by the letter of its gate, and that gate could not see a regression under about 23 %.
+
+**Protocol.** Window 7's (section 15), plus one addition: **the during-process witness is gated**, so a process above
+2 % is re-run once at the end of its pass. K = 6 per cell (two passes x three rounds); DM1 runs one ABBA pass. Five
+blocks, in order: W8S-A, W8S-R, micro, DM1, P-jolt56-prof.
+
+**Where and when.** The owner's workstation, one launch at 18:45:27, timed 18:47:47-19:55:18 +03:00, complete
+(`WINDOW_DONE` exit 0). The idle rule took 9 waits and 33 polls. No build or lane process was seen at any poll,
+receipt or process.
+
+**Binaries** (sha256 prefixes, `bin/SHA256SUMS`):
+- the instrument `226bd99e` (`u/phys-w8s`, not on the trunk) `c3cef91c`, and its omega_b bench `ffcac12f`. Both were
+  built from a `git archive` tree under the tracked lock;
+- DM1 A `cad5439b` `47cb2c9b` and B `97ee830f` `79bba864`, dev-profile builds;
+- Jolt v5.6.0 `918fd2b7`, run in place;
+- a patched profiled Jolt build, `b35986ef`: the lighter profile plus the WaitingForBatch counter.
+
+**Counts.** 357 records: 348 processes (9 warm-ups, 337 originals, 2 re-runs, both witness re-runs) and 9 pass
+markers. All 337 slots are used, with 0 dropped, 0 voided passes and 0 validity problems.
+- Receipts: 357, median 1.04 %, max 4.35 %, none over 5 %.
+- The untimed gate: every part passed, and both red controls exit 4.
+
+**Moved to window 8b** (the orchestrator's rulings of 2026-09-27, recorded in the window's README):
+- S4-AB, with its own ladder, rung and zone canary;
+- the per-wave split, on the fixed instrument (the review's B1, B2, N2, N3, N6);
+- omega_b v2, and omega(W, gap) with the participation receipt;
+- the F3 rows;
+- J-Son-T, sleeping on the tree broadphase;
+- the DM1 re-read with power.
+
+From 8b on, a claim needs IQR and SE in every clean block and pooled, with K = 9 over three passes (ruling 1).
+
+**Not measured:**
+- DM1 at 2560x1440 and 3840x2160: the display cannot host them;
+- S4-AB: S4 is not built;
+- the per-wave split: the review ruled it NO-GO on `226bd99e`.
+
+**Receipts:** `docs/measurements/2026-09-27-physics-window8/`:
+- `README.md`: the protocol, the binaries, the omitted rows and amendments, the timeline, the counts, the rulings,
+  window 8b's contents, the layout;
+- `analysis.md`: the analyst's reduction, verbatim;
+- `prep.md`, `review-instrument-226bd99e.md`;
+- `rows8.json`, `run_window8.sh`, `dryrun.txt`, `wait_log.txt`, `progress.txt`, `WINDOW_DONE`;
+- `bin/`, hashes and commits only;
+- `logs/`, `gate/` (the four fixtures included), `tools/`, `analysis/`;
+- `raw/`, without the pose dumps: `skipped.sha256` lists every file not committed.
+
+---
+
 ## When an entry is done
 
 Strike it with the date and the receipt's location, rather than deleting it. An entry that was run
