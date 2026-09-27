@@ -1,0 +1,6 @@
+
+thread 'dm1_material_table_timing' (21744) panicked at crates\boyko_app\tests\dm1_material_table_timing.rs:145:5:
+assertion `left == right` failed: the window came up 2052x1133, not the requested 3840x2160: this row is NOT MEASURED (a clamped display), never a number at a different size
+  left: (2052, 1133)
+ right: (3840, 2160)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

@@ -1,0 +1,7 @@
+Single precision x86 64-bit with instructions: SSE2 SSE4.1 SSE4.2 AVX AVX2 F16C LZCNT TZCNT FMADD (Profile) (16-bit ObjectLayer) (ObjectStream) 
+Running scene: Pyramid
+boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0, allow_sleep=0, receipt=0
+boyko-w8s-patch v1: lighter profile (removed: Add Constraint From Cached Manifold, ConstraintManager::sSolveVelocityConstraints, ContactConstraintManager::SolveVelocityConstraints); WaitingForBatch per-thread counter, wfb=1
+Motion Quality, Thread Count, Steps / Second, Hash
+boyko-w8s-patch: tsc ticks per second 3293815523.9 over 5.109 s, threads slots used 1
+Discrete, 1, 98.539732, 0xb8522b4e3fc62cfe

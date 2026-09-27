@@ -1,0 +1,30 @@
+PHYSICS WINDOW 8 DRY RUN: rows8.json, 5 blocks, K per cell = passes x rounds (default 2 x 3; DM1 ABBA, one pass), cutoff 23:30, assumed start 19:00; STOP flag C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\238150a2-5c92-4147-8309-b6428586e8a7\scratchpad\win8\STOP absent
+per pass: idle rule >= 135 s, opening receipt 10 s, one warm-up; per process: the gate's untimed dry-sample wall + 0.4 s launch + 5 s receipt
+binaries: all match bin/SHA256SUMS
+fixtures: all present
+estimates: every cell has an untimed dry sample
+DM1 row dropped: dm-vb-2560x1440-idle: the display cannot host a 2560x1440 client area (see gate/dm1_res.json)
+DM1 row dropped: dm-vb-3840x2160-idle: the display cannot host a 3840x2160 client area (see gate/dm1_res.json)
+DM1 row dropped: dm-deferred-2560x1440-idle: the display cannot host a 2560x1440 client area (see gate/dm1_res.json)
+DM1 row dropped: dm-deferred-3840x2160-idle: the display cannot host a 3840x2160 client area (see gate/dm1_res.json)
+
+[W8S-A prio 1]: 25 cells x K 6 = 150 timed processes + 2 warm-up(s); 2 pass(es) x 3 rounds; per round 205 s; per pass 12.8 min; block 25.6 min; 19:00 -> 19:25
+  pass 0: idle rule; warm-up J-T#instr#8; each round: J-T#instr@W1(2.7s), H-jolt56#j56@W1(5.3s), J-T-a#instr@W1(2.8s), J-T-off#instr@W1(3.5s), J-T-off-a#instr@W1(3.6s), J-A#instr@W1(8.7s), J-A-a#instr@W1(8.8s), J-Son#instr@W1(5.5s), J-Son-a#instr@W1(5.6s), J-T#instr@W8(1.5s), H-jolt56#j56@W8(1.7s), J-T-a#instr@W8(1.5s), J-T-off#instr@W8(1.5s), J-T-off-a#instr@W8(1.8s), J-A#instr@W8(3.2s), J-A-a#instr@W8(3.3s), J-Son#instr@W8(2.4s), J-Son-a#instr@W8(2.5s), J-T#instr@W16(1.5s), H-jolt56#j56@W16(1.7s), J-T-a#instr@W16(1.7s), J-T-off#instr@W16(1.6s), J-T-off-a#instr@W16(1.7s), J-A#instr@W16(3.2s), J-A-a#instr@W16(3.2s)
+  pass 1: idle rule; warm-up J-T#instr#8; each round: J-A-a#instr@W16(3.2s), J-A#instr@W16(3.2s), J-T-off-a#instr@W16(1.7s), J-T-off#instr@W16(1.6s), J-T-a#instr@W16(1.7s), H-jolt56#j56@W16(1.7s), J-T#instr@W16(1.5s), J-Son-a#instr@W8(2.5s), J-Son#instr@W8(2.4s), J-A-a#instr@W8(3.3s), J-A#instr@W8(3.2s), J-T-off-a#instr@W8(1.8s), J-T-off#instr@W8(1.5s), J-T-a#instr@W8(1.5s), H-jolt56#j56@W8(1.7s), J-T#instr@W8(1.5s), J-Son-a#instr@W1(5.6s), J-Son#instr@W1(5.5s), J-A-a#instr@W1(8.8s), J-A#instr@W1(8.7s), J-T-off-a#instr@W1(3.6s), J-T-off#instr@W1(3.5s), J-T-a#instr@W1(2.8s), H-jolt56#j56@W1(5.3s), J-T#instr@W1(2.7s)
+
+[W8S-R prio 2]: 19 cells x K 6 = 114 timed processes + 2 warm-up(s); 2 pass(es) x 3 rounds; per round 128 s; per pass 8.9 min; block 17.8 min; 19:25 -> 19:43
+  pass 0: idle rule; warm-up R-J-T#instr#8; each round: R-J-T#instr@W1(2.7s), rung#instr@W1(2.7s), R-J-T#instr@W2(2.0s), rung#instr@W2(2.0s), R-J-T#instr@W4(1.6s), rung#instr@W4(1.7s), R-J-T#instr@W8(1.4s), ladder8-F0.5#instr@W8(1.4s), ladder8-F1#instr@W8(1.5s), ladder8-F1.5#instr@W8(1.5s), ladder8-F2#instr@W8(1.5s), R-J-T-a#instr@W8(1.6s), zone-N30000#instr@W8(1.5s), zone-N60000#instr@W8(1.6s), R-J-T#instr@W16(1.5s), ladder16-F0.5#instr@W16(1.6s), ladder16-F1#instr@W16(1.6s), ladder16-F1.5#instr@W16(1.6s), ladder16-F2#instr@W16(1.7s)
+  pass 1: idle rule; warm-up R-J-T#instr#8; each round: ladder16-F2#instr@W16(1.7s), ladder16-F1.5#instr@W16(1.6s), ladder16-F1#instr@W16(1.6s), ladder16-F0.5#instr@W16(1.6s), R-J-T#instr@W16(1.5s), zone-N60000#instr@W8(1.6s), zone-N30000#instr@W8(1.5s), R-J-T-a#instr@W8(1.6s), ladder8-F2#instr@W8(1.5s), ladder8-F1.5#instr@W8(1.5s), ladder8-F1#instr@W8(1.5s), ladder8-F0.5#instr@W8(1.4s), R-J-T#instr@W8(1.4s), rung#instr@W4(1.7s), R-J-T#instr@W4(1.6s), rung#instr@W2(2.0s), R-J-T#instr@W2(2.0s), rung#instr@W1(2.7s), R-J-T#instr@W1(2.7s)
+
+[micro prio 3]: 6 cells x K 6 = 36 timed processes + 2 warm-up(s); 2 pass(es) x 3 rounds; per round 38 s; per pass 4.4 min; block 8.9 min; 19:43 -> 19:52
+  pass 0: idle rule; warm-up omega-worker#omega#0; each round: omega-b-s36-worker#omega@W0(1.2s), omega-b-s36-external#omega@W0(1.1s), omega-b-s72-worker#omega@W0(1.9s), omega-b-s72-external#omega@W0(1.9s), omega-worker#omega@W0(1.0s), omega-external#omega@W0(1.0s)
+  pass 1: idle rule; warm-up omega-worker#omega#0; each round: omega-external#omega@W0(1.0s), omega-worker#omega@W0(1.0s), omega-b-s72-external#omega@W0(1.9s), omega-b-s72-worker#omega@W0(1.9s), omega-b-s36-external#omega@W0(1.1s), omega-b-s36-worker#omega@W0(1.2s)
+
+[DM1 prio 4]: 19 cells x K 1 = 19 timed processes + 1 warm-up(s); 1 pass(es) x 1 rounds; per round 197 s; per pass 5.9 min; block 5.9 min; 19:52 -> 19:58
+  pass 0: idle rule; warm-up dm-vb-1920x1080-idle#dmA#0; each round: dm-vb-1920x1080-idle#dmA@W0(5.2s), dm-vb-1920x1080-idle#dmB@W0(5.2s), dm-vb-1920x1080-idle#dmB@W0(5.2s), dm-vb-1920x1080-idle#dmA@W0(5.2s), dm-deferred-1920x1080-idle#dmA@W0(4.1s), dm-deferred-1920x1080-idle#dmB@W0(4.1s), dm-deferred-1920x1080-idle#dmB@W0(4.1s), dm-deferred-1920x1080-idle#dmA@W0(4.1s), dm-vb-1920x1080-edit100#dmA@W0(4.4s), dm-vb-1920x1080-edit100#dmB@W0(4.4s), dm-vb-1920x1080-edit100#dmB@W0(4.4s), dm-vb-1920x1080-edit100#dmA@W0(4.4s), dm-deferred-1920x1080-edit100#dmA@W0(4.4s), dm-deferred-1920x1080-edit100#dmB@W0(4.4s), dm-deferred-1920x1080-edit100#dmB@W0(4.4s), dm-deferred-1920x1080-edit100#dmA@W0(4.4s), dm-vb-1920x1080-grow150#dmB@W0(9.8s), dm-vb-1920x1080-grow150#dmB@W0(9.8s), dm-vb-1920x1080-grow150#dmB@W0(9.8s)
+
+[P-jolt56-prof prio 5]: 3 cells x K 6 = 18 timed processes + 2 warm-up(s); 2 pass(es) x 3 rounds; per round 24 s; per pass 3.7 min; block 7.5 min; 19:58 -> 20:05
+  pass 0: idle rule; warm-up P-jolt56-prof#j56p#8; each round: P-jolt56-prof#j56p@W1(5.5s), P-jolt56-prof#j56p@W8(1.8s), P-jolt56-prof#j56p@W16(1.7s)
+  pass 1: idle rule; warm-up P-jolt56-prof#j56p#8; each round: P-jolt56-prof#j56p@W16(1.7s), P-jolt56-prof#j56p@W8(1.8s), P-jolt56-prof#j56p@W1(5.5s)
+
+TOTAL 65.6 min if every block runs; ends 20:05; the cutoff stops starting processes at 23:30

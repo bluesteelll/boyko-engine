@@ -1,0 +1,69 @@
+
+## Jolt j56p W1: K=6 processes x 4 dump frames (100/200/300/400), per-process mean over the frames, cell median
+  harness frame mean [100,500) 9.9162 [9.8563-10.1013] K=6 (r 2.47 / i 0.98 / s 0.48 %); the dump frames 9.8532 [9.6144-9.9987] K=6 (r 3.90 / i 0.99 / s 0.68 %); Update scope 9.8538 [9.6149-9.9991] K=6 (r 3.90 / i 0.99 / s 0.68 %)
+  ApplyGravity                 start 0.0564 end 0.0765 extent 0.0197 union 0.0197 cpu 0.0197 n 1
+  UpdateBroadPhasePrepare      start 0.0061 end 0.0555 extent 0.0488 union 0.0488 cpu 0.0488 n 1
+  FindCollisions               start 0.0777 end 2.5902 extent 2.5137 union 2.5137 cpu 2.5137 n 1
+  FinalizeIslands              start 2.5906 end 2.6012 extent 0.0107 union 0.0107 cpu 0.0107 n 1
+  SolveVelocityConstraints     start 2.6051 end 8.8100 extent 6.2083 union 6.2083 cpu 6.2083 n 1
+  IntegrateVelocity            start 8.8108 end 8.8229 extent 0.0114 union 0.0114 cpu 0.0114 n 1
+  SolvePositionConstraints     start 8.8251 end 9.8473 extent 1.0468 union 1.0468 cpu 1.0468 n 1
+  DetermineActiveConstraints   start 0.0556 end 0.0562 extent 0.0006 union 0.0006 cpu 0.0006 n 1
+  BuildIslandsFromConstraints  start 0.0771 end 0.0777 extent 0.0005 union 0.0005 cpu 0.0005 n 1
+  SetupVelocityConstraints     start 0.0765 end 0.0771 extent 0.0005 union 0.0005 cpu 0.0005 n 1
+  ContactRemovedCallbacks      start 9.8473 end 9.8500 extent 0.0024 union 0.0024 cpu 0.0024 n 1
+  UpdateBroadPhaseFinalize     start 2.5903 end 2.5904 extent 0.0001 union 0.0001 cpu 0.0001 n 1
+  SoftBodyPrepare              start 9.8500 end 9.8505 extent 0.0005 union 0.0005 cpu 0.0005 n 1
+  ResolveCCDContacts           start 8.8244 end 8.8251 extent 0.0006 union 0.0006 cpu 0.0006 n 1
+  Build Jobs                   start 0.0020 end 0.0053 extent 0.0034 union 0.0034 cpu 0.0034 n 1
+  Island                       start 2.6056 end 9.8470 extent 7.2141 union 0.5368 cpu 0.5368 n 2
+  island_big (sort+split, one thread) 0.5368 [0.5310-0.5523] K=6 (r 3.96 / i 2.26 / s 0.82 %); sort 0.3956 split 0.1398
+  SolveVelocity extent - island = parallel velocity solve 5.6653 [5.5937-5.7366] K=6 (r 2.52 / i 1.66 / s 0.53 %)
+  serial remainder (Update - FC - SV - SP extents) 0.1143 [0.1091-0.1210] K=6 (r 10.43 / i 3.55 / s 1.90 %); serial chain incl. island 0.6476 [0.6444-0.6686] K=6 (r 3.74 / i 2.39 / s 0.87 %)
+  WaitingForBatch [100,500): sum over threads 0.0002 [0.0001-0.0002] K=6 (r 29.45 / i 3.84 / s 5.86 %) ms/frame; max thread 0.0002; min thread 0.0002; mean of the W-1 largest 0.0000; episodes/frame 1.0
+
+## Jolt j56p W8: K=6 processes x 4 dump frames (100/200/300/400), per-process mean over the frames, cell median
+  harness frame mean [100,500) 2.6397 [2.5315-2.6565] K=6 (r 4.73 / i 0.74 / s 0.91 %); the dump frames 2.6375 [2.5205-2.7196] K=6 (r 7.55 / i 2.97 / s 1.41 %); Update scope 2.6376 [2.5202-2.7194] K=6 (r 7.55 / i 2.96 / s 1.41 %)
+  ApplyGravity                 start 0.0086 end 0.0169 extent 0.0083 union 0.0083 cpu 0.0277 n 6
+  UpdateBroadPhasePrepare      start 0.0061 end 0.0702 extent 0.0642 union 0.0642 cpu 0.0642 n 1
+  FindCollisions               start 0.0177 end 0.7422 extent 0.7236 union 0.7236 cpu 5.7162 n 8
+  FinalizeIslands              start 0.7420 end 0.7577 extent 0.0159 union 0.0159 cpu 0.0159 n 1
+  SolveVelocityConstraints     start 0.7595 end 2.3889 extent 1.6318 union 1.6318 cpu 13.0439 n 8
+  IntegrateVelocity            start 2.3898 end 2.3952 extent 0.0053 union 0.0053 cpu 0.0279 n 8
+  SolvePositionConstraints     start 2.3973 end 2.6304 extent 0.2275 union 0.2275 cpu 1.3299 n 8
+  DetermineActiveConstraints   start 0.0160 end 0.0186 extent 0.0025 union 0.0025 cpu 0.0025 n 1
+  BuildIslandsFromConstraints  start 0.0165 end 0.0170 extent 0.0005 union 0.0005 cpu 0.0005 n 1
+  SetupVelocityConstraints     start 0.0169 end 0.0171 extent 0.0002 union 0.0002 cpu 0.0002 n 1
+  ContactRemovedCallbacks      start 2.3957 end 2.3995 extent 0.0036 union 0.0036 cpu 0.0036 n 1
+  UpdateBroadPhaseFinalize     start 0.7415 end 0.7416 extent 0.0001 union 0.0001 cpu 0.0001 n 1
+  SoftBodyPrepare              start 2.6316 end 2.6319 extent 0.0002 union 0.0002 cpu 0.0002 n 1
+  ResolveCCDContacts           start 2.3965 end 2.3997 extent 0.0026 union 0.0026 cpu 0.0026 n 1
+  Build Jobs                   start 0.0018 end 0.0191 extent 0.0173 union 0.0173 cpu 0.0173 n 1
+  Island                       start 0.7596 end 2.4047 extent 1.6470 union 0.5783 cpu 0.5783 n 2
+  island_big (sort+split, one thread) 0.5782 [0.5728-0.6375] K=6 (r 11.18 / i 6.96 / s 2.60 %); sort 0.4220 split 0.1515
+  SolveVelocity extent - island = parallel velocity solve 1.0536 [1.0393-1.0734] K=6 (r 3.23 / i 1.42 / s 0.60 %)
+  serial remainder (Update - FC - SV - SP extents) 0.0511 [0.0497-0.0520] K=6 (r 4.58 / i 2.55 / s 0.92 %); serial chain incl. island 0.6296 [0.6225-0.6879] K=6 (r 10.39 / i 6.27 / s 2.38 %)
+  WaitingForBatch [100,500): sum over threads 5.2352 [5.2078-5.2494] K=6 (r 0.80 / i 0.46 / s 0.16 %) ms/frame; max thread 0.7365; min thread 0.1494; mean of the W-1 largest 0.7265; episodes/frame 1373.0
+
+## Jolt j56p W16: K=6 processes x 4 dump frames (100/200/300/400), per-process mean over the frames, cell median
+  harness frame mean [100,500) 2.4802 [2.3928-2.4889] K=6 (r 3.88 / i 2.32 / s 0.88 %); the dump frames 2.4682 [2.3906-2.5795] K=6 (r 7.65 / i 1.28 / s 1.28 %); Update scope 2.4677 [2.3906-2.5795] K=6 (r 7.65 / i 1.28 / s 1.28 %)
+  ApplyGravity                 start 0.0099 end 0.0252 extent 0.0154 union 0.0096 cpu 0.0313 n 14
+  UpdateBroadPhasePrepare      start 0.0064 end 0.0842 extent 0.0778 union 0.0778 cpu 0.0778 n 1
+  FindCollisions               start 0.0332 end 0.6020 extent 0.5688 union 0.5688 cpu 8.7843 n 16
+  FinalizeIslands              start 0.6016 end 0.6237 extent 0.0233 union 0.0233 cpu 0.0233 n 1
+  SolveVelocityConstraints     start 0.6257 end 2.2327 extent 1.6125 union 1.6125 cpu 25.7634 n 16
+  IntegrateVelocity            start 2.2342 end 2.2421 extent 0.0090 union 0.0089 cpu 0.0344 n 16
+  SolvePositionConstraints     start 2.2449 end 2.4596 extent 0.2200 union 0.2200 cpu 2.3253 n 16
+  DetermineActiveConstraints   start 0.0265 end 0.0272 extent 0.0008 union 0.0008 cpu 0.0008 n 1
+  BuildIslandsFromConstraints  start 0.0276 end 0.0278 extent 0.0003 union 0.0003 cpu 0.0003 n 1
+  SetupVelocityConstraints     start 0.0311 end 0.0313 extent 0.0002 union 0.0002 cpu 0.0002 n 1
+  ContactRemovedCallbacks      start 2.2429 end 2.2492 extent 0.0068 union 0.0068 cpu 0.0068 n 1
+  UpdateBroadPhaseFinalize     start 0.5987 end 0.5988 extent 0.0001 union 0.0001 cpu 0.0001 n 1
+  SoftBodyPrepare              start 2.4609 end 2.4611 extent 0.0002 union 0.0002 cpu 0.0002 n 1
+  ResolveCCDContacts           start 2.2437 end 2.2511 extent 0.0076 union 0.0076 cpu 0.0076 n 1
+  Build Jobs                   start 0.0020 end 0.0436 extent 0.0416 union 0.0416 cpu 0.0416 n 1
+  Island                       start 0.6259 end 2.2528 extent 1.6355 union 0.7045 cpu 0.7045 n 2
+  island_big (sort+split, one thread) 0.7045 [0.6934-0.7444] K=6 (r 7.23 / i 3.42 / s 1.48 %); sort 0.5148 split 0.1858
+  SolveVelocity extent - island = parallel velocity solve 0.9142 [0.8981-0.9486] K=6 (r 5.53 / i 0.55 / s 0.95 %)
+  serial remainder (Update - FC - SV - SP extents) 0.0798 [0.0754-0.0856] K=6 (r 12.80 / i 5.75 / s 2.41 %); serial chain incl. island 0.7858 [0.7693-0.8300] K=6 (r 7.73 / i 3.41 / s 1.54 %)
+  WaitingForBatch [100,500): sum over threads 14.4639 [14.3655-14.6217] K=6 (r 1.77 / i 0.65 / s 0.33 %) ms/frame; max thread 0.9705; min thread 0.2428; mean of the W-1 largest 0.9480; episodes/frame 2829.7

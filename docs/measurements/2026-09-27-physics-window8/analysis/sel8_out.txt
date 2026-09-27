@@ -1,0 +1,5 @@
+processes (non-warm-up): 339 slots: 327 used: 337 dropped slots: 0
+validity problems: 0
+unclean processes: 2
+   ('W8S-A', 1, 2, 'H-jolt56', 8, 'original', ['witness 3.29'])
+   ('micro', 0, 2, 'omega-worker', 0, 'original', ['witness 3.62'])

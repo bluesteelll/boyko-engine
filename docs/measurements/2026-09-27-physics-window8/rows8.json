@@ -1,0 +1,1647 @@
+{
+ "window": "physics window 8 (2026-09-27)",
+ "protocol": {
+  "k_per_cell": 6,
+  "passes": 2,
+  "rounds_per_pass": 3,
+  "order": "pass 0: W ascending, inside a W group row by row (this file's order), each row's binaries in order; pass 1: the whole list reversed; one untimed warm-up per pass",
+  "receipt_s_between_processes": 5.0,
+  "receipt_s_before_pass": 10.0,
+  "busy_pct_limit": 5.0,
+  "others_busy_pct_limit": 2.0,
+  "rerun_once_at_end_of_pass": "receipt before/after > 5 %, OR the during-process witness others_busy_pct > 2 % (window 7 FOLLOW-UP 8; design 01-DESIGN.md \u00a77 \"the witness is gated\"), OR invalid; a slot whose re-run is also hot is dropped by the reduction",
+  "void_pass_on_build_process": true,
+  "placement": "P-none",
+  "idle_rule": "tools/wait_idle8.ps1 (window 7 wait_idle7.ps1 + the window-8 exe names): 0 build procs AND 0 procs under D:/wt/_targets or D:/wt/mq-* on 3 consecutive 60-s polls, 10-s cpu < 5 %; up to 30 polls per wait; a timeout STOPS the window (exit 3)",
+  "hard_stop": "--cutoff HH:MM (no process starts whose estimated end passes it); the STOP flag file win8/STOP",
+  "windowed_hang_s": 300,
+  "dm1": "ABBA per (path, RES); noise band O3 = max(|A1-A2|, |B1-B2|); a clamped RES is \"not measured\" (the harness asserts the client area after the run)"
+ },
+ "binaries": {
+  "instr": {
+   "exe": "bin/runner_226bd99e.exe",
+   "commit": "226bd99efba61c73886826eee4ab977af551bc23",
+   "kind": "runner",
+   "what": "u/phys-w8s commit (1): the W8S instrument (armed-only) + omega_b bench; jolt_parity_pyramid, --profile parity"
+  },
+  "omega": {
+   "exe": "bin/omega_b_region_226bd99e.exe",
+   "commit": "226bd99efba61c73886826eee4ab977af551bc23",
+   "kind": "micro",
+   "what": "omega_b_region bench at the same commit, --profile parity"
+  },
+  "j56": {
+   "exe": "D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe",
+   "commit": "Jolt v5.6.0 (wt-v5.6.0-parity, repository patch)",
+   "kind": "jolt",
+   "what": "window 7's j56 (P0 Distribution build), run in place"
+  },
+  "j56p": {
+   "exe": "bin/jolt56prof8/PerformanceTest.exe",
+   "commit": "Jolt v5.6.0 build copy + tools/patch_jolt_w8.py",
+   "kind": "joltprof",
+   "what": "window 7's j56p recipe (PROFILER_IN_DISTRIBUTION=ON) on a build copy with the lighter profile + the WaitingForBatch per-thread counter (-wfb)"
+  },
+  "dmA": {
+   "exe": "bin/dm1_A.exe",
+   "commit": "cad5439b61ba6f07739523901aab90edf7079433",
+   "kind": "dm1",
+   "what": "DM1 A = trunk-sync merge cad5439b (host-visible table)"
+  },
+  "dmB": {
+   "exe": "bin/dm1_B.exe",
+   "commit": "97ee830f754e008032992fcd8a928cd29c04936f",
+   "kind": "dm1",
+   "what": "DM1 B = C6 97ee830f (device-local table)"
+  }
+ },
+ "blocks": [
+  {
+   "name": "W8S-A",
+   "item": "W8S",
+   "priority": 1,
+   "warmup": [
+    "J-T",
+    "instr",
+    8
+   ]
+  },
+  {
+   "name": "W8S-R",
+   "item": "W8S",
+   "priority": 2,
+   "warmup": [
+    "R-J-T",
+    "instr",
+    8
+   ]
+  },
+  {
+   "name": "micro",
+   "item": "W8S",
+   "priority": 3,
+   "warmup": [
+    "omega-worker",
+    "omega",
+    0
+   ]
+  },
+  {
+   "name": "DM1",
+   "item": "DM1",
+   "priority": 4,
+   "warmup": [
+    "dm-vb-1920x1080-idle",
+    "dmA",
+    0
+   ],
+   "passes": 1,
+   "rounds": 1,
+   "order": [
+    [
+     "dm-vb-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmA",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-edit100",
+     "dmA",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-edit100",
+     "dmB",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-edit100",
+     "dmB",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-edit100",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-grow150",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-grow150",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-grow150",
+     "dmB",
+     0
+    ]
+   ]
+  },
+  {
+   "name": "P-jolt56-prof",
+   "item": "W8S",
+   "priority": 5,
+   "warmup": [
+    "P-jolt56-prof",
+    "j56p",
+    8
+   ]
+  }
+ ],
+ "rows": [
+  {
+   "id": "J-T",
+   "blocks": [
+    "W8S-A"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    1,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree"
+  },
+  {
+   "id": "H-jolt56",
+   "blocks": [
+    "W8S-A"
+   ],
+   "kind": "jolt",
+   "binaries": [
+    "j56"
+   ],
+   "args": [
+    "-s=Pyramid",
+    "-q=Discrete",
+    "-f"
+   ],
+   "workers": [
+    1,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": null,
+   "broadphase": null,
+   "jolt_hash": "0xb8522b4e3fc62cfe"
+  },
+  {
+   "id": "J-T-a",
+   "blocks": [
+    "W8S-A"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    1,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JT500",
+   "broadphase": "Tree"
+  },
+  {
+   "id": "J-T-off",
+   "blocks": [
+    "W8S-A"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--contact-reuse",
+    "off"
+   ],
+   "workers": [
+    1,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JToff500",
+   "broadphase": "Tree"
+  },
+  {
+   "id": "J-T-off-a",
+   "blocks": [
+    "W8S-A"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--contact-reuse",
+    "off"
+   ],
+   "workers": [
+    1,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JToff500",
+   "broadphase": "Tree"
+  },
+  {
+   "id": "J-A",
+   "blocks": [
+    "W8S-A"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a"
+   ],
+   "workers": [
+    1,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JA500",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "J-A-a",
+   "blocks": [
+    "W8S-A"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a"
+   ],
+   "workers": [
+    1,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JA500",
+   "broadphase": "AllPairs"
+  },
+  {
+   "id": "J-Son",
+   "blocks": [
+    "W8S-A"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--sleeping",
+    "on"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JSon500",
+   "broadphase": "AllPairs",
+   "note": "amendment 4: the disarmed twin of J-Son-a"
+  },
+  {
+   "id": "J-Son-a",
+   "blocks": [
+    "W8S-A"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--sleeping",
+    "on"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JSon500",
+   "broadphase": "AllPairs",
+   "note": "spec W8; W1 added by amendment 4 for D(W)"
+  },
+  {
+   "id": "R-J-T",
+   "blocks": [
+    "W8S-R"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "note": "the ladder/rung reference (J-T)"
+  },
+  {
+   "id": "ladder8-F0.5",
+   "blocks": [
+    "W8S-R"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "0.5",
+    "--canary-ref-ns",
+    "60000"
+   ],
+   "workers": [
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "canary": true
+  },
+  {
+   "id": "ladder8-F1",
+   "blocks": [
+    "W8S-R"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "1",
+    "--canary-ref-ns",
+    "60000"
+   ],
+   "workers": [
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "canary": true
+  },
+  {
+   "id": "ladder8-F1.5",
+   "blocks": [
+    "W8S-R"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "1.5",
+    "--canary-ref-ns",
+    "60000"
+   ],
+   "workers": [
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "canary": true
+  },
+  {
+   "id": "ladder8-F2",
+   "blocks": [
+    "W8S-R"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "2",
+    "--canary-ref-ns",
+    "60000"
+   ],
+   "workers": [
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "canary": true
+  },
+  {
+   "id": "ladder16-F0.5",
+   "blocks": [
+    "W8S-R"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "0.5",
+    "--canary-ref-ns",
+    "105000"
+   ],
+   "workers": [
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "canary": true
+  },
+  {
+   "id": "ladder16-F1",
+   "blocks": [
+    "W8S-R"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "1",
+    "--canary-ref-ns",
+    "105000"
+   ],
+   "workers": [
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "canary": true
+  },
+  {
+   "id": "ladder16-F1.5",
+   "blocks": [
+    "W8S-R"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "1.5",
+    "--canary-ref-ns",
+    "105000"
+   ],
+   "workers": [
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "canary": true
+  },
+  {
+   "id": "ladder16-F2",
+   "blocks": [
+    "W8S-R"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "2",
+    "--canary-ref-ns",
+    "105000"
+   ],
+   "workers": [
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "canary": true
+  },
+  {
+   "id": "rung",
+   "blocks": [
+    "W8S-R"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "1",
+    "--canary-ref-ns",
+    "60000"
+   ],
+   "workers": [
+    1,
+    2,
+    4
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "canary": true,
+   "note": "Q8"
+  },
+  {
+   "id": "R-J-T-a",
+   "blocks": [
+    "W8S-R"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "note": "the zone canary reference (J-T-a)"
+  },
+  {
+   "id": "zone-N30000",
+   "blocks": [
+    "W8S-R"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-zone",
+    "phys_solve_build",
+    "--canary-ns",
+    "30000"
+   ],
+   "workers": [
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "zone_canary": [
+    "phys_solve_build",
+    30000
+   ]
+  },
+  {
+   "id": "zone-N60000",
+   "blocks": [
+    "W8S-R"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "instr"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-zone",
+    "phys_solve_build",
+    "--canary-ns",
+    "60000"
+   ],
+   "workers": [
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "zone_canary": [
+    "phys_solve_build",
+    60000
+   ]
+  },
+  {
+   "id": "omega-b-s36-worker",
+   "blocks": [
+    "micro"
+   ],
+   "kind": "micro",
+   "binaries": [
+    "omega"
+   ],
+   "args": [
+    "--bench",
+    "--mode",
+    "omega-b",
+    "--participants",
+    "2,4,8,16",
+    "--stages",
+    "36",
+    "--route",
+    "worker"
+   ],
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "expect_summaries": 4,
+   "expect_bench": "omega_b",
+   "expect_route": "worker",
+   "expect_stages": 36
+  },
+  {
+   "id": "omega-b-s36-external",
+   "blocks": [
+    "micro"
+   ],
+   "kind": "micro",
+   "binaries": [
+    "omega"
+   ],
+   "args": [
+    "--bench",
+    "--mode",
+    "omega-b",
+    "--participants",
+    "2,4,8,16",
+    "--stages",
+    "36",
+    "--route",
+    "external"
+   ],
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "expect_summaries": 4,
+   "expect_bench": "omega_b",
+   "expect_route": "external",
+   "expect_stages": 36
+  },
+  {
+   "id": "omega-b-s72-worker",
+   "blocks": [
+    "micro"
+   ],
+   "kind": "micro",
+   "binaries": [
+    "omega"
+   ],
+   "args": [
+    "--bench",
+    "--mode",
+    "omega-b",
+    "--participants",
+    "2,4,8,16",
+    "--stages",
+    "72",
+    "--route",
+    "worker"
+   ],
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "expect_summaries": 4,
+   "expect_bench": "omega_b",
+   "expect_route": "worker",
+   "expect_stages": 72
+  },
+  {
+   "id": "omega-b-s72-external",
+   "blocks": [
+    "micro"
+   ],
+   "kind": "micro",
+   "binaries": [
+    "omega"
+   ],
+   "args": [
+    "--bench",
+    "--mode",
+    "omega-b",
+    "--participants",
+    "2,4,8,16",
+    "--stages",
+    "72",
+    "--route",
+    "external"
+   ],
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "expect_summaries": 4,
+   "expect_bench": "omega_b",
+   "expect_route": "external",
+   "expect_stages": 72
+  },
+  {
+   "id": "omega-worker",
+   "blocks": [
+    "micro"
+   ],
+   "kind": "micro",
+   "binaries": [
+    "omega"
+   ],
+   "args": [
+    "--bench",
+    "--mode",
+    "omega",
+    "--workers",
+    "8,16",
+    "--gap-us",
+    "0,5,20,80",
+    "--route",
+    "worker"
+   ],
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "expect_summaries": 8,
+   "expect_bench": "omega",
+   "expect_route": "worker",
+   "expect_stages": null
+  },
+  {
+   "id": "omega-external",
+   "blocks": [
+    "micro"
+   ],
+   "kind": "micro",
+   "binaries": [
+    "omega"
+   ],
+   "args": [
+    "--bench",
+    "--mode",
+    "omega",
+    "--workers",
+    "8,16",
+    "--gap-us",
+    "0,5,20,80",
+    "--route",
+    "external"
+   ],
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "expect_summaries": 8,
+   "expect_bench": "omega",
+   "expect_route": "external",
+   "expect_stages": null
+  },
+  {
+   "id": "dm-vb-1920x1080-idle",
+   "blocks": [
+    "DM1"
+   ],
+   "kind": "dm1",
+   "binaries": [
+    "dmA",
+    "dmB"
+   ],
+   "args": [
+    "dm1_material_table_timing",
+    "--exact",
+    "--ignored",
+    "--test-threads=1",
+    "--nocapture"
+   ],
+   "env": {
+    "BOYKO_DISABLE_VALIDATION": "1",
+    "BOYKO_VB_ZONE": "1",
+    "BOYKO_VB_BENCH_FRAMES": "220",
+    "BOYKO_DM1_PATH": "vb",
+    "BOYKO_DM1_RES": "1920x1080",
+    "BOYKO_DM1_EDIT_ROWS": "0"
+   },
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "res": "1920x1080",
+   "path": "vb",
+   "edit_rows": 0,
+   "grow_at": null
+  },
+  {
+   "id": "dm-deferred-1920x1080-idle",
+   "blocks": [
+    "DM1"
+   ],
+   "kind": "dm1",
+   "binaries": [
+    "dmA",
+    "dmB"
+   ],
+   "args": [
+    "dm1_material_table_timing",
+    "--exact",
+    "--ignored",
+    "--test-threads=1",
+    "--nocapture"
+   ],
+   "env": {
+    "BOYKO_DISABLE_VALIDATION": "1",
+    "BOYKO_VB_ZONE": "1",
+    "BOYKO_VB_BENCH_FRAMES": "220",
+    "BOYKO_DM1_PATH": "deferred",
+    "BOYKO_DM1_RES": "1920x1080",
+    "BOYKO_DM1_EDIT_ROWS": "0"
+   },
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "res": "1920x1080",
+   "path": "deferred",
+   "edit_rows": 0,
+   "grow_at": null
+  },
+  {
+   "id": "dm-vb-1920x1080-edit100",
+   "blocks": [
+    "DM1"
+   ],
+   "kind": "dm1",
+   "binaries": [
+    "dmA",
+    "dmB"
+   ],
+   "args": [
+    "dm1_material_table_timing",
+    "--exact",
+    "--ignored",
+    "--test-threads=1",
+    "--nocapture"
+   ],
+   "env": {
+    "BOYKO_DISABLE_VALIDATION": "1",
+    "BOYKO_VB_ZONE": "1",
+    "BOYKO_VB_BENCH_FRAMES": "220",
+    "BOYKO_DM1_PATH": "vb",
+    "BOYKO_DM1_RES": "1920x1080",
+    "BOYKO_DM1_EDIT_ROWS": "100"
+   },
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "res": "1920x1080",
+   "path": "vb",
+   "edit_rows": 100,
+   "grow_at": null
+  },
+  {
+   "id": "dm-deferred-1920x1080-edit100",
+   "blocks": [
+    "DM1"
+   ],
+   "kind": "dm1",
+   "binaries": [
+    "dmA",
+    "dmB"
+   ],
+   "args": [
+    "dm1_material_table_timing",
+    "--exact",
+    "--ignored",
+    "--test-threads=1",
+    "--nocapture"
+   ],
+   "env": {
+    "BOYKO_DISABLE_VALIDATION": "1",
+    "BOYKO_VB_ZONE": "1",
+    "BOYKO_VB_BENCH_FRAMES": "220",
+    "BOYKO_DM1_PATH": "deferred",
+    "BOYKO_DM1_RES": "1920x1080",
+    "BOYKO_DM1_EDIT_ROWS": "100"
+   },
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "res": "1920x1080",
+   "path": "deferred",
+   "edit_rows": 100,
+   "grow_at": null
+  },
+  {
+   "id": "dm-vb-1920x1080-grow150",
+   "blocks": [
+    "DM1"
+   ],
+   "kind": "dm1",
+   "binaries": [
+    "dmB"
+   ],
+   "args": [
+    "dm1_material_table_timing",
+    "--exact",
+    "--ignored",
+    "--test-threads=1",
+    "--nocapture"
+   ],
+   "env": {
+    "BOYKO_DISABLE_VALIDATION": "1",
+    "BOYKO_VB_ZONE": "1",
+    "BOYKO_VB_BENCH_FRAMES": "220",
+    "BOYKO_DM1_PATH": "vb",
+    "BOYKO_DM1_RES": "1920x1080",
+    "BOYKO_DM1_EDIT_ROWS": "0",
+    "BOYKO_DM1_GROW_AT": "150"
+   },
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "res": "1920x1080",
+   "path": "vb",
+   "edit_rows": 0,
+   "grow_at": 150
+  },
+  {
+   "id": "P-jolt56-prof",
+   "blocks": [
+    "P-jolt56-prof"
+   ],
+   "kind": "joltprof",
+   "binaries": [
+    "j56p"
+   ],
+   "args": [
+    "-s=Pyramid",
+    "-q=Discrete",
+    "-f",
+    "-p",
+    "-wfb"
+   ],
+   "workers": [
+    1,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": null,
+   "broadphase": null,
+   "jolt_hash": "0xb8522b4e3fc62cfe",
+   "profile_frames": [
+    100,
+    200,
+    300,
+    400
+   ],
+   "note": "job walls per frame + the lighter profile + the WaitingForBatch counter (wfb_<tag>.csv), frames 100-400"
+  }
+ ],
+ "dm1_dropped": [
+  {
+   "row": "dm-vb-2560x1440-idle",
+   "why": "the display cannot host a 2560x1440 client area (see gate/dm1_res.json)"
+  },
+  {
+   "row": "dm-vb-3840x2160-idle",
+   "why": "the display cannot host a 3840x2160 client area (see gate/dm1_res.json)"
+  },
+  {
+   "row": "dm-deferred-2560x1440-idle",
+   "why": "the display cannot host a 2560x1440 client area (see gate/dm1_res.json)"
+  },
+  {
+   "row": "dm-deferred-3840x2160-idle",
+   "why": "the display cannot host a 3840x2160 client area (see gate/dm1_res.json)"
+  }
+ ],
+ "excluded": [
+  {
+   "block": "S4-AB",
+   "why": "S4 (commit (4) of u/phys-w8s) is not built yet; it gets its own window"
+  }
+ ]
+}

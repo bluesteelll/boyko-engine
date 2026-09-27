@@ -1,0 +1,10 @@
+omega_b_region: no --bench --mode, so this is the untimed self-check
+  region: 1 participant(s), external route: ok
+  region: 2 participant(s), external route: ok
+  region: 4 participant(s), external route: ok
+  omega: W 2, external route: ok
+  region: 1 participant(s), worker route: ok
+  region: 2 participant(s), worker route: ok
+  region: 4 participant(s), worker route: ok
+  omega: W 2, worker route: ok
+omega_b_region self-check: ok

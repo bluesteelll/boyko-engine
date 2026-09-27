@@ -1,0 +1,7 @@
+warning: crates\reflect_fixture\Cargo.toml: file `D:\wt\_dm1_ab\crates\reflect_fixture\src\bin\reflect_on.rs` found to be present in multiple build targets:
+  * `bin` target `reflect_on`
+  * `bin` target `reflect_off_twin`
+warning: `reflect-fixture` (manifest) generated 1 warning
+   Compiling boyko-render v0.1.0 (D:\wt\_dm1_ab\crates\boyko_render)
+   Compiling boyko-app v0.1.0 (D:\wt\_dm1_ab\crates\boyko_app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.70s
