@@ -177,6 +177,25 @@
 //! armed openings (`ColoredSoftStepSolver::zone_canary_spins`): the span check alone cannot see a
 //! canary that never ran when Z's own cost already exceeds N, which `phys_solve_build`'s does.
 //!
+//! # The query kernel (`--bp-kernel K`)
+//!
+//! Selects the tree broadphase's query kernel inside one binary (lever ruling 2026-09-24,
+//! `docs/physics/perf-campaign/levers/00-RULINGS.md`: "the runner gains `--bp-kernel` … The flag
+//! changes no default and no pose"), so a kernel A/B is timed same-binary. `rowwalk` is the per-row
+//! walk (`QueryKernel::RowWalk`), `leaflist` the per-leaf list (`QueryKernel::LeafList`, the tree's
+//! default); `leaflist-kd` names tree F3's kernel and reports "not in this build" (exit 2) until F3
+//! merges. The value is parsed by name, never by an exhaustive match on `QueryKernel`, so a kernel
+//! the tree gains compiles here until it is named. Unset, the tree's own default stands.
+//!
+//! Refused (exit 2) unless the row's configuration resolves to the tree under `Manual` selection
+//! (`--broadphase tree`), where the kernel would be read: elsewhere the row would carry a kernel
+//! that never ran. With the flag, the run's cumulative `TreeDiag` must name the chosen kernel as the
+//! one that answered its active leaves and never the other (`benches/broadphase.rs`'s
+//! `assert_kernel_receipt` rule, read over the whole run so a step whose rows were all withheld
+//! asleep voids nothing), or the run is void (exit 3). The summary carries `bp_kernel` and the
+//! three leaf receipts (`leaf_list_leaves`, `fallback_leaves`, `row_walk_leaves`) in
+//! `broadphase_tree`; a line prints the kernel and the tree's `TreeDiag` with `{:?}`.
+//!
 //! # The W8S instrument (armed)
 //!
 //! `boyko_physics::profiling`'s module docs carry the whole table. Per armed step the runner
@@ -236,6 +255,9 @@
 //! --canary-ref-ns T
 //! --canary-zone Z              with --canary-ns N and --arm-profiler: zone Z (phys_solve_build
 //! --canary-ns N                or a phys_sb_* sub-zone) spins N ns each armed opening (W8S)
+//! --bp-kernel rowwalk|leaflist|leaflist-kd
+//!                              select the tree query kernel (with --broadphase tree); unset, the
+//!                              tree's default; leaflist-kd is F3's and not in this build
 //! --csv PATH                   the per-step CSV
 //! --pose-out PATH              write the final pose bytes (every dynamic body's full state)
 //! --expect-pose PATH           compare the final pose bytes with a file; exit 4 if they differ
@@ -378,7 +400,7 @@ use boyko_physics::components::{
 use boyko_physics::manifold::BodyIndex;
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::narrowphase::{NP_CHUNKS_PER_LANE, NP_MAX_CHUNKS, NP_MIN_PAIRS_PER_CHUNK};
-use boyko_physics::broadphase_tree::{BroadphaseTree, TreeDiag};
+use boyko_physics::broadphase_tree::{BroadphaseTree, QueryKernel, TreeDiag};
 use boyko_physics::plugin::{PhysicsStageKeys, add_physics_colored_solve, add_physics_systems};
 use boyko_physics::profiling::{
     CANARY_ZONES, COUNTER_ZONE_COUNT, COUNTER_ZONES, HIST_BINS, HIST_COLOR_ZONES, HIST_SLOT_ZONES,
@@ -583,6 +605,8 @@ struct Args {
     canary_zone: Option<String>,
     /// W8S: its busy-wait per armed opening (`--canary-ns`).
     canary_zone_ns: Option<u64>,
+    /// `--bp-kernel`: the tree query kernel; `None` leaves the tree's default.
+    bp_kernel: Option<QueryKernel>,
     csv: Option<PathBuf>,
     pose_out: Option<PathBuf>,
     expect_pose: Option<PathBuf>,
@@ -610,7 +634,7 @@ fn usage_error(msg: &str) -> ExitCode {
          [--broadphase allpairs|tree|grid] [--sleeping [on|off]] [--sleep-skip off|sets] \
          [--threshold T] \
          [--frozen-by K] [--arm-profiler] [--canary-frac F --canary-ref-ns T] \
-         [--canary-zone Z --canary-ns N] [--csv PATH] \
+         [--canary-zone Z --canary-ns N] [--bp-kernel rowwalk|leaflist|leaflist-kd] [--csv PATH] \
          [--pose-out PATH] [--expect-pose PATH] [--label TEXT]"
     );
     ExitCode::from(EXIT_USAGE)
@@ -656,6 +680,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     let mut canary_ref_ns = None;
     let mut canary_zone = None;
     let mut canary_zone_ns = None;
+    let mut bp_kernel = None;
     let mut csv = None;
     let mut pose_out = None;
     let mut expect_pose = None;
@@ -748,6 +773,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
             "--canary-ref-ns" => canary_ref_ns = Some(parse_num::<u64>("--canary-ref-ns", it.next())?),
             "--canary-zone" => canary_zone = Some(it.next().ok_or("--canary-zone needs a zone name")?),
             "--canary-ns" => canary_zone_ns = Some(parse_num::<u64>("--canary-ns", it.next())?),
+            "--bp-kernel" => bp_kernel = Some(parse_bp_kernel(it.next())?),
             "--csv" => csv = Some(PathBuf::from(it.next().ok_or("--csv needs a path")?)),
             "--pose-out" => pose_out = Some(PathBuf::from(it.next().ok_or("--pose-out needs a path")?)),
             "--expect-pose" => {
@@ -781,6 +807,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
         canary_ref_ns,
         canary_zone,
         canary_zone_ns,
+        bp_kernel,
         csv,
         pose_out,
         expect_pose,
@@ -789,6 +816,22 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     };
     validate(&args)?;
     Ok(Mode::Run(Box::new(args)))
+}
+
+/// `--bp-kernel`'s value, by name (module docs, "The query kernel"). A string match with an error
+/// arm, never an exhaustive match on `QueryKernel` (ruling Q10 of the W8S lane): a kernel the tree
+/// gains compiles here and stays unnamed until this match names it.
+fn parse_bp_kernel(value: Option<String>) -> Result<QueryKernel, String> {
+    match value.as_deref() {
+        Some("rowwalk") => Ok(QueryKernel::RowWalk),
+        Some("leaflist") => Ok(QueryKernel::LeafList),
+        Some("leaflist-kd") => Err(
+            "--bp-kernel leaflist-kd: not in this build (tree F3's kernel; it is named here when \
+             F3 merges)"
+                .into(),
+        ),
+        other => Err(format!("--bp-kernel: expected rowwalk|leaflist|leaflist-kd, got {other:?}")),
+    }
 }
 
 /// Refuses every combination a row could be mislabelled by.
@@ -866,6 +909,20 @@ fn validate(a: &Args) -> Result<(), String> {
             }
         }
         _ => return Err("--canary-frac and --canary-ref-ns go together".into()),
+    }
+    if let Some(kernel) = a.bp_kernel {
+        // The configuration the row will run, resolved as `build` resolves it.
+        let mut cfg = PhysicsConfig::default();
+        configure(&mut cfg, a);
+        if cfg.broadphase != BroadphaseKind::Tree
+            || cfg.broadphase_select != BroadphaseSelectMode::Manual
+        {
+            return Err(format!(
+                "--bp-kernel {kernel:?} needs the tree broadphase under Manual selection \
+                 (--broadphase tree); this row resolves to {:?} / {:?}, so the kernel would never run",
+                cfg.broadphase, cfg.broadphase_select
+            ));
+        }
     }
     match (&a.canary_zone, a.canary_zone_ns) {
         (None, None) => {}
@@ -1839,6 +1896,7 @@ fn self_check() -> ExitCode {
         canary_ref_ns: None,
         canary_zone: None,
         canary_zone_ns: None,
+        bp_kernel: None,
         csv: None,
         pose_out: None,
         expect_pose: None,
@@ -1878,6 +1936,10 @@ fn run(args: &Args) -> ExitCode {
             rig.world.resource_mut::<ColoredSoftStepSolver>().set_zone_canary(zone, ns),
             "invariant: validate() admitted only a zone of CANARY_ZONES"
         );
+    }
+    // `--bp-kernel`: the tree is inserted at plugin setup, so it is here before step 0.
+    if let Some(kernel) = args.bp_kernel {
+        rig.world.resource_mut::<BroadphaseTree>().set_query_kernel(kernel);
     }
     let (substeps, relax, sleeping, sleep_skip, parallel_np, contact_reuse, parallel_solve, simd_solve, config_json) = {
         let cfg = rig.world.resource::<PhysicsConfig>();
@@ -2150,6 +2212,25 @@ fn run(args: &Args) -> ExitCode {
             )
         });
     }
+    // `--bp-kernel`: the run's cumulative receipt names the chosen kernel as the one that answered
+    // its active leaves, and never the other (`benches/broadphase.rs`'s `assert_kernel_receipt`
+    // rule), over the whole run (module docs, "The query kernel").
+    if let Some(kernel) = args.bp_kernel {
+        let d = rig.world.resource::<BroadphaseTree>().diag();
+        let ok = if kernel == QueryKernel::RowWalk {
+            d.row_walk_leaves > 0 && d.leaf_list_leaves == 0 && d.fallback_leaves == 0
+        } else if kernel == QueryKernel::LeafList {
+            d.leaf_list_leaves + d.fallback_leaves > 0 && d.row_walk_leaves == 0
+        } else {
+            false
+        };
+        if !ok {
+            void_steps += 1;
+            first_void.get_or_insert_with(|| {
+                format!("--bp-kernel {kernel:?}: the tree's leaf receipt does not name it: {d:?}")
+            });
+        }
+    }
     // W8S: the in-zone canary spun once per armed opening of its zone, and at least once.
     if let Some((zone, _)) = zone_canary {
         let spins = rig.world.resource::<ColoredSoftStepSolver>().zone_canary_spins();
@@ -2272,7 +2353,8 @@ fn run(args: &Args) -> ExitCode {
     let bp_json = format!(
         "{{\"static_rebuilds\":{},\"sleeper_rebuilds\":{},\"evictions\":{},\"translations\":{},\
          \"patches\":{},\"hint_candidates\":{},\"wide_rows\":{},\"excluded_rows\":{},\
-         \"locator_resets\":{},\"members\":{}}}",
+         \"locator_resets\":{},\"members\":{},\"leaf_list_leaves\":{},\"fallback_leaves\":{},\
+         \"row_walk_leaves\":{},\"bp_kernel\":{}}}",
         bp.static_rebuilds,
         bp.sleeper_rebuilds,
         bp.evictions,
@@ -2283,6 +2365,10 @@ fn run(args: &Args) -> ExitCode {
         bp.excluded_rows,
         bp.locator_resets,
         bp.members,
+        bp.leaf_list_leaves,
+        bp.fallback_leaves,
+        bp.row_walk_leaves,
+        json_str(&format!("{:?}", rig.world.resource::<BroadphaseTree>().query_kernel())),
     );
     let census_json = fallback_census_json();
     let w8s_json = if armed { w8s.json(window, tpn) } else { "null".to_owned() };
@@ -2331,6 +2417,12 @@ fn run(args: &Args) -> ExitCode {
             rig.world.resource::<BroadphaseTree>().sleeper_members()
         );
     }
+    if args.bp_kernel.is_some() {
+        println!(
+            "bp kernel {:?} (--bp-kernel): tree diag {bp:?}",
+            rig.world.resource::<BroadphaseTree>().query_kernel()
+        );
+    }
     if let Some(why) = &first_void {
         println!("VOID: {why}");
     }
@@ -2348,7 +2440,7 @@ fn run(args: &Args) -> ExitCode {
          \"void_steps\":{void_steps},\"first_void\":{},\"drops_total\":{},\
          \"disarmed_ring_traffic\":{},\"ticks_per_ns\":{},\"waves_total\":{waves_total},\
          \"first_frozen_step\":{},\"frozen_by\":{},\"awake_max_from_frozen_by\":{},\
-         \"broadphase_tree\":{bp_json},\"fallback_census\":{census_json},\
+         \"broadphase_tree\":{bp_json},\"bp_kernel_flag\":{},\"fallback_census\":{census_json},\
          \"pair_classes\":{classes_json},\"w8s\":{w8s_json},\
          \"canary_zone\":{},\"canary_zone_ns\":{},\"route_note\":{},\
          \"host\":{{\"logical_cores\":{logical_cores}}},\
@@ -2395,6 +2487,7 @@ fn run(args: &Args) -> ExitCode {
         first_frozen_step.map_or_else(|| "null".to_owned(), |k| k.to_string()),
         args.frozen_by.map_or_else(|| "null".to_owned(), |k| k.to_string()),
         awake_after.map_or_else(|| "null".to_owned(), |k| k.to_string()),
+        args.bp_kernel.map_or_else(|| "null".to_owned(), |k| json_str(&format!("{k:?}"))),
         args.canary_zone.as_deref().map_or_else(|| "null".to_owned(), json_str),
         args.canary_zone_ns.map_or_else(|| "null".to_owned(), |n| n.to_string()),
         json_str(ROUTE_NOTE),

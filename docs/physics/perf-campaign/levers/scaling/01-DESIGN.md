@@ -879,9 +879,23 @@ applies and the gravity dispatcher exist only inlined into `solve_colored_inner`
 (the sub-zones and the S6 probe), so no symbol-level receipt can isolate them; they are dropped from the codegen claim.
 Their source is unchanged by commit (1).
 
-### 10.2 `--bp-kernel` (commit 2) and 10.3 the CI step (commit 3)
+### 10.2 `--bp-kernel` (commit 2)
 
-*Filled by those commits.*
+The parity runner selects the tree's query kernel inside one binary (lever ruling 2026-09-24,
+`levers/00-RULINGS.md`): `--bp-kernel rowwalk|leaflist`, parsed by name with an error arm
+(ruling Q10), never by an exhaustive match on `QueryKernel`, so the tree lane's `LeafListKd` compiles
+in the runner until it is named; `leaflist-kd` exits 2 "not in this build" until F3 merges. Unset,
+the tree's own default stands. Refused (exit 2) unless the row resolves to the tree under `Manual`
+selection. The receipt is the tree's cumulative `TreeDiag` over the whole run — the chosen kernel
+answered leaves and the other none (`benches/broadphase.rs`'s `assert_kernel_receipt` rule),
+read over the run rather than per step, so a step whose rows were all withheld asleep voids
+nothing (review O6) — or the run is void. The summary carries the kernel and the three leaf
+receipts; the runner prints the kernel and `TreeDiag` with `{:?}`. The API was public already
+(`BroadphaseTree::set_query_kernel`), so nothing in `broadphase_tree/**` changed.
+
+### 10.3 The CI step (commit 3)
+
+*Filled by that commit.*
 
 ### 10.4 S4 (commit 4)
 
