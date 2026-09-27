@@ -1936,6 +1936,34 @@ impl HzbDumpLayout {
     }
 }
 
+/// Dynamic-materials DM1: one frame's material-table upload — the source staging and the copy
+/// regions ([`GBufferScene::material_upload`]).
+#[derive(Clone, Copy)]
+pub struct MaterialUploadScene<'a> {
+    /// The FENCED staging slot the host wrote this frame (`TRANSFER_SRC`, host-coherent): the
+    /// compact edited rows at `[0, k·48)`, or the full image at `[0, capacity·48)`.
+    pub staging: &'a BoundBuffer,
+    /// The copy regions — `src_offset` into [`Self::staging`], `dst_offset` into
+    /// [`GBufferScene::material_table`]. Layout-matched to `VkBufferCopy`, so the recorder passes
+    /// the whole slice to ONE `vkCmdCopyBuffer`. Every region lies inside both buffers (the host's
+    /// contract: the runs are built from rows `< capacity`, the full image is `[0, capacity·48)`).
+    pub regions: &'a [boyko_rhi::BufferCopy],
+}
+
+/// Dynamic-materials DM1: what the recorder DID with this frame's material upload, counted at the
+/// record sites — never derived from [`GBufferScene::material_upload`] (the arming predicate), so
+/// a disagreement between the host's plan and the recorded stream is data, not an assumption
+/// (the [`VbRecordProbe`](super::VbRecordProbe) rule). Read by the host through
+/// [`Renderer::material_upload_probe`](super::Renderer::material_upload_probe) after the frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MaterialUploadProbe {
+    /// `material_upload` passes recorded (their graph barriers emitted): `0` or `1`. A pass
+    /// declared with an empty region list still counts here — the idle-frame gate's signal.
+    pub passes: u32,
+    /// Regions handed to `vkCmdCopyBuffer`.
+    pub regions: u32,
+}
+
 pub struct GBufferScene<'a> {
     /// The mesh-raster graphics pipeline (pass A). Render P5-r0: a 3-MRT G-buffer
     /// PRODUCER — the fronto-parallel quad is drawn into the D32 depth image AND the three
@@ -2147,16 +2175,20 @@ pub struct GBufferScene<'a> {
     /// The sampler the present-blit samples the LIT image with (nearest/clamp for
     /// a 1:1 sample).
     pub present_sampler: &'a VulkanSampler,
-    /// The PBR MVP-2 material table SSBO (`MaterialGpu[]`), host-seeded ONCE before the
-    /// loop. Bound at the marcher vocab set's binding 7 (the marcher fetches `base_color`)
-    /// AND the resolve set's binding 4 (the resolve fetches metallic/roughness/etc.). The
-    /// scene OWNS it; [`GBufferTargets`] borrows it into both sets.
+    /// The PBR MVP-2 material table SSBO (`MaterialGpu[]`). Bound at the marcher vocab set's
+    /// binding 7 (the marcher fetches `base_color`) AND the resolve set's binding 4 (the
+    /// resolve fetches metallic/roughness/etc.), plus every Forward/VB set that shades. The
+    /// production runner's table receives its bytes ONLY through [`Self::material_upload`]'s
+    /// recorded copy (dynamic-materials DM1); a harness that host-seeds its own table passes
+    /// `material_upload: None`. The scene OWNS it; [`GBufferTargets`] borrows it into the sets.
     pub material_table: &'a BoundBuffer,
     /// The Lighting-L0 light table SSBO (`[LightHeaderGpu || GpuLight[]]`, word-indexed;
-    /// `light_table.hlsli`). A DEVICE-LOCAL buffer minted with `TRANSFER_DST | STORAGE`
-    /// usage, bound to the resolve set's binding 6. Seeded ONCE via the fence-waited
-    /// `upload_initial`; re-uploaded on-change via the async recorded copy below (C3 /
-    /// rung L0-r0). The scene OWNS it; [`GBufferTargets`] borrows it into the resolve set.
+    /// `light_table.hlsli`), minted with `TRANSFER_DST | STORAGE` usage and bound to the
+    /// resolve set's binding 6. The production host mints it `HostVisibleCoherent` and seeds it
+    /// once through its mapping (`boyko_app::gpu_scene`) — NOT device-local, whatever older
+    /// notes say; the recorder never relies on its memory kind. Re-uploaded on-change via the
+    /// async recorded copy below (C3 / rung L0-r0). The scene OWNS it; [`GBufferTargets`]
+    /// borrows it into the resolve set.
     pub light_table: &'a BoundBuffer,
     /// The host-coherent STAGING source for the light table (rung L0-r0). On a dirty
     /// frame the recorder copies `light_upload_bytes` from this into `light_table` +
@@ -2170,6 +2202,13 @@ pub struct GBufferScene<'a> {
     /// staging→`light_table` copy + barrier; `false` records NOTHING (idle frame → zero
     /// cost, byte-identical command stream — the rung L0-r0 0%-gate).
     pub light_dirty: bool,
+    /// Dynamic-materials DM1 (design F1/F3): this frame's material-table upload — `Some` only
+    /// on a frame that copies (frame 0, a table grow, the frame after a lost edit, or an edit
+    /// frame). Each declarator then declares `material_table` as its LAST buffer and a
+    /// `material_upload` pass right after `light_upload`; the recorder records its graph
+    /// barriers and ONE multi-region `staging → material_table` copy. `None` declares and records
+    /// NOTHING, so an idle frame's graph and command stream are the pre-DM1 ones.
+    pub material_upload: Option<MaterialUploadScene<'a>>,
     /// The Lighting-L1 clustered froxel light-cull compute pipeline: ONE pipeline per boot,
     /// built from EITHER `cluster_cull.comp` (the base arm) OR `cluster_cull_hier.comp` (the
     /// VB-P1e hierarchical arm). Its layout declares the cull bind-group LAYOUT at `set 0` plus

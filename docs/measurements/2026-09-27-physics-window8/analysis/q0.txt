@@ -1,0 +1,54 @@
+# section 0: receipts and witness over the used set, by block and pass
+W8S-A p0: n 75; witness median 0.27 p90 0.51 max 1.40; receipts median 1.31 max 4.35
+W8S-A p1: n 75; witness median 0.37 p90 0.92 max 1.97; receipts median 1.47 max 4.27
+W8S-R p0: n 57; witness median 0.12 p90 0.57 max 1.20; receipts median 0.90 max 1.93
+W8S-R p1: n 57; witness median 0.19 p90 0.44 max 1.19; receipts median 0.88 max 2.34
+micro p0: n 18; witness median 0.15 p90 0.33 max 0.48; receipts median 0.81 max 1.73
+micro p1: n 18; witness median 0.13 p90 0.48 max 1.90; receipts median 0.77 max 1.59
+DM1 p0: n 19; witness median 0.37 p90 0.52 max 0.56; receipts median 1.55 max 2.62
+P-jolt56-prof p0: n 9; witness median 0.19 p90 0.46 max 0.46; receipts median 0.72 max 1.58
+P-jolt56-prof p1: n 9; witness median 0.30 p90 0.46 max 0.46; receipts median 0.76 max 2.08
+witness top-1 counts over all processes: [('claude.exe', 248), ('steamwebhelper.exe', 22), ('steam.exe', 17), ('explorer.exe', 7), ('AmneziaVPN.exe', 2), ('powershell.exe', 2), ('nvsphelper64.exe', 2), ('sihost.exe', 1)]
+
+# reuse-off bridge and other rows, disarmed wall [0,500) and [100,500), block A
+J-T W1: [0,500) 4.4701 [4.4169-4.6098] K=6 (r 4.32 / i 0.90 / s 0.76 %); [100,500) 4.2515
+J-T W8: [0,500) 2.0357 [1.9872-2.1359] K=6 (r 7.30 / i 6.15 / s 1.78 %); [100,500) 2.0010
+J-T W16: [0,500) 2.2233 [2.2023-2.3364] K=6 (r 6.03 / i 1.06 / s 1.14 %); [100,500) 2.1828
+
+J-T-off W1: [0,500) 6.0984 [6.0427-6.2337] K=6 (r 3.13 / i 0.50 / s 0.55 %); [100,500) 6.1017
+J-T-off W8: [0,500) 2.2239 [2.2157-2.2887] K=6 (r 3.28 / i 1.66 / s 0.70 %); [100,500) 2.2118
+J-T-off W16: [0,500) 2.3828 [2.3673-2.5344] K=6 (r 7.01 / i 2.07 / s 1.38 %); [100,500) 2.3664
+
+J-A W1: [0,500) 16.4875 [16.3866-16.5052] K=6 (r 0.72 / i 0.43 / s 0.16 %); [100,500) 16.2505
+J-A W8: [0,500) 5.5079 [5.4758-5.6823] K=6 (r 3.75 / i 2.64 / s 0.88 %); [100,500) 5.4791
+J-A W16: [0,500) 5.4565 [5.3517-5.5375] K=6 (r 3.41 / i 1.55 / s 0.64 %); [100,500) 5.4153
+
+J-Son W1: [0,500) 10.0741 [10.0562-10.1334] K=6 (r 0.77 / i 0.49 / s 0.17 %); [100,500) 8.2304
+J-Son W8: [0,500) 3.9516 [3.9285-4.1136] K=6 (r 4.68 / i 0.99 / s 0.90 %); [100,500) 3.5258
+
+reuse on vs off (J-T/J-T-off) W1: 0.7330 (-26.70 %, d -1.6283) Y/Y/Y bars r 10.66 / i 2.05 / s 1.88 %
+reuse on vs off (J-T/J-T-off) W8: 0.9154 (-8.46 %, d -0.1882) n/n/Y bars r 16.02 / i 12.74 / s 3.83 %
+reuse on vs off (J-T/J-T-off) W16: 0.9331 (-6.69 %, d -0.1595) n/Y/Y bars r 18.50 / i 4.65 / s 3.58 %
+
+# armed vs disarmed per row and W (A/A1-style perturbation), [0,500)
+J-T-a/J-T W1: 1.0100 (+1.00 %, d +0.0446) n/n/n bars r 13.46 / i 3.53 / s 2.46 %
+J-T-a/J-T W8: 1.0372 (+3.72 %, d +0.0756) n/n/n bars r 19.84 / i 13.13 / s 4.40 %
+J-T-a/J-T W16: 1.0485 (+4.85 %, d +0.1079) n/n/Y bars r 16.97 / i 5.73 / s 3.30 %
+J-T-off-a/J-T-off W1: 1.0078 (+0.78 %, d +0.0473) n/n/n bars r 7.23 / i 2.21 / s 1.33 %
+J-T-off-a/J-T-off W8: 1.0437 (+4.37 %, d +0.0972) n/n/Y bars r 19.65 / i 10.93 / s 4.18 %
+J-T-off-a/J-T-off W16: 1.0584 (+5.84 %, d +0.1391) n/n/Y bars r 20.12 / i 11.71 / s 4.37 %
+J-A-a/J-A W1: 1.0051 (+0.51 %, d +0.0838) n/n/n bars r 3.22 / i 1.35 / s 0.61 %
+J-A-a/J-A W8: 1.0261 (+2.61 %, d +0.1439) n/n/n bars r 17.14 / i 9.89 / s 3.76 %
+J-A-a/J-A W16: 1.0048 (+0.48 %, d +0.0260) n/n/n bars r 7.92 / i 3.33 / s 1.48 %
+J-Son-a/J-Son W1: 1.0034 (+0.34 %, d +0.0342) n/n/n bars r 4.95 / i 2.83 / s 1.01 %
+J-Son-a/J-Son W8: 1.0206 (+2.06 %, d +0.0812) n/n/n bars r 13.38 / i 4.67 / s 2.64 %
+
+# armed J-T-off spans [100,500) W1/W8/W16 (the bridge to window 7 P4)
+W1: T 6.1129 bp 0.2585 np 2.5324 (disp 0.0000) graph 0.1190 setup 0.2898 (pc 0.2354) warm 0.2950 wide 2.3921 narrow 0.0096 integ 0.1012 gather 0.0370 g 0.0387 u 0.0090 r 0.0028 waves 108.00 manifolds 4519.26
+W8: T 2.3085 bp 0.2688 np 0.3980 (disp 0.3622) graph 0.1234 setup 0.3374 (pc 0.2781) warm 0.3110 wide 0.6257 narrow 0.0114 integ 0.1266 gather 0.0396 g 0.0311 u 0.0095 r 0.0291 waves 108.00 manifolds 4519.26
+W16: T 2.4817 bp 0.2724 np 0.3315 (disp 0.2910) graph 0.1257 setup 0.3411 (pc 0.2809) warm 0.3152 wide 0.8028 narrow 0.0147 integ 0.1402 gather 0.0398 g 0.0335 u 0.0097 r 0.0388 waves 108.00 manifolds 4519.26
+
+# J-A armed spans [100,500) W1/W8/W16
+W1: T 16.3649 bp 1.9113 np 0.7711 graph 0.1274 setup 0.3836 warm 0.5229 wide 12.0558 narrow 0.1760 integ 0.1125 g 0.2380 r 0.0031
+W8: T 5.6160 bp 1.8405 np 0.1723 graph 0.1165 setup 0.3784 warm 0.5251 wide 2.1550 narrow 0.1915 integ 0.1299 g 0.0329 r 0.0343
+W16: T 5.4423 bp 1.8428 np 0.1457 graph 0.1161 setup 0.3294 warm 0.5307 wide 1.9819 narrow 0.2134 integ 0.1291 g 0.0341 r 0.0456

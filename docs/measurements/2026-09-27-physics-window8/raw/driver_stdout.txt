@@ -1,0 +1,388 @@
+2026-09-27T18:45:27.200+03:00 WINDOW START cutoff 2026-09-27T21:00:00 blocks ['W8S-A', 'W8S-R', 'micro', 'DM1', 'P-jolt56-prof'] test False resume False
+2026-09-27T18:45:27.402+03:00 W8S-A-p0: idle rule (wait_idle8.ps1, up to 30 polls)
+2026-09-27T18:47:37.890+03:00 W8S-A-p0: idle reached; {'time': '2026-09-27T18:47:37.890+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-27T18:47:47.969+03:00 W8S-A-p0: opening receipt 1.11% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-27T18:47:54.026+03:00   W8S-A-p0 warm-up J-T#instr W=8 (untimed): pose 0x30c5438bc6ad9ffa expect match rb 1.11% ra 1.25% others 0.29% exit 0 waited 0.0s
+2026-09-27T18:48:01.341+03:00   W8S-A-p0 r0 [  1] J-T#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.25% ra 1.6% others 0.34% exit 0 waited 0.0s
+2026-09-27T18:48:11.400+03:00   W8S-A-p0 r0 [  2] H-jolt56#j56 W=1: jolt hash 0xb8522b4e3fc62cfe threads 1 rb 1.6% ra 3.68% others 0.17% exit 0 waited 0.0s
+2026-09-27T18:48:18.821+03:00   W8S-A-p0 r0 [  3] J-T-a#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 3.68% ra 0.96% others 0.17% exit 0 waited 0.0s
+2026-09-27T18:48:26.932+03:00   W8S-A-p0 r0 [  4] J-T-off#instr W=1: pose 0x32d5e235342b4143 expect match rb 0.96% ra 0.94% others 0.38% exit 0 waited 0.0s
+2026-09-27T18:48:35.163+03:00   W8S-A-p0 r0 [  5] J-T-off-a#instr W=1: pose 0x32d5e235342b4143 expect match rb 0.94% ra 1.13% others 0.47% exit 0 waited 0.0s
+2026-09-27T18:48:48.429+03:00   W8S-A-p0 r0 [  6] J-A#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.13% ra 1.46% others 0.36% exit 0 waited 0.0s
+2026-09-27T18:49:01.813+03:00   W8S-A-p0 r0 [  7] J-A-a#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.46% ra 0.79% others 0.31% exit 0 waited 0.0s
+2026-09-27T18:49:11.907+03:00   W8S-A-p0 r0 [  8] J-Son#instr W=1: pose 0x3db47fae414b655c expect match rb 0.79% ra 0.59% others 0.35% exit 0 waited 0.0s
+2026-09-27T18:49:22.063+03:00   W8S-A-p0 r0 [  9] J-Son-a#instr W=1: pose 0x3db47fae414b655c expect match rb 0.59% ra 0.81% others 0.48% exit 0 waited 0.0s
+2026-09-27T18:49:28.120+03:00   W8S-A-p0 r0 [ 10] J-T#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.81% ra 2.41% others 0.1% exit 0 waited 0.0s
+2026-09-27T18:49:34.448+03:00   W8S-A-p0 r0 [ 11] H-jolt56#j56 W=8: jolt hash 0xb8522b4e3fc62cfe threads 8 rb 2.41% ra 0.92% others 0.16% exit 0 waited 0.0s
+2026-09-27T18:49:40.642+03:00   W8S-A-p0 r0 [ 12] J-T-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.92% ra 1.02% others 0.0% exit 0 waited 0.0s
+2026-09-27T18:49:46.847+03:00   W8S-A-p0 r0 [ 13] J-T-off#instr W=8: pose 0x32d5e235342b4143 expect match rb 1.02% ra 1.1% others 0.34% exit 0 waited 0.0s
+2026-09-27T18:49:53.141+03:00   W8S-A-p0 r0 [ 14] J-T-off-a#instr W=8: pose 0x32d5e235342b4143 expect match rb 1.1% ra 1.18% others 0.24% exit 0 waited 0.0s
+2026-09-27T18:50:00.942+03:00   W8S-A-p0 r0 [ 15] J-A#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.18% ra 0.86% others 0.25% exit 0 waited 0.0s
+2026-09-27T18:50:09.117+03:00   W8S-A-p0 r0 [ 16] J-A-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.86% ra 1.68% others 0.32% exit 0 waited 0.0s
+2026-09-27T18:50:16.146+03:00   W8S-A-p0 r0 [ 17] J-Son#instr W=8: pose 0x3db47fae414b655c expect match rb 1.68% ra 1.09% others 0.15% exit 0 waited 0.0s
+2026-09-27T18:50:23.302+03:00   W8S-A-p0 r0 [ 18] J-Son-a#instr W=8: pose 0x3db47fae414b655c expect match rb 1.09% ra 2.17% others 0.57% exit 0 waited 0.0s
+2026-09-27T18:50:29.484+03:00   W8S-A-p0 r0 [ 19] J-T#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 2.17% ra 0.58% others 0.26% exit 0 waited 0.0s
+2026-09-27T18:50:35.998+03:00   W8S-A-p0 r0 [ 20] H-jolt56#j56 W=16: jolt hash 0xb8522b4e3fc62cfe threads 16 rb 0.58% ra 1.9% others 0.4% exit 0 waited 0.0s
+2026-09-27T18:50:42.302+03:00   W8S-A-p0 r0 [ 21] J-T-a#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.9% ra 0.68% others 0.24% exit 0 waited 0.0s
+2026-09-27T18:50:48.585+03:00   W8S-A-p0 r0 [ 22] J-T-off#instr W=16: pose 0x32d5e235342b4143 expect match rb 0.68% ra 2.1% others 0.56% exit 0 waited 0.0s
+2026-09-27T18:50:54.969+03:00   W8S-A-p0 r0 [ 23] J-T-off-a#instr W=16: pose 0x32d5e235342b4143 expect match rb 2.1% ra 1.34% others 0.3% exit 0 waited 0.0s
+2026-09-27T18:51:02.708+03:00   W8S-A-p0 r0 [ 24] J-A#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.34% ra 1.06% others 0.22% exit 0 waited 0.0s
+2026-09-27T18:51:10.580+03:00   W8S-A-p0 r0 [ 25] J-A-a#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.06% ra 1.58% others 0.21% exit 0 waited 0.0s
+2026-09-27T18:51:17.855+03:00   W8S-A-p0 r1 [ 26] J-T#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.58% ra 2.35% others 0.4% exit 0 waited 0.0s
+2026-09-27T18:51:28.648+03:00   W8S-A-p0 r1 [ 27] H-jolt56#j56 W=1: jolt hash 0xb8522b4e3fc62cfe threads 1 rb 2.35% ra 1.87% others 0.37% exit 0 waited 0.0s
+2026-09-27T18:51:36.027+03:00   W8S-A-p0 r1 [ 28] J-T-a#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.87% ra 1.63% others 0.39% exit 0 waited 0.0s
+2026-09-27T18:51:44.110+03:00   W8S-A-p0 r1 [ 29] J-T-off#instr W=1: pose 0x32d5e235342b4143 expect match rb 1.63% ra 0.51% others 0.2% exit 0 waited 0.0s
+2026-09-27T18:51:52.299+03:00   W8S-A-p0 r1 [ 30] J-T-off-a#instr W=1: pose 0x32d5e235342b4143 expect match rb 0.51% ra 1.07% others 0.19% exit 0 waited 0.0s
+2026-09-27T18:52:05.608+03:00   W8S-A-p0 r1 [ 31] J-A#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.07% ra 2.5% others 0.4% exit 0 waited 0.0s
+2026-09-27T18:52:19.086+03:00   W8S-A-p0 r1 [ 32] J-A-a#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.5% ra 1.89% others 0.26% exit 0 waited 0.0s
+2026-09-27T18:52:29.180+03:00   W8S-A-p0 r1 [ 33] J-Son#instr W=1: pose 0x3db47fae414b655c expect match rb 1.89% ra 1.11% others 0.27% exit 0 waited 0.0s
+2026-09-27T18:52:39.384+03:00   W8S-A-p0 r1 [ 34] J-Son-a#instr W=1: pose 0x3db47fae414b655c expect match rb 1.11% ra 1.89% others 0.46% exit 0 waited 0.0s
+2026-09-27T18:52:45.443+03:00   W8S-A-p0 r1 [ 35] J-T#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.89% ra 1.18% others 0.29% exit 0 waited 0.0s
+2026-09-27T18:52:51.729+03:00   W8S-A-p0 r1 [ 36] H-jolt56#j56 W=8: jolt hash 0xb8522b4e3fc62cfe threads 8 rb 1.18% ra 1.58% others 0.4% exit 0 waited 0.0s
+2026-09-27T18:52:57.922+03:00   W8S-A-p0 r1 [ 37] J-T-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.58% ra 1.16% others 0.17% exit 0 waited 0.0s
+2026-09-27T18:53:04.094+03:00   W8S-A-p0 r1 [ 38] J-T-off#instr W=8: pose 0x32d5e235342b4143 expect match rb 1.16% ra 1.65% others 0.0% exit 0 waited 0.0s
+2026-09-27T18:53:10.418+03:00   W8S-A-p0 r1 [ 39] J-T-off-a#instr W=8: pose 0x32d5e235342b4143 expect match rb 1.65% ra 1.31% others 0.16% exit 0 waited 0.0s
+2026-09-27T18:53:18.220+03:00   W8S-A-p0 r1 [ 40] J-A#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.31% ra 1.09% others 0.25% exit 0 waited 0.0s
+2026-09-27T18:53:26.171+03:00   W8S-A-p0 r1 [ 41] J-A-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.09% ra 1.34% others 0.24% exit 0 waited 0.0s
+2026-09-27T18:53:33.209+03:00   W8S-A-p0 r1 [ 42] J-Son#instr W=8: pose 0x3db47fae414b655c expect match rb 1.34% ra 2.04% others 0.05% exit 0 waited 0.0s
+2026-09-27T18:53:40.383+03:00   W8S-A-p0 r1 [ 43] J-Son-a#instr W=8: pose 0x3db47fae414b655c expect match rb 2.04% ra 1.59% others 0.33% exit 0 waited 0.0s
+2026-09-27T18:53:46.556+03:00   W8S-A-p0 r1 [ 44] J-T#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.59% ra 0.53% others 0.0% exit 0 waited 0.0s
+2026-09-27T18:53:52.919+03:00   W8S-A-p0 r1 [ 45] H-jolt56#j56 W=16: jolt hash 0xb8522b4e3fc62cfe threads 16 rb 0.53% ra 1.88% others 0.15% exit 0 waited 0.0s
+2026-09-27T18:53:59.240+03:00   W8S-A-p0 r1 [ 46] J-T-a#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.88% ra 1.44% others 0.24% exit 0 waited 0.0s
+2026-09-27T18:54:05.488+03:00   W8S-A-p0 r1 [ 47] J-T-off#instr W=16: pose 0x32d5e235342b4143 expect match rb 1.44% ra 3.82% others 0.0% exit 0 waited 0.0s
+2026-09-27T18:54:11.868+03:00   W8S-A-p0 r1 [ 48] J-T-off-a#instr W=16: pose 0x32d5e235342b4143 expect match rb 3.82% ra 1.95% others 0.08% exit 0 waited 0.0s
+2026-09-27T18:54:19.662+03:00   W8S-A-p0 r1 [ 49] J-A#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.95% ra 0.74% others 0.57% exit 0 waited 0.0s
+2026-09-27T18:54:27.542+03:00   W8S-A-p0 r1 [ 50] J-A-a#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.74% ra 4.35% others 0.18% exit 0 waited 0.0s
+2026-09-27T18:54:34.913+03:00   W8S-A-p0 r2 [ 51] J-T#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 4.35% ra 1.66% others 0.51% exit 0 waited 0.0s
+2026-09-27T18:54:44.787+03:00   W8S-A-p0 r2 [ 52] H-jolt56#j56 W=1: jolt hash 0xb8522b4e3fc62cfe threads 1 rb 1.66% ra 1.85% others 0.25% exit 0 waited 0.0s
+2026-09-27T18:54:52.208+03:00   W8S-A-p0 r2 [ 53] J-T-a#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.85% ra 1.83% others 0.46% exit 0 waited 0.0s
+2026-09-27T18:55:00.310+03:00   W8S-A-p0 r2 [ 54] J-T-off#instr W=1: pose 0x32d5e235342b4143 expect match rb 1.83% ra 1.21% others 0.16% exit 0 waited 0.0s
+2026-09-27T18:55:08.543+03:00   W8S-A-p0 r2 [ 55] J-T-off-a#instr W=1: pose 0x32d5e235342b4143 expect match rb 1.21% ra 0.94% others 0.47% exit 0 waited 0.0s
+2026-09-27T18:55:21.849+03:00   W8S-A-p0 r2 [ 56] J-A#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.94% ra 0.41% others 0.31% exit 0 waited 0.0s
+2026-09-27T18:55:35.286+03:00   W8S-A-p0 r2 [ 57] J-A-a#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.41% ra 1.05% others 0.57% exit 0 waited 0.0s
+2026-09-27T18:55:45.382+03:00   W8S-A-p0 r2 [ 58] J-Son#instr W=1: pose 0x3db47fae414b655c expect match rb 1.05% ra 1.42% others 0.12% exit 0 waited 0.0s
+2026-09-27T18:55:55.529+03:00   W8S-A-p0 r2 [ 59] J-Son-a#instr W=1: pose 0x3db47fae414b655c expect match rb 1.42% ra 1.44% others 0.73% exit 0 waited 0.0s
+2026-09-27T18:56:01.587+03:00   W8S-A-p0 r2 [ 60] J-T#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.44% ra 1.15% others 0.1% exit 0 waited 0.0s
+2026-09-27T18:56:07.936+03:00   W8S-A-p0 r2 [ 61] H-jolt56#j56 W=8: jolt hash 0xb8522b4e3fc62cfe threads 8 rb 1.15% ra 1.45% others 0.3% exit 0 waited 0.0s
+2026-09-27T18:56:14.137+03:00   W8S-A-p0 r2 [ 62] J-T-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.45% ra 2.15% others 1.4% exit 0 waited 0.0s
+2026-09-27T18:56:20.312+03:00   W8S-A-p0 r2 [ 63] J-T-off#instr W=8: pose 0x32d5e235342b4143 expect match rb 2.15% ra 1.75% others 0.0% exit 0 waited 0.0s
+2026-09-27T18:56:26.619+03:00   W8S-A-p0 r2 [ 64] J-T-off-a#instr W=8: pose 0x32d5e235342b4143 expect match rb 1.75% ra 1.1% others 0.33% exit 0 waited 0.0s
+2026-09-27T18:56:34.446+03:00   W8S-A-p0 r2 [ 65] J-A#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.1% ra 0.84% others 0.28% exit 0 waited 0.0s
+2026-09-27T18:56:42.401+03:00   W8S-A-p0 r2 [ 66] J-A-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.84% ra 1.3% others 0.58% exit 0 waited 0.0s
+2026-09-27T18:56:49.438+03:00   W8S-A-p0 r2 [ 67] J-Son#instr W=8: pose 0x3db47fae414b655c expect match rb 1.3% ra 1.72% others 0.3% exit 0 waited 0.0s
+2026-09-27T18:56:56.593+03:00   W8S-A-p0 r2 [ 68] J-Son-a#instr W=8: pose 0x3db47fae414b655c expect match rb 1.72% ra 1.37% others 0.43% exit 0 waited 0.0s
+2026-09-27T18:57:02.755+03:00   W8S-A-p0 r2 [ 69] J-T#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.37% ra 0.59% others 0.09% exit 0 waited 0.0s
+2026-09-27T18:57:08.989+03:00   W8S-A-p0 r2 [ 70] H-jolt56#j56 W=16: jolt hash 0xb8522b4e3fc62cfe threads 16 rb 0.59% ra 0.9% others 0.08% exit 0 waited 0.0s
+2026-09-27T18:57:15.301+03:00   W8S-A-p0 r2 [ 71] J-T-a#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.9% ra 0.72% others 0.24% exit 0 waited 0.0s
+2026-09-27T18:57:21.551+03:00   W8S-A-p0 r2 [ 72] J-T-off#instr W=16: pose 0x32d5e235342b4143 expect match rb 0.72% ra 0.35% others 0.41% exit 0 waited 0.0s
+2026-09-27T18:57:27.928+03:00   W8S-A-p0 r2 [ 73] J-T-off-a#instr W=16: pose 0x32d5e235342b4143 expect match rb 0.35% ra 1.93% others 0.23% exit 0 waited 0.0s
+2026-09-27T18:57:35.690+03:00   W8S-A-p0 r2 [ 74] J-A#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.93% ra 1.21% others 0.22% exit 0 waited 0.0s
+2026-09-27T18:57:43.586+03:00   W8S-A-p0 r2 [ 75] J-A-a#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.21% ra 0.67% others 0.38% exit 0 waited 0.0s
+2026-09-27T18:57:43.586+03:00 W8S-A-p0: done
+2026-09-27T18:57:43.590+03:00 W8S-A-p1: idle rule (wait_idle8.ps1, up to 30 polls)
+2026-09-27T18:59:54.038+03:00 W8S-A-p1: idle reached; {'time': '2026-09-27T18:59:54.038+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-27T19:00:04.119+03:00 W8S-A-p1: opening receipt 0.83% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-27T19:00:10.171+03:00   W8S-A-p1 warm-up J-T#instr W=8 (untimed): pose 0x30c5438bc6ad9ffa expect match rb 0.83% ra 2.35% others 0.1% exit 0 waited 0.0s
+2026-09-27T19:00:18.071+03:00   W8S-A-p1 r0 [  1] J-A-a#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 2.35% ra 2.4% others 0.21% exit 0 waited 0.0s
+2026-09-27T19:00:25.902+03:00   W8S-A-p1 r0 [  2] J-A#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 2.4% ra 1.56% others 0.49% exit 0 waited 0.0s
+2026-09-27T19:00:32.368+03:00   W8S-A-p1 r0 [  3] J-T-off-a#instr W=16: pose 0x32d5e235342b4143 expect match rb 1.56% ra 1.6% others 0.99% exit 0 waited 0.0s
+2026-09-27T19:00:38.616+03:00   W8S-A-p1 r0 [  4] J-T-off#instr W=16: pose 0x32d5e235342b4143 expect match rb 1.6% ra 0.86% others 0.57% exit 0 waited 0.0s
+2026-09-27T19:00:44.997+03:00   W8S-A-p1 r0 [  5] J-T-a#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.86% ra 0.78% others 0.9% exit 0 waited 0.0s
+2026-09-27T19:00:51.327+03:00   W8S-A-p1 r0 [  6] H-jolt56#j56 W=16: jolt hash 0xb8522b4e3fc62cfe threads 16 rb 0.78% ra 2.39% others 0.53% exit 0 waited 0.0s
+2026-09-27T19:00:57.499+03:00   W8S-A-p1 r0 [  7] J-T#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 2.39% ra 1.22% others 0.35% exit 0 waited 0.0s
+2026-09-27T19:01:04.706+03:00   W8S-A-p1 r0 [  8] J-Son-a#instr W=8: pose 0x3db47fae414b655c expect match rb 1.22% ra 0.93% others 0.37% exit 0 waited 0.0s
+2026-09-27T19:01:11.764+03:00   W8S-A-p1 r0 [  9] J-Son#instr W=8: pose 0x3db47fae414b655c expect match rb 0.93% ra 1.48% others 0.49% exit 0 waited 0.0s
+2026-09-27T19:01:19.734+03:00   W8S-A-p1 r0 [ 10] J-A-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.48% ra 1.97% others 0.41% exit 0 waited 0.0s
+2026-09-27T19:01:27.632+03:00   W8S-A-p1 r0 [ 11] J-A#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.97% ra 1.22% others 0.59% exit 0 waited 0.0s
+2026-09-27T19:01:34.038+03:00   W8S-A-p1 r0 [ 12] J-T-off-a#instr W=8: pose 0x32d5e235342b4143 expect match rb 1.22% ra 1.77% others 0.74% exit 0 waited 0.0s
+2026-09-27T19:01:40.211+03:00   W8S-A-p1 r0 [ 13] J-T-off#instr W=8: pose 0x32d5e235342b4143 expect match rb 1.77% ra 1.95% others 0.18% exit 0 waited 0.0s
+2026-09-27T19:01:46.434+03:00   W8S-A-p1 r0 [ 14] J-T-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.95% ra 2.09% others 0.35% exit 0 waited 0.0s
+2026-09-27T19:01:53.327+03:00   W8S-A-p1 r0 [ 15] H-jolt56#j56 W=8: jolt hash 0xb8522b4e3fc62cfe threads 8 rb 2.09% ra 0.66% others 1.01% exit 0 waited 0.0s
+2026-09-27T19:01:59.429+03:00   W8S-A-p1 r0 [ 16] J-T#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.66% ra 1.27% others 1.11% exit 0 waited 0.0s
+2026-09-27T19:02:09.640+03:00   W8S-A-p1 r0 [ 17] J-Son-a#instr W=1: pose 0x3db47fae414b655c expect match rb 1.27% ra 0.72% others 0.38% exit 0 waited 0.0s
+2026-09-27T19:02:19.763+03:00   W8S-A-p1 r0 [ 18] J-Son#instr W=1: pose 0x3db47fae414b655c expect match rb 0.72% ra 1.49% others 0.25% exit 0 waited 0.0s
+2026-09-27T19:02:33.217+03:00   W8S-A-p1 r0 [ 19] J-A-a#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.49% ra 0.76% others 0.35% exit 0 waited 0.0s
+2026-09-27T19:02:46.532+03:00   W8S-A-p1 r0 [ 20] J-A#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.76% ra 1.76% others 0.43% exit 0 waited 0.0s
+2026-09-27T19:02:54.758+03:00   W8S-A-p1 r0 [ 21] J-T-off-a#instr W=1: pose 0x32d5e235342b4143 expect match rb 1.76% ra 1.7% others 0.37% exit 0 waited 0.0s
+2026-09-27T19:03:02.877+03:00   W8S-A-p1 r0 [ 22] J-T-off#instr W=1: pose 0x32d5e235342b4143 expect match rb 1.7% ra 1.46% others 0.16% exit 0 waited 0.0s
+2026-09-27T19:03:10.382+03:00   W8S-A-p1 r0 [ 23] J-T-a#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.46% ra 1.89% others 0.32% exit 0 waited 0.0s
+2026-09-27T19:03:21.518+03:00   W8S-A-p1 r0 [ 24] H-jolt56#j56 W=1: jolt hash 0xb8522b4e3fc62cfe threads 1 rb 1.89% ra 1.17% others 0.64% exit 0 waited 0.0s
+2026-09-27T19:03:28.818+03:00   W8S-A-p1 r0 [ 25] J-T#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.17% ra 2.07% others 0.65% exit 0 waited 0.0s
+2026-09-27T19:03:36.718+03:00   W8S-A-p1 r1 [ 26] J-A-a#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 2.07% ra 3.1% others 0.77% exit 0 waited 0.0s
+2026-09-27T19:03:44.508+03:00   W8S-A-p1 r1 [ 27] J-A#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 3.1% ra 1.06% others 0.14% exit 0 waited 0.0s
+2026-09-27T19:03:50.958+03:00   W8S-A-p1 r1 [ 28] J-T-off-a#instr W=16: pose 0x32d5e235342b4143 expect match rb 1.06% ra 0.86% others 0.5% exit 0 waited 0.0s
+2026-09-27T19:03:57.290+03:00   W8S-A-p1 r1 [ 29] J-T-off#instr W=16: pose 0x32d5e235342b4143 expect match rb 0.86% ra 1.71% others 0.31% exit 0 waited 0.0s
+2026-09-27T19:04:03.645+03:00   W8S-A-p1 r1 [ 30] J-T-a#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.71% ra 1.39% others 0.08% exit 0 waited 0.0s
+2026-09-27T19:04:10.142+03:00   W8S-A-p1 r1 [ 31] H-jolt56#j56 W=16: jolt hash 0xb8522b4e3fc62cfe threads 16 rb 1.39% ra 2.03% others 0.41% exit 0 waited 0.0s
+2026-09-27T19:04:16.321+03:00   W8S-A-p1 r1 [ 32] J-T#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 2.03% ra 2.7% others 0.35% exit 0 waited 0.0s
+2026-09-27T19:04:23.475+03:00   W8S-A-p1 r1 [ 33] J-Son-a#instr W=8: pose 0x3db47fae414b655c expect match rb 2.7% ra 1.13% others 0.38% exit 0 waited 0.0s
+2026-09-27T19:04:30.514+03:00   W8S-A-p1 r1 [ 34] J-Son#instr W=8: pose 0x3db47fae414b655c expect match rb 1.13% ra 1.11% others 0.05% exit 0 waited 0.0s
+2026-09-27T19:04:38.506+03:00   W8S-A-p1 r1 [ 35] J-A-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.11% ra 0.59% others 0.27% exit 0 waited 0.0s
+2026-09-27T19:04:46.321+03:00   W8S-A-p1 r1 [ 36] J-A#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.59% ra 1.04% others 0.28% exit 0 waited 0.0s
+2026-09-27T19:04:52.625+03:00   W8S-A-p1 r1 [ 37] J-T-off-a#instr W=8: pose 0x32d5e235342b4143 expect match rb 1.04% ra 0.92% others 0.08% exit 0 waited 0.0s
+2026-09-27T19:04:58.801+03:00   W8S-A-p1 r1 [ 38] J-T-off#instr W=8: pose 0x32d5e235342b4143 expect match rb 0.92% ra 1.04% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:05:05.074+03:00   W8S-A-p1 r1 [ 39] J-T-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.04% ra 0.66% others 0.17% exit 0 waited 0.0s
+2026-09-27T19:05:11.455+03:00   W8S-A-p1 r1 [ 40] H-jolt56#j56 W=8: jolt hash 0xb8522b4e3fc62cfe threads 8 rb 0.66% ra 0.54% others 0.37% exit 0 waited 0.0s
+2026-09-27T19:05:17.587+03:00   W8S-A-p1 r1 [ 41] J-T#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.54% ra 1.18% others 0.45% exit 0 waited 0.0s
+2026-09-27T19:05:27.837+03:00   W8S-A-p1 r1 [ 42] J-Son-a#instr W=1: pose 0x3db47fae414b655c expect match rb 1.18% ra 2.35% others 0.19% exit 0 waited 0.0s
+2026-09-27T19:05:37.945+03:00   W8S-A-p1 r1 [ 43] J-Son#instr W=1: pose 0x3db47fae414b655c expect match rb 2.35% ra 1.81% others 0.39% exit 0 waited 0.0s
+2026-09-27T19:05:51.448+03:00   W8S-A-p1 r1 [ 44] J-A-a#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.81% ra 0.7% others 0.35% exit 0 waited 0.0s
+2026-09-27T19:06:04.706+03:00   W8S-A-p1 r1 [ 45] J-A#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.7% ra 1.89% others 0.54% exit 0 waited 0.0s
+2026-09-27T19:06:12.950+03:00   W8S-A-p1 r1 [ 46] J-T-off-a#instr W=1: pose 0x32d5e235342b4143 expect match rb 1.89% ra 1.99% others 0.25% exit 0 waited 0.0s
+2026-09-27T19:06:21.129+03:00   W8S-A-p1 r1 [ 47] J-T-off#instr W=1: pose 0x32d5e235342b4143 expect match rb 1.99% ra 1.65% others 0.19% exit 0 waited 0.0s
+2026-09-27T19:06:28.533+03:00   W8S-A-p1 r1 [ 48] J-T-a#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.65% ra 1.79% others 0.47% exit 0 waited 0.0s
+2026-09-27T19:06:38.574+03:00   W8S-A-p1 r1 [ 49] H-jolt56#j56 W=1: jolt hash 0xb8522b4e3fc62cfe threads 1 rb 1.79% ra 1.78% others 0.37% exit 0 waited 0.0s
+2026-09-27T19:06:45.872+03:00   W8S-A-p1 r1 [ 50] J-T#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.78% ra 1.85% others 0.61% exit 0 waited 0.0s
+2026-09-27T19:06:53.802+03:00   W8S-A-p1 r2 [ 51] J-A-a#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.85% ra 2.14% others 0.17% exit 0 waited 0.0s
+2026-09-27T19:07:01.622+03:00   W8S-A-p1 r2 [ 52] J-A#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 2.14% ra 2.62% others 0.43% exit 0 waited 0.0s
+2026-09-27T19:07:08.075+03:00   W8S-A-p1 r2 [ 53] J-T-off-a#instr W=16: pose 0x32d5e235342b4143 expect match rb 2.62% ra 0.6% others 0.85% exit 0 waited 0.0s
+2026-09-27T19:07:14.332+03:00   W8S-A-p1 r2 [ 54] J-T-off#instr W=16: pose 0x32d5e235342b4143 expect match rb 0.6% ra 1.46% others 0.33% exit 0 waited 0.0s
+2026-09-27T19:07:20.651+03:00   W8S-A-p1 r2 [ 55] J-T-a#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.46% ra 0.76% others 0.32% exit 0 waited 0.0s
+2026-09-27T19:07:26.924+03:00   W8S-A-p1 r2 [ 56] H-jolt56#j56 W=16: jolt hash 0xb8522b4e3fc62cfe threads 16 rb 0.76% ra 1.71% others 0.48% exit 0 waited 0.0s
+2026-09-27T19:07:33.157+03:00   W8S-A-p1 r2 [ 57] J-T#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.71% ra 4.27% others 0.33% exit 0 waited 0.0s
+2026-09-27T19:07:40.408+03:00   W8S-A-p1 r2 [ 58] J-Son-a#instr W=8: pose 0x3db47fae414b655c expect match rb 4.27% ra 2.66% others 0.4% exit 0 waited 0.0s
+2026-09-27T19:07:47.529+03:00   W8S-A-p1 r2 [ 59] J-Son#instr W=8: pose 0x3db47fae414b655c expect match rb 2.66% ra 1.99% others 0.52% exit 0 waited 0.0s
+2026-09-27T19:07:55.646+03:00   W8S-A-p1 r2 [ 60] J-A-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.99% ra 0.72% others 0.97% exit 0 waited 0.0s
+2026-09-27T19:08:03.551+03:00   W8S-A-p1 r2 [ 61] J-A#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.72% ra 0.52% others 0.38% exit 0 waited 0.0s
+2026-09-27T19:08:09.933+03:00   W8S-A-p1 r2 [ 62] J-T-off-a#instr W=8: pose 0x32d5e235342b4143 expect match rb 0.52% ra 0.88% others 1.97% exit 0 waited 0.0s
+2026-09-27T19:08:16.129+03:00   W8S-A-p1 r2 [ 63] J-T-off#instr W=8: pose 0x32d5e235342b4143 expect match rb 0.88% ra 2.0% others 0.17% exit 0 waited 0.0s
+2026-09-27T19:08:22.354+03:00   W8S-A-p1 r2 [ 64] J-T-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.0% ra 0.72% others 1.03% exit 0 waited 0.0s
+2026-09-27T19:08:29.009+03:00   W8S-A-p1 r2 [ 65] H-jolt56#j56 W=8: jolt hash 0xb8522b4e3fc62cfe threads 8 rb 0.72% ra 0.95% others 3.29% exit 0 waited 0.0s OTHERS-BUSY(3.29%)
+2026-09-27T19:08:35.134+03:00   W8S-A-p1 r2 [ 66] J-T#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.95% ra 1.19% others 1.45% exit 0 waited 0.0s
+2026-09-27T19:08:45.402+03:00   W8S-A-p1 r2 [ 67] J-Son-a#instr W=1: pose 0x3db47fae414b655c expect match rb 1.19% ra 2.7% others 0.92% exit 0 waited 0.0s
+2026-09-27T19:08:55.534+03:00   W8S-A-p1 r2 [ 68] J-Son#instr W=1: pose 0x3db47fae414b655c expect match rb 2.7% ra 1.57% others 0.33% exit 0 waited 0.0s
+2026-09-27T19:09:08.961+03:00   W8S-A-p1 r2 [ 69] J-A-a#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.57% ra 2.22% others 0.26% exit 0 waited 0.0s
+2026-09-27T19:09:22.274+03:00   W8S-A-p1 r2 [ 70] J-A#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.22% ra 0.78% others 0.17% exit 0 waited 0.0s
+2026-09-27T19:09:30.476+03:00   W8S-A-p1 r2 [ 71] J-T-off-a#instr W=1: pose 0x32d5e235342b4143 expect match rb 0.78% ra 0.56% others 0.16% exit 0 waited 0.0s
+2026-09-27T19:09:38.591+03:00   W8S-A-p1 r2 [ 72] J-T-off#instr W=1: pose 0x32d5e235342b4143 expect match rb 0.56% ra 1.68% others 0.26% exit 0 waited 0.0s
+2026-09-27T19:09:45.982+03:00   W8S-A-p1 r2 [ 73] J-T-a#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.68% ra 0.99% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:09:55.858+03:00   W8S-A-p1 r2 [ 74] H-jolt56#j56 W=1: jolt hash 0xb8522b4e3fc62cfe threads 1 rb 0.99% ra 0.66% others 0.1% exit 0 waited 0.0s
+2026-09-27T19:10:03.148+03:00   W8S-A-p1 r2 [ 75] J-T#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.66% ra 0.69% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:10:03.148+03:00 W8S-A-p1: re-running 1 process(es) at the end of the pass: [(65, 2, 'H-jolt56', 'j56', 8, 'contaminated')]
+2026-09-27T19:10:09.456+03:00   W8S-A-p1 r2 [ 65] H-jolt56#j56 W=8 RERUN (contaminated): jolt hash 0xb8522b4e3fc62cfe threads 8 rb 0.69% ra 1.03% others 0.23% exit 0 waited 0.0s
+2026-09-27T19:10:09.456+03:00 W8S-A-p1: done
+2026-09-27T19:10:09.459+03:00 W8S-R-p0: idle rule (wait_idle8.ps1, up to 30 polls)
+2026-09-27T19:15:19.976+03:00 W8S-R-p0: idle reached; {'time': '2026-09-27T19:15:19.976+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-27T19:15:30.151+03:00 W8S-R-p0: opening receipt 3.33% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-27T19:15:36.227+03:00   W8S-R-p0 warm-up R-J-T#instr W=8 (untimed): pose 0x30c5438bc6ad9ffa expect match rb 3.33% ra 1.09% others 0.29% exit 0 waited 0.0s
+2026-09-27T19:15:43.496+03:00   W8S-R-p0 r0 [  1] R-J-T#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.09% ra 0.95% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:15:50.784+03:00   W8S-R-p0 r0 [  2] rung#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.95% ra 1.16% others 0.13% exit 0 waited 0.0s
+2026-09-27T19:15:57.420+03:00   W8S-R-p0 r0 [  3] R-J-T#instr W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.16% ra 0.55% others 0.37% exit 0 waited 0.0s
+2026-09-27T19:16:04.092+03:00   W8S-R-p0 r0 [  4] rung#instr W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.55% ra 0.97% others 0.12% exit 0 waited 0.0s
+2026-09-27T19:16:10.334+03:00   W8S-R-p0 r0 [  5] R-J-T#instr W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.97% ra 0.85% others 0.42% exit 0 waited 0.0s
+2026-09-27T19:16:16.613+03:00   W8S-R-p0 r0 [  6] rung#instr W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.85% ra 1.43% others 0.16% exit 0 waited 0.0s
+2026-09-27T19:16:22.696+03:00   W8S-R-p0 r0 [  7] R-J-T#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.43% ra 1.16% others 0.67% exit 0 waited 0.0s
+2026-09-27T19:16:28.782+03:00   W8S-R-p0 r0 [  8] ladder8-F0.5#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.16% ra 0.73% others 0.19% exit 0 waited 0.0s
+2026-09-27T19:16:34.889+03:00   W8S-R-p0 r0 [  9] ladder8-F1#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.73% ra 1.03% others 0.18% exit 0 waited 0.0s
+2026-09-27T19:16:41.006+03:00   W8S-R-p0 r0 [ 10] ladder8-F1.5#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.03% ra 0.29% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:16:47.145+03:00   W8S-R-p0 r0 [ 11] ladder8-F2#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.29% ra 0.62% others 0.18% exit 0 waited 0.0s
+2026-09-27T19:16:53.340+03:00   W8S-R-p0 r0 [ 12] R-J-T-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.62% ra 1.18% others 0.18% exit 0 waited 0.0s
+2026-09-27T19:16:59.613+03:00   W8S-R-p0 r0 [ 13] zone-N30000#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.18% ra 1.75% others 0.08% exit 0 waited 0.0s
+2026-09-27T19:17:05.858+03:00   W8S-R-p0 r0 [ 14] zone-N60000#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.75% ra 0.81% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:17:12.032+03:00   W8S-R-p0 r0 [ 15] R-J-T#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.81% ra 1.21% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:17:18.235+03:00   W8S-R-p0 r0 [ 16] ladder16-F0.5#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.21% ra 1.31% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:17:24.448+03:00   W8S-R-p0 r0 [ 17] ladder16-F1#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.31% ra 0.7% others 0.42% exit 0 waited 0.0s
+2026-09-27T19:17:30.711+03:00   W8S-R-p0 r0 [ 18] ladder16-F1.5#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.7% ra 0.9% others 1.2% exit 0 waited 0.0s
+2026-09-27T19:17:37.000+03:00   W8S-R-p0 r0 [ 19] ladder16-F2#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.9% ra 0.95% others 0.08% exit 0 waited 0.0s
+2026-09-27T19:17:44.291+03:00   W8S-R-p0 r1 [ 20] R-J-T#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.95% ra 1.48% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:17:51.586+03:00   W8S-R-p0 r1 [ 21] rung#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.48% ra 0.69% others 0.22% exit 0 waited 0.0s
+2026-09-27T19:17:58.186+03:00   W8S-R-p0 r1 [ 22] R-J-T#instr W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.69% ra 0.76% others 0.25% exit 0 waited 0.0s
+2026-09-27T19:18:04.898+03:00   W8S-R-p0 r1 [ 23] rung#instr W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.76% ra 1.65% others 0.12% exit 0 waited 0.0s
+2026-09-27T19:18:11.136+03:00   W8S-R-p0 r1 [ 24] R-J-T#instr W=4: pose 0x30c5438bc6ad9ffa expect match rb 1.65% ra 0.68% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:18:17.460+03:00   W8S-R-p0 r1 [ 25] rung#instr W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.68% ra 1.21% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:18:23.580+03:00   W8S-R-p0 r1 [ 26] R-J-T#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.21% ra 1.27% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:18:29.666+03:00   W8S-R-p0 r1 [ 27] ladder8-F0.5#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.27% ra 0.49% others 0.28% exit 0 waited 0.0s
+2026-09-27T19:18:35.804+03:00   W8S-R-p0 r1 [ 28] ladder8-F1#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.49% ra 0.61% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:18:41.944+03:00   W8S-R-p0 r1 [ 29] ladder8-F1.5#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.61% ra 0.63% others 0.27% exit 0 waited 0.0s
+2026-09-27T19:18:48.086+03:00   W8S-R-p0 r1 [ 30] ladder8-F2#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.63% ra 0.72% others 0.45% exit 0 waited 0.0s
+2026-09-27T19:18:54.284+03:00   W8S-R-p0 r1 [ 31] R-J-T-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.72% ra 0.6% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:19:00.546+03:00   W8S-R-p0 r1 [ 32] zone-N30000#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.6% ra 1.93% others 0.08% exit 0 waited 0.0s
+2026-09-27T19:19:06.892+03:00   W8S-R-p0 r1 [ 33] zone-N60000#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.93% ra 0.86% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:19:13.097+03:00   W8S-R-p0 r1 [ 34] R-J-T#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.86% ra 0.39% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:19:19.308+03:00   W8S-R-p0 r1 [ 35] ladder16-F0.5#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.39% ra 0.95% others 0.34% exit 0 waited 0.0s
+2026-09-27T19:19:25.543+03:00   W8S-R-p0 r1 [ 36] ladder16-F1#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.95% ra 0.8% others 0.08% exit 0 waited 0.0s
+2026-09-27T19:19:31.815+03:00   W8S-R-p0 r1 [ 37] ladder16-F1.5#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.8% ra 0.8% others 0.08% exit 0 waited 0.0s
+2026-09-27T19:19:38.113+03:00   W8S-R-p0 r1 [ 38] ladder16-F2#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.8% ra 1.63% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:19:45.405+03:00   W8S-R-p0 r2 [ 39] R-J-T#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.63% ra 0.72% others 0.22% exit 0 waited 0.0s
+2026-09-27T19:19:52.689+03:00   W8S-R-p0 r2 [ 40] rung#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.72% ra 1.35% others 0.62% exit 0 waited 0.0s
+2026-09-27T19:19:59.323+03:00   W8S-R-p0 r2 [ 41] R-J-T#instr W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.35% ra 0.6% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:20:05.988+03:00   W8S-R-p0 r2 [ 42] rung#instr W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.6% ra 1.17% others 0.12% exit 0 waited 0.0s
+2026-09-27T19:20:12.240+03:00   W8S-R-p0 r2 [ 43] R-J-T#instr W=4: pose 0x30c5438bc6ad9ffa expect match rb 1.17% ra 0.82% others 0.08% exit 0 waited 0.0s
+2026-09-27T19:20:18.520+03:00   W8S-R-p0 r2 [ 44] rung#instr W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.82% ra 1.81% others 0.08% exit 0 waited 0.0s
+2026-09-27T19:20:24.585+03:00   W8S-R-p0 r2 [ 45] R-J-T#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.81% ra 0.98% others 0.2% exit 0 waited 0.0s
+2026-09-27T19:20:30.667+03:00   W8S-R-p0 r2 [ 46] ladder8-F0.5#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.98% ra 0.53% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:20:36.766+03:00   W8S-R-p0 r2 [ 47] ladder8-F1#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.53% ra 0.91% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:20:42.883+03:00   W8S-R-p0 r2 [ 48] ladder8-F1.5#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.91% ra 0.81% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:20:49.003+03:00   W8S-R-p0 r2 [ 49] ladder8-F2#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.81% ra 0.65% others 0.28% exit 0 waited 0.0s
+2026-09-27T19:20:55.232+03:00   W8S-R-p0 r2 [ 50] R-J-T-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.65% ra 0.58% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:21:01.458+03:00   W8S-R-p0 r2 [ 51] zone-N30000#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.58% ra 1.82% others 0.86% exit 0 waited 0.0s
+2026-09-27T19:21:07.701+03:00   W8S-R-p0 r2 [ 52] zone-N60000#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.82% ra 0.93% others 0.35% exit 0 waited 0.0s
+2026-09-27T19:21:13.873+03:00   W8S-R-p0 r2 [ 53] R-J-T#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.93% ra 1.23% others 0.26% exit 0 waited 0.0s
+2026-09-27T19:21:20.071+03:00   W8S-R-p0 r2 [ 54] ladder16-F0.5#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.23% ra 0.35% others 0.69% exit 0 waited 0.0s
+2026-09-27T19:21:26.305+03:00   W8S-R-p0 r2 [ 55] ladder16-F1#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.35% ra 0.96% others 0.33% exit 0 waited 0.0s
+2026-09-27T19:21:32.556+03:00   W8S-R-p0 r2 [ 56] ladder16-F1.5#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.96% ra 0.67% others 0.57% exit 0 waited 0.0s
+2026-09-27T19:21:38.821+03:00   W8S-R-p0 r2 [ 57] ladder16-F2#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.67% ra 0.94% others 0.08% exit 0 waited 0.0s
+2026-09-27T19:21:38.821+03:00 W8S-R-p0: done
+2026-09-27T19:21:38.826+03:00 W8S-R-p1: idle rule (wait_idle8.ps1, up to 30 polls)
+2026-09-27T19:23:49.460+03:00 W8S-R-p1: idle reached; {'time': '2026-09-27T19:23:49.460+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-27T19:23:59.536+03:00 W8S-R-p1: opening receipt 0.83% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-27T19:24:05.594+03:00   W8S-R-p1 warm-up R-J-T#instr W=8 (untimed): pose 0x30c5438bc6ad9ffa expect match rb 0.83% ra 0.55% others 0.19% exit 0 waited 0.0s
+2026-09-27T19:24:11.857+03:00   W8S-R-p1 r0 [  1] ladder16-F2#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.55% ra 2.34% others 0.08% exit 0 waited 0.0s
+2026-09-27T19:24:18.099+03:00   W8S-R-p1 r0 [  2] ladder16-F1.5#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 2.34% ra 0.97% others 0.25% exit 0 waited 0.0s
+2026-09-27T19:24:24.317+03:00   W8S-R-p1 r0 [  3] ladder16-F1#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.97% ra 1.37% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:24:30.512+03:00   W8S-R-p1 r0 [  4] ladder16-F0.5#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.37% ra 1.19% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:24:36.668+03:00   W8S-R-p1 r0 [  5] R-J-T#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.19% ra 0.7% others 0.18% exit 0 waited 0.0s
+2026-09-27T19:24:42.884+03:00   W8S-R-p1 r0 [  6] zone-N60000#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.7% ra 0.23% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:24:49.081+03:00   W8S-R-p1 r0 [  7] zone-N30000#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.23% ra 0.89% others 0.17% exit 0 waited 0.0s
+2026-09-27T19:24:55.263+03:00   W8S-R-p1 r0 [  8] R-J-T-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.89% ra 0.72% others 0.71% exit 0 waited 0.0s
+2026-09-27T19:25:01.378+03:00   W8S-R-p1 r0 [  9] ladder8-F2#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.72% ra 1.31% others 0.19% exit 0 waited 0.0s
+2026-09-27T19:25:07.483+03:00   W8S-R-p1 r0 [ 10] ladder8-F1.5#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.31% ra 0.41% others 0.28% exit 0 waited 0.0s
+2026-09-27T19:25:13.566+03:00   W8S-R-p1 r0 [ 11] ladder8-F1#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.41% ra 0.29% others 0.19% exit 0 waited 0.0s
+2026-09-27T19:25:19.649+03:00   W8S-R-p1 r0 [ 12] ladder8-F0.5#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.29% ra 0.92% others 0.28% exit 0 waited 0.0s
+2026-09-27T19:25:25.701+03:00   W8S-R-p1 r0 [ 13] R-J-T#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.92% ra 0.57% others 0.98% exit 0 waited 0.0s
+2026-09-27T19:25:31.979+03:00   W8S-R-p1 r0 [ 14] rung#instr W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.57% ra 0.45% others 1.19% exit 0 waited 0.0s
+2026-09-27T19:25:38.216+03:00   W8S-R-p1 r0 [ 15] R-J-T#instr W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.45% ra 1.44% others 0.33% exit 0 waited 0.0s
+2026-09-27T19:25:44.848+03:00   W8S-R-p1 r0 [ 16] rung#instr W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.44% ra 1.74% others 0.19% exit 0 waited 0.0s
+2026-09-27T19:25:51.462+03:00   W8S-R-p1 r0 [ 17] R-J-T#instr W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.74% ra 1.85% others 0.38% exit 0 waited 0.0s
+2026-09-27T19:25:58.755+03:00   W8S-R-p1 r0 [ 18] rung#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.85% ra 0.86% others 0.13% exit 0 waited 0.0s
+2026-09-27T19:26:06.006+03:00   W8S-R-p1 r0 [ 19] R-J-T#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.86% ra 1.11% others 0.44% exit 0 waited 0.0s
+2026-09-27T19:26:12.280+03:00   W8S-R-p1 r1 [ 20] ladder16-F2#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.11% ra 1.15% others 0.32% exit 0 waited 0.0s
+2026-09-27T19:26:18.534+03:00   W8S-R-p1 r1 [ 21] ladder16-F1.5#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.15% ra 1.22% others 0.33% exit 0 waited 0.0s
+2026-09-27T19:26:24.756+03:00   W8S-R-p1 r1 [ 22] ladder16-F1#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.22% ra 1.76% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:26:30.952+03:00   W8S-R-p1 r1 [ 23] ladder16-F0.5#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.76% ra 0.68% others 0.26% exit 0 waited 0.0s
+2026-09-27T19:26:37.122+03:00   W8S-R-p1 r1 [ 24] R-J-T#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.68% ra 0.55% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:26:43.338+03:00   W8S-R-p1 r1 [ 25] zone-N60000#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.55% ra 0.65% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:26:49.539+03:00   W8S-R-p1 r1 [ 26] zone-N30000#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.65% ra 0.45% others 0.44% exit 0 waited 0.0s
+2026-09-27T19:26:55.730+03:00   W8S-R-p1 r1 [ 27] R-J-T-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.45% ra 0.67% others 0.17% exit 0 waited 0.0s
+2026-09-27T19:27:01.850+03:00   W8S-R-p1 r1 [ 28] ladder8-F2#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.67% ra 1.34% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:27:07.946+03:00   W8S-R-p1 r1 [ 29] ladder8-F1.5#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.34% ra 0.98% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:27:14.037+03:00   W8S-R-p1 r1 [ 30] ladder8-F1#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.98% ra 0.6% others 0.38% exit 0 waited 0.0s
+2026-09-27T19:27:20.127+03:00   W8S-R-p1 r1 [ 31] ladder8-F0.5#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.6% ra 0.68% others 0.37% exit 0 waited 0.0s
+2026-09-27T19:27:26.187+03:00   W8S-R-p1 r1 [ 32] R-J-T#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.68% ra 0.7% others 0.2% exit 0 waited 0.0s
+2026-09-27T19:27:32.443+03:00   W8S-R-p1 r1 [ 33] rung#instr W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.7% ra 0.47% others 0.73% exit 0 waited 0.0s
+2026-09-27T19:27:38.680+03:00   W8S-R-p1 r1 [ 34] R-J-T#instr W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.47% ra 0.9% others 0.17% exit 0 waited 0.0s
+2026-09-27T19:27:45.336+03:00   W8S-R-p1 r1 [ 35] rung#instr W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.9% ra 1.57% others 0.43% exit 0 waited 0.0s
+2026-09-27T19:27:51.942+03:00   W8S-R-p1 r1 [ 36] R-J-T#instr W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.57% ra 0.98% others 0.25% exit 0 waited 0.0s
+2026-09-27T19:27:59.238+03:00   W8S-R-p1 r1 [ 37] rung#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.98% ra 0.8% others 0.18% exit 0 waited 0.0s
+2026-09-27T19:28:06.474+03:00   W8S-R-p1 r1 [ 38] R-J-T#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.8% ra 0.88% others 0.23% exit 0 waited 0.0s
+2026-09-27T19:28:12.755+03:00   W8S-R-p1 r2 [ 39] ladder16-F2#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.88% ra 0.66% others 0.08% exit 0 waited 0.0s
+2026-09-27T19:28:18.993+03:00   W8S-R-p1 r2 [ 40] ladder16-F1.5#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.66% ra 0.77% others 0.08% exit 0 waited 0.0s
+2026-09-27T19:28:25.205+03:00   W8S-R-p1 r2 [ 41] ladder16-F1#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.77% ra 1.29% others 0.17% exit 0 waited 0.0s
+2026-09-27T19:28:31.394+03:00   W8S-R-p1 r2 [ 42] ladder16-F0.5#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.29% ra 1.32% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:28:37.553+03:00   W8S-R-p1 r2 [ 43] R-J-T#instr W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.32% ra 0.59% others 0.17% exit 0 waited 0.0s
+2026-09-27T19:28:43.763+03:00   W8S-R-p1 r2 [ 44] zone-N60000#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.59% ra 0.88% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:28:49.957+03:00   W8S-R-p1 r2 [ 45] zone-N30000#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.88% ra 0.56% others 0.18% exit 0 waited 0.0s
+2026-09-27T19:28:56.142+03:00   W8S-R-p1 r2 [ 46] R-J-T-a#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.56% ra 0.71% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:29:02.304+03:00   W8S-R-p1 r2 [ 47] ladder8-F2#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.71% ra 1.5% others 0.35% exit 0 waited 0.0s
+2026-09-27T19:29:08.403+03:00   W8S-R-p1 r2 [ 48] ladder8-F1.5#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.5% ra 1.59% others 0.09% exit 0 waited 0.0s
+2026-09-27T19:29:14.488+03:00   W8S-R-p1 r2 [ 49] ladder8-F1#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.59% ra 0.9% others 0.1% exit 0 waited 0.0s
+2026-09-27T19:29:20.568+03:00   W8S-R-p1 r2 [ 50] ladder8-F0.5#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.9% ra 0.59% others 0.28% exit 0 waited 0.0s
+2026-09-27T19:29:26.626+03:00   W8S-R-p1 r2 [ 51] R-J-T#instr W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.59% ra 0.35% others 0.29% exit 0 waited 0.0s
+2026-09-27T19:29:32.889+03:00   W8S-R-p1 r2 [ 52] rung#instr W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.35% ra 0.88% others 0.24% exit 0 waited 0.0s
+2026-09-27T19:29:39.124+03:00   W8S-R-p1 r2 [ 53] R-J-T#instr W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.88% ra 0.59% others 0.17% exit 0 waited 0.0s
+2026-09-27T19:29:45.757+03:00   W8S-R-p1 r2 [ 54] rung#instr W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.59% ra 1.41% others 0.19% exit 0 waited 0.0s
+2026-09-27T19:29:52.367+03:00   W8S-R-p1 r2 [ 55] R-J-T#instr W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.41% ra 0.66% others 0.19% exit 0 waited 0.0s
+2026-09-27T19:29:59.675+03:00   W8S-R-p1 r2 [ 56] rung#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.66% ra 0.95% others 0.22% exit 0 waited 0.0s
+2026-09-27T19:30:06.914+03:00   W8S-R-p1 r2 [ 57] R-J-T#instr W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.95% ra 0.34% others 0.18% exit 0 waited 0.0s
+2026-09-27T19:30:06.914+03:00 W8S-R-p1: done
+2026-09-27T19:30:06.918+03:00 micro-p0: idle rule (wait_idle8.ps1, up to 30 polls)
+2026-09-27T19:32:17.376+03:00 micro-p0: idle reached; {'time': '2026-09-27T19:32:17.376+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-27T19:32:27.456+03:00 micro-p0: opening receipt 1.26% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-27T19:32:33.117+03:00   micro-p0 warm-up omega-worker#omega W=0 (untimed): summaries 8 rb 1.26% ra 0.78% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:32:39.008+03:00   micro-p0 r0 [  1] omega-b-s36-worker#omega W=0: summaries 4 rb 0.78% ra 0.41% others 0.24% exit 0 waited 0.0s
+2026-09-27T19:32:44.813+03:00   micro-p0 r0 [  2] omega-b-s36-external#omega W=0: summaries 4 rb 0.41% ra 0.51% others 0.26% exit 0 waited 0.0s
+2026-09-27T19:32:51.342+03:00   micro-p0 r0 [  3] omega-b-s72-worker#omega W=0: summaries 4 rb 0.51% ra 0.58% others 0.07% exit 0 waited 0.0s
+2026-09-27T19:32:57.885+03:00   micro-p0 r0 [  4] omega-b-s72-external#omega W=0: summaries 4 rb 0.58% ra 0.58% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:33:03.541+03:00   micro-p0 r0 [  5] omega-worker#omega W=0: summaries 8 rb 0.58% ra 1.55% others 0.33% exit 0 waited 0.0s
+2026-09-27T19:33:09.191+03:00   micro-p0 r0 [  6] omega-external#omega W=0: summaries 8 rb 1.55% ra 1.02% others 0.16% exit 0 waited 0.0s
+2026-09-27T19:33:15.073+03:00   micro-p0 r1 [  7] omega-b-s36-worker#omega W=0: summaries 4 rb 1.02% ra 0.94% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:33:20.865+03:00   micro-p0 r1 [  8] omega-b-s36-external#omega W=0: summaries 4 rb 0.94% ra 0.94% others 0.13% exit 0 waited 0.0s
+2026-09-27T19:33:27.539+03:00   micro-p0 r1 [  9] omega-b-s72-worker#omega W=0: summaries 4 rb 0.94% ra 0.84% others 0.24% exit 0 waited 0.0s
+2026-09-27T19:33:34.125+03:00   micro-p0 r1 [ 10] omega-b-s72-external#omega W=0: summaries 4 rb 0.84% ra 0.56% others 0.26% exit 0 waited 0.0s
+2026-09-27T19:33:39.781+03:00   micro-p0 r1 [ 11] omega-worker#omega W=0: summaries 8 rb 0.56% ra 1.0% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:33:45.437+03:00   micro-p0 r1 [ 12] omega-external#omega W=0: summaries 8 rb 1.0% ra 1.35% others 0.48% exit 0 waited 0.0s
+2026-09-27T19:33:51.308+03:00   micro-p0 r2 [ 13] omega-b-s36-worker#omega W=0: summaries 4 rb 1.35% ra 1.09% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:33:57.088+03:00   micro-p0 r2 [ 14] omega-b-s36-external#omega W=0: summaries 4 rb 1.09% ra 0.58% others 0.27% exit 0 waited 0.0s
+2026-09-27T19:34:03.702+03:00   micro-p0 r2 [ 15] omega-b-s72-worker#omega W=0: summaries 4 rb 0.58% ra 0.48% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:34:10.170+03:00   micro-p0 r2 [ 16] omega-b-s72-external#omega W=0: summaries 4 rb 0.48% ra 0.74% others 0.07% exit 0 waited 0.0s
+2026-09-27T19:34:15.836+03:00   micro-p0 r2 [ 17] omega-worker#omega W=0: summaries 8 rb 0.74% ra 1.43% others 3.62% exit 0 waited 0.0s OTHERS-BUSY(3.62%)
+2026-09-27T19:34:21.482+03:00   micro-p0 r2 [ 18] omega-external#omega W=0: summaries 8 rb 1.43% ra 0.45% others 0.16% exit 0 waited 0.0s
+2026-09-27T19:34:21.482+03:00 micro-p0: re-running 1 process(es) at the end of the pass: [(17, 2, 'omega-worker', 'omega', 0, 'contaminated')]
+2026-09-27T19:34:27.139+03:00   micro-p0 r2 [ 17] omega-worker#omega W=0 RERUN (contaminated): summaries 8 rb 0.45% ra 1.73% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:34:27.139+03:00 micro-p0: done
+2026-09-27T19:34:27.141+03:00 micro-p1: idle rule (wait_idle8.ps1, up to 30 polls)
+2026-09-27T19:36:37.588+03:00 micro-p1: idle reached; {'time': '2026-09-27T19:36:37.588+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-27T19:36:47.666+03:00 micro-p1: opening receipt 0.65% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-27T19:36:53.332+03:00   micro-p1 warm-up omega-worker#omega W=0 (untimed): summaries 8 rb 0.65% ra 0.66% others 0.31% exit 0 waited 0.0s
+2026-09-27T19:36:58.989+03:00   micro-p1 r0 [  1] omega-external#omega W=0: summaries 8 rb 0.66% ra 1.0% others 0.16% exit 0 waited 0.0s
+2026-09-27T19:37:04.645+03:00   micro-p1 r0 [  2] omega-worker#omega W=0: summaries 8 rb 1.0% ra 0.98% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:37:11.182+03:00   micro-p1 r0 [  3] omega-b-s72-external#omega W=0: summaries 4 rb 0.98% ra 1.21% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:37:17.686+03:00   micro-p1 r0 [  4] omega-b-s72-worker#omega W=0: summaries 4 rb 1.21% ra 1.42% others 0.13% exit 0 waited 0.0s
+2026-09-27T19:37:23.479+03:00   micro-p1 r0 [  5] omega-b-s36-external#omega W=0: summaries 4 rb 1.42% ra 0.82% others 0.13% exit 0 waited 0.0s
+2026-09-27T19:37:29.333+03:00   micro-p1 r0 [  6] omega-b-s36-worker#omega W=0: summaries 4 rb 0.82% ra 0.94% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:37:35.001+03:00   micro-p1 r1 [  7] omega-external#omega W=0: summaries 8 rb 0.94% ra 0.68% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:37:40.659+03:00   micro-p1 r1 [  8] omega-worker#omega W=0: summaries 8 rb 0.68% ra 0.72% others 0.16% exit 0 waited 0.0s
+2026-09-27T19:37:47.157+03:00   micro-p1 r1 [  9] omega-b-s72-external#omega W=0: summaries 4 rb 0.72% ra 1.42% others 0.14% exit 0 waited 0.0s
+2026-09-27T19:37:53.801+03:00   micro-p1 r1 [ 10] omega-b-s72-worker#omega W=0: summaries 4 rb 1.42% ra 0.59% others 0.12% exit 0 waited 0.0s
+2026-09-27T19:37:59.566+03:00   micro-p1 r1 [ 11] omega-b-s36-external#omega W=0: summaries 4 rb 0.59% ra 0.53% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:38:05.371+03:00   micro-p1 r1 [ 12] omega-b-s36-worker#omega W=0: summaries 4 rb 0.53% ra 0.64% others 0.39% exit 0 waited 0.0s
+2026-09-27T19:38:11.022+03:00   micro-p1 r2 [ 13] omega-external#omega W=0: summaries 8 rb 0.64% ra 0.47% others 0.48% exit 0 waited 0.0s
+2026-09-27T19:38:16.678+03:00   micro-p1 r2 [ 14] omega-worker#omega W=0: summaries 8 rb 0.47% ra 1.27% others 1.9% exit 0 waited 0.0s
+2026-09-27T19:38:23.124+03:00   micro-p1 r2 [ 15] omega-b-s72-external#omega W=0: summaries 4 rb 1.27% ra 0.25% others 0.14% exit 0 waited 0.0s
+2026-09-27T19:38:29.676+03:00   micro-p1 r2 [ 16] omega-b-s72-worker#omega W=0: summaries 4 rb 0.25% ra 1.59% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:38:35.481+03:00   micro-p1 r2 [ 17] omega-b-s36-external#omega W=0: summaries 4 rb 1.59% ra 0.7% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:38:41.345+03:00   micro-p1 r2 [ 18] omega-b-s36-worker#omega W=0: summaries 4 rb 0.7% ra 0.52% others 0.36% exit 0 waited 0.0s
+2026-09-27T19:38:41.346+03:00 micro-p1: done
+2026-09-27T19:38:41.348+03:00 DM1-p0: idle rule (wait_idle8.ps1, up to 30 polls)
+2026-09-27T19:43:51.840+03:00 DM1-p0: idle reached; {'time': '2026-09-27T19:43:51.840+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-27T19:44:01.921+03:00 DM1-p0: opening receipt 0.65% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-27T19:44:11.957+03:00   DM1-p0 warm-up dm-vb-1920x1080-idle#dmA W=0 (untimed): DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 2682 B rb 0.65% ra 0.86% others 0.45% exit 0 waited 0.0s
+2026-09-27T19:44:21.684+03:00   DM1-p0 r0 [  1] dm-vb-1920x1080-idle#dmA W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 2684 B rb 0.86% ra 2.36% others 0.38% exit 0 waited 0.0s
+2026-09-27T19:44:35.997+03:00   DM1-p0 r0 [  2] dm-vb-1920x1080-idle#dmB W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 2688 B rb 2.36% ra 1.43% others 0.26% exit 0 waited 0.0s
+2026-09-27T19:44:50.985+03:00   DM1-p0 r0 [  3] dm-vb-1920x1080-idle#dmB W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 2678 B rb 1.43% ra 1.13% others 0.23% exit 0 waited 0.0s
+2026-09-27T19:45:00.750+03:00   DM1-p0 r0 [  4] dm-vb-1920x1080-idle#dmA W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 2680 B rb 1.13% ra 1.44% others 0.39% exit 0 waited 0.0s
+2026-09-27T19:45:10.271+03:00   DM1-p0 r0 [  5] dm-deferred-1920x1080-idle#dmA W=0: DM1 timing: path=Deferred res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 920 B rb 1.44% ra 2.56% others 0.37% exit 0 waited 0.0s
+2026-09-27T19:45:24.441+03:00   DM1-p0 r0 [  6] dm-deferred-1920x1080-idle#dmB W=0: DM1 timing: path=Deferred res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 919 B rb 2.56% ra 2.15% others 0.31% exit 0 waited 0.0s
+2026-09-27T19:45:38.551+03:00   DM1-p0 r0 [  7] dm-deferred-1920x1080-idle#dmB W=0: DM1 timing: path=Deferred res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 922 B rb 2.15% ra 1.09% others 0.38% exit 0 waited 0.0s
+2026-09-27T19:45:48.110+03:00   DM1-p0 r0 [  8] dm-deferred-1920x1080-idle#dmA W=0: DM1 timing: path=Deferred res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 920 B rb 1.09% ra 1.76% others 0.56% exit 0 waited 0.0s
+2026-09-27T19:45:57.874+03:00   DM1-p0 r0 [  9] dm-vb-1920x1080-edit100#dmA W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 2684 B rb 1.76% ra 1.55% others 0.52% exit 0 waited 0.0s
+2026-09-27T19:46:12.940+03:00   DM1-p0 r0 [ 10] dm-vb-1920x1080-edit100#dmB W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 2692 B rb 1.55% ra 1.17% others 0.25% exit 0 waited 0.0s
+2026-09-27T19:46:28.020+03:00   DM1-p0 r0 [ 11] dm-vb-1920x1080-edit100#dmB W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 2689 B rb 1.17% ra 1.74% others 0.39% exit 0 waited 0.0s
+2026-09-27T19:46:37.763+03:00   DM1-p0 r0 [ 12] dm-vb-1920x1080-edit100#dmA W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 2680 B rb 1.74% ra 2.62% others 0.34% exit 0 waited 0.0s
+2026-09-27T19:46:47.295+03:00   DM1-p0 r0 [ 13] dm-deferred-1920x1080-edit100#dmA W=0: DM1 timing: path=Deferred res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 923 B rb 2.62% ra 1.39% others 0.46% exit 0 waited 0.0s
+2026-09-27T19:47:01.459+03:00   DM1-p0 r0 [ 14] dm-deferred-1920x1080-edit100#dmB W=0: DM1 timing: path=Deferred res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 921 B rb 1.39% ra 1.49% others 0.22% exit 0 waited 0.0s
+2026-09-27T19:47:15.704+03:00   DM1-p0 r0 [ 15] dm-deferred-1920x1080-edit100#dmB W=0: DM1 timing: path=Deferred res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 922 B rb 1.49% ra 2.04% others 0.39% exit 0 waited 0.0s
+2026-09-27T19:47:25.237+03:00   DM1-p0 r0 [ 16] dm-deferred-1920x1080-edit100#dmA W=0: DM1 timing: path=Deferred res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 920 B rb 2.04% ra 2.23% others 0.44% exit 0 waited 0.0s
+2026-09-27T19:47:40.339+03:00   DM1-p0 r0 [ 17] dm-vb-1920x1080-grow150#dmB W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=Some(150) frames=241 artifact 2690 B rb 2.23% ra 0.92% others 0.25% exit 0 waited 0.0s
+2026-09-27T19:47:55.406+03:00   DM1-p0 r0 [ 18] dm-vb-1920x1080-grow150#dmB W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=Some(150) frames=241 artifact 2689 B rb 0.92% ra 1.61% others 0.25% exit 0 waited 0.0s
+2026-09-27T19:48:10.496+03:00   DM1-p0 r0 [ 19] dm-vb-1920x1080-grow150#dmB W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=Some(150) frames=241 artifact 2691 B rb 1.61% ra 1.24% others 0.24% exit 0 waited 0.0s
+2026-09-27T19:48:10.497+03:00 DM1-p0: done
+2026-09-27T19:48:10.499+03:00 P-jolt56-prof-p0: idle rule (wait_idle8.ps1, up to 30 polls)
+2026-09-27T19:50:20.969+03:00 P-jolt56-prof-p0: idle reached; {'time': '2026-09-27T19:50:20.969+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-27T19:50:31.046+03:00 P-jolt56-prof-p0: opening receipt 1.25% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-27T19:50:37.507+03:00   P-jolt56-prof-p0 warm-up P-jolt56-prof#j56p W=8 (untimed): jolt hash 0xb8522b4e3fc62cfe threads 8 dumps 5 rb 1.25% ra 1.0% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:50:47.827+03:00   P-jolt56-prof-p0 r0 [  1] P-jolt56-prof#j56p W=1: jolt hash 0xb8522b4e3fc62cfe threads 1 dumps 5 rb 1.0% ra 0.73% others 0.23% exit 0 waited 0.0s
+2026-09-27T19:50:54.339+03:00   P-jolt56-prof-p0 r0 [  2] P-jolt56-prof#j56p W=8: jolt hash 0xb8522b4e3fc62cfe threads 8 dumps 5 rb 0.73% ra 0.56% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:51:00.794+03:00   P-jolt56-prof-p0 r0 [  3] P-jolt56-prof#j56p W=16: jolt hash 0xb8522b4e3fc62cfe threads 16 dumps 5 rb 0.56% ra 0.77% others 0.0% exit 0 waited 0.0s
+2026-09-27T19:51:11.000+03:00   P-jolt56-prof-p0 r1 [  4] P-jolt56-prof#j56p W=1: jolt hash 0xb8522b4e3fc62cfe threads 1 dumps 5 rb 0.77% ra 1.58% others 0.19% exit 0 waited 0.0s
+2026-09-27T19:51:17.517+03:00   P-jolt56-prof-p0 r1 [  5] P-jolt56-prof#j56p W=8: jolt hash 0xb8522b4e3fc62cfe threads 8 dumps 5 rb 1.58% ra 1.25% others 0.44% exit 0 waited 0.0s
+2026-09-27T19:51:23.961+03:00   P-jolt56-prof-p0 r1 [  6] P-jolt56-prof#j56p W=16: jolt hash 0xb8522b4e3fc62cfe threads 16 dumps 5 rb 1.25% ra 0.65% others 0.46% exit 0 waited 0.0s
+2026-09-27T19:51:34.160+03:00   P-jolt56-prof-p0 r2 [  7] P-jolt56-prof#j56p W=1: jolt hash 0xb8522b4e3fc62cfe threads 1 dumps 5 rb 0.65% ra 0.72% others 0.1% exit 0 waited 0.0s
+2026-09-27T19:51:40.618+03:00   P-jolt56-prof-p0 r2 [  8] P-jolt56-prof#j56p W=8: jolt hash 0xb8522b4e3fc62cfe threads 8 dumps 5 rb 0.72% ra 0.7% others 0.15% exit 0 waited 0.0s
+2026-09-27T19:51:47.032+03:00   P-jolt56-prof-p0 r2 [  9] P-jolt56-prof#j56p W=16: jolt hash 0xb8522b4e3fc62cfe threads 16 dumps 5 rb 0.7% ra 0.43% others 0.24% exit 0 waited 0.0s
+2026-09-27T19:51:47.032+03:00 P-jolt56-prof-p0: done
+2026-09-27T19:51:47.034+03:00 P-jolt56-prof-p1: idle rule (wait_idle8.ps1, up to 30 polls)
+2026-09-27T19:53:57.491+03:00 P-jolt56-prof-p1: idle reached; {'time': '2026-09-27T19:53:57.491+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-27T19:54:07.571+03:00 P-jolt56-prof-p1: opening receipt 0.67% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-27T19:54:14.018+03:00   P-jolt56-prof-p1 warm-up P-jolt56-prof#j56p W=8 (untimed): jolt hash 0xb8522b4e3fc62cfe threads 8 dumps 5 rb 0.67% ra 2.08% others 0.08% exit 0 waited 0.0s
+2026-09-27T19:54:20.476+03:00   P-jolt56-prof-p1 r0 [  1] P-jolt56-prof#j56p W=16: jolt hash 0xb8522b4e3fc62cfe threads 16 dumps 5 rb 2.08% ra 0.7% others 0.3% exit 0 waited 0.0s
+2026-09-27T19:54:26.979+03:00   P-jolt56-prof-p1 r0 [  2] P-jolt56-prof#j56p W=8: jolt hash 0xb8522b4e3fc62cfe threads 8 dumps 5 rb 0.7% ra 0.61% others 0.14% exit 0 waited 0.0s
+2026-09-27T19:54:37.224+03:00   P-jolt56-prof-p1 r0 [  3] P-jolt56-prof#j56p W=1: jolt hash 0xb8522b4e3fc62cfe threads 1 dumps 5 rb 0.61% ra 1.03% others 0.31% exit 0 waited 0.0s
+2026-09-27T19:54:43.629+03:00   P-jolt56-prof-p1 r1 [  4] P-jolt56-prof#j56p W=16: jolt hash 0xb8522b4e3fc62cfe threads 16 dumps 5 rb 1.03% ra 0.68% others 0.32% exit 0 waited 0.0s
+2026-09-27T19:54:50.132+03:00   P-jolt56-prof-p1 r1 [  5] P-jolt56-prof#j56p W=8: jolt hash 0xb8522b4e3fc62cfe threads 8 dumps 5 rb 0.68% ra 0.68% others 0.22% exit 0 waited 0.0s
+2026-09-27T19:55:00.332+03:00   P-jolt56-prof-p1 r1 [  6] P-jolt56-prof#j56p W=1: jolt hash 0xb8522b4e3fc62cfe threads 1 dumps 5 rb 0.68% ra 0.82% others 0.17% exit 0 waited 0.0s
+2026-09-27T19:55:06.779+03:00   P-jolt56-prof-p1 r2 [  7] P-jolt56-prof#j56p W=16: jolt hash 0xb8522b4e3fc62cfe threads 16 dumps 5 rb 0.82% ra 0.98% others 0.46% exit 0 waited 0.0s
+2026-09-27T19:55:13.295+03:00   P-jolt56-prof-p1 r2 [  8] P-jolt56-prof#j56p W=8: jolt hash 0xb8522b4e3fc62cfe threads 8 dumps 5 rb 0.98% ra 1.27% others 0.36% exit 0 waited 0.0s
+2026-09-27T19:55:23.563+03:00   P-jolt56-prof-p1 r2 [  9] P-jolt56-prof#j56p W=1: jolt hash 0xb8522b4e3fc62cfe threads 1 dumps 5 rb 1.27% ra 0.68% others 0.25% exit 0 waited 0.0s
+2026-09-27T19:55:23.563+03:00 P-jolt56-prof-p1: done
+2026-09-27T19:55:23.610+03:00 WINDOW END exit 0: complete; counters {'timed': 339, 'rerun': 2, 'warm': 9, 'voided_processes': 0}; binaries after all match

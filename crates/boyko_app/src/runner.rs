@@ -1324,6 +1324,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // Minimized window (0×0 client): skip the fence + uploads + render,
         // keep pumping (plan runner-frame note).
         if host.window.width() == 0 || host.window.height() == 0 {
+            // Dynamic-materials DM1 (cut C-4): the stager already drained this frame's material
+            // edits into staging this frame never copies, so the next recorded frame owes the
+            // full image rebuilt from the authority (which carries them).
+            host.material_full_image_pending = crate::material_gate::full_pending_after_skip(
+                host.material_full_image_pending,
+                app.world().resource::<boyko_render::MaterialUploadStaging>().row_count(),
+            );
             host.window.refresh_size();
             continue;
         }
@@ -1389,12 +1396,16 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     .expect("invariant: MaterialTable inserted at boot");
                 {
                     let material_assets = app.world().resource::<Assets<Material>>();
-                    material_table.grow_if_needed(
+                    // Dynamic-materials DM1 (design F3): the grown table is created EMPTY, so this
+                    // frame owes it the full image (6-mat below), never only this frame's runs.
+                    if material_table.grow_if_needed(
                         material_assets,
                         ctx,
                         &mut retired,
                         host.renderer.submission_epoch(),
-                    );
+                    ) {
+                        host.material_full_image_pending = true;
+                    }
                 }
                 app.world_mut().insert_non_send_resource(material_table);
             }
@@ -1584,6 +1595,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // would be dead and `unused_assignments` — a `-D warnings` gate — would say so. The
         // minimized (0×0 client) iteration never gets here at all; it `continue`s far above.
         let vb_cull_capture: bool;
+        // Dynamic-materials DM1: this frame's material-table upload plan, decided inside the render
+        // block (6-mat) and read after the render call to settle the full-image-owed flag.
+        // DEFINITE-INITIALIZED for the reason the bindings above are.
+        let material_plan: crate::material_gate::MaterialUploadPlan;
         // The dump's readback request (cold; `None` without the env knob). The
         // returned borrow holds `dump` until the render call consumes it, so the
         // light-header latch below reads this flag instead of `dump` itself.
@@ -1783,15 +1798,37 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             }
 
             // 5b''. Asset-streaming plan F8: the gathered per-instance material-id lane —
-            //       gated on `any_non_default_material` (Principle 1: a default frame does
-            //       ZERO material-upload work).
-            if scratch.any_non_default_material() {
-                // SAFETY: `host.gpu.pm_instance_material_rings[s]` — same provenance
-                // contract as `instance_rings[s]` above (boot-minted or F8-grown in
-                // lockstep, live until teardown, the fenced slot `s == token.slot()`).
-                unsafe {
-                    upload_instance_materials(&token, &host.gpu.pm_instance_material_rings[s], scratch);
+            //       uploaded on an `any_non_default_material` frame only (Principle 1: a
+            //       default frame does ZERO material-upload work). Dynamic-materials DM1 (D-2):
+            //       VB and Forward read this ring every frame, so on the falling edge each slot
+            //       zero-fills the prefix it was written to, once (`material_gate`).
+            let pm_rows = scratch.material_ids.len() as u32;
+            match crate::material_gate::pm_ring_action(
+                scratch.any_non_default_material(),
+                &mut host.pm_ring_high_water[s],
+                pm_rows,
+            ) {
+                crate::material_gate::PmRingAction::Upload => {
+                    // SAFETY: `host.gpu.pm_instance_material_rings[s]` — same provenance
+                    // contract as `instance_rings[s]` above (boot-minted or F8-grown in
+                    // lockstep, live until teardown, the fenced slot `s == token.slot()`).
+                    unsafe {
+                        upload_instance_materials(&token, &host.gpu.pm_instance_material_rings[s], scratch);
+                    }
                 }
+                crate::material_gate::PmRingAction::Zero { rows } => {
+                    // SAFETY: the same ring slot and provenance contract as the upload arm;
+                    // `rows` is this slot's high-water, which only ever recorded lanes the
+                    // slot's (monotonically growing) capacity held.
+                    unsafe {
+                        boyko_render::zero_instance_materials(
+                            &token,
+                            &host.gpu.pm_instance_material_rings[s],
+                            rows,
+                        );
+                    }
+                }
+                crate::material_gate::PmRingAction::Idle => {}
             }
 
             // 5b'''. Textured-PBR T6c: the gathered per-instance TEXTURED material payload
@@ -2177,6 +2214,45 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // `scene()` below so `GBufferScene.material_table` binds its device SSBO
             // instead of a boot-owned buffer.
             let material_table = world.non_send_resource::<MaterialTable>();
+
+            // 6-mat. Dynamic-materials DM1 (design F1/F3): the material-table upload into the
+            //        fenced staging slot `s`, through shared borrows only (no new `World` write —
+            //        the G-LOOP census). FULL image when owed (frame 0 / a grow / after a lost
+            //        edit): zero + every `Loaded` row, rebuilt from the authority, as ONE region
+            //        `[0, capacity·48)`. COMPACT otherwise, when the stager staged rows: the packed
+            //        rows at `[0, k·48)` of slot `s`, copied at their runs. IDLE: nothing written,
+            //        nothing declared, nothing recorded.
+            let material_staging = world.resource::<boyko_render::MaterialUploadStaging>();
+            material_plan = crate::material_gate::material_upload_plan(
+                host.material_full_image_pending,
+                material_staging.row_count(),
+            );
+            let material_full_region: [boyko_rhi::BufferCopy; 1];
+            let material_regions: Option<&[boyko_rhi::BufferCopy]> = match material_plan {
+                crate::material_gate::MaterialUploadPlan::Idle => None,
+                crate::material_gate::MaterialUploadPlan::Compact => {
+                    // SAFETY: `material_table.staging_slot(s)` is the CURRENT staging ring's slot
+                    // (a grow replaces every slot and retires the superseded ones at `epoch +
+                    // RETIRE_DELAY`), minted `HostVisibleCoherent` + persistently mapped at the
+                    // table's capacity, live until teardown, and the fenced slot `s ==
+                    // token.slot()`; the rows are the staging resource's own column, staged
+                    // `< high_water <= capacity` (the grow above ran first).
+                    unsafe {
+                        boyko_render::upload_material_rows(
+                            &token,
+                            material_table.staging_slot(s),
+                            material_staging.rows(),
+                        );
+                    }
+                    Some(material_staging.runs())
+                }
+                crate::material_gate::MaterialUploadPlan::Full => {
+                    let bytes =
+                        material_table.write_full_image(&token, world.resource::<Assets<Material>>());
+                    material_full_region = [boyko_rhi::BufferCopy { src_offset: 0, dst_offset: 0, size: bytes }];
+                    Some(&material_full_region)
+                }
+            };
             // The SAME `casters` gather the 5d-pre arming read.
             let caster_batches = casters.batches();
             // VG rung R2c: the instance ring the per-batch AABB fold reads. Bound ONCE outside
@@ -2731,6 +2807,8 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 #[cfg(feature = "hwrt")]
                 temporal_enabled,
                 material_table,
+                // Dynamic-materials DM1: 6-mat's regions (`None` on an idle frame).
+                material_regions,
                 // Asset-streaming plan F8: the per-frame PER_INSTANCE_MATERIAL pipeline gate,
                 // read from the SAME `scratch` the instance-model upload above just read.
                 scratch.any_non_default_material(),
@@ -2892,6 +2970,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         host.draw_scratch.put(draws);
 
         let presented_ok = matches!(&presented, Ok(true));
+        // Dynamic-materials DM1 (cut C-4): a frame that planned a material copy and did not record
+        // it (a recreate skip) owes the full image; a recorded frame owes nothing.
+        host.material_full_image_pending =
+            crate::material_gate::full_pending_after(material_plan, presented_ok);
         match presented {
             // Presented normally, or the swapchain was (re)created this call
             // (frame skipped; the size refresh below feeds the next attempt) —
@@ -3270,6 +3352,8 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     frame_csm_armed,
                     frame_light_uploaded,
                     ray_upload,
+                    host.renderer.material_upload_probe(),
+                    material_plan == crate::material_gate::MaterialUploadPlan::Full,
                 );
                 d.after_present(ctx, presented_ok, meta)
             }
@@ -3620,6 +3704,9 @@ fn word_set<T: Copy>(variants: &[T], seen: u8, word: impl Fn(T) -> &'static str)
 #[cfg(windows)]
 #[cold]
 #[inline(never)]
+// Each argument is a distinct per-frame fact the state line records; a struct would only move
+// the same list behind one more name, with this fn its only reader.
+#[allow(clippy::too_many_arguments)]
 fn dump_frame_meta(
     app: &App,
     dump: &crate::host_dump::HostDump,
@@ -3628,6 +3715,8 @@ fn dump_frame_meta(
     csm_armed: bool,
     light_uploaded: bool,
     ray_upload: Option<crate::host_dump::RayShadowUpload>,
+    material_probe: boyko_rhi_vulkan::present::MaterialUploadProbe,
+    material_full: bool,
 ) -> crate::host_dump::FrameMeta {
     let jitter = app.world().try_resource::<JitterState>().copied().unwrap_or_default();
     crate::host_dump::FrameMeta {
@@ -3641,6 +3730,9 @@ fn dump_frame_meta(
         seed: ray_upload.map(|r| r.seed),
         origin_mode: ray_upload.map(|r| r.origin_mode),
         raster_fwd: ray_upload.map(|r| r.raster_fwd),
+        mat_pass: material_probe.passes,
+        mat_regions: material_probe.regions,
+        mat_full: material_full,
     }
 }
 
@@ -3773,6 +3865,8 @@ unsafe fn destroy_host_gpu_chain(host: WindowHost, ctx: &VulkanContext) {
         light_uploaded_gen: _,
         last_ddgi_grid: _,
         particle_effects_uploaded_gen: _,
+        pm_ring_high_water: _,
+        material_full_image_pending: _,
         swapchain,
         surface,
         window,

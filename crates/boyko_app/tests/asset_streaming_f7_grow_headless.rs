@@ -489,7 +489,7 @@ fn f7_grow_and_defer_old_phased_headless() {
 
     // Phase D: FIX-E (rebind-under-FIF) — a fully quiet tail must still converge
     // both FIF slots (the repoint is gated ONLY on rebind_pending, never on
-    // dirty_gen/flush_if_dirty).
+    // dirty_gen or the material edited set).
     assert!(
         !stats.rebind_pending_slot0 && !stats.rebind_pending_slot1,
         "both FIF slots must have converged by the end of the quiet Phase D tail \

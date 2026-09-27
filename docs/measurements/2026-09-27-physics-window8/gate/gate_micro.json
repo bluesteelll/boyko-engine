@@ -1,0 +1,199 @@
+[
+ {
+  "what": "--help (the exe has no help text: without --bench --mode it runs the untimed self-check)",
+  "exit": 0,
+  "self_check_ok": true,
+  "modes_in_source": [
+   "omega-b",
+   "omega"
+  ],
+  "routes_in_source": [
+   "worker",
+   "external"
+  ]
+ },
+ {
+  "what": "small-omega-b-worker",
+  "args": [
+   "--bench",
+   "--mode",
+   "omega-b",
+   "--participants",
+   "2",
+   "--regions",
+   "10",
+   "--route",
+   "worker"
+  ],
+  "exit": 0,
+  "summaries": 1,
+  "wall_s_for_schedule": 0.009,
+  "fail": []
+ },
+ {
+  "what": "small-omega-b-external",
+  "args": [
+   "--bench",
+   "--mode",
+   "omega-b",
+   "--participants",
+   "2",
+   "--regions",
+   "10",
+   "--route",
+   "external"
+  ],
+  "exit": 0,
+  "summaries": 1,
+  "wall_s_for_schedule": 0.008,
+  "fail": []
+ },
+ {
+  "what": "small-omega-worker",
+  "args": [
+   "--bench",
+   "--mode",
+   "omega",
+   "--workers",
+   "8",
+   "--gap-us",
+   "0",
+   "--reps",
+   "10",
+   "--route",
+   "worker"
+  ],
+  "exit": 0,
+  "summaries": 1,
+  "wall_s_for_schedule": 0.009,
+  "fail": []
+ },
+ {
+  "what": "small-omega-external",
+  "args": [
+   "--bench",
+   "--mode",
+   "omega",
+   "--workers",
+   "8",
+   "--gap-us",
+   "0",
+   "--reps",
+   "10",
+   "--route",
+   "external"
+  ],
+  "exit": 0,
+  "summaries": 1,
+  "wall_s_for_schedule": 0.009,
+  "fail": []
+ },
+ {
+  "what": "omega-b-s36-worker",
+  "args": [
+   "--bench",
+   "--mode",
+   "omega-b",
+   "--participants",
+   "2,4,8,16",
+   "--stages",
+   "36",
+   "--route",
+   "worker"
+  ],
+  "exit": 0,
+  "summaries": 4,
+  "wall_s_for_schedule": 0.82,
+  "fail": []
+ },
+ {
+  "what": "omega-b-s36-external",
+  "args": [
+   "--bench",
+   "--mode",
+   "omega-b",
+   "--participants",
+   "2,4,8,16",
+   "--stages",
+   "36",
+   "--route",
+   "external"
+  ],
+  "exit": 0,
+  "summaries": 4,
+  "wall_s_for_schedule": 0.722,
+  "fail": []
+ },
+ {
+  "what": "omega-b-s72-worker",
+  "args": [
+   "--bench",
+   "--mode",
+   "omega-b",
+   "--participants",
+   "2,4,8,16",
+   "--stages",
+   "72",
+   "--route",
+   "worker"
+  ],
+  "exit": 0,
+  "summaries": 4,
+  "wall_s_for_schedule": 1.474,
+  "fail": []
+ },
+ {
+  "what": "omega-b-s72-external",
+  "args": [
+   "--bench",
+   "--mode",
+   "omega-b",
+   "--participants",
+   "2,4,8,16",
+   "--stages",
+   "72",
+   "--route",
+   "external"
+  ],
+  "exit": 0,
+  "summaries": 4,
+  "wall_s_for_schedule": 1.518,
+  "fail": []
+ },
+ {
+  "what": "omega-worker",
+  "args": [
+   "--bench",
+   "--mode",
+   "omega",
+   "--workers",
+   "8,16",
+   "--gap-us",
+   "0,5,20,80",
+   "--route",
+   "worker"
+  ],
+  "exit": 0,
+  "summaries": 8,
+  "wall_s_for_schedule": 0.626,
+  "fail": []
+ },
+ {
+  "what": "omega-external",
+  "args": [
+   "--bench",
+   "--mode",
+   "omega",
+   "--workers",
+   "8,16",
+   "--gap-us",
+   "0,5,20,80",
+   "--route",
+   "external"
+  ],
+  "exit": 0,
+  "summaries": 8,
+  "wall_s_for_schedule": 0.618,
+  "fail": []
+ }
+]

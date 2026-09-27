@@ -1,0 +1,39 @@
+# Q8 DM1 C6: A = cad5439b (host-visible table), B = 97ee830f (device-local); 1920x1080 only; zone median_ns over 220 frames
+present modes: ['fifo']
+
+## dm-vb-1920x1080-idle: order ['dmA', 'dmB', 'dmB', 'dmA'] (seq [1, 2, 3, 4])
+  zone 12 VB_PRODUCE_RUN         A1   300.54 B1   249.86 B2   318.98 A2   294.40 us; median(B-A)  -13.06 us (-4.39 %); band  69.12 us -> B<=A (d<=0); means A 299.18 B 281.34
+  zone 14 VB_PRODUCE_NET         A1   300.54 B1   249.86 B2   318.98 A2   294.40 us; median(B-A)  -13.06 us (-4.39 %); band  69.12 us -> B<=A (d<=0); means A 299.18 B 281.34
+  zone 2 VB_SHADE               A1   300.54 B1   249.86 B2   318.46 A2   293.89 us; median(B-A)  -13.06 us (-4.39 %); band  68.61 us -> B<=A (d<=0); means A 298.69 B 280.87
+  zone 4 VB_EARLY_CULL          A1   792.61 B1   807.50 B2   803.38 A2   773.74 us; median(B-A)  +22.26 us (+2.84 %); band  18.86 us -> RED: B-A above band; means A 746.84 B 804.92
+  zone 5 VB_EARLY_RASTER        A1    65.28 B1    68.66 B2    65.73 A2    65.25 us; median(B-A)   +1.93 us (+2.95 %); band   2.93 us -> B<=A (inside band); means A 65.46 B 68.18
+  zone 9 VB_RUN                 A1   859.14 B1   878.08 B2   872.45 A2   840.19 us; median(B-A)  +25.60 us (+3.01 %); band  18.94 us -> RED: B-A above band; means A 813.25 B 874.71
+
+## dm-deferred-1920x1080-idle: order ['dmA', 'dmB', 'dmB', 'dmA'] (seq [5, 6, 7, 8])
+  zone 17 GBUF_DEFERRED_RESOLVE  A1   605.18 B1   571.39 B2   446.46 A2   607.23 us; median(B-A)  -97.28 us (-16.05 %); band 124.93 us -> B<=A (d<=0); means A 606.96 B 503.55
+
+## dm-vb-1920x1080-edit100: order ['dmA', 'dmB', 'dmB', 'dmA'] (seq [9, 10, 11, 12])
+  zone 12 VB_PRODUCE_RUN         A1   315.90 B1   320.51 B2   318.46 A2   286.21 us; median(B-A)  +18.43 us (+6.12 %); band  29.70 us -> B<=A (inside band); means A 300.27 B 292.15
+  zone 14 VB_PRODUCE_NET         A1   315.90 B1   320.51 B2   318.46 A2   286.21 us; median(B-A)  +18.43 us (+6.12 %); band  29.70 us -> B<=A (inside band); means A 300.27 B 292.15
+  zone 2 VB_SHADE               A1   315.39 B1   319.49 B2   318.46 A2   285.18 us; median(B-A)  +18.69 us (+6.22 %); band  30.21 us -> B<=A (inside band); means A 299.80 B 291.64
+  zone 4 VB_EARLY_CULL          A1   784.64 B1   808.72 B2   805.66 A2   781.62 us; median(B-A)  +24.06 us (+3.07 %); band   3.06 us -> RED: B-A above band; means A 748.59 B 775.43
+  zone 5 VB_EARLY_RASTER        A1    65.94 B1    65.87 B2    65.86 A2    66.38 us; median(B-A)   -0.30 us (-0.45 %); band   0.45 us -> B<=A (d<=0); means A 66.14 B 66.04
+  zone 9 VB_RUN                 A1   850.94 B1   877.57 B2   875.52 A2   849.41 us; median(B-A)  +26.37 us (+3.10 %); band   2.05 us -> RED: B-A above band; means A 815.68 B 842.54
+
+## dm-deferred-1920x1080-edit100: order ['dmA', 'dmB', 'dmB', 'dmA'] (seq [13, 14, 15, 16])
+  zone 17 GBUF_DEFERRED_RESOLVE  A1   453.41 B1   567.15 B2   434.16 A2   603.06 us; median(B-A)  -27.58 us (-5.22 %); band 149.65 us -> B<=A (d<=0); means A 526.50 B 500.00
+
+## the grow frame (B only, grow at frame 150): per-zone mean over 220 frames vs B idle; implied one-frame excess = 220 x (mean_grow - mean_idle) (estimate; the artifact has no per-frame record)
+  zone 9 VB_RUN: idle means [912.42, 836.99] us; grow means [848.2, 842.47, 839.52] us; implied excess -6888.3 us; per-frame SD 78.4 us -> SE of a 220-frame mean 5.29 us, x220 = 1163 us; p95 idle [1036288.0, 959488.0] grow [1011712.0, 982016.0, 977920.0]
+  zone 2 VB_SHADE: idle means [272.3, 289.44] us; grow means [297.53, 292.47, 290.23] us; implied excess +2759.8 us; per-frame SD 42.7 us -> SE of a 220-frame mean 2.88 us, x220 = 633 us; p95 idle [427008.0, 326656.0] grow [338944.0, 331776.0, 326656.0]
+  zone 14 VB_PRODUCE_NET: idle means [272.77, 289.92] us; grow means [298.04, 292.96, 290.72] us; implied excess +2764.5 us; per-frame SD 42.7 us -> SE of a 220-frame mean 2.88 us, x220 = 633 us; p95 idle [427008.0, 326656.0] grow [338944.0, 331776.0, 327680.0]
+
+## the 100-row edit vs idle, per binary (median_ns): the edit adds
+  vb dmA zone 2: idle [300.54, 293.89] edit100 [315.39, 285.18] us; d +3.07 us
+  vb dmA zone 14: idle [300.54, 294.4] edit100 [315.9, 286.21] us; d +3.58 us
+  vb dmA zone 9: idle [859.14, 840.19] edit100 [850.94, 849.41] us; d +0.51 us
+  vb dmB zone 2: idle [249.86, 318.46] edit100 [319.49, 318.46] us; d +34.82 us
+  vb dmB zone 14: idle [249.86, 318.98] edit100 [320.51, 318.46] us; d +35.07 us
+  vb dmB zone 9: idle [878.08, 872.45] edit100 [877.57, 875.52] us; d +1.28 us
+  deferred dmA zone 17: idle [605.18, 607.23] edit100 [453.41, 603.06] us; d -77.98 us
+  deferred dmB zone 17: idle [571.39, 446.46] edit100 [567.15, 434.16] us; d -8.27 us

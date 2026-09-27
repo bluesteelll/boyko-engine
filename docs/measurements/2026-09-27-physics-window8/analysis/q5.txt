@@ -1,0 +1,45 @@
+# Q5 micro: omega_b (region protocol) and omega(W, gap); cell = median over K=6 processes of each SUMMARY statistic
+
+## omega_b, route worker
+  P2: region36 16000 [14900-16900] K=6 (r 12.50 / i 6.72 / s 2.46 %); region72 28300 [27200-31800] K=6 (r 16.25 / i 5.92 / s 3.07 %) ns
+       slope (72-36)/36 = 341.7 ns/stage [worst pairing 286.1 .. 469.4]; per-round paired slope 352.8 [291.7-469.4] K=6 (r 50.39 / i 18.11 / s 9.42 %); intercept (region cost at 0 stages) 3700 ns; stage_ns_median(36) as printed 444.4; means: 36 15976 72 28264 -> slope(mean) 341.4
+  P4: region36 39900 [38500-52900] K=6 (r 36.09 / i 25.56 / s 8.92 %); region72 82600 [73300-105800] K=6 (r 39.35 / i 17.58 / s 7.59 %) ns
+       slope (72-36)/36 = 1186.1 ns/stage [worst pairing 566.7 .. 1869.4]; per-round paired slope 1079.2 [566.7-1844.4] K=6 (r 118.40 / i 43.24 / s 21.33 %); intercept (region cost at 0 stages) -2800 ns; stage_ns_median(36) as printed 1108.3; means: 36 40167 72 82787 -> slope(mean) 1183.9
+  P8: region36 118650 [101800-132700] K=6 (r 26.04 / i 20.12 / s 6.01 %); region72 226650 [200500-272200] K=6 (r 31.63 / i 17.73 / s 6.55 %) ns
+       slope (72-36)/36 = 3000.0 ns/stage [worst pairing 1883.3 .. 4733.3]; per-round paired slope 3452.8 [1883.3-4030.6] K=6 (r 62.19 / i 20.70 / s 11.60 %); intercept (region cost at 0 stages) 10650 ns; stage_ns_median(36) as printed 3295.8; means: 36 116591 72 223608 -> slope(mean) 2972.7
+  P16: region36 217450 [198000-218500] K=6 (r 9.43 / i 5.58 / s 2.18 %); region72 399200 [380700-430700] K=6 (r 12.53 / i 8.15 / s 2.67 %) ns
+       slope (72-36)/36 = 5048.6 ns/stage [worst pairing 4505.6 .. 6463.9]; per-round paired slope 5311.1 [4516.7-6344.4] K=6 (r 34.41 / i 17.44 / s 6.74 %); intercept (region cost at 0 stages) 35700 ns; stage_ns_median(36) as printed 6040.3; means: 36 217705 72 398697 -> slope(mean) 5027.6
+
+## omega_b, route external
+  P2: region36 15350 [15200-16100] K=6 (r 5.86 / i 4.07 / s 1.36 %); region72 29850 [28400-32600] K=6 (r 14.07 / i 9.55 / s 3.05 %) ns
+       slope (72-36)/36 = 402.8 ns/stage [worst pairing 341.7 .. 483.3]; per-round paired slope 406.9 [361.1-461.1] K=6 (r 24.57 / i 15.36 / s 5.15 %); intercept (region cost at 0 stages) 850 ns; stage_ns_median(36) as printed 426.4; means: 36 15419 72 29912 -> slope(mean) 402.6
+  P4: region36 41600 [38500-47500] K=6 (r 21.63 / i 11.96 / s 4.36 %); region72 77150 [72600-85400] K=6 (r 16.59 / i 10.43 / s 3.53 %) ns
+       slope (72-36)/36 = 987.5 ns/stage [worst pairing 697.2 .. 1302.8]; per-round paired slope 1011.1 [761.1-1250.0] K=6 (r 48.35 / i 20.26 / s 9.06 %); intercept (region cost at 0 stages) 6050 ns; stage_ns_median(36) as printed 1155.6; means: 36 41508 72 76237 -> slope(mean) 964.7
+  P8: region36 110500 [97000-116400] K=6 (r 17.56 / i 9.64 / s 3.56 %); region72 212200 [199600-270300] K=6 (r 33.32 / i 5.70 / s 6.17 %) ns
+       slope (72-36)/36 = 2825.0 ns/stage [worst pairing 2311.1 .. 4813.9]; per-round paired slope 2973.6 [2480.6-4325.0] K=6 (r 62.03 / i 10.63 / s 11.02 %); intercept (region cost at 0 stages) 8800 ns; stage_ns_median(36) as printed 3069.4; means: 36 108642 72 209472 -> slope(mean) 2800.8
+  P16: region36 198100 [191700-217800] K=6 (r 13.18 / i 9.23 / s 3.04 %); region72 394800 [380100-430800] K=6 (r 12.84 / i 7.47 / s 2.76 %) ns
+       slope (72-36)/36 = 5463.9 ns/stage [worst pairing 4508.3 .. 6641.7]; per-round paired slope 5534.7 [4508.3-6572.2] K=6 (r 37.29 / i 7.14 / s 6.23 %); intercept (region cost at 0 stages) 1400 ns; stage_ns_median(36) as printed 5502.8; means: 36 198031 72 395024 -> slope(mean) 5472.0
+
+## omega(W, gap), route worker: zero-work scope of 32 tasks after a gap; scope_ns_median (ns)
+  W8 gap  0 us: median 7600 [6900-7600] K=6 (r 9.21 / i 2.96 / s 1.94 %); mean-of-reps cell 7520
+  W8 gap  5 us: median 2550 [2400-3200] K=6 (r 31.37 / i 12.75 / s 6.14 %); mean-of-reps cell 2843
+  W8 gap 20 us: median 9700 [9500-10000] K=6 (r 5.15 / i 0.77 / s 0.86 %); mean-of-reps cell 9609
+  W8 gap 80 us: median 9800 [9400-10000] K=6 (r 6.12 / i 1.53 / s 1.08 %); mean-of-reps cell 9703
+  W8: omega(80) - omega(0) = +2200 ns (Y/Y/Y); omega(20)-omega(5) = +7150; min over gaps 2550
+  W16 gap  0 us: median 10600 [10600-10700] K=6 (r 0.94 / i 0.71 / s 0.25 %); mean-of-reps cell 10430
+  W16 gap  5 us: median 11250 [11100-11400] K=6 (r 2.67 / i 0.89 / s 0.48 %); mean-of-reps cell 11303
+  W16 gap 20 us: median 20100 [19900-20200] K=6 (r 1.49 / i 0.00 / s 0.25 %); mean-of-reps cell 20875
+  W16 gap 80 us: median 20100 [20000-20200] K=6 (r 1.00 / i 0.37 / s 0.19 %); mean-of-reps cell 20958
+  W16: omega(80) - omega(0) = +9500 ns (Y/Y/Y); omega(20)-omega(5) = +8850; min over gaps 10600
+
+## omega(W, gap), route external: zero-work scope of 32 tasks after a gap; scope_ns_median (ns)
+  W8 gap  0 us: median 4900 [4700-5100] K=6 (r 8.16 / i 3.06 / s 1.57 %); mean-of-reps cell 4931
+  W8 gap  5 us: median 4150 [3600-4400] K=6 (r 19.28 / i 15.66 / s 4.66 %); mean-of-reps cell 4415
+  W8 gap 20 us: median 10900 [10800-11000] K=6 (r 1.83 / i 0.69 / s 0.35 %); mean-of-reps cell 10827
+  W8 gap 80 us: median 11000 [10900-11100] K=6 (r 1.82 / i 0.68 / s 0.35 %); mean-of-reps cell 10971
+  W8: omega(80) - omega(0) = +6100 ns (Y/Y/Y); omega(20)-omega(5) = +6750; min over gaps 4150
+  W16 gap  0 us: median 5200 [5000-5300] K=6 (r 5.77 / i 1.44 / s 1.02 %); mean-of-reps cell 5189
+  W16 gap  5 us: median 6900 [6700-7100] K=6 (r 5.80 / i 2.17 / s 1.05 %); mean-of-reps cell 7813
+  W16 gap 20 us: median 21200 [20800-21500] K=6 (r 3.30 / i 2.59 / s 0.77 %); mean-of-reps cell 23003
+  W16 gap 80 us: median 21150 [21000-21500] K=6 (r 2.36 / i 1.77 / s 0.55 %); mean-of-reps cell 23160
+  W16: omega(80) - omega(0) = +15950 ns (Y/Y/Y); omega(20)-omega(5) = +14300; min over gaps 5200

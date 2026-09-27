@@ -10,6 +10,11 @@
 //! systems: `clear_consumed_fixed_edges` and `update_action_state` (`InputPlugin`), the three
 //! interaction systems, the two bind systems, the two bar systems and the three animation systems.
 //!
+//! Re-derived on `u/dm1` (DM1 commit C4, "stage_material_edits"): both Main lists gain
+//! `boyko_render::material_upload::stage_material_edits`, the dynamic-materials stager
+//! `register_main_frame_systems` now registers after `gather_mesh_draws` — app (a) Main 36,
+//! app (b) Main 48 (37 / 49 with `hwrt`); Fixed unchanged. Nothing else moved.
+//!
 //! **Feature sets.** The consts below are the default build. `--features hwrt` adds exactly
 //! [`MAIN_HWRT_EXTRA`] to Main in BOTH apps (measured the same day, same tree: app (a) Main 36,
 //! app (b) Main 48, Fixed unchanged); [`main_a`] / [`main_b`] fold it in when the feature is on, so
@@ -73,6 +78,7 @@ pub const MAIN_A: &[(&str, u32)] = &[
     ("boyko_render::light_policy::select_lighting_cull", 1),
     ("boyko_render::light_reconcile::light_reconcile", 1),
     ("boyko_render::light_system::collect_lights", 1),
+    ("boyko_render::material_upload::stage_material_edits", 1),
     ("boyko_render::mesh_draw::gather_mesh_draws", 1),
     (
         "boyko_render::particle_system::particle_apply_effect_refs",
@@ -136,6 +142,7 @@ pub const MAIN_B: &[(&str, u32)] = &[
     ("boyko_render::light_policy::select_lighting_cull", 1),
     ("boyko_render::light_reconcile::light_reconcile", 1),
     ("boyko_render::light_system::collect_lights", 1),
+    ("boyko_render::material_upload::stage_material_edits", 1),
     ("boyko_render::mesh_draw::gather_mesh_draws", 1),
     (
         "boyko_render::particle_system::particle_apply_effect_refs",

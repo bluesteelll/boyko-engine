@@ -1115,12 +1115,32 @@ impl Renderer<'_> {
             ts.cmd();
             self.record_vb_pass(light_upload, cmd, targets, forward, vb, scene, fi);
             let region = VkBufferCopy { src_offset: 0, dst_offset: 0, size: scene.light_upload_bytes };
-            // SAFETY: recording is open; the copy names the live host-coherent staging +
-            // device-local table buffers; the copy region spans `[0, light_upload_bytes)` ≤ both
+            // SAFETY: recording is open; the copy names the live host-coherent staging + light
+            // table buffers; the copy region spans `[0, light_upload_bytes)` ≤ both
             // buffer sizes (caller contract). `&region` outlives the call.
             unsafe {
                 ts.cmd();
                 (self.fns.cmd_copy_buffer)(cmd, scene.light_staging.buffer, scene.light_table.buffer, 1, &region);
+            }
+        }
+
+        // === Dynamic-materials DM1: the material-table upload, at the position `declare_vb_graph`
+        // declared it (right after `light_upload`, before every VB table reader). Recorded ONLY on
+        // an upload frame. ===
+        if let Some(material_upload) = plan.material_upload {
+            let upload = scene
+                .material_upload
+                .expect("invariant: the material_upload pass is declared iff scene.material_upload is Some");
+            ts.cmd();
+            self.record_vb_pass(material_upload, cmd, targets, forward, vb, scene, fi);
+            if !upload.regions.is_empty() {
+                ts.cmd();
+            }
+            // SAFETY: recording is open, outside any render scope; `upload.staging` and
+            // `scene.material_table` are live buffers of this device (the scene's contract), and every
+            // region lies inside both (`MaterialUploadScene`'s contract).
+            unsafe {
+                self.record_material_copy(cmd, scene.material_table, &upload);
             }
         }
 

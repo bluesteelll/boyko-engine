@@ -83,6 +83,13 @@ pub struct Renderer<'ctx> {
     /// is its OWN decoupled, private ResId space). `Some` only on a `VisibilityBuffer`-resolved
     /// frame; `None` otherwise.
     pub(crate) vb_pass_plan: Option<VbPassPlan>,
+    /// Dynamic-materials DM1: this frame's recorder-site material-upload counts
+    /// ([`super::MaterialUploadProbe`]). Reset at the top of every
+    /// [`render_gbuffer_frame`](Self::render_gbuffer_frame) and incremented by the three
+    /// recorders (`&self`) where they record the `material_upload` pass — a `Cell` because the
+    /// recorders borrow the renderer shared, not because anything else touches it (one thread
+    /// records).
+    material_upload_probe: core::cell::Cell<super::MaterialUploadProbe>,
 }
 
 impl<'ctx> Renderer<'ctx> {
@@ -245,7 +252,28 @@ impl<'ctx> Renderer<'ctx> {
             gbuffer_pass_plan: None,
             forward_pass_plan: None,
             vb_pass_plan: None,
+            material_upload_probe: core::cell::Cell::new(super::MaterialUploadProbe::default()),
         })
+    }
+
+    /// Dynamic-materials DM1: what the recorder did with the LAST
+    /// [`render_gbuffer_frame`](Self::render_gbuffer_frame)'s material upload — counted at the
+    /// record sites ([`super::MaterialUploadProbe`]). All-zero after a frame that recorded
+    /// nothing (an idle frame, or a call that returned before recording).
+    #[inline]
+    pub fn material_upload_probe(&self) -> super::MaterialUploadProbe {
+        self.material_upload_probe.get()
+    }
+
+    /// Records one `material_upload` pass that handed `regions` regions to `vkCmdCopyBuffer` —
+    /// called by the three recorders at the site that records the pass.
+    #[inline]
+    pub(crate) fn note_material_upload(&self, regions: u32) {
+        let p = self.material_upload_probe.get();
+        self.material_upload_probe.set(super::MaterialUploadProbe {
+            passes: p.passes + 1,
+            regions: p.regions + regions,
+        });
     }
 
     /// The frame-in-flight slot index the NEXT [`present_sampled`](Self::present_sampled)
@@ -842,6 +870,8 @@ impl<'ctx> Renderer<'ctx> {
         );
         // The by-value consume ends this frame's host-write window (R0b).
         let _ = token;
+        // Dynamic-materials DM1: a call that returns before recording reports nothing.
+        self.material_upload_probe.set(super::MaterialUploadProbe::default());
         // Thin adapter over the shared [`drive_frame`](Self::drive_frame) skeleton, with
         // `frame` (the G-buffer targets) threaded as the payload: pre-record syncs the
         // targets, the record body re-declares the whole-frame graph then records the

@@ -1,0 +1,65 @@
+# Q3 per wave (armed rows; per-process means over the window, cell = median over K)
+
+## window [100..500)
+J-T-a W8: waves 96.00 scopes 96.00 tasks/scope 23.36; wide 0.6100 ms -> 6.355 us/wave; ramp 2.031 us/wave (sum 0.1950 ms); tail 3.322 us/wave (sum 0.3189 ms); inflight 8.00; lanes 8.00; route worker 96.00 external 0.00; np: disp 0.1138 ramp 2.756 us tail 30.490 us inflight 8.0 lanes 8.0
+R-J-T-a W8: waves 96.00 scopes 96.00 tasks/scope 23.36; wide 0.6030 ms -> 6.281 us/wave; ramp 2.024 us/wave (sum 0.1943 ms); tail 3.259 us/wave (sum 0.3129 ms); inflight 8.00; lanes 8.00; route worker 96.00 external 0.00; np: disp 0.1087 ramp 2.679 us tail 34.454 us inflight 8.0 lanes 8.0
+J-T-a W16: waves 96.00 scopes 96.00 tasks/scope 23.36; wide 0.7760 ms -> 8.084 us/wave; ramp 2.155 us/wave (sum 0.2069 ms); tail 4.978 us/wave (sum 0.4779 ms); inflight 14.49; lanes 15.39; route worker 96.00 external 0.00; np: disp 0.0991 ramp 2.988 us tail 35.174 us inflight 15.9675 lanes 15.9675
+J-T-off-a W8: waves 108.00 scopes 108.00 tasks/scope 21.44; wide 0.6257 ms -> 5.793 us/wave; ramp 1.825 us/wave (sum 0.1971 ms); tail 2.903 us/wave (sum 0.3135 ms); inflight 7.56; lanes 7.56; route worker 108.00 external 0.00; np: disp 0.3622 ramp 2.640 us tail 75.253 us inflight 8.0 lanes 8.0
+J-T-off-a W16: waves 108.00 scopes 108.00 tasks/scope 21.44; wide 0.8028 ms -> 7.434 us/wave; ramp 2.014 us/wave (sum 0.2176 ms); tail 4.757 us/wave (sum 0.5137 ms); inflight 13.37; lanes 14.11; route worker 108.00 external 0.00; np: disp 0.2910 ramp 2.972 us tail 69.714 us inflight 15.945 lanes 15.945
+J-A-a W8: waves 96.00 scopes 96.00 tasks/scope 31.04; wide 2.1550 ms -> 22.448 us/wave; ramp 2.591 us/wave (sum 0.2488 ms); tail 8.806 us/wave (sum 0.8453 ms); inflight 8.00; lanes 8.00; route worker 96.00 external 0.00; np: disp 0.1305 ramp 4.315 us tail 46.468 us inflight 8.0 lanes 8.0
+J-A-a W16: waves 96.00 scopes 96.00 tasks/scope 31.04; wide 1.9819 ms -> 20.645 us/wave; ramp 2.736 us/wave (sum 0.2627 ms); tail 13.593 us/wave (sum 1.3049 ms); inflight 15.95; lanes 15.95; route worker 96.00 external 0.00; np: disp 0.1029 ramp 4.089 us tail 44.515 us inflight 15.973749999999999 lanes 15.975
+J-Son-a W8: waves 41.52 scopes 41.52 tasks/scope 30.93; wide 0.9337 ms -> 22.487 us/wave; ramp 2.583 us/wave (sum 0.1072 ms); tail 8.867 us/wave (sum 0.3681 ms); inflight 8.00; lanes 8.00; route worker 41.52 external 0.00; np: disp 0.0662 ramp 6.933 us tail 23.596 us inflight 7.922499999999999 lanes 7.9825
+
+  omega(W) = [wide(W) - wide(1)/W]/waves, and the ramp+tail share of it
+  J-T-a W8: L_wide 0.3171 ms, waves 96.00, omega 3.304 us; ramp+tail per wave 5.353 us = 162.0 % of L_wide; E_wide 0.480; work/wave at W1 24.41 us
+  J-T-a W16: L_wide 0.6296 ms, waves 96.00, omega 6.558 us; ramp+tail per wave 7.133 us = 108.8 % of L_wide; E_wide 0.189; work/wave at W1 24.41 us
+  J-T-off-a W8: L_wide 0.3266 ms, waves 108.00, omega 3.024 us; ramp+tail per wave 4.728 us = 156.3 % of L_wide; E_wide 0.478; work/wave at W1 22.15 us
+  J-T-off-a W16: L_wide 0.6533 ms, waves 108.00, omega 6.049 us; ramp+tail per wave 6.771 us = 111.9 % of L_wide; E_wide 0.186; work/wave at W1 22.15 us
+  J-A-a W8: L_wide 0.6480 ms, waves 96.00, omega 6.750 us; ramp+tail per wave 11.397 us = 168.8 % of L_wide; E_wide 0.699; work/wave at W1 125.58 us
+  J-A-a W16: L_wide 1.2284 ms, waves 96.00, omega 12.796 us; ramp+tail per wave 16.329 us = 127.6 % of L_wide; E_wide 0.380; work/wave at W1 125.58 us
+
+## window [0..100)
+J-T-a W8: waves 110.04 scopes 110.04 tasks/scope 20.83; wide 0.6299 ms -> 5.724 us/wave; ramp 1.942 us/wave (sum 0.2137 ms); tail 3.165 us/wave (sum 0.3482 ms); inflight 7.75; lanes 7.75; route worker 110.04 external 0.00; np: disp 0.2717 ramp 4.020 us tail 92.271 us inflight 8.0 lanes 8.0
+R-J-T-a W8: waves 110.04 scopes 110.04 tasks/scope 20.83; wide 0.6246 ms -> 5.676 us/wave; ramp 1.930 us/wave (sum 0.2124 ms); tail 3.113 us/wave (sum 0.3425 ms); inflight 7.75; lanes 7.75; route worker 110.04 external 0.00; np: disp 0.2667 ramp 4.017 us tail 88.377 us inflight 8.0 lanes 8.0
+J-T-a W16: waves 110.04 scopes 110.04 tasks/scope 20.83; wide 0.8350 ms -> 7.588 us/wave; ramp 2.104 us/wave (sum 0.2315 ms); tail 5.131 us/wave (sum 0.5646 ms); inflight 13.40; lanes 14.20; route worker 110.04 external 0.00; np: disp 0.2197 ramp 5.052 us tail 89.132 us inflight 15.99 lanes 15.99
+J-T-off-a W8: waves 114.60 scopes 114.60 tasks/scope 20.11; wide 0.6363 ms -> 5.553 us/wave; ramp 1.854 us/wave (sum 0.2125 ms); tail 3.082 us/wave (sum 0.3532 ms); inflight 7.64; lanes 7.64; route worker 114.60 external 0.00; np: disp 0.3635 ramp 3.860 us tail 91.803 us inflight 8.0 lanes 8.0
+J-T-off-a W16: waves 114.60 scopes 114.60 tasks/scope 20.11; wide 0.8419 ms -> 7.347 us/wave; ramp 2.067 us/wave (sum 0.2369 ms); tail 5.008 us/wave (sum 0.5739 ms); inflight 12.96; lanes 13.78; route worker 114.60 external 0.00; np: disp 0.2960 ramp 5.277 us tail 95.910 us inflight 15.965 lanes 15.965
+J-A-a W8: waves 110.04 scopes 110.04 tasks/scope 26.69; wide 2.1296 ms -> 19.353 us/wave; ramp 2.352 us/wave (sum 0.2588 ms); tail 8.480 us/wave (sum 0.9331 ms); inflight 7.83; lanes 7.83; route worker 110.04 external 0.00; np: disp 0.3204 ramp 5.693 us tail 125.980 us inflight 8.0 lanes 8.0
+J-A-a W16: waves 110.04 scopes 110.04 tasks/scope 26.69; wide 2.0344 ms -> 18.488 us/wave; ramp 2.467 us/wave (sum 0.2715 ms); tail 16.350 us/wave (sum 1.7992 ms); inflight 14.90; lanes 14.91; route worker 110.04 external 0.00; np: disp 0.2441 ramp 6.531 us tail 122.056 us inflight 15.975000000000001 lanes 15.975000000000001
+J-Son-a W8: waves 110.04 scopes 110.04 tasks/scope 26.69; wide 2.1657 ms -> 19.681 us/wave; ramp 2.349 us/wave (sum 0.2585 ms); tail 8.691 us/wave (sum 0.9563 ms); inflight 7.83; lanes 7.83; route worker 110.04 external 0.00; np: disp 0.3295 ramp 6.475 us tail 133.359 us inflight 8.0 lanes 8.0
+
+  omega(W) = [wide(W) - wide(1)/W]/waves, and the ramp+tail share of it
+  J-T-a W8: L_wide 0.3316 ms, waves 110.04, omega 3.014 us; ramp+tail per wave 5.106 us = 169.4 % of L_wide; E_wide 0.474; work/wave at W1 21.68 us
+  J-T-a W16: L_wide 0.6859 ms, waves 110.04, omega 6.233 us; ramp+tail per wave 7.235 us = 116.1 % of L_wide; E_wide 0.179; work/wave at W1 21.68 us
+  J-T-off-a W8: L_wide 0.3368 ms, waves 114.60, omega 2.939 us; ramp+tail per wave 4.936 us = 167.9 % of L_wide; E_wide 0.471; work/wave at W1 20.91 us
+  J-T-off-a W16: L_wide 0.6921 ms, waves 114.60, omega 6.040 us; ramp+tail per wave 7.075 us = 117.1 % of L_wide; E_wide 0.178; work/wave at W1 20.91 us
+  J-A-a W8: L_wide 0.6291 ms, waves 110.04, omega 5.717 us; ramp+tail per wave 10.832 us = 189.5 % of L_wide; E_wide 0.705; work/wave at W1 109.09 us
+  J-A-a W16: L_wide 1.2842 ms, waves 110.04, omega 11.670 us; ramp+tail per wave 18.818 us = 161.2 % of L_wide; E_wide 0.369; work/wave at W1 109.09 us
+
+# colour histogram per step (colours; slots) [100,500) and [0,100)
+[100..500) J-T-a W8: colours 10.88 wide 8.00; hist colours ['1.88', '0.00', '0.00', '1.00', '8.00']; slots ['23.3', '0.0', '0.0', '211.2', '16319.3']; slots wide 16319.3 narrow 234.5; narrow span 0.0473 ms
+[100..500) J-T-off-a W8: colours 10.69 wide 9.00; hist colours ['0.81', '0.88', '0.00', '0.00', '9.00']; slots ['5.9', '30.8', '0.0', '0.0', '16983.8']; slots wide 16983.8 narrow 36.7; narrow span 0.0114 ms
+[100..500) J-A-a W8: colours 10.88 wide 8.00; hist colours ['1.88', '0.00', '0.00', '1.00', '8.00']; slots ['23.3', '0.0', '0.0', '211.2', '16319.3']; slots wide 16319.3 narrow 234.5; narrow span 0.1915 ms
+[100..500) J-Son-a W8: colours 4.69 wide 3.46; hist colours ['0.74', '0.00', '0.00', '0.43', '3.46']; slots ['9.1', '0.0', '0.0', '92.9', '7047.6']; slots wide 7047.6 narrow 102.1; narrow span 0.0838 ms
+[100..500) J-T-a W1: colours 10.88 wide 8.00; hist colours ['1.88', '0.00', '0.00', '1.00', '8.00']; slots ['23.3', '0.0', '0.0', '211.2', '16319.3']; slots wide 16319.3 narrow 234.5; narrow span 0.0394 ms
+[0..100) J-T-a W8: colours 11.48 wide 9.17; hist colours ['1.18', '0.27', '0.25', '0.61', '9.17']; slots ['15.0', '11.8', '23.6', '125.1', '16179.0']; slots wide 16179.0 narrow 175.6; narrow span 0.0364 ms
+[0..100) J-T-off-a W8: colours 11.20 wide 9.55; hist colours ['0.80', '0.32', '0.26', '0.27', '9.55']; slots ['11.8', '14.2', '24.3', '50.3', '16256.6']; slots wide 16256.6 narrow 100.5; narrow span 0.0212 ms
+[0..100) J-A-a W8: colours 11.48 wide 9.17; hist colours ['1.18', '0.27', '0.25', '0.61', '9.17']; slots ['15.0', '11.8', '23.6', '125.1', '16179.0']; slots wide 16179.0 narrow 175.6; narrow span 0.1466 ms
+[0..100) J-Son-a W8: colours 11.48 wide 9.17; hist colours ['1.18', '0.27', '0.25', '0.61', '9.17']; slots ['15.0', '11.8', '23.6', '125.1', '16179.0']; slots wide 16179.0 narrow 175.6; narrow span 0.1475 ms
+[0..100) J-T-a W1: colours 11.48 wide 9.17; hist colours ['1.18', '0.27', '0.25', '0.61', '9.17']; slots ['15.0', '11.8', '23.6', '125.1', '16179.0']; slots wide 16179.0 narrow 175.6; narrow span 0.0310 ms
+
+# S6 hit rates (per solving step, armed; mean of the 0/1 counters)
+[100..500) J-T-a W1: graph hit 0.5350 [0.5350-0.5350], P-b hit 0.3275 [0.3275-0.3275] K=6
+[100..500) J-T-a W8: graph hit 0.5350 [0.5350-0.5350], P-b hit 0.3275 [0.3275-0.3275] K=6
+[100..500) J-T-a W16: graph hit 0.5350 [0.5350-0.5350], P-b hit 0.3275 [0.3275-0.3275] K=6
+[100..500) J-T-off-a W8: graph hit 0.3325 [0.3325-0.3325], P-b hit 0.0050 [0.0050-0.0050] K=6
+[100..500) J-A-a W8: graph hit 0.5350 [0.5350-0.5350], P-b hit 0.3275 [0.3275-0.3275] K=6
+[100..500) J-Son-a W1: graph hit 0.6550 [0.6550-0.6550], P-b hit 0.5825 [0.5825-0.5825] K=6
+[100..500) J-Son-a W8: graph hit 0.6550 [0.6550-0.6550], P-b hit 0.5825 [0.5825-0.5825] K=6
+[0..100) J-T-a W1: graph hit 0.0000 [0.0000-0.0000], P-b hit 0.0000 [0.0000-0.0000] K=6
+[0..100) J-T-a W8: graph hit 0.0000 [0.0000-0.0000], P-b hit 0.0000 [0.0000-0.0000] K=6
+[0..100) J-T-a W16: graph hit 0.0000 [0.0000-0.0000], P-b hit 0.0000 [0.0000-0.0000] K=6
+[0..100) J-T-off-a W8: graph hit 0.0000 [0.0000-0.0000], P-b hit 0.0000 [0.0000-0.0000] K=6
+[0..100) J-A-a W8: graph hit 0.0000 [0.0000-0.0000], P-b hit 0.0000 [0.0000-0.0000] K=6
+[0..100) J-Son-a W1: graph hit 0.0000 [0.0000-0.0000], P-b hit 0.0000 [0.0000-0.0000] K=6
+[0..100) J-Son-a W8: graph hit 0.0000 [0.0000-0.0000], P-b hit 0.0000 [0.0000-0.0000] K=6

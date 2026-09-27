@@ -1,0 +1,1 @@
+SUMMARY {"bench":"omega_b","route":"worker","participants":2,"regions":10,"stages":36,"blocks":8,"block_slots":16,"region_ns_median":18000,"region_ns_mean":15000,"stage_ns_median":500}

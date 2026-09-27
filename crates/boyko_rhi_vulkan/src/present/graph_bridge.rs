@@ -70,6 +70,9 @@ pub(crate) struct GbufferPassPlan {
     pub(crate) viewt_from_depth: Option<crate::framegraph::PassId>,
     /// The async light-table re-upload (`scene.light_dirty && light_upload_bytes>0`).
     pub(crate) light_upload: Option<crate::framegraph::PassId>,
+    /// Dynamic-materials DM1: the `staging → material_table` copy (`scene.material_upload.
+    /// is_some()`), declared right after [`Self::light_upload`] — before every table reader.
+    pub(crate) material_upload: Option<crate::framegraph::PassId>,
     /// The P0 coarse tile-cull (`scene.coarse.is_some()`).
     pub(crate) coarse: Option<crate::framegraph::PassId>,
     /// The SDF marcher pass. Its `record_pass` emits the collapsed input transitions
@@ -666,6 +669,9 @@ pub(crate) struct ForwardPassPlan {
     /// The async light-table re-upload (`scene.light_dirty && scene.light_upload_bytes > 0`) —
     /// the SAME gate [`GbufferPassPlan::light_upload`] uses.
     pub(crate) light_upload: Option<crate::framegraph::PassId>,
+    /// Dynamic-materials DM1: the `staging → material_table` copy — the SAME gate
+    /// [`GbufferPassPlan::material_upload`] uses, declared right after [`Self::light_upload`].
+    pub(crate) material_upload: Option<crate::framegraph::PassId>,
     /// The CSM cascade depth pass (`scene.csm.is_some()`) — declared BEFORE `forward_opaque`
     /// (unlike the plan's literal pass-order text, which lists `forward_opaque` before
     /// `light_upload?/csm?/atlas?`): `forward_opaque.fs.hlsl` samples the cascade/atlas maps
@@ -828,19 +834,94 @@ pub(crate) struct GbufferBarrierSink<'a> {
     pub(crate) buffers: [VkBuffer; GBUFFER_SINK_BUFFER_COUNT],
 }
 
+/// Dynamic-materials DM1: the one-buffer material tail every declarator appends LAST — after
+/// the particle tail — and ONLY on a frame that uploads to the material table
+/// ([`GBufferScene::material_upload`]). Appending is the one edit shape that cannot re-key an
+/// existing barrier, and declaring it only on an upload frame keeps an idle frame's ResId space,
+/// passes and barriers the pre-DM1 ones.
+pub(crate) const MATERIAL_TAIL_BUFFER_COUNT: usize = 1;
+
+/// Dynamic-materials DM1: the stages the Deferred declarator's `Materials` readers run at (the
+/// marcher's `sdf_gbuffer_composite`, `shadow_vis`'s and the resolve's `deferred_pbr`).
+const DEFERRED_MATERIAL_READ_STAGES: u32 = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+/// … the Forward declarator's (`forward_opaque.fs` at FRAGMENT, `sdf_forward_march` at COMPUTE).
+const FORWARD_MATERIAL_READ_STAGES: u32 =
+    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+/// … the VB declarator's (`vb_shade`, `vb_resolve`, `vb_geo`, `vb_shade_split`,
+/// `sdf_forward_march` — all COMPUTE).
+const VB_MATERIAL_READ_STAGES: u32 = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+/// Dynamic-materials DM1: a frame's declared `material_table` buffer, carrying the stage mask it
+/// was SEEDED with — the previous frame's readers, which this frame's copy must wait for. The
+/// table is ONE buffer both in-flight frames read, so a reader whose stage the seed omits is a
+/// cross-frame write-after-read race on every edit frame: next frame's copy would not wait for it.
+///
+/// Synchronization validation does not see that race on this machine (MEASURED: with the Forward
+/// seed narrowed to FRAGMENT, and separately with `forward_opaque`'s read undeclared, the
+/// validation leg printed zero messages). So the pairing is checked structurally instead: every
+/// read goes through [`Self::read`], which debug-asserts the reader's stage lies inside the seed.
+/// Every debug run exercises it, because frame 0 is an upload frame on every path.
+#[derive(Clone, Copy)]
+struct MaterialTableRes {
+    id: crate::framegraph::ResId,
+    seed_stages: u32,
+}
+
+impl MaterialTableRes {
+    /// Declares `material_table` (the last buffer, on an upload frame only) seeded as read at
+    /// `seed_stages` by the previous frame.
+    fn declare(g: &mut crate::framegraph::FrameGraph, seed_stages: u32) -> Self {
+        let id = g.add_buffer_seeded(
+            "material_table",
+            crate::framegraph::ResSync::seeded_readers(seed_stages, VK_ACCESS_SHADER_READ_BIT),
+        );
+        Self { id, seed_stages }
+    }
+
+    /// Declares the `staging → table` copy's write (the `material_upload` pass).
+    fn copy_write(self, g: &mut crate::framegraph::FrameGraph) {
+        g.buffer_access(self.id, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+    }
+
+    /// Declares a shader read of the table at `stage`, which the seed must cover.
+    fn read(self, g: &mut crate::framegraph::FrameGraph, stage: u32) {
+        debug_assert_eq!(
+            stage & !self.seed_stages,
+            0,
+            "invariant (DM1): a material_table reader at stage {stage:#x} lies outside the table's \
+             cross-frame seed {:#x} — next frame's copy would not wait for this read",
+            self.seed_stages
+        );
+        g.buffer_access(self.id, stage, VK_ACCESS_SHADER_READ_BIT);
+    }
+}
+
+// The recorders hand a `&[boyko_rhi::BufferCopy]` straight to `vkCmdCopyBuffer` as
+// `*const VkBufferCopy` (one command for every region). Both are `#[repr(C)]` over the same three
+// `u64`s in the same order; these pin it at compile time.
+const _: () = {
+    assert!(core::mem::size_of::<boyko_rhi::BufferCopy>() == core::mem::size_of::<VkBufferCopy>());
+    assert!(core::mem::align_of::<boyko_rhi::BufferCopy>() == core::mem::align_of::<VkBufferCopy>());
+    assert!(core::mem::offset_of!(boyko_rhi::BufferCopy, src_offset) == core::mem::offset_of!(VkBufferCopy, src_offset));
+    assert!(core::mem::offset_of!(boyko_rhi::BufferCopy, dst_offset) == core::mem::offset_of!(VkBufferCopy, dst_offset));
+    assert!(core::mem::offset_of!(boyko_rhi::BufferCopy, size) == core::mem::offset_of!(VkBufferCopy, size));
+};
+
 /// The length of [`GbufferBarrierSink::buffers`] — the deferred declarator's whole buffer ResId
-/// space: 7 unconditional (+1 for `tlas_instances` under `hwrt`), the 3-buffer interp trio, and
-/// the [`PARTICLE_BUFFER_COUNT`] particle tail.
+/// space: 7 unconditional (+1 for `tlas_instances` under `hwrt`), the 3-buffer interp trio, the
+/// [`PARTICLE_BUFFER_COUNT`] particle tail and the [`MATERIAL_TAIL_BUFFER_COUNT`] material tail.
 ///
 /// It is the ARRAY LENGTH rather than a number standing beside one, for the reason
 /// [`VB_BUFFER_COUNT`]'s doc gives at length: a `res.index()` that lands on the wrong BUFFER slot
 /// names a live wrong allocation with no VUID and no validation message, where a wrong IMAGE slot
 /// would hold `VkImage::NULL` and fault loudly.
 #[cfg(not(feature = "hwrt"))]
-pub(crate) const GBUFFER_SINK_BUFFER_COUNT: usize = 7 + 3 + PARTICLE_BUFFER_COUNT;
+pub(crate) const GBUFFER_SINK_BUFFER_COUNT: usize =
+    7 + 3 + PARTICLE_BUFFER_COUNT + MATERIAL_TAIL_BUFFER_COUNT;
 /// See the `not(hwrt)` variant's doc: `hwrt` adds `tlas_instances` to the unconditional prefix.
 #[cfg(feature = "hwrt")]
-pub(crate) const GBUFFER_SINK_BUFFER_COUNT: usize = 8 + 3 + PARTICLE_BUFFER_COUNT;
+pub(crate) const GBUFFER_SINK_BUFFER_COUNT: usize =
+    8 + 3 + PARTICLE_BUFFER_COUNT + MATERIAL_TAIL_BUFFER_COUNT;
 
 /// Particles P0/P2: the twelve physical handles of the particle tail, in the SAME order
 /// [`declare_particle_buffers`] declares their `ResId`s and the shaders number their Set-0
@@ -1096,9 +1177,9 @@ pub(crate) struct ForwardBarrierSink<'a> {
 const FORWARD_IMAGE_COUNT: usize = 4;
 
 /// The length of [`ForwardBarrierSink::buffers`] — the five unconditional Forward buffers plus
-/// the [`PARTICLE_BUFFER_COUNT`] particle tail. The ARRAY LENGTH, for the reason
-/// [`GBUFFER_SINK_BUFFER_COUNT`]'s doc gives.
-const FORWARD_SINK_BUFFER_COUNT: usize = 5 + PARTICLE_BUFFER_COUNT;
+/// the [`PARTICLE_BUFFER_COUNT`] particle tail and the [`MATERIAL_TAIL_BUFFER_COUNT`] material
+/// tail. The ARRAY LENGTH, for the reason [`GBUFFER_SINK_BUFFER_COUNT`]'s doc gives.
+const FORWARD_SINK_BUFFER_COUNT: usize = 5 + PARTICLE_BUFFER_COUNT + MATERIAL_TAIL_BUFFER_COUNT;
 
 impl crate::framegraph::BarrierSink for ForwardBarrierSink<'_> {
     fn image_barriers(&mut self, src_stage: u32, dst_stage: u32, group: &[crate::framegraph::ImgBarrier]) {
@@ -1625,6 +1706,15 @@ impl Renderer<'_> {
         // therefore fills its buffer array POSITIONALLY under the same two conditions, in the same
         // order, rather than from a fixed literal — see that fn's own comment.
         let particle_res = scene.particle.as_ref().map(|_| declare_particle_buffers(g));
+        // Dynamic-materials DM1: the material table, the LAST buffer of all and declared ONLY on a
+        // frame that uploads to it — an idle frame declares nothing, so its ResIds, passes and
+        // barriers are the pre-DM1 graph. ONE buffer both in-flight frames read, so this frame's
+        // copy must order after the sibling frame's still-pipelined reads: seeded as read by the
+        // Deferred readers' stage, COMPUTE (the marcher, `shadow_vis` under `hwrt`, the resolve —
+        // the `light_table` seed-WAR). `record_graph_pass` fills its sink slot positionally, after
+        // the two conditional tails ahead of it.
+        let material_table =
+            scene.material_upload.map(|_| MaterialTableRes::declare(g, DEFERRED_MATERIAL_READ_STAGES));
 
         // Pass `interp` (Pillar B B3, refined-B) — gated `scene.interp.is_some()`. Runs FIRST
         // (before raster): reads the pair + out-slot SSBOs (COMPUTE/SHADER_READ — first touch, no
@@ -1866,6 +1956,16 @@ impl Renderer<'_> {
             None
         };
 
+        // Pass `material_upload` (dynamic-materials DM1): the `staging → material_table` copy,
+        // right after `light_upload` and before every table reader (the marcher, `shadow_vis`, the
+        // resolve), which declare their reads below so the graph derives TRANSFER→COMPUTE there.
+        // The copy's own barrier is the cross-frame seed-WAR above.
+        let material_upload = material_table.map(|t| {
+            let p = g.add_pass("material_upload");
+            t.copy_write(g);
+            p
+        });
+
         // Pass `coarse` (P0 coarse tile-cull) — gated `scene.coarse.is_some()`. Samples
         // depth (transitions it to SHADER_READ_ONLY) + writes the tiles buffer.
         let coarse = if scene.coarse.is_some() {
@@ -1927,6 +2027,10 @@ impl Renderer<'_> {
                     VK_IMAGE_LAYOUT_GENERAL,
                     SubRange::COLOR,
                 );
+            }
+            // DM1: `sdf_gbuffer_composite` reads `Materials` (vocab binding 7).
+            if let Some(t) = material_table {
+                t.read(g, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
             }
             Some(p)
         } else {
@@ -2092,6 +2196,12 @@ impl Renderer<'_> {
                 VK_IMAGE_LAYOUT_GENERAL,
                 SubRange::COLOR,
             );
+            // DM1 (cut §9.4): the VIS pass dispatches `deferred_pbr` at `SHADOW_STAGE_VIS`, which
+            // reads `Materials` — on `Deferred × Mesh` there is no marcher ahead of it, so this is
+            // the table's first reader.
+            if let Some(t) = material_table {
+                t.read(g, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            }
             // HW-RT Rung 3b step 5b: when the SDF-MV path is active, the VIS pass ALSO writes each
             // SDF pixel's camera-only `Δuv` to `motion_vec` (STORAGE, GENERAL). Declaring this WRITE
             // makes the graph order the raster pass's earlier COLOR_ATTACHMENT write of the MESH
@@ -2410,6 +2520,10 @@ impl Renderer<'_> {
                 VK_ACCESS_SHADER_READ_BIT,
             );
         }
+        // DM1: every resolve variant (`deferred_pbr`) reads `Materials` (resolve binding 4).
+        if let Some(t) = material_table {
+            t.read(g, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        }
         // UNCONDITIONAL + FULL-ARRAY (09600, see the pass comment above): with the depth pass ON
         // this derives the whole-array DEPTH_ATTACHMENT→SHADER_READ_ONLY barrier-out; with it OFF
         // (bound-but-unread) it derives the discard-legal UNDEFINED→SHADER_READ_ONLY transition
@@ -2580,6 +2694,7 @@ impl Renderer<'_> {
             mesh_depth_neutral_clear,
             viewt_from_depth,
             light_upload,
+            material_upload,
             coarse,
             marcher,
             ssao: ssao_pass,
@@ -2710,6 +2825,12 @@ impl Renderer<'_> {
         // deferred declarator, whose interp trio is conditional — the particle span always begins
         // at the same sink slot on this path.
         let particle_res = scene.particle.as_ref().map(|_| declare_particle_buffers(g));
+        // Dynamic-materials DM1: the material table, LAST and ONLY on an upload frame (see
+        // `declare_deferred_graph`'s own site). Seeded as read at FRAGMENT **and** COMPUTE: this
+        // path's readers are `forward_opaque.fs` (FRAGMENT) and `sdf_forward_march` (COMPUTE), so
+        // the `light_table`'s FRAGMENT-only seed here is not the model (cut C-7).
+        let material_table =
+            scene.material_upload.map(|_| MaterialTableRes::declare(g, FORWARD_MATERIAL_READ_STAGES));
 
         // Pass `interp` — gated `scene.interp.is_some()`, the SAME activation
         // `declare_deferred_graph`'s own `interp` pass reads. Writes `instance_model_ring`
@@ -2779,6 +2900,14 @@ impl Renderer<'_> {
         } else {
             None
         };
+
+        // Pass `material_upload` (DM1) — right after `light_upload`, before both readers
+        // (`forward_opaque`, `sdf_forward_march`); `record_forward` records it at the same point.
+        let material_upload = material_table.map(|t| {
+            let p = g.add_pass("material_upload");
+            t.copy_write(g);
+            p
+        });
 
         // Pass `light_cull` (L1 clustered froxel cull) — Multi-paradigm render-path plan, rung
         // R5 (ForwardPlus). Gated EXACTLY as `declare_deferred_graph`'s own `light_cull` pass
@@ -2943,6 +3072,10 @@ impl Renderer<'_> {
                 VK_ACCESS_SHADER_READ_BIT,
             );
         }
+        // DM1: `forward_opaque.fs` reads `Materials` (Set 0 binding 4) at FRAGMENT.
+        if let Some(t) = material_table {
+            t.read(g, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        }
         // Multi-paradigm render-path plan, rung R5 (ForwardPlus): the froxel `ClusterGrid`/
         // `LightIndexList` reads `forward_opaque_froxel.fs.hlsl` performs every frame, gated on
         // `light_cull.is_some()` — the SAME "only need the barrier when a write happened THIS
@@ -3004,6 +3137,10 @@ impl Renderer<'_> {
                     SubRange::DEPTH,
                 );
             }
+            // DM1: the march shades with `Materials` (`sdf_forward_set` binding 2) at COMPUTE.
+            if let Some(t) = material_table {
+                t.read(g, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            }
             Some(p)
         } else {
             None
@@ -3051,6 +3188,7 @@ impl Renderer<'_> {
             interp,
             depth_prepass,
             light_upload,
+            material_upload,
             csm,
             atlas: atlas_pass,
             light_cull,
@@ -3144,6 +3282,12 @@ impl Renderer<'_> {
         }
         if let Some(p) = scene.particle.as_ref() {
             buffers[next..next + PARTICLE_BUFFER_COUNT].copy_from_slice(&particle_sink_buffers(p));
+            next += PARTICLE_BUFFER_COUNT;
+        }
+        // Dynamic-materials DM1: the material tail, after both conditional tails — the declarator's
+        // order and condition (`scene.material_upload`).
+        if scene.material_upload.is_some() {
+            buffers[next] = scene.material_table.buffer;
         }
         let mut sink = GbufferBarrierSink {
             fns: self.fns,
@@ -3300,9 +3444,14 @@ impl Renderer<'_> {
             scene.light_index.map_or(scene.light_table.buffer, |b| b.buffer),
         ];
         buffers[..fixed.len()].copy_from_slice(&fixed);
+        let mut next = fixed.len();
         if let Some(p) = scene.particle.as_ref() {
-            buffers[fixed.len()..fixed.len() + PARTICLE_BUFFER_COUNT]
-                .copy_from_slice(&particle_sink_buffers(p));
+            buffers[next..next + PARTICLE_BUFFER_COUNT].copy_from_slice(&particle_sink_buffers(p));
+            next += PARTICLE_BUFFER_COUNT;
+        }
+        // Dynamic-materials DM1: the material tail, after the conditional particle tail.
+        if scene.material_upload.is_some() {
+            buffers[next] = scene.material_table.buffer;
         }
         let mut sink = ForwardBarrierSink {
             fns: self.fns,
@@ -3316,6 +3465,45 @@ impl Renderer<'_> {
             buffers,
         };
         self.frame_graph.record_pass(pass, &mut sink);
+    }
+
+    /// Dynamic-materials DM1: records this frame's `material_upload` copy — ONE multi-region
+    /// `vkCmdCopyBuffer` from `upload.staging` into `table` — and notes the pass and its region
+    /// count in [`Renderer::material_upload_probe`]. The caller has already recorded the pass's
+    /// graph barriers (the cross-frame seed-WAR), and the readers' own passes record the
+    /// TRANSFER→SHADER barriers. An empty region list records no copy but still notes the pass,
+    /// so a pass declared on a frame with nothing to copy is visible to the idle-frame gate.
+    ///
+    /// # Safety
+    ///
+    /// Recording is open on `cmd`, outside any render scope; `upload.staging` and `table` are live
+    /// buffers of this renderer's device; every region lies inside both buffers
+    /// ([`MaterialUploadScene`](super::MaterialUploadScene)'s contract).
+    pub(crate) unsafe fn record_material_copy(
+        &self,
+        cmd: VkCommandBuffer,
+        table: &crate::memory::BoundBuffer,
+        upload: &super::MaterialUploadScene<'_>,
+    ) {
+        let regions = upload.regions.len() as u32;
+        if regions > 0 {
+            // SAFETY: recording is open on `cmd` outside a render scope and both buffers are live
+            // (this fn's contract); `upload.regions` is a live slice of `regions` elements, and
+            // `boyko_rhi::BufferCopy` is layout-identical to `VkBufferCopy` (size, alignment and
+            // every field offset are const-asserted beside `MATERIAL_TAIL_BUFFER_COUNT`), so its
+            // pointer is a valid `*const VkBufferCopy` for `regions` elements; every region lies
+            // inside both buffers (the contract). The slice outlives the call.
+            unsafe {
+                (self.fns.cmd_copy_buffer)(
+                    cmd,
+                    upload.staging.buffer,
+                    table.buffer,
+                    regions,
+                    upload.regions.as_ptr().cast(),
+                );
+            }
+        }
+        self.note_material_upload(regions);
     }
 }
 
@@ -3336,6 +3524,10 @@ pub(crate) struct VbPassPlan {
     /// The async light-table re-upload (`scene.light_dirty && scene.light_upload_bytes > 0`) —
     /// the SAME gate [`ForwardPassPlan::light_upload`] uses.
     pub(crate) light_upload: Option<crate::framegraph::PassId>,
+    /// Dynamic-materials DM1: the `staging → material_table` copy — the SAME gate
+    /// [`GbufferPassPlan::material_upload`] uses, declared right after [`Self::light_upload`]
+    /// (VB's first pass), so it precedes every VB table reader.
+    pub(crate) material_upload: Option<crate::framegraph::PassId>,
     /// VB-P1a ("dark infra"): the L1 clustered froxel light-cull pass — the SAME "4-buffers-Some"
     /// gate [`ForwardPassPlan::light_cull`] uses (`scene.cluster_cull`/`cluster_grid`/
     /// `light_index`/`light_index_alloc` all `Some`). ⚠️ The arm is **default-OFF, not hardcoded
@@ -3754,12 +3946,14 @@ pub(crate) struct VbBarrierSink<'a> {
 /// end of the declarator's buffer block now pins the UNCONDITIONAL prefix and a second assert
 /// pins the armed total — see the comment there for why weakening it to the prefix alone would
 /// let an armed frame run off the end of the sink array in silence.
+/// Dynamic-materials DM1 appends the [`MATERIAL_TAIL_BUFFER_COUNT`] material tail after the
+/// particle tail, conditional on an upload frame, so both tails' slots are filled positionally.
 #[cfg(feature = "hwrt")]
-const VB_BUFFER_COUNT: usize = 18 + PARTICLE_BUFFER_COUNT;
+const VB_BUFFER_COUNT: usize = 18 + PARTICLE_BUFFER_COUNT + MATERIAL_TAIL_BUFFER_COUNT;
 /// See the `hwrt` variant's doc: a `not(hwrt)` build has no `tlas_instances` slot, so 18 - 1 = 17
-/// unconditional, plus the same particle tail.
+/// unconditional, plus the same particle and material tails.
 #[cfg(not(feature = "hwrt"))]
-const VB_BUFFER_COUNT: usize = 17 + PARTICLE_BUFFER_COUNT;
+const VB_BUFFER_COUNT: usize = 17 + PARTICLE_BUFFER_COUNT + MATERIAL_TAIL_BUFFER_COUNT;
 
 /// The number of IMAGE resources [`Renderer::declare_vb_graph`] declares — see
 /// [`VbBarrierSink::images`]'s doc for the fixed order. A PRIVATE, per-frame ResId space (mirrors
@@ -4499,6 +4693,11 @@ impl Renderer<'_> {
         // is still the one edit shape that cannot re-key an existing barrier: every ResId above is
         // unchanged, and on a disarmed frame not one of these exists.
         let particle_res = scene.particle.as_ref().map(|_| declare_particle_buffers(g));
+        // Dynamic-materials DM1: the material table, LAST (after the particle tail) and ONLY on an
+        // upload frame (see `declare_deferred_graph`'s own site). Every VB reader of `Materials`
+        // (`vb_shade`, `vb_resolve`, `vb_geo`, `vb_shade_split`, `sdf_forward_march`) is COMPUTE.
+        let material_table =
+            scene.material_upload.map(|_| MaterialTableRes::declare(g, VB_MATERIAL_READ_STAGES));
         // The buffer-side sibling of the `hzb_pyramid` assert above, and the buffer side is where
         // it matters more: a mis-keyed buffer barrier names a LIVE WRONG buffer (every sink slot
         // resolves to a real handle) instead of faulting on a NULL. `- VB_IMAGE_COUNT` is exactly
@@ -4515,9 +4714,9 @@ impl Renderer<'_> {
         // silently.
         debug_assert_eq!(
             vb_cull_uniform.index() + 1 - VB_IMAGE_COUNT,
-            VB_BUFFER_COUNT - PARTICLE_BUFFER_COUNT,
+            VB_BUFFER_COUNT - PARTICLE_BUFFER_COUNT - MATERIAL_TAIL_BUFFER_COUNT,
             "invariant: vb_cull_uniform is the last UNCONDITIONAL buffer ResId declare_vb_graph \
-             declares — the particle tail follows it and is conditional"
+             declares — the particle and material tails follow it and are conditional"
         );
         // ⚠️ **The named ResId MOVED again at rung P2 item 3**, and the reason is the same one the
         // block above records: the tail grew two rows (`p_render_sorted`, `p_sort_bins`), so
@@ -4526,9 +4725,17 @@ impl Renderer<'_> {
         // the sink — so the assert names the CURRENT last row and nothing else about it moves.
         debug_assert!(
             particle_res.is_none_or(|ids| ids.sort_bins.index() + 1 - VB_IMAGE_COUNT
-                == VB_BUFFER_COUNT),
-            "invariant: with particles armed, p_sort_bins is the LAST buffer ResId and the buffer \
-             ResIds must exactly fill VbBarrierSink::buffers"
+                == VB_BUFFER_COUNT - MATERIAL_TAIL_BUFFER_COUNT),
+            "invariant: with particles armed, p_sort_bins is the last PARTICLE buffer ResId and the \
+             particle tail must exactly fill its span of VbBarrierSink::buffers"
+        );
+        // DM1: the material tail lands on the slot `vb_sink_buffers` fills for it — right after
+        // the particle span when armed, else right after the unconditional prefix.
+        debug_assert!(
+            material_table.is_none_or(|t| t.id.index() - VB_IMAGE_COUNT
+                == VB_BUFFER_COUNT - PARTICLE_BUFFER_COUNT - MATERIAL_TAIL_BUFFER_COUNT
+                    + if particle_res.is_some() { PARTICLE_BUFFER_COUNT } else { 0 }),
+            "invariant: material_table's buffer ResId must be the sink slot vb_sink_buffers fills"
         );
 
         // Pass `light_upload` (async light-table re-upload) — the SAME gate
@@ -4540,6 +4747,14 @@ impl Renderer<'_> {
         } else {
             None
         };
+
+        // Pass `material_upload` (DM1) — right after `light_upload`, ahead of the particle block
+        // and every table reader; `record_vb` records it at the same point.
+        let material_upload = material_table.map(|t| {
+            let p = g.add_pass("material_upload");
+            t.copy_write(g);
+            p
+        });
 
         // Particles P0: the `upload → kickoff → emit → sim` block, declared EARLY (the free
         // latency win — see `declare_deferred_graph`'s own site). The DRAW is declared far below,
@@ -5526,6 +5741,10 @@ impl Renderer<'_> {
                         VK_ACCESS_SHADER_READ_BIT,
                     );
                 }
+                // DM1: every `vb_shade` variant reads `Materials` (Set 0 binding 4).
+                if let Some(t) = material_table {
+                    t.read(g, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+                }
                 (None, Some(vb_shade))
             } else {
                 // Pass `vb_resolve` (FUSED): reads `vb_id` (COMPUTE,
@@ -5595,6 +5814,10 @@ impl Renderer<'_> {
                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                         VK_ACCESS_SHADER_READ_BIT,
                     );
+                }
+                // DM1: `vb_resolve` reads `Materials` (Set 0 binding 4).
+                if let Some(t) = material_table {
+                    t.read(g, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
                 }
                 (Some(vb_resolve), None)
             };
@@ -5684,6 +5907,10 @@ impl Renderer<'_> {
                 SubRange::COLOR,
             );
             g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+            // DM1: `vb_geo` reads `Materials` (Set 0 binding 4).
+            if let Some(t) = material_table {
+                t.read(g, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            }
             g.image_access(
                 thin_normal,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -6066,6 +6293,10 @@ impl Renderer<'_> {
                     SubRange::COLOR,
                 );
             }
+            // DM1: `vb_shade_split` reads `Materials` (Set 0 binding 4).
+            if let Some(t) = material_table {
+                t.read(g, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            }
             (vb_ddgi_update, Some(s))
         } else {
             (None, None)
@@ -6111,6 +6342,12 @@ impl Renderer<'_> {
                     VK_IMAGE_LAYOUT_GENERAL,
                     SubRange::COLOR,
                 );
+            }
+            // DM1: the march shades with `Materials` (`sdf_forward_set` binding 2). Declared on
+            // both legs: under `mesh_leg` it is a read-after-read of a tail's (no barrier derived);
+            // under `Sdf` it is the table's only reader.
+            if let Some(t) = material_table {
+                t.read(g, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
             }
             if mesh_leg {
                 g.image_access(
@@ -6516,6 +6753,7 @@ impl Renderer<'_> {
 
         self.vb_pass_plan = Some(VbPassPlan {
             light_upload,
+            material_upload,
             light_cull,
             csm,
             atlas: atlas_pass,
@@ -6809,22 +7047,29 @@ impl Renderer<'_> {
     }
 }
 
-/// Particles P0: appends the ten-buffer particle tail to the VB sink's unconditional prefix.
+/// Particles P0: appends the ten-buffer particle tail to the VB sink's unconditional prefix, and
+/// (dynamic-materials DM1) the material tail after it.
 ///
 /// A function rather than an inline fill because the prefix is written TWICE (once per `hwrt`
-/// arm) and the tail must be identical in both. `fixed` is the prefix in declaration order; the
-/// returned array is the sink's whole buffer space, with the tail present iff the frame is armed
-/// and [`VkBuffer::NULL`] otherwise (inert — no derived barrier names a ResId that was never
+/// arm) and the tails must be identical in both. `fixed` is the prefix in declaration order; the
+/// returned array is the sink's whole buffer space, each conditional tail filled positionally —
+/// in the declarator's order and under its condition — iff its frame is armed, and
+/// [`VkBuffer::NULL`] otherwise (inert — no derived barrier names a ResId that was never
 /// declared).
 #[inline]
 fn vb_sink_buffers(
     scene: &GBufferScene<'_>,
-    fixed: [VkBuffer; VB_BUFFER_COUNT - PARTICLE_BUFFER_COUNT],
+    fixed: [VkBuffer; VB_BUFFER_COUNT - PARTICLE_BUFFER_COUNT - MATERIAL_TAIL_BUFFER_COUNT],
 ) -> [VkBuffer; VB_BUFFER_COUNT] {
     let mut buffers = [VkBuffer::NULL; VB_BUFFER_COUNT];
     buffers[..fixed.len()].copy_from_slice(&fixed);
+    let mut next = fixed.len();
     if let Some(p) = scene.particle.as_ref() {
-        buffers[fixed.len()..].copy_from_slice(&particle_sink_buffers(p));
+        buffers[next..next + PARTICLE_BUFFER_COUNT].copy_from_slice(&particle_sink_buffers(p));
+        next += PARTICLE_BUFFER_COUNT;
+    }
+    if scene.material_upload.is_some() {
+        buffers[next] = scene.material_table.buffer;
     }
     buffers
 }
