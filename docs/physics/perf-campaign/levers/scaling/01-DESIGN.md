@@ -934,7 +934,24 @@ receipts; the runner prints the kernel and `TreeDiag` with `{:?}`. The API was p
 
 ### 10.3 The CI step (commit 3)
 
-*Filled by that commit.*
+`feature-legs` gains one step after its `cargo check` of the derived legs: `cargo test --locked -p boyko-physics
+--features bp-query-counts --test bp_query_counts --no-fail-fast` and the same for `narrowphase-counts` /
+`narrowphase_census`. Until this step CI compiled both features and ran neither, which is how L9 C4's
+`bp_query_counts` red went unseen (PC-C0-CI, `scratchpad/l10b/pc_lines.md`, taken in a changed form):
+
+- **The status is accumulated** (`set +e`, `PIPESTATUS[0]` per leg): GitHub's `bash -eo pipefail` would stop at a
+  failing first leg and shadow the second.
+- **Each target must print its own whole-line count** (`grep -qx 'running 2 tests'` / `'running 1 test'`), so a
+  feature that did not take effect (`running 0 tests`) is a red, not a green.
+- **The step runs under `!cancelled()`**, so a red derived-leg compile in the step above does not skip it.
+- **A red that shows only on the ubuntu runner** is a host-divergence finding for its own lane, never a reason to
+  weaken the step (ruling Q9). Its first run executes pins so far checked only on msvc; the orchestrator reads it.
+
+Shown able to fail, locally in Git Bash with GitHub's own `bash --noprofile --norc -eo pipefail` (the run body
+extracted from `ci.yml`, only its two log paths moved under scratch): as written, exit 0; both `--features` removed,
+exit 1 with BOTH count errors printed (the second leg is not shadowed); leg 1 pointed at a `--test` target that does
+not exist (cargo exits 101, review W5: no file of the tree lane is touched), exit 1 with leg 1's failure and leg 2's
+`running 1 test`.
 
 ### 10.4 S4 (commit 4)
 

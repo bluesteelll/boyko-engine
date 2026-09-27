@@ -482,6 +482,27 @@ jobs:
           if [ "$failed" -ne 0 ]; then
             exit 1
           fi
+      # The two physics count features gate test-only code: the step above compiles it, only `cargo
+      # test` runs it, and until this step nothing did (L9 C4's `bp_query_counts` red went unseen until
+      # a lane ran it by hand). Each target must report its own count: `running 0 tests` from a feature
+      # that did not take effect is the vacuous green this file guards against. Both legs run even when
+      # the first fails, so the status is accumulated rather than left to `-e`; and the step runs even
+      # when a derived leg above failed (`!cancelled()`), so one red compile does not shadow it. A red
+      # that shows only on this runner is a host-divergence finding for its own lane, never a reason
+      # to weaken the step (W8S cut, Q9).
+      - name: cargo test the physics count features (bp-query-counts, narrowphase-counts)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set +e
+          rc=0
+          cargo test --locked -p boyko-physics --features bp-query-counts --test bp_query_counts --no-fail-fast -- --nocapture 2>&1 | tee bpqc.log
+          [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "::error::bp_query_counts failed"; rc=1; }
+          cargo test --locked -p boyko-physics --features narrowphase-counts --test narrowphase_census --no-fail-fast -- --nocapture 2>&1 | tee npc.log
+          [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "::error::narrowphase_census failed"; rc=1; }
+          grep -qx 'running 2 tests' bpqc.log || { echo "::error::bp_query_counts did not run its 2 tests"; rc=1; }
+          grep -qx 'running 1 test' npc.log || { echo "::error::narrowphase_census did not run its 1 test"; rc=1; }
+          exit "$rc"
 
   bench-compile:
     name: cargo bench --no-run
