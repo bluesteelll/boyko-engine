@@ -74,11 +74,13 @@
 //! * **The event lane, change detection and the whole query path are free**:
 //!   +0.000 over an identical 4-system baseline. A `par_iter` fan-out is exactly
 //!   +1 scope and +1 chunk (BEFORE: +6).
-//! * **A parallel physics step is `1 + passes x colours` scope frames, on
-//!   EVERY frame, exactly** (asserted per frame: `scope - 1` is a multiple of
+//! * **A parallel physics step is `1 + setup + passes x colours` scope frames, on
+//!   EVERY frame, exactly** (asserted per frame: `scope - 1 - setup` is a multiple of
 //!   `substeps x (1 + relax)`, and the quotient is the dispatched colour count —
 //!   10 on the warmed 1240-body pile over the census's fixed window, so 121 a
-//!   step there, and 9 once the pile settles further), with ~1.7 chunks per
+//!   step there before S4 and 122 since, and 9 once the pile settles further; `setup` is
+//!   S4's parallel setup scope, 0 or 1 a step, read from the solver's own
+//!   `setup_dispatches` counter, W8S lane commit 4, ruling 7 of 2026-09-26), with ~1.7 chunks per
 //!   scope. **Quote the step as a range, never as 331.8:** over 4,352 steady
 //!   steps (the adjudication run, 2026-09-11, reproduced the same day) it read
 //!   302..339 per step, with 256-step block means ~307..332 (331.8 in the first
@@ -212,7 +214,7 @@ use boyko_physics::components::{
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::{add_physics_colored_solve, add_physics_systems};
 use boyko_physics::resources::{Manifolds, PhysicsConfig};
-use boyko_physics::solver::SoftStepSolver;
+use boyko_physics::solver::{ColoredSoftStepSolver, SoftStepSolver};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Report output — libtest's capture contract, without libtest
@@ -2003,6 +2005,11 @@ impl Pile {
     fn np_dispatches(&self) -> u64 {
         self.world.resource::<Manifolds>().narrowphase_dispatches()
     }
+    /// S4's own count of steps whose solve setup opened its scope
+    /// (`ColoredSoftStepSolver::setup_dispatches`); 0 on the reference pipeline.
+    fn setup_dispatches(&self) -> u64 {
+        self.world.try_resource::<ColoredSoftStepSolver>().map_or(0, ColoredSoftStepSolver::setup_dispatches)
+    }
     /// Both loop counts at once. `PhysicsConfig` is read at the top of every
     /// step, so this takes effect on the next `step()` without a rebuild.
     fn set_passes(&mut self, substeps: u32, relax: u32) {
@@ -2224,24 +2231,40 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
     let mut pass_points: Vec<(u32, f64)> = Vec::with_capacity(sweep.len());
     for (substeps, relax) in sweep {
         pile.set_passes(substeps, relax);
-        let per_frame = frames(6, PHYS_REPS, || pile.step());
+        // S4's counter after every step, read inside the closure (a resource read allocates
+        // nothing) into a log pre-sized for every step `frames` runs, so the push never
+        // allocates inside a measured frame.
+        let mut setup_log: Vec<u64> = Vec::with_capacity(6 + PHYS_REPS);
+        let per_frame = frames(6, PHYS_REPS, || {
+            pile.step();
+            setup_log.push(pile.setup_dispatches());
+        });
         let m = summarise(&per_frame);
         let passes = passes_of(substeps, relax);
         pass_points.push((passes, m.mean));
         // THE STRUCTURAL CLAIM, per frame and exact: a step opens ONE install
-        // frame plus one nested scope per DISPATCHED colour per pass, and every
-        // pass walks the same colours (the graph is built once per step). So
-        // `scope - 1` is a multiple of the pass count on EVERY frame, and the
-        // quotient is the number of colours wide enough to dispatch.
+        // frame, S4's setup scope when its gate held (its own counter says whether it
+        // did, at most once a step), plus one nested scope per DISPATCHED colour per
+        // pass, and every pass walks the same colours (the graph is built once per
+        // step). So `scope - 1 - setup` is a multiple of the pass count on EVERY frame,
+        // and the quotient is the number of colours wide enough to dispatch.
         let mut colours: Vec<u64> = Vec::with_capacity(per_frame.len());
         for (i, f) in per_frame.iter().enumerate() {
+            let j = 6 + i;
+            // Frame i is step 6 + i; the warm-up's last step read setup_log[5].
+            let setup = setup_log[j] - setup_log[j - 1];
             assert!(
-                f.scope >= 1 && (f.scope - 1) % passes as u64 == 0,
-                "D: substeps={substeps} relax={relax}: frame {i} opened {} scope frames, and \
-                 {} is not a multiple of the {passes} colour passes — the solver no longer \
-                 opens one scope per dispatched colour per pass",
+                setup <= 1,
+                "D: substeps={substeps} relax={relax}: frame {i} moved `setup_dispatches` by \
+                 {setup}; the solve builds once per step, so its setup dispatches at most once"
+            );
+            assert!(
+                f.scope > setup && (f.scope - 1 - setup).is_multiple_of(passes as u64),
+                "D: substeps={substeps} relax={relax}: frame {i} opened {} scope frames with {setup} \
+                 setup scope(s), and {} is not a multiple of the {passes} colour passes — the \
+                 solver no longer opens one scope per dispatched colour per pass",
                 f.scope,
-                f.scope.saturating_sub(1)
+                f.scope.saturating_sub(1 + setup)
             );
             assert!(
                 f.chunk >= f.scope,
@@ -2251,7 +2274,7 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
                 f.chunk,
                 f.scope
             );
-            colours.push((f.scope - 1) / passes as u64);
+            colours.push((f.scope - 1 - setup) / passes as u64);
         }
         let (c_lo, c_hi) = (
             colours.iter().min().copied().unwrap_or(0),

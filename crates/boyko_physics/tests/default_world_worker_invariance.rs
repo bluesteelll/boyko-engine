@@ -40,6 +40,11 @@
 //!   one-worker flag-on arm it does not move (the `lanes < 2` term; the twin of G-L4-1 for
 //!   the narrowphase is `narrowphase_parallel_equivalence.rs`'s
 //!   `one_worker_parallel_narrowphase_runs_the_serial_loop`).
+//! - S4 (W8S lane, commit 4): the solve's parallel setup reaches its dispatch on every frame
+//!   of every `parallel_solve` arm of two or more workers — the scene's widest colour clears
+//!   the colour floor on every frame, so its points clear two setup tasks' floor too — and on
+//!   no frame of any other arm (`ColoredSoftStepSolver::setup_dispatches`). So the invariance
+//!   below covers the setup's ranges on 2, 4 and 8 workers, not only the colour waves.
 //! - L9 C4: `contact_reuse` is on in the same built resource, with the same twin on
 //!   `PhysicsConfig::default()`, and [`run`] leaves it alone, so every one of the seventeen arms
 //!   runs the shipped reuse default and the invariance above covers it. And the flag reaches the
@@ -225,6 +230,8 @@ struct Run {
     min_pairs: usize,
     /// How far `Manifolds::narrowphase_dispatches` moved over the [`FRAMES`] frames.
     np_dispatches: u64,
+    /// How far `ColoredSoftStepSolver::setup_dispatches` moved over the [`FRAMES`] frames (S4).
+    setup_dispatches: u64,
     /// Box pairs served from a contact-reuse record, summed over the [`FRAMES`] frames
     /// (`Manifolds::pair_classes`).
     reused: u64,
@@ -257,6 +264,7 @@ fn run(workers: usize, parallel_solve: bool, parallel_narrowphase: bool, simd_so
 
     let spawn_hash = state_hash(&mut world);
     let np_before = world.resource::<Manifolds>().narrowphase_dispatches();
+    let setup_before = world.resource::<DefaultRigidSolver>().setup_dispatches();
     let mut hashes = Vec::with_capacity(FRAMES);
     let mut min_widest = usize::MAX;
     let mut min_pairs = usize::MAX;
@@ -269,6 +277,7 @@ fn run(workers: usize, parallel_solve: bool, parallel_narrowphase: bool, simd_so
         reused += world.resource::<Manifolds>().pair_classes().reused;
     }
     let np_dispatches = world.resource::<Manifolds>().narrowphase_dispatches() - np_before;
+    let setup_dispatches = world.resource::<DefaultRigidSolver>().setup_dispatches() - setup_before;
     let last = (
         world.resource::<SolverScratch>().bodies().to_vec(),
         world.resource::<Manifolds>().manifolds().iter().collect::<Vec<_>>(),
@@ -278,6 +287,7 @@ fn run(workers: usize, parallel_solve: bool, parallel_narrowphase: bool, simd_so
         min_widest,
         min_pairs,
         np_dispatches,
+        setup_dispatches,
         reused,
         spawn_hash,
         last,
@@ -410,6 +420,20 @@ fn default_world_is_worker_count_invariant() {
              {expected} (one per frame on a flag-on arm of two or more workers, none on a \
              flag-off arm or at one worker)",
             r.np_dispatches
+        );
+    }
+
+    // S4's non-vacuity: the setup opens its scope on every frame of every arm that can dispatch
+    // a colour — `parallel_solve` on and two or more workers — and on no other frame. Checked
+    // before the hash comparison, like the narrowphase's.
+    for (label, _, r) in &runs {
+        let setup = label.contains("parallel_solve=true") && !label.starts_with("1w");
+        let expected = if setup { FRAMES as u64 } else { 0 };
+        assert_eq!(
+            r.setup_dispatches, expected,
+            "S4: {label}: `setup_dispatches` moved {} over {FRAMES} frames, expected {expected} (one \
+             per frame on a parallel_solve arm of two or more workers, none elsewhere)",
+            r.setup_dispatches
         );
     }
 

@@ -955,7 +955,44 @@ not exist (cargo exits 101, review W5: no file of the tree lane is touched), exi
 
 ### 10.4 S4 (commit 4)
 
-*Filled by commit (4).*
+Built in **shape F** (ruling Q1): P-c by cohort range under one `pool.scope` (L11 D10), with the laid-out
+manifolds' warm source search fused into the fill tasks.
+
+- **The gate**, once per step, right after P-b: the colour dispatch's own P2 predicate (`parallel_solve`, a pool of at
+  least two workers, the widest colour at least `MIN_PARALLEL_SLOTS_PER_COLOR`), computed once in `build_columns` and
+  handed to the solve, AND at least two setup ranges: `tasks = min(lanes × 6, points / 256, cohorts, 32)` at least
+  two, and the cohorts, cut on cohort boundaries by a point quota of `points / tasks` (rounded up), falling into at
+  least two ranges (a lumpy cut can make fewer than `tasks`; one range runs inline rather than spawning one task and
+  waiting). A step that fails it runs the parent's path byte for byte: P-a's stream-order search of every manifold,
+  then the fill over every cohort on the calling thread. Tying it to P2 keeps every step whose colours all run inline
+  on that path, which is why S8b's exact `scope == 1 + np` needed no edit.
+- **The order**: sizing and tags (P-a, `phys_sb_pa`), the layout (P-b), then the sources and the fill (`phys_sb_pc`).
+  The layout reads only the tags' counts and frozen flags, never `SRC_RESTORE`, so the sources can follow it, and
+  they must: whether the search is fused depends on the gate, and the gate on P-b's widths. Commit (1) measured the
+  source search inside `phys_sb_pa`; since this commit it is inside `phys_sb_pc`.
+- **Shape F** where the read side is searched by D2's cursor (strict, warm, not `Reset`): serial P-a1 writes every
+  ordinal, the write side's strictness and the run of every manifold that is NOT laid out (frozen or empty: the
+  store's carry reads those); each range searches its own lanes' runs with cursors of its own (`find` is exact from
+  any cursor, so only `backward_searches` counts differently) and writes their `plan` and `SRC_RESTORE` as P-a would.
+  A non-strict read side, warm start off or a `Reset` keeps P-a serial and only the fill runs in the ranges.
+- **One code path**: the inline fill and every task run `fill_range` over a cohort range, so the serial and parallel
+  fills are the same instructions. A task captures `&FillCtx`, its slot and its range (24 bytes; 32 cells fit the
+  scope's first 4 KiB block). Every table a range writes is reached through a raw base taken with `solve_base()` after
+  the last build-time grow; no reference spans a column another range writes. Integer sums (hits, the fused search's
+  counts, `SetupCounters`) are reduced after the join in range order.
+- **Counters**: `ColoredSoftStepSolver::setup_dispatches()` (the `narrowphase_dispatches` pattern) and the armed
+  counter `phys_setup_chunks` (the range count, 0 inline). An armed setup wave is stamped like a colour wave; its
+  reading joins the step's wave sums and routes (not the colour scopes, not B1's first-wave or pass counters), and it
+  is reduced after `phys_sb_pc` closes, inside `phys_solve_build`'s armed span.
+- **Declared changes**: `SetupCounters::backward_searches` counts per range (its readers are `> 0` anti-vacuity gates);
+  +1 dispatch scope per dispatching step (ruling 7), which moves `alloc_frame_census`'s S1c and S1e pins by exactly
+  that scope and its chunk, re-derived by the census's fourth re-pin form (the counter-attributed shift) from the
+  17 × 256-step long run, and `alloc_frame_attribution`'s row D per-frame structure subtracts the per-frame setup
+  count. No value moves: poses, `WarmSeedStats`, the setup digest and every other pin are the parent's.
+- **O2, accepted**: shape F writes `plan[mi]` for every laid-out lane from colour-ordered tasks, onto 8-entry lines
+  several tasks share (4.5k stores a step on J-T); ruling Q1's byte-equal claim on `plan` / `tags` needs them, and the
+  store never reads them for a solved manifold. If window 8b reads S4 under its bar, dropping them (and narrowing G3 /
+  G4-A to the entries the store reads) is the first variant to try.
 
 ---
 

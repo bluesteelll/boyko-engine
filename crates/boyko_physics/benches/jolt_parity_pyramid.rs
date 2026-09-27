@@ -227,6 +227,12 @@
 //! unattached thread are external, and a worker of another pool would read as a worker — the
 //! physics schedule creates none (cut Q4; `route_note` in the summary says so).
 //!
+//! **S4's setup wave.** Under the same gate, a step with at least two setup tasks' worth of
+//! points and cohorts fills its cohorts under one more `pool.scope`: `phys_setup_chunks` must equal
+//! the task count [`expected_setup_tasks`] recomputes (0 inline), the wave sums and the route
+//! counters count that scope besides the colours', and `phys_color_scopes` / `phys_color_tasks` do
+//! not.
+//!
 //! # Flags
 //!
 //! ```text
@@ -423,12 +429,13 @@ use boyko_physics::profiling::{
     PHYS_NP_WAVE_JOIN, PHYS_NP_WAVE_LANES, PHYS_NP_WAVE_OVERFLOW, PHYS_NP_WAVE_RAMP,
     PHYS_NP_WAVE_TAIL, PHYS_PASS_BIASED, PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_ROUTE_EXTERNAL,
     PHYS_ROUTE_WORKER, PHYS_S6_GRAPH_HIT, PHYS_S6_PB_HIT, PHYS_SB_BODIES, PHYS_SB_PA,
-    PHYS_SB_PB, PHYS_SB_PC, PHYS_SLEEP_BEGIN, PHYS_SLEEP_CLASSIFY, PHYS_SLEEP_END,
-    PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD,
-    PHYS_STORE, PHYS_WARM_APPLY, PHYS_WAVE_FIRST_RAMP, PHYS_WAVE_FIRST_TAIL, PHYS_WAVE_HELPED,
-    PHYS_WAVE_INFLIGHT, PHYS_WAVE_JOIN, PHYS_WAVE_LANES, PHYS_WAVE_OVERFLOW, PHYS_WAVE_PASS_RAMP,
-    PHYS_WAVE_RAMP, PHYS_WAVE_TAIL, PHYS_WRITE_BACK, SPAN_ZONE_COUNT, SPAN_ZONES,
-    WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED, hist_bin,
+    PHYS_SB_PB, PHYS_SB_PC, PHYS_SETUP_CHUNKS, PHYS_SLEEP_BEGIN, PHYS_SLEEP_CLASSIFY,
+    PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE,
+    PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY, PHYS_WAVE_FIRST_RAMP, PHYS_WAVE_FIRST_TAIL,
+    PHYS_WAVE_HELPED, PHYS_WAVE_INFLIGHT, PHYS_WAVE_JOIN, PHYS_WAVE_LANES, PHYS_WAVE_OVERFLOW,
+    PHYS_WAVE_PASS_RAMP, PHYS_WAVE_RAMP, PHYS_WAVE_TAIL, PHYS_WRITE_BACK,
+    SETUP_CHUNKS_PER_LANE, SETUP_MAX_TASKS, SETUP_MIN_POINTS_PER_CHUNK, SPAN_ZONE_COUNT,
+    SPAN_ZONES, WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED, hist_bin,
 };
 use boyko_physics::resources::{
     BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
@@ -1278,6 +1285,8 @@ struct Shape {
     hist_colors: [u64; HIST_BINS],
     /// W8S: their slots.
     hist_slots: [u64; HIST_BINS],
+    /// S4: the setup tasks the step's gate spawns, by [`expected_setup_tasks`] (0 inline).
+    setup_tasks: u64,
 }
 
 /// Whether the step took the colored solve's no-awake fast path (L10 C3a), derived from public
@@ -1335,6 +1344,8 @@ fn step_shape(
     // W8S: one colour's laid-out groups' points, in the layout's order (the colour's manifolds
     // ascending, frozen and empty ones skipped), reused across colours.
     let mut groups: Vec<u32> = Vec::new();
+    // S4: every cohort's points, in the layout's order (a colour's groups, eight at a time).
+    let mut cohorts: Vec<u32> = Vec::new();
     for c in 0..graph.n_colors() {
         groups.clear();
         groups.extend(
@@ -1357,6 +1368,7 @@ fn step_shape(
                 .filter(|&n| n != 0),
         );
         let slots: u32 = groups.iter().sum();
+        cohorts.extend(groups.chunks(COLOR_COHORT).map(|c| c.iter().sum::<u32>()));
         if slots >= WIDE_COLOR_MIN_SLOTS {
             shape.wide_colors += 1;
             shape.wide_slots += u64::from(slots);
@@ -1370,7 +1382,41 @@ fn step_shape(
             shape.hist_slots[bin] += u64::from(slots);
         }
     }
+    // S4's gate is the colour dispatch's P2 predicate (the caller's `parallel`) AND two tasks;
+    // here the task count, which the check scales by P2.
+    shape.setup_tasks = expected_setup_tasks(&cohorts, lanes);
     shape
+}
+
+/// The tasks S4's setup scope spawns for a step whose cohorts hold `cohorts` points each, in the
+/// layout's order, on `lanes` workers — 0 when the task count or the cut's range count is under two
+/// and P-c runs inline, before
+/// the P2 predicate the caller applies: this runner's copy of `setup_chunk_count` and
+/// `setup_cuts` (`solver/colored.rs`), from the exported `SETUP_*` constants.
+fn expected_setup_tasks(cohorts: &[u32], lanes: usize) -> u64 {
+    let points: usize = cohorts.iter().map(|&p| p as usize).sum();
+    let tasks = (lanes * SETUP_CHUNKS_PER_LANE)
+        .min(points / SETUP_MIN_POINTS_PER_CHUNK)
+        .min(cohorts.len())
+        .min(SETUP_MAX_TASKS);
+    if tasks < 2 {
+        return 0;
+    }
+    let target = points.div_ceil(tasks).max(1);
+    let (mut n, mut lo, mut acc) = (0usize, 0usize, 0usize);
+    for (k, &p) in cohorts.iter().enumerate() {
+        acc += p as usize;
+        if acc >= target && n + 1 < tasks {
+            n += 1;
+            lo = k + 1;
+            acc = 0;
+        }
+    }
+    if lo < cohorts.len() {
+        n += 1;
+    }
+    // A cut of one range runs inline: the solver opens no scope for it.
+    if n < 2 { 0 } else { n as u64 }
 }
 
 /// The tasks one dispatched colour spawns, whose laid-out groups hold `groups` points each in
@@ -1569,6 +1615,10 @@ fn check_step(
     let parallel = parallel_solve && lanes >= 2 && shape.wide_colors > 0;
     let waves = c * run * u64::from(parallel) * shape.wide_colors * sweeps;
     let tasks = c * run * u64::from(parallel) * shape.wide_tasks * sweeps;
+    // S4: the setup wave, under the same P2 predicate (the fast path lays nothing out, so it never
+    // reaches it).
+    let setup_tasks = c * u64::from(parallel) * shape.setup_tasks;
+    let solve_waves = waves + u64::from(setup_tasks >= 2);
     let threads = lanes as u64 + 1;
     let [h0, h1, h2, h3, h4] = shape.hist_colors;
     let [s0, s1, s2, s3, s4] = shape.hist_slots;
@@ -1591,8 +1641,8 @@ fn check_step(
         (&PHYS_SLEEP_HELD, l10, Want::Exact(shape.held_rows)),
         (&PHYS_WAVE_RAMP, c, Want::Any),
         (&PHYS_WAVE_TAIL, c, Want::Any),
-        (&PHYS_WAVE_INFLIGHT, c, Want::Within(waves, waves * threads)),
-        (&PHYS_WAVE_LANES, c, Want::Within(waves, waves * threads)),
+        (&PHYS_WAVE_INFLIGHT, c, Want::Within(solve_waves, solve_waves * threads)),
+        (&PHYS_WAVE_LANES, c, Want::Within(solve_waves, solve_waves * threads)),
         (&PHYS_WAVE_OVERFLOW, c, Want::Exact(0)),
         (&PHYS_COLOR_SCOPES, c, Want::Exact(waves)),
         (&PHYS_COLOR_TASKS, c, Want::Exact(tasks)),
@@ -1616,12 +1666,13 @@ fn check_step(
         (&PHYS_NP_WAVE_LANES, np, Want::Within(1, threads)),
         (&PHYS_NP_WAVE_OVERFLOW, np, Want::Exact(0)),
         (&PHYS_WAVE_JOIN, c, Want::Any),
-        (&PHYS_WAVE_HELPED, c, Want::Within(0, waves)),
+        (&PHYS_WAVE_HELPED, c, Want::Within(0, solve_waves)),
         (&PHYS_WAVE_FIRST_RAMP, c, Want::Any),
         (&PHYS_WAVE_FIRST_TAIL, c, Want::Any),
         (&PHYS_WAVE_PASS_RAMP, c, Want::Any),
         (&PHYS_NP_WAVE_JOIN, np, Want::Any),
         (&PHYS_NP_ROUTE_WORKER, np, Want::Within(0, 1)),
+        (&PHYS_SETUP_CHUNKS, c, Want::Exact(setup_tasks)),
     ];
     for &(handle, want_n, want) in &expected_counters {
         let k = base + counter_index(handle);
@@ -1645,9 +1696,10 @@ fn check_step(
         }
     }
     let value = |h: &ZoneHandle| values[base + counter_index(h)];
-    if value(&PHYS_ROUTE_WORKER) + value(&PHYS_ROUTE_EXTERNAL) != waves {
+    if value(&PHYS_ROUTE_WORKER) + value(&PHYS_ROUTE_EXTERNAL) != solve_waves {
         return Err(format!(
-            "the route counters ({} worker + {} external) do not sum to the {waves} solve scopes",
+            "the route counters ({} worker + {} external) do not sum to the {solve_waves} solve \
+             scopes",
             value(&PHYS_ROUTE_WORKER),
             value(&PHYS_ROUTE_EXTERNAL)
         ));
@@ -1716,6 +1768,8 @@ struct W8sSums {
     pass_waves: u64,
     np_join: u64,
     np_route_worker: u64,
+    setup_steps: u64,
+    setup_tasks: u64,
 }
 
 impl W8sSums {
@@ -1759,6 +1813,8 @@ impl W8sSums {
         self.np_inflight += v(&PHYS_NP_WAVE_INFLIGHT);
         self.np_lanes += v(&PHYS_NP_WAVE_LANES);
         self.np_overflow += v(&PHYS_NP_WAVE_OVERFLOW);
+        self.setup_steps += u64::from(v(&PHYS_SETUP_CHUNKS) > 0);
+        self.setup_tasks += v(&PHYS_SETUP_CHUNKS);
     }
 
     /// The summary's `w8s` object: sums, and per-wave means (the ramp and tail in ns).
@@ -1776,7 +1832,8 @@ impl W8sSums {
              \"join_ns_mean\":{},\"imbalance_ns_mean\":{},\"helped_waves\":{},\
              \"ramp_ns_mean_helped\":{},\"first_waves\":{},\"first_ramp_ns_mean\":{},\
              \"first_tail_ns_mean\":{},\"pass_waves\":{},\"pass_ramp_ns_mean\":{},\
-             \"np_join_ns_mean\":{},\"np_imbalance_ns_mean\":{},\"np_route_worker\":{}}}",
+             \"np_join_ns_mean\":{},\"np_imbalance_ns_mean\":{},\"np_route_worker\":{},\
+             \"setup_steps\":{},\"setup_tasks\":{}}}",
             window.0,
             window.1,
             self.steps,
@@ -1811,6 +1868,8 @@ impl W8sSums {
             json_f64(mean(self.np_join, self.np_waves) / tpn),
             json_f64(mean(self.np_tail.saturating_sub(self.np_join), self.np_waves) / tpn),
             self.np_route_worker,
+            self.setup_steps,
+            self.setup_tasks,
         )
     }
 }

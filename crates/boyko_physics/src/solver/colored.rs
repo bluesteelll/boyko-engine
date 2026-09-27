@@ -81,8 +81,10 @@
 //! per-point key, no table refill. `warm_records.rs` states Lemma W, the argument
 //! that every seed and hit count equals the per-point table's it replaced.
 
+use std::cell::Cell;
 use std::marker::PhantomData;
 use std::ptr;
+use std::slice;
 
 use boyko_diag::profiling_abi::{ZoneGuard, ZoneHandle};
 use boyko_diag::{zone, zone_enabled};
@@ -101,7 +103,8 @@ use super::simd;
 // no value/layout change to `soft_step.rs`).
 use super::soft_step::{IMMOVABLE_AT_REST, MAX_BIAS_VELOCITY, RESTITUTION_THRESHOLD, SoftCoefficients};
 use super::warm_records::{
-    self, WarmIndex, WarmLookup, WarmRecord, WarmRecords, WarmRun, ord, point_fid,
+    self, PlanCounts, SearchCursors, WarmIndex, WarmLookup, WarmRecord, WarmRecords, WarmRun, ord,
+    point_fid,
 };
 use super::RigidSolver;
 use crate::manifold::{Manifold, SDF_SENTINEL};
@@ -114,7 +117,8 @@ use crate::profiling::{
     PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_S6_GRAPH_HIT, PHYS_S6_PB_HIT, PHYS_SB_BODIES,
     PHYS_SB_PA, PHYS_SB_PB, PHYS_SB_PC, PHYS_SLEEP_BEGIN, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE,
     PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY,
-    PHYS_WRITE_BACK, WaveStamps, WaveTally, ZoneCanary, counter, hist_bin,
+    PHYS_SETUP_CHUNKS, PHYS_WRITE_BACK, WaveReading, WaveStamps, WaveTally, ZoneCanary, counter,
+    hist_bin,
 };
 use crate::resources::{
     BodyState, ConstraintGraph, IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
@@ -319,7 +323,7 @@ pub(crate) const MIN_PARALLEL_SLOTS_PER_COLOR: u32 = 256;
 /// the converged per-body result is independent of the partition and the visiting
 /// order) holds for ANY chunking. So tuning this const changes only WHERE work runs,
 /// never the bits. `4` is a starting point the bench sweeps (3..=8 typical).
-const CHUNKS_PER_WORKER: usize = 6;
+pub(crate) const CHUNKS_PER_WORKER: usize = 6;
 
 /// Minimum SLOTS a dispatched chunk must carry, so a chunk pays for its own
 /// boxed closure.
@@ -374,6 +378,35 @@ const CHUNKS_PER_WORKER: usize = 6;
 /// as the optimum of either. It captures most of the pyramid win (26.99 vs 35.26
 /// ms unfloored at W = 16) without refusing the wide-colour dispatch.
 const MIN_SLOTS_PER_CHUNK: usize = 64;
+
+/// S4 (the parallel solve setup, `docs/physics/perf-campaign/levers/scaling/01-DESIGN.md` §6.4):
+/// the fewest laid-out contact points a setup task carries, so a task pays for its share of the
+/// scope. Arithmetic, not measured: at the L11 witness's 20–40 ns of fill per point a 256-point
+/// task fills for 5–10 µs, against the 2.88 µs a dispatched wave loses at W8 (window 7). The W8S
+/// window re-derives it. Changes only WHERE the fill runs, never a value.
+pub(crate) const SETUP_MIN_POINTS_PER_CHUNK: usize = 256;
+
+/// S4: the most tasks the setup scope spawns — row D's one-block rule: 32 task cells of at most
+/// 128 B fill the scope's first 4 KiB block, so the scope costs one boxed frame and one chunk.
+pub(crate) const SETUP_MAX_TASKS: usize = 32;
+
+/// S4: the setup scope's task count for a step of `points` laid-out points in `n_cohorts`
+/// cohorts on `lanes` workers — the lanes, work, cohort and cell-budget terms. At two or more the
+/// cohorts are cut ([`setup_cuts`]), and the step dispatches when the cut makes two ranges or
+/// more.
+#[inline]
+pub(crate) const fn setup_chunk_count(lanes: usize, points: usize, n_cohorts: usize) -> usize {
+    let by_lanes = lanes * CHUNKS_PER_WORKER;
+    let by_work = points / SETUP_MIN_POINTS_PER_CHUNK;
+    let mut n = if by_lanes < by_work { by_lanes } else { by_work };
+    if n_cohorts < n {
+        n = n_cohorts;
+    }
+    if SETUP_MAX_TASKS < n {
+        n = SETUP_MAX_TASKS;
+    }
+    n
+}
 
 /// O7 SIMD cohort width: the number of body-disjoint manifold-GROUPS packed into
 /// one AVX2 batch (one group per lane = 8 lanes per `__m256`).
@@ -762,6 +795,24 @@ impl SetupCounters {
         {
             self.restitution_applied += 1;
         }
+    }
+
+    /// Adds another count's fields (S4: a setup task's, after the join, in task order — integer
+    /// sums, exact under any partition).
+    #[inline]
+    fn merge(&mut self, other: &SetupCounters) {
+        #[cfg(test)]
+        {
+            self.carry_hits += other.carry_hits;
+            self.backward_searches += other.backward_searches;
+            self.misses += other.misses;
+            self.cold_index_steps += other.cold_index_steps;
+            self.duplicate_fids_met += other.duplicate_fids_met;
+            self.disabled_steps += other.disabled_steps;
+            self.restitution_applied += other.restitution_applied;
+        }
+        // The only other reader of `other` is the gated block above.
+        let _ = other;
     }
 
     /// Adds what one step's `plan_sources` counted: its backward searches, and whether
@@ -1521,6 +1572,195 @@ fn debug_assert_padding_zero(
     assert!(head._p == 0 && head._pad == [0; 16], "invariant: the head's padding bytes are zero");
 }
 
+/// S4: how one step's P-c runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SetupRun {
+    /// On the calling thread, over every cohort. `fused` searches the laid-out manifolds' warm
+    /// runs in the fill, as a dispatched step does (the serial twin of shape F; test builds only
+    /// set it).
+    Inline {
+        /// Whether the fill searches the laid-out manifolds' runs itself.
+        fused: bool,
+    },
+    /// In this many tasks under one `pool.scope`.
+    Pool(usize),
+    /// In this many scoped std threads: the pool-free twin Miri runs (G4-F).
+    #[cfg(test)]
+    Threads(usize),
+}
+
+/// S4, test builds: how a test forces the setup's shape (G4-A, G4-F).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SetupMode {
+    /// The production gate.
+    #[default]
+    Auto,
+    /// Shape F's fused search on the calling thread, one range.
+    SerialFused,
+    /// This task count (capped by the cohorts and [`SETUP_MAX_TASKS`]) on the ambient pool, the
+    /// P2 gate and the point floor waived; a step whose cut makes two ranges or more dispatches.
+    Pool(usize),
+    /// The same tasks on scoped std threads.
+    Threads(usize),
+}
+
+/// What one P-c range reports (S4): its point hits, its searches' counts, its anti-vacuity
+/// counts. Integer sums, reduced after the join in range order.
+#[derive(Clone, Copy, Debug, Default)]
+struct RangeOut {
+    /// The lanes' point hits.
+    hits: u32,
+    /// The fused search's counts (all zero when the runs were planned serially).
+    counts: PlanCounts,
+    /// The fill's anti-vacuity counts.
+    setup: SetupCounters,
+}
+
+/// One step's P-c as its ranges see it (S4, L11 D10): the write-capable raw base of every table
+/// the fill writes, taken with `ScratchColumn::solve_base` after the last build-time grow (B4),
+/// and shared views of what it only reads. No reference spans a column a range writes — heads,
+/// cold, blocks, `vn0`, `plan`, `tags`, the write side's records — so ranges on different threads
+/// hold no overlapping reference (the P1/P2 discipline). A range writes only its own cohorts,
+/// their own rank rows, and the `plan` / `tags` / record entries of its own lanes' manifolds.
+struct FillCtx<'a> {
+    heads: *mut CohortHead,
+    cold: *mut CohortCold,
+    blocks: *mut RankBlock,
+    vn0: *mut [f32; COHORT],
+    plan: *mut WarmRun,
+    tags: *mut ManifoldTag,
+    /// The write side's records, `None` with warm start off (no record is written).
+    recs_w: Option<*mut WarmRecord>,
+    /// Built cohorts.
+    n_heads: usize,
+    /// Built rank blocks (and `vn0` rows).
+    n_blocks: usize,
+    manifolds: &'a [Manifold],
+    bodies: &'a [BodyState],
+    bodies_eff: &'a [BodyEffective],
+    /// The read side's lookup.
+    lookup: WarmLookup<'a>,
+    /// L10's restore source's lookup, on a step that has one.
+    restore: Option<WarmLookup<'a>>,
+    /// How the warm store's cursor classifies this gather.
+    remap: RowRemap<'a>,
+    /// Shape F: the fill searches each laid-out manifold's run itself (strict read side, warm,
+    /// looked up); otherwise P-a planned every run and the fill reads `plan` and `tags`.
+    fused: bool,
+    /// One [`RangeOut`] slot per range.
+    outs: *mut RangeOut,
+}
+
+// SAFETY: `FillCtx` is shared by reference between the setup tasks. Its raw bases are written only
+//   per element, each element by exactly one range: cohort `k`'s head, cold record, rank blocks and
+//   `vn0` rows by the range that owns `k` (the cuts partition the cohorts, and P-b gives each cohort
+//   its own consecutive ranks); `plan[mi]`, `tags[mi]` and the record `mi` by the range owning the
+//   one lane manifold `mi` has (P-b lays each solved manifold out once); `outs[i]` by range `i`
+//   alone. No range forms a reference over a whole column. Its shared views (`manifolds`, the
+//   bodies, both lookups, the remap) are not written while any range runs. The bases are
+//   address-stable (`ComponentPool` reservations) and taken after the last grow, and the scope's
+//   join outlives every task, so no base dangles.
+unsafe impl Sync for FillCtx<'_> {}
+
+impl<'a> FillCtx<'a> {
+    /// Manifold `mi`'s lookup and run for its lane's fill. Shape F searches it here with the
+    /// range's own cursors — D2's search is exact from any cursor, so the result is the one P-a's
+    /// stream-order walk finds; only the `backward` count differs — and records it in `plan` and
+    /// `tags` as P-a would. Otherwise P-a planned it, and it is read back.
+    ///
+    /// # Safety
+    /// `mi` is the manifold of a lane of a cohort the calling range owns, so no other thread
+    /// reads or writes `plan[mi]` or `tags[mi]` while it runs.
+    #[inline]
+    unsafe fn source(
+        &self,
+        mi: usize,
+        cursors: &mut SearchCursors,
+        counts: &mut PlanCounts,
+    ) -> (WarmLookup<'a>, WarmRun) {
+        if self.fused {
+            let (run, restored) = warm_records::source_of(
+                &self.manifolds[mi],
+                self.remap,
+                self.lookup.read,
+                self.lookup.index,
+                self.restore.map(|r| r.read),
+                cursors,
+                counts,
+            );
+            // SAFETY: `mi` is this range's own lane manifold (the contract), `mi < n` (a laid-out
+            //   manifold of this step), and `plan` / `tags` are the write-capable bases of
+            //   columns sized to `n`: the read, the writes and the tag's read-modify-write touch
+            //   elements no other thread touches, and form no reference.
+            unsafe {
+                ptr::write(self.plan.add(mi), run);
+                if restored {
+                    let tag = self.tags.add(mi);
+                    let mut t = ptr::read(tag);
+                    t.flags |= ManifoldTag::SRC_RESTORE;
+                    ptr::write(tag, t);
+                }
+            }
+            let lookup = match self.restore {
+                Some(restore) if restored => restore,
+                _ => self.lookup,
+            };
+            (lookup, run)
+        } else {
+            // SAFETY: as above; P-a wrote both entries before any range started, and nothing
+            //   writes them while ranges run.
+            let (run, tag) = unsafe { (ptr::read(self.plan.add(mi)), ptr::read(self.tags.add(mi))) };
+            let lookup = match self.restore {
+                Some(restore) if tag.src_restore() => restore,
+                _ => self.lookup,
+            };
+            (lookup, run)
+        }
+    }
+}
+
+/// What the build reports to the solve (S4): L10's restore counts, the P2 predicate the solve's
+/// colour dispatch reuses, and the setup wave's W8S reading when it dispatched armed (added to
+/// the step's tally by the caller, like a colour wave's).
+struct BuildOut {
+    restore_searches: u32,
+    restore_hits: u32,
+    p2: bool,
+    setup_wave: Option<WaveReading>,
+}
+
+/// S4: cuts `heads` into at most `tasks` consecutive cohort ranges by point quota — `points /
+/// tasks`, rounded up — on cohort boundaries, the colour cut walk's shape over cohorts. Writes the
+/// ranges to `cuts` and returns their count, `1..=tasks`.
+fn setup_cuts(
+    heads: &[CohortHead],
+    points: usize,
+    tasks: usize,
+    cuts: &mut [(u32, u32); SETUP_MAX_TASKS],
+) -> usize {
+    debug_assert!(
+        (1..=SETUP_MAX_TASKS).contains(&tasks),
+        "invariant: 1..=SETUP_MAX_TASKS setup tasks"
+    );
+    let target = points.div_ceil(tasks).max(1);
+    let (mut n, mut lo, mut acc) = (0usize, 0usize, 0usize);
+    for (k, h) in heads.iter().enumerate() {
+        acc += h.width[..h.nlanes as usize].iter().map(|&w| usize::from(w)).sum::<usize>();
+        if acc >= target && n + 1 < tasks {
+            cuts[n] = (lo as u32, (k + 1) as u32);
+            n += 1;
+            lo = k + 1;
+            acc = 0;
+        }
+    }
+    if lo < heads.len() {
+        cuts[n] = (lo as u32, heads.len() as u32);
+        n += 1;
+    }
+    n
+}
+
 /// W8S instrument 4 (S6's hit-rate counter, `levers/scaling/01-DESIGN.md` §6.6): what the
 /// previous ARMED step's graph and layout inputs were, as far as the solve sees them. The design
 /// keyed the memo on a `StepInputs` epoch and an L10 held-store epoch; neither exists on this tree
@@ -1612,6 +1852,11 @@ pub struct ColoredSoftStepSolver {
     /// W8S: the in-zone canary ([`set_zone_canary`](Self::set_zone_canary)); spins nowhere by
     /// default.
     canary: ZoneCanary,
+    /// S4: steps whose P-c ran in the setup scope ([`setup_dispatches`](Self::setup_dispatches)).
+    setup_dispatches: u64,
+    /// S4, test builds: the setup's forced shape.
+    #[cfg(test)]
+    pub(crate) setup_mode: SetupMode,
     /// The last solve's setup digest (L11 C0): the built columns' logical values,
     /// then the step's [`WarmSeedStats`], folded after the store. Test-only.
     #[cfg(test)]
@@ -1658,6 +1903,9 @@ impl ColoredSoftStepSolver {
             counters: SetupCounters::default(),
             s6: S6Witness::default(),
             canary: ZoneCanary::default(),
+            setup_dispatches: 0,
+            #[cfg(test)]
+            setup_mode: SetupMode::Auto,
             #[cfg(test)]
             step_digest: 0,
         }
@@ -1718,6 +1966,15 @@ impl ColoredSoftStepSolver {
             }
             None => false,
         }
+    }
+
+    /// S4: the steps whose P-c ran in the setup scope (one `pool.scope` per such step), since
+    /// construction — the `narrowphase_dispatches` pattern. The frame census subtracts it from a
+    /// frame's scope count; a step whose colours do not dispatch (the P2 predicate), or whose
+    /// cohorts cut into fewer than two setup ranges, adds nothing.
+    #[inline]
+    pub fn setup_dispatches(&self) -> u64 {
+        self.setup_dispatches
     }
 
     /// W8S: the in-zone canary's busy-waits since [`set_zone_canary`](Self::set_zone_canary) —
@@ -1991,7 +2248,28 @@ impl ColoredSoftStepSolver {
     /// No per-step heap allocation: all scratch is capacity-reused.
     ///
     /// `restore` is L10's restore warm source for the step (design 06 A3), searched after a
-    /// miss of the read side. Returns its searches and hits.
+    /// miss of the read side. Returns its searches and hits, the P2 predicate the solve's colour
+    /// dispatch reuses, and the setup wave's W8S reading.
+    ///
+    /// # S4: the parallel setup (`levers/scaling/01-DESIGN.md` §6.4, as built: shape F)
+    ///
+    /// One decision per step, right after P-b: the P2 predicate (`parallel_solve`, a pool of at
+    /// least two workers, the widest colour at least `MIN_PARALLEL_SLOTS_PER_COLOR` — the solve's
+    /// own gate, computed here once and handed back) AND at least two setup ranges: the task
+    /// count ([`setup_chunk_count`]) at least two, and the cohorts, cut by point quota on cohort
+    /// boundaries ([`setup_cuts`]), falling into at least two ranges. A step that fails it runs
+    /// today's path: P-a's stream-order search of every manifold, then the fill over every cohort
+    /// on this thread. A step that passes opens one `pool.scope` over those ranges, each range
+    /// filling its cohorts through the same per-range routine
+    /// ([`fill_range`](Self::fill_range)). Where the read side is searched by D2's cursor
+    /// (strict, warm, not `Reset`), shape F moves the laid-out manifolds' search into the ranges:
+    /// serial P-a1 writes every ordinal, the write side's strictness and the run of every
+    /// manifold that is not laid out (frozen, or empty — the store's carry reads those), and
+    /// each range searches its own lanes' runs — exact from any cursor — before filling them.
+    /// Every output byte is the serial path's; `SetupCounters::backward_searches` counts
+    /// differently (a range's cursors start at 0). The P-a / P-b / P-c order changed with it: the
+    /// source search now follows the layout, which reads only the tags' counts and frozen flags.
+    #[allow(clippy::too_many_arguments)]
     fn build_columns(
         &mut self,
         manifolds: &[Manifold],
@@ -2000,7 +2278,10 @@ impl ColoredSoftStepSolver {
         sleep: Option<&IslandSleep>,
         remap: RowRemap<'_>,
         restore: Option<&WarmRecords>,
-    ) -> (u32, u32) {
+        parallel_solve: bool,
+    ) -> BuildOut {
+        #[cfg(test)]
+        let setup_mode = self.setup_mode;
         if let RowRemap::Rows(prev_row) = remap {
             debug_assert_eq!(
                 prev_row.len(),
@@ -2023,6 +2304,7 @@ impl ColoredSoftStepSolver {
             warm_stats,
             counters,
             canary,
+            setup_dispatches,
             ..
         } = self;
         debug_assert!(
@@ -2030,7 +2312,8 @@ impl ColoredSoftStepSolver {
             "invariant: warm start runs only if the setup flag allows it"
         );
         let n = manifolds.len();
-        // W8S: P-a's span, from the sizing through the source search.
+        // W8S: P-a's span: the sizing and the tags. (Since S4 the warm source search follows
+        // P-b, inside P-c's span.)
         let pa_zone = zone!(PHYS_SB_PA);
         canary.at(&PHYS_SB_PA, pa_zone.is_some());
 
@@ -2038,7 +2321,7 @@ impl ColoredSoftStepSolver {
         // manifold's warm source run goes to `plan`. The read side is `warm[cur]`,
         // the write side the other one — two elements of one array, borrowed apart.
         // B4: every grow / refill happens here and in P-b, single-threaded, BEFORE
-        // any `solve_view()` captures a base — so no worker can see a moving base.
+        // any base is taken for the fill — so no range can see a moving base.
         let (read, write) = Self::warm_sides(warm, *warm_cur);
         cols.manifold_fill(n);
         if *warm_effective {
@@ -2055,7 +2338,9 @@ impl ColoredSoftStepSolver {
         // adds L10's `SRC_RESTORE` to the manifolds whose run it finds in `restore`.
         //
         // Warm-seed diagnostic (defect A): the carried count is taken only on a step
-        // whose rows changed; the unchanged step does no per-manifold work for it.
+        // whose rows changed; the unchanged step does no per-manifold work for it. The layout
+        // reads the tags' counts and frozen flags only, never `SRC_RESTORE`, so it runs before the
+        // source search.
         let carried_rows = *warm_effective && matches!(remap, RowRemap::Rows(_));
         let mut carried = 0u32;
         let mut points = 0u32;
@@ -2081,29 +2366,7 @@ impl ColoredSoftStepSolver {
                 }
             }
         }
-        // P-a, the sources: this step's ordinals to the write side, every manifold's warm run
-        // to `plan` — from the read side, or (L10, design 06 A3) from the restore source
-        // when the read side misses, which marks the tag `SRC_RESTORE`.
-        let plan_counts = {
-            let mut tags = cols.tags.build_view();
-            let tags = tags.as_mut_slice();
-            warm_records::plan_sources_restored(
-                manifolds,
-                remap,
-                *warm_effective,
-                read,
-                write,
-                warm_index,
-                cols.plan.build_view().as_mut_slice(),
-                restore,
-                |mi| tags[mi].flags |= ManifoldTag::SRC_RESTORE,
-            )
-        };
-        counters.plan(plan_counts);
         drop(pa_zone);
-        let index: &WarmIndex = warm_index;
-        let lookup = WarmLookup { read, index };
-        let restore_lookup = restore.map(|read| WarmLookup { read, index });
 
         // P-b (D4): the layout, in color order.
         let seeded = {
@@ -2113,50 +2376,147 @@ impl ColoredSoftStepSolver {
         };
         debug_assert_eq!(points, cols.len() as u32, "invariant: the tags and the layout agree on the point count");
 
-        // P-c (D4): the fill, per cohort. The `BodyEffective` rows the fill reads are
-        // a SINGLE-THREADED read here (the build runs before any parallel dispatch);
-        // take one read slice of the solver's body column (a distinct field of
-        // `self`). The write side's records take each solved manifold's shape now,
-        // while its manifold is in cache; the store writes the impulses (D3).
-        let bodies_eff = bodies_eff.as_read_slice();
-        let mut point_hits = 0u32;
-        // The build views commit their lengths on drop, so the fill's borrows end here.
-        {
-            let pc_zone = zone!(PHYS_SB_PC);
-            canary.at(&PHYS_SB_PC, pc_zone.is_some());
-            let sources = WarmSources {
-                lookup,
-                restore: restore_lookup,
-                plan: cols.plan.as_read_slice(),
-                tags: cols.tags.as_read_slice(),
-            };
-            let mut recs_view = write.recs_mut();
-            let mut recs_w = if *warm_effective { Some(recs_view.as_mut_slice()) } else { None };
-            let mut heads = cols.heads.build_view();
-            let mut cold = cols.cold.build_view();
-            let mut blocks = cols.blocks.build_view();
-            let mut vn0 = cols.rank_cold.build_view();
-            let blocks = blocks.as_mut_slice();
-            let vn0 = vn0.as_mut_slice();
-            for (head, cold) in heads.as_mut_slice().iter_mut().zip(cold.as_mut_slice()) {
-                let lo = head.rank_base as usize;
-                let hi = lo + head.depth as usize;
-                point_hits += Self::fill_cohort(
-                    head,
-                    cold,
-                    &mut blocks[lo..hi],
-                    &mut vn0[lo..hi],
-                    manifolds,
-                    bodies,
-                    bodies_eff,
-                    sources,
-                    recs_w.as_deref_mut(),
-                    counters,
-                );
-                #[cfg(debug_assertions)]
-                debug_assert_padding_zero(head, cold, &blocks[lo..hi], &vn0[lo..hi]);
+        // S4's gate, once per step (the method docs): P2, reused by the solve, AND at least two
+        // setup ranges. The cuts read only the heads' widths (P-b's), so they are taken before
+        // the source search, whose shape (fused or not) follows from the gate.
+        let lanes = try_with_active_pool(|pool| pool.num_threads()).unwrap_or(0);
+        let p2 = parallel_solve
+            && lanes >= 2
+            && cols.widest_color_slots() >= MIN_PARALLEL_SLOTS_PER_COLOR;
+        let n_cohorts = cols.heads.len();
+        let tasks = if p2 { setup_chunk_count(lanes, points as usize, n_cohorts) } else { 0 };
+        #[cfg(test)]
+        let tasks = match setup_mode {
+            SetupMode::Auto | SetupMode::SerialFused => tasks,
+            SetupMode::Pool(t) | SetupMode::Threads(t) => t.min(n_cohorts).min(SETUP_MAX_TASKS),
+        };
+        let mut cuts = [(0u32, 0u32); SETUP_MAX_TASKS];
+        let n_ranges = if tasks >= 2 { setup_cuts(cols.heads(), points as usize, tasks, &mut cuts) } else { 0 };
+        // A cut that left one range would spawn one task and wait for it: run it here instead.
+        let run = if n_ranges >= 2 { SetupRun::Pool(n_ranges) } else { SetupRun::Inline { fused: false } };
+        #[cfg(test)]
+        let run = match (setup_mode, run) {
+            (SetupMode::SerialFused, _) => SetupRun::Inline { fused: true },
+            (SetupMode::Threads(_), SetupRun::Pool(r)) => SetupRun::Threads(r),
+            (_, run) => run,
+        };
+        let n_ranges = match run {
+            SetupRun::Inline { .. } => {
+                cuts[0] = (0, n_cohorts as u32);
+                1
             }
+            SetupRun::Pool(r) => r,
+            #[cfg(test)]
+            SetupRun::Threads(r) => r,
+        };
+        // Shape F where the read side is searched by D2's cursor: strict, warm, looked up.
+        let fused = !matches!(run, SetupRun::Inline { fused: false })
+            && *warm_effective
+            && !matches!(remap, RowRemap::Reset)
+            && read.strict();
+
+        // P-c (D4, S4): the sources, then the fill.
+        let mut pc_zone = zone!(PHYS_SB_PC);
+        canary.at(&PHYS_SB_PC, pc_zone.is_some());
+        // The sources: this step's ordinals to the write side, and the warm run of every manifold
+        // — or, fused, of every manifold not laid out — to `plan`, from the read side, or (L10,
+        // design 06 A3) from the restore source when the read side misses, which marks the tag
+        // `SRC_RESTORE`. The tags are cells so the two callbacks can share them.
+        let mut plan_counts = {
+            let mut tags_view = cols.tags.build_view();
+            let tags = Cell::from_mut(tags_view.as_mut_slice()).as_slice_of_cells();
+            let mut plan_view = cols.plan.build_view();
+            let plan = plan_view.as_mut_slice();
+            let on_restore = |mi: usize| {
+                let mut tag = tags[mi].get();
+                tag.flags |= ManifoldTag::SRC_RESTORE;
+                tags[mi].set(tag);
+            };
+            if fused {
+                warm_records::plan_sources_unsolved(
+                    manifolds,
+                    remap,
+                    read,
+                    write,
+                    warm_index,
+                    plan,
+                    restore,
+                    |mi| tags[mi].get().solved(),
+                    on_restore,
+                )
+            } else {
+                warm_records::plan_sources_restored(
+                    manifolds,
+                    remap,
+                    *warm_effective,
+                    read,
+                    write,
+                    warm_index,
+                    plan,
+                    restore,
+                    on_restore,
+                )
+            }
+        };
+        let index: &WarmIndex = warm_index;
+        let lookup = WarmLookup { read, index };
+        let restore_lookup = restore.map(|read| WarmLookup { read, index });
+
+        // The fill, per cohort range: one range on this thread, or the setup scope's ranges (the
+        // cuts above). The `BodyEffective` rows the fill reads are the solver's body column, which
+        // nothing writes during the build. The write side's records take each solved manifold's
+        // shape now, while its manifold is in cache; the store writes the impulses (D3).
+        let mut outs = [RangeOut::default(); SETUP_MAX_TASKS];
+        let ctx = FillCtx {
+            heads: cols.heads.solve_base(),
+            cold: cols.cold.solve_base(),
+            blocks: cols.blocks.solve_base(),
+            vn0: cols.rank_cold.solve_base(),
+            plan: cols.plan.solve_base(),
+            tags: cols.tags.solve_base(),
+            recs_w: if *warm_effective { Some(write.recs_base()) } else { None },
+            n_heads: n_cohorts,
+            n_blocks: cols.blocks.len(),
+            manifolds,
+            bodies,
+            bodies_eff: bodies_eff.as_read_slice(),
+            lookup,
+            restore: restore_lookup,
+            remap,
+            fused,
+            outs: outs.as_mut_ptr(),
+        };
+        let (dispatched, setup_wave) = match run {
+            SetupRun::Inline { .. } => {
+                // SAFETY: one range over every cohort, on the only thread touching the tables:
+                //   `ctx`'s bases were taken after the last grow and nothing else holds a
+                //   reference to a column it writes; slot 0 is the range's.
+                unsafe { ptr::write(ctx.outs, Self::fill_range(&ctx, 0, n_cohorts)) };
+                (false, None)
+            }
+            // An armed wave takes P-c's span with it and closes it at the join.
+            SetupRun::Pool(_) => Self::fill_parallel(&ctx, &cuts[..n_ranges], pc_zone.take()),
+            #[cfg(test)]
+            SetupRun::Threads(_) => {
+                Self::fill_threads(&ctx, &cuts[..n_ranges]);
+                (true, None)
+            }
+        };
+        let spawned = if dispatched { n_ranges } else { 0 };
+        *setup_dispatches += u64::from(dispatched);
+        counter!(PHYS_SETUP_CHUNKS, spawned as u64);
+        // The ranges' reports, in range order (integer sums). A range that did not run (the fill
+        // fell back inline) left its slot at the default, which adds nothing.
+        let mut point_hits = 0u32;
+        for out in &outs[..n_ranges] {
+            point_hits += out.hits;
+            plan_counts.backward_searches += out.counts.backward_searches;
+            plan_counts.restore_searches += out.counts.restore_searches;
+            plan_counts.restore_hits += out.counts.restore_hits;
+            counters.merge(&out.setup);
         }
+        counters.plan(plan_counts);
+        drop(pc_zone);
 
         let translated = match remap {
             _ if !*warm_effective => 0,
@@ -2185,7 +2545,154 @@ impl ColoredSoftStepSolver {
             *cols.color_cohort_start().last().unwrap_or(&0),
             "invariant: the per-color cohort CSR must tile every cohort exactly once"
         );
-        (plan_counts.restore_searches, plan_counts.restore_hits)
+        BuildOut {
+            restore_searches: plan_counts.restore_searches,
+            restore_hits: plan_counts.restore_hits,
+            p2,
+            setup_wave,
+        }
+    }
+
+    /// S4 (P-c by cohort range, L11 D10): fills cohorts `[k_lo, k_hi)` through
+    /// [`fill_cohort`](Self::fill_cohort) and reports the range's hits and counts. The one routine
+    /// of every shape — the calling thread's single range and each setup task's — so the serial
+    /// and parallel fills are the same instructions. A pure function of the cohorts' rank tables,
+    /// the manifolds, the bodies and the warm sources, so ranges may run in any order or at once.
+    ///
+    /// # Safety
+    /// `ctx` holds the bases of this step's built tables, taken after the last grow; `k_lo <= k_hi
+    /// <= ctx.n_heads`; and while this runs no other thread reads or writes cohorts `[k_lo, k_hi)`,
+    /// their rank blocks and `vn0` rows, or the `plan` / `tags` / record entries of their lanes'
+    /// manifolds, and nothing holds a reference over any of those columns. Cohorts own consecutive,
+    /// pairwise disjoint rank rows (P-b), and each laid-out manifold is one lane of one cohort, so
+    /// disjoint cohort ranges satisfy this for each other.
+    unsafe fn fill_range(ctx: &FillCtx<'_>, k_lo: usize, k_hi: usize) -> RangeOut {
+        debug_assert!(k_lo <= k_hi && k_hi <= ctx.n_heads, "invariant: a range of built cohorts");
+        let mut cursors = SearchCursors::default();
+        let mut counts = PlanCounts::default();
+        let mut setup = SetupCounters::default();
+        let mut hits = 0u32;
+        for k in k_lo..k_hi {
+            // SAFETY: `k < n_heads` and cohort `k` is this range's alone (the contract), so its
+            //   head and cold record are live and no other reference to either exists.
+            let (head, cold) = unsafe { (&mut *ctx.heads.add(k), &mut *ctx.cold.add(k)) };
+            let (lo, depth) = (head.rank_base as usize, head.depth as usize);
+            debug_assert!(lo + depth <= ctx.n_blocks, "invariant: a cohort's ranks are built");
+            // SAFETY: the cohort's ranks `[lo, lo + depth)` lie inside the built blocks and `vn0`
+            //   rows (P-b sized both to the rank count) and are cohort `k`'s alone.
+            let (blocks, vn0) = unsafe {
+                (
+                    slice::from_raw_parts_mut(ctx.blocks.add(lo), depth),
+                    slice::from_raw_parts_mut(ctx.vn0.add(lo), depth),
+                )
+            };
+            // SAFETY: every lane of cohort `k` is this range's, so the records and the `plan` /
+            //   `tags` entries the fill and `source` touch are its alone (the contract).
+            hits += unsafe {
+                Self::fill_cohort(
+                    head,
+                    cold,
+                    blocks,
+                    vn0,
+                    ctx.manifolds,
+                    ctx.bodies,
+                    ctx.bodies_eff,
+                    |mi| ctx.source(mi, &mut cursors, &mut counts),
+                    ctx.recs_w,
+                    &mut setup,
+                )
+            };
+            #[cfg(debug_assertions)]
+            debug_assert_padding_zero(head, cold, blocks, vn0);
+        }
+        RangeOut { hits, counts, setup }
+    }
+
+    /// S4: runs `cuts` as the setup scope's tasks on the ambient pool — ONE `pool.scope` (ruling
+    /// 7, 2026-09-26, extends L5 OQ1's per-step scope exception to it until S1's region retires
+    /// it) — and returns whether it dispatched and, armed, the wave's W8S reading. `zone` is P-c's
+    /// span guard: `Some` is the armed wave, whose span closes at the join. Without a pool it runs
+    /// the ranges here, in order. Each task captures `&ctx`, its slot and its range: 24 B, a 40 B
+    /// cell, 32 of them inside the scope's first 4 KiB block.
+    fn fill_parallel(
+        ctx: &FillCtx<'_>,
+        cuts: &[(u32, u32)],
+        zone: Option<ZoneGuard>,
+    ) -> (bool, Option<WaveReading>) {
+        let task = move |i: usize, (lo, hi): (u32, u32)| {
+            move || {
+                // SAFETY: the cuts partition `[0, n_heads)` into consecutive ranges with distinct
+                //   slots, so range `i` owns its cohorts, their ranks and their lanes' entries
+                //   (`fill_range`'s contract); `ctx` outlives the scope's join. Slot `i` is written
+                //   by this task alone and read only after the join.
+                unsafe { ptr::write(ctx.outs.add(i), Self::fill_range(ctx, lo as usize, hi as usize)) };
+            }
+        };
+        // `Some(reading)` when a pool ran the scope (`reading` is the armed wave's, else `None`).
+        let dispatched = try_with_active_pool(|pool| {
+            if zone.is_some() {
+                return Self::fill_parallel_stamped(pool, cuts, task, zone);
+            }
+            pool.scope(|scope| {
+                for (i, &cut) in cuts.iter().enumerate() {
+                    scope.spawn(task(i, cut));
+                }
+            });
+            None
+        });
+        match dispatched {
+            Some(reading) => (true, reading),
+            None => {
+                for (i, &cut) in cuts.iter().enumerate() {
+                    task(i, cut)();
+                }
+                (false, None)
+            }
+        }
+    }
+
+    /// [`fill_parallel`](Self::fill_parallel) for an armed setup wave (W8S, ruling 3): the same
+    /// tasks, each wrapped by `WaveStamps::task` over a record on this frame; P-c's span (`zone`)
+    /// closes at the join, and the record is reduced after it, so the reduction of at most
+    /// [`SETUP_MAX_TASKS`] stamps lands in `phys_solve_build`'s armed span and never in
+    /// `phys_sb_pc`'s. Only the reading leaves: the 8.3 KiB record never widens the build's frame
+    /// on the disarmed path.
+    #[cold]
+    #[inline(never)]
+    fn fill_parallel_stamped<F: FnOnce() + Send>(
+        pool: &boyko_threadpool::PoolInner,
+        cuts: &[(u32, u32)],
+        task: impl Fn(usize, (u32, u32)) -> F + Sync,
+        zone: Option<ZoneGuard>,
+    ) -> Option<WaveReading> {
+        let stamps = WaveStamps::new();
+        stamps.begin(pool.num_threads());
+        pool.scope(|scope| {
+            for (i, &cut) in cuts.iter().enumerate() {
+                let t = task(i, cut);
+                let stamps = &stamps;
+                scope.spawn(move || stamps.task(t));
+            }
+            stamps.spawned();
+        });
+        stamps.joined();
+        drop(zone);
+        stamps.reduce()
+    }
+
+    /// S4, test builds: runs `cuts` on scoped std threads, one per range — the pool-free twin of
+    /// [`fill_parallel`](Self::fill_parallel) that Miri drives (G4-F).
+    #[cfg(test)]
+    fn fill_threads(ctx: &FillCtx<'_>, cuts: &[(u32, u32)]) {
+        std::thread::scope(|scope| {
+            for (i, &(lo, hi)) in cuts.iter().enumerate() {
+                scope.spawn(move || {
+                    // SAFETY: as `fill_parallel`'s tasks — disjoint ranges, a slot each, `ctx`
+                    //   outliving the scope.
+                    unsafe { ptr::write(ctx.outs.add(i), Self::fill_range(ctx, lo as usize, hi as usize)) };
+                });
+            }
+        });
     }
 
     /// The read side and the write side of the warm store: `warm[cur]` is read this
@@ -2210,16 +2717,21 @@ impl ColoredSoftStepSolver {
     /// read it (`!(restitution <= 0.0)`, D9/O3) and zero elsewhere. Every padding
     /// lane and every rank past a lane's width is written as zero.
     ///
-    /// `blocks` / `vn0` are the cohort's own `depth` rows. `recs_w` is `None` with
-    /// warm start disabled (no record is written). `sources` holds every manifold's run and
-    /// the lookup its tag names (the read side, or L10's restore source). Returns the lanes'
-    /// point hits.
+    /// `blocks` / `vn0` are the cohort's own `depth` rows. `recs_w` is the write side's record
+    /// base, `None` with warm start disabled (no record is written). `source(mi)` is manifold
+    /// `mi`'s lookup and run (the read side, or L10's restore source): planned by P-a, or searched
+    /// by shape F's range (S4). Returns the lanes' point hits.
+    ///
+    /// # Safety
+    /// `recs_w`, when `Some`, is the write-capable base of a record column holding every
+    /// manifold index of this step, and no other thread reads or writes the records of this
+    /// cohort's lanes' manifolds while this runs (S4's disjoint cohort ranges).
     // The ten parameters are the per-cohort slice of every table the fill reads
-    // or writes, split so the C4 parallel fill can hand each worker its own cohort
+    // or writes, split so the S4 parallel fill hands each range its own cohort
     // rows without a shared `&mut CohortColumns`; a parameter struct would be built
     // once per cohort per step for no reader.
     #[allow(clippy::too_many_arguments)]
-    fn fill_cohort(
+    unsafe fn fill_cohort<'a>(
         head: &mut CohortHead,
         cold: &mut CohortCold,
         blocks: &mut [RankBlock],
@@ -2227,8 +2739,8 @@ impl ColoredSoftStepSolver {
         manifolds: &[Manifold],
         bodies: &[BodyState],
         bodies_eff: &[BodyEffective],
-        sources: WarmSources<'_>,
-        mut recs_w: Option<&mut [WarmRecord]>,
+        mut source: impl FnMut(usize) -> (WarmLookup<'a>, WarmRun),
+        recs_w: Option<*mut WarmRecord>,
         counters: &mut SetupCounters,
     ) -> u32 {
         let depth = head.depth as usize;
@@ -2301,9 +2813,12 @@ impl ColoredSoftStepSolver {
             let ba = &bodies_eff[ia];
             let bb = if b_is_sentinel { &IMMOVABLE_AT_REST } else { &bodies_eff[ib] };
 
-            let (lookup, run) = sources.of(mi);
-            if let Some(recs) = recs_w.as_deref_mut() {
-                recs[mi].set_shape(m);
+            let (lookup, run) = source(mi);
+            if let Some(recs) = recs_w {
+                // SAFETY: `mi` indexes this step's record column (the contract: it holds every
+                //   manifold index), and the record is this lane's alone, so the one-element
+                //   `&mut` aliases nothing.
+                unsafe { (*recs.add(mi)).set_shape(m) };
             }
             let mut lane_hits = 0u32;
             for (r, (blk, vn)) in blocks.iter_mut().zip(vn0.iter_mut()).enumerate() {
@@ -4424,7 +4939,11 @@ impl ColoredSoftStepSolver {
             self.s6_probe(manifolds, graph, scratch, held.as_ref(), sleep_view, config.sleeping);
         }
 
-        {
+        // W8S: the step's dispatch totals, written only in a wave's armed arm (the setup wave's
+        // below, the colour waves' in the passes) and pushed once after the substep loop.
+        let mut tally = WaveTally::default();
+
+        let (p2, setup_wave) = {
             let build_zone = zone!(PHYS_SOLVE_BUILD);
             self.canary.at(&PHYS_SOLVE_BUILD, build_zone.is_some());
             let cls: &[RowCls] = held.as_ref().map_or(&[], |h| h.cls);
@@ -4448,12 +4967,24 @@ impl ColoredSoftStepSolver {
                 }
             };
             let restore = held.as_ref().and_then(|h| h.restore);
-            let (searches, hits) =
-                self.build_columns(manifolds, graph, scratch.bodies(), sleep_view, warm_remap, restore);
+            let built = self.build_columns(
+                manifolds,
+                graph,
+                scratch.bodies(),
+                sleep_view,
+                warm_remap,
+                restore,
+                config.parallel_solve,
+            );
             if let Some(h) = held.as_mut() {
-                h.rules.restore_rec_searches += u64::from(searches);
-                h.rules.restore_rec_hits += u64::from(hits);
+                h.rules.restore_rec_searches += u64::from(built.restore_searches);
+                h.rules.restore_rec_hits += u64::from(built.restore_hits);
             }
+            (built.p2, built.setup_wave)
+        };
+        // W8S (armed only): the setup wave's reading, a solve wave that is not a colour's.
+        if let Some(reading) = setup_wave {
+            tally.add(&reading, None);
         }
         // L11 C0: the setup digest is taken here, over the seeds the sweeps have not
         // yet touched; the step's warm stats are folded in after the store.
@@ -4552,9 +5083,9 @@ impl ColoredSoftStepSolver {
         // `many_disjoint_pairs_are_one_wide_color_and_must_dispatch`.
         //
         // The new metric is the quantity the per-color floor already compares against,
-        // maximised over colors — read off the `color_offsets` CSR that
-        // `build_columns` (above) has already filled, so it stays a single pass over
-        // `n_colors + 1` u32s and no new state.
+        // maximised over colors — read off the `color_offsets` CSR by `build_columns` (above),
+        // which evaluates this whole predicate once, right after P-b, for S4's setup gate and
+        // hands it back as `p2`: a single pass over `n_colors + 1` u32s and no new state.
         //
         // L4 lanes term: a pool of ONE worker has nothing to parallelise with, yet the
         // per-color cut (`lanes × CHUNKS_PER_WORKER` chunks, `solve_color_parallel`)
@@ -4565,14 +5096,7 @@ impl ColoredSoftStepSolver {
         // `+ 1`, for the reason `BroadphaseGrid::build_parallel` gives (KE16 App-1).
         // No pool attached ⇒ `None` ⇒ inline, as the per-color probe already did.
         // Gated red-first by `one_worker_parallel_solve_takes_the_inline_path`.
-        let parallel = !fast
-            && config.parallel_solve
-            && self.columns.widest_color_slots() >= MIN_PARALLEL_SLOTS_PER_COLOR
-            && try_with_active_pool(|pool| pool.num_threads() >= 2) == Some(true);
-
-        // W8S: the step's dispatch totals, written only in a wave's armed arm and pushed once
-        // after the substep loop.
-        let mut tally = WaveTally::default();
+        let parallel = !fast && p2;
 
         // L10 C3a: the fast path runs no substep.
         let passes = if fast { 0 } else { substeps };

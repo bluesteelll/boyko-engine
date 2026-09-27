@@ -167,7 +167,10 @@ fn run(n: u32, steps: usize, parallel: bool, workers: usize) -> Vec<u32> {
 
 #[test]
 fn scalar_colored_one_vs_n_worker_bit_identical() {
-    // n = 300 > 256 ⇒ the single shared-floor color crosses the parallel threshold.
+    // n = 300 > 256 ⇒ the single shared-floor color crosses the parallel threshold. Its 300
+    // one-point manifolds are under two tasks' worth of S4's setup floor (256 points a task), so
+    // the setup stays inline here (W8S lane, commit 4); the parallel setup's {1, N} gates are the
+    // colored solver's own (`colored_tests.rs`, G3, the random-scene gate and S4's G4-A).
     let (n, steps) = (300u32, 6);
 
     // The serial reference (parallel OFF, 1 worker pool present but unused).

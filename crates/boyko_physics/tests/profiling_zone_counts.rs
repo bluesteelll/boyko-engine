@@ -30,13 +30,16 @@
 //! | `phys_np_wave_*` (W8S) | 1 each when the narrowphase dispatched; in-flight and lanes in `[1, W + 1]`, overflow 0 |
 //! | `phys_wave_join` / `_helped` / `_first_ramp` / `_first_tail` / `_pass_ramp` (W8S review) | 1 each; join ≤ tail, first tail ≤ tail, first ramp ≤ pass ramp ≤ ramp, helped ≤ the solve scopes, and no helped wave means a ramp of 0 |
 //! | `phys_np_wave_join` / `phys_np_route_worker` (W8S review) | 1 each when the narrowphase dispatched; join ≤ its tail, route 0 or 1 |
+//! | `phys_setup_chunks` (S4) | 1, S4's setup task count recomputed from the cohorts (0 inline); a dispatched setup adds one wave to the wave sums and the route counters |
 //! | every system of the schedule (its `SystemSpan`) | 1 |
 //!
 //! The W8S dispatch counters are recomputed from the same graph and manifolds: a colour
 //! dispatches when `parallel_solve` is on, the pool has two workers and the step's widest colour
 //! reaches `WIDE_COLOR_MIN_SLOTS` (the scene's wide colour, on every step), and its task count is
 //! [`expected_color_tasks`], this test's copy of the solver's cut walk. The S6 counter must hit on
-//! some step of the run, or its 0 would be the only value ever checked.
+//! some step of the run, or its 0 would be the only value ever checked. S4's setup task count is
+//! [`expected_setup_tasks`], this test's copy of `setup_chunk_count` and `setup_cuts`; the scene
+//! must dispatch its setup on every step, or `phys_setup_chunks` would be checked against 0.
 //!
 //! The first [`STEPS_OFF`] steps run with sleeping off, the parity configuration; summed over
 //! them the counts are the plan's literals — build 3, gravity = warm = integrate = biased = 12,
@@ -122,12 +125,14 @@ use boyko_physics::profiling::{
     PHYS_NP_ROUTE_WORKER, PHYS_NP_WAVE_INFLIGHT, PHYS_NP_WAVE_JOIN, PHYS_NP_WAVE_LANES,
     PHYS_NP_WAVE_OVERFLOW, PHYS_NP_WAVE_RAMP, PHYS_NP_WAVE_TAIL, PHYS_PASS_BIASED,
     PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_ROUTE_EXTERNAL, PHYS_ROUTE_WORKER, PHYS_S6_GRAPH_HIT,
-    PHYS_S6_PB_HIT, PHYS_SB_BODIES, PHYS_SB_PA, PHYS_SB_PB, PHYS_SB_PC, PHYS_SLEEP_BEGIN,
-    PHYS_SLEEP_CLASSIFY, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD, PHYS_SLOTS_NARROW,
-    PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY, PHYS_WAVE_FIRST_RAMP,
-    PHYS_WAVE_FIRST_TAIL, PHYS_WAVE_HELPED, PHYS_WAVE_INFLIGHT, PHYS_WAVE_JOIN, PHYS_WAVE_LANES,
-    PHYS_WAVE_OVERFLOW, PHYS_WAVE_PASS_RAMP, PHYS_WAVE_RAMP, PHYS_WAVE_TAIL, PHYS_WRITE_BACK,
-    SPAN_ZONE_COUNT, SPAN_ZONES, WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED, hist_bin,
+    PHYS_S6_PB_HIT, PHYS_SB_BODIES, PHYS_SB_PA, PHYS_SB_PB, PHYS_SB_PC, PHYS_SETUP_CHUNKS,
+    PHYS_SLEEP_BEGIN, PHYS_SLEEP_CLASSIFY, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD,
+    PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY,
+    PHYS_WAVE_FIRST_RAMP, PHYS_WAVE_FIRST_TAIL, PHYS_WAVE_HELPED, PHYS_WAVE_INFLIGHT,
+    PHYS_WAVE_JOIN, PHYS_WAVE_LANES, PHYS_WAVE_OVERFLOW, PHYS_WAVE_PASS_RAMP, PHYS_WAVE_RAMP,
+    PHYS_WAVE_TAIL, PHYS_WRITE_BACK, SETUP_CHUNKS_PER_LANE, SETUP_MAX_TASKS,
+    SETUP_MIN_POINTS_PER_CHUNK, SPAN_ZONE_COUNT, SPAN_ZONES, WIDE_COLOR_MIN_SLOTS,
+    ZONES_COMPILED, hist_bin,
 };
 use boyko_physics::broadphase_tree::BroadphaseTree;
 use boyko_physics::components::ColliderShape;
@@ -180,6 +185,37 @@ struct StepShape {
     hist_colors: [u64; HIST_BINS],
     /// W8S: their slots.
     hist_slots: [u64; HIST_BINS],
+    /// S4: the setup tasks the step spawns (0 inline), before the P2 predicate.
+    setup_tasks: u64,
+}
+
+/// S4's setup task count for cohorts holding `cohorts` points each, in the layout's order, on
+/// `lanes` workers — 0 when under two: `setup_chunk_count` and `setup_cuts` over the exported
+/// constants.
+fn expected_setup_tasks(cohorts: &[u32], lanes: usize) -> u64 {
+    let points: usize = cohorts.iter().map(|&p| p as usize).sum();
+    let tasks = (lanes * SETUP_CHUNKS_PER_LANE)
+        .min(points / SETUP_MIN_POINTS_PER_CHUNK)
+        .min(cohorts.len())
+        .min(SETUP_MAX_TASKS);
+    if tasks < 2 {
+        return 0;
+    }
+    let target = points.div_ceil(tasks).max(1);
+    let (mut n, mut lo, mut acc) = (0usize, 0usize, 0usize);
+    for (k, &p) in cohorts.iter().enumerate() {
+        acc += p as usize;
+        if acc >= target && n + 1 < tasks {
+            n += 1;
+            lo = k + 1;
+            acc = 0;
+        }
+    }
+    if lo < cohorts.len() {
+        n += 1;
+    }
+    // A cut of one range runs inline: the solver opens no scope for it.
+    if n < 2 { 0 } else { n as u64 }
 }
 
 /// The tasks one dispatched colour spawns, its laid-out groups holding `groups` points each in
@@ -229,7 +265,9 @@ fn step_shape(scene: &Scene) -> StepShape {
         wide_tasks: 0,
         hist_colors: [0; HIST_BINS],
         hist_slots: [0; HIST_BINS],
+        setup_tasks: 0,
     };
+    let mut cohorts: Vec<u32> = Vec::new();
     for c in 0..graph.n_colors() {
         // The colour's laid-out groups: its manifolds in order, empty ones skipped (no island
         // of this scene freezes within its steps, asserted per step).
@@ -240,6 +278,7 @@ fn step_shape(scene: &Scene) -> StepShape {
             .filter(|&n| n != 0)
             .collect();
         let slots: u32 = groups.iter().sum();
+        cohorts.extend(groups.chunks(COLOR_COHORT).map(|c| c.iter().sum::<u32>()));
         if slots >= WIDE_COLOR_MIN_SLOTS {
             shape.wide_colors += 1;
             shape.wide_slots += u64::from(slots);
@@ -253,6 +292,7 @@ fn step_shape(scene: &Scene) -> StepShape {
             shape.hist_slots[bin] += u64::from(slots);
         }
     }
+    shape.setup_tasks = expected_setup_tasks(&cohorts, WORKERS);
     shape
 }
 
@@ -489,6 +529,13 @@ fn physics_zones_count_exactly() {
         let waves = shape.wide_colors * sweeps;
         let tasks = shape.wide_tasks * sweeps;
         let threads = WORKERS as u64 + 1;
+        // S4: the setup dispatches under the colours' own gate (it holds on every step here).
+        assert!(
+            shape.setup_tasks >= 2,
+            "step {step}: the scene must dispatch S4's setup, or `phys_setup_chunks` is checked \
+             against 0: {shape:?}"
+        );
+        let solve_waves = waves + 1;
         // (samples per step, value): the ten step counters sample once per step; the three
         // tree counters once per tree-path step and never otherwise; the W8S rows as the table
         // in the module docs says. `None` is a value checked below, or a timing.
@@ -542,6 +589,7 @@ fn physics_zones_count_exactly() {
             (&PHYS_WAVE_PASS_RAMP, 1, None),
             (&PHYS_NP_WAVE_JOIN, np, None),
             (&PHYS_NP_ROUTE_WORKER, np, None),
+            (&PHYS_SETUP_CHUNKS, 1, Some(shape.setup_tasks)),
         ];
         let mut totals = [0u64; COUNTER_ZONE_COUNT];
         // Every mismatch of the step, reported together (module docs).
@@ -576,8 +624,8 @@ fn physics_zones_count_exactly() {
             totals[COUNTER_ZONES.iter().position(|&z| std::ptr::eq(z, h)).expect("a listed counter")]
         };
         for (h, n) in [
-            (&PHYS_WAVE_INFLIGHT, waves),
-            (&PHYS_WAVE_LANES, waves),
+            (&PHYS_WAVE_INFLIGHT, solve_waves),
+            (&PHYS_WAVE_LANES, solve_waves),
             (&PHYS_NP_WAVE_INFLIGHT, np),
             (&PHYS_NP_WAVE_LANES, np),
         ] {
@@ -590,10 +638,11 @@ fn physics_zones_count_exactly() {
             }
         }
         let scopes = total_of(&PHYS_ROUTE_WORKER) + total_of(&PHYS_ROUTE_EXTERNAL);
-        if scopes != waves * on {
+        if scopes != solve_waves * on {
             wrong.push(format!(
-                "step {step}: the route counters sum to {scopes}, the solve scopes are {}",
-                waves * on
+                "step {step}: the route counters sum to {scopes}, the solve scopes (the colours' and \
+                 S4's) are {}",
+                solve_waves * on
             ));
         }
         // The review's relations (B1, B2, N3, N6): a tail is its imbalance plus its join, one

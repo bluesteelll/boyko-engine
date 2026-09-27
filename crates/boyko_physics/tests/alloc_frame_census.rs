@@ -488,6 +488,36 @@
 //! and no more: on the eight-colour frames the regression lands at 110 / 110 and dispatch
 //! 220..221, inside the pin.
 //!
+//! **S1c and S1e after S4 (W8S lane, commit 4, 2026-09-27) — +1 scope and +1 chunk on every
+//! frame, attributed by a counter.** S4 fills the solve's cohorts under ONE more `pool.scope`
+//! on every step whose colours dispatch and whose cohorts cut into at least two setup ranges
+//! (ruling 7 of 2026-09-26 extends L5 OQ1's per-step scope exception to it until S1's region
+//! retires it). Its 32 task cells of 40 bytes fit the scope's first block, so it adds exactly
+//! one scope and one chunk. `ColoredSoftStepSolver::setup_dispatches` moved by one on every
+//! steady frame of both piles (the report's "solve setup (S4) on 256 of the 256", and on 4,352
+//! of 4,352 in the long run), and the per-frame structural assertion subtracts it the way it
+//! subtracts the narrowphase's. Re-pinned by the fourth form below (L5 C4's), from this file's
+//! scene extended to 17 x 256 steady steps (the extension copied in and restored by content,
+//! md5-checked; release all scenes, debug S1b / S1c / S1e only, because an S0 frame of the
+//! extended debug run overflows the harness's own `acquisitions - other` before S1c is reached):
+//!
+//! ```text
+//!                             S1c (reuse on)                        S1e (reuse off)
+//! release window, scope       123..=135 (mean 123.562)              135..=135
+//! release long, histogram     246->3789 247->551 270->11 271->1     270->3800 271->552
+//! release long, scope / MAX   123..=135 / dispatch 271              135..=135 / dispatch 271
+//! debug long, histogram       199->3521 200->511 223->279 224->41   199->2893 200->419 223->907 224->133
+//! debug long, scope / MAX     99..=111 / dispatch 223               99..=111 / dispatch 223
+//! ```
+//!
+//! Every histogram is L9 C4's long run above (release 244->3789 245->551 268->11 269->1 and
+//! 268->3800 269->552; debug 197->3521 198->511 221->279 222->41 and 197->2893 198->419
+//! 221->907 222->133) moved by exactly +2, bin for bin with the same frame counts: one scope and
+//! one chunk, the object the lane added. Pins, no headroom either way: S1c release scope and
+//! chunk 123..=135, dispatch MAX 271; S1e release 135..=135, 271; debug, both, 99..=111, 223.
+//! S8b's exact `scope == 1 + np` did not move: its colours stay under the floor, and S4's gate
+//! is the colours' own.
+//!
 //! **S2 after EM2′ (same tree plus the entity-id recycling fix, 2026-09-11,
 //! release and debug alike): 4.031 / 5, `realloc` 0.** The 0.008 it lost is
 //! exactly the two free-list reallocs the AFTER column's window carried
@@ -520,16 +550,18 @@
 //! S2        2 exact      2 exact            2/63       0 (first touch)  0 (was 2, EM2′)
 //! S3        1 exact      1 exact            4/63       0 (first touch)  0
 //! S1a/S1b   1 exact      1 exact            ~7/63      0                0
-//! S1c   122..134 (window) 122..134 (1.00/scope) 0.125  0           0
-//! S1c long 122..134    122..134              —         0                0
-//! S1e   134 exact (window) 134 exact (1.00/scope) 0.125  0          0
-//! S1e long 134 exact   134 exact             —         0                0
+//! S1c   123..135 (window) 123..135 (1.00/scope) 0.125  0           0
+//! S1c long 123..135    123..135              —         0                0
+//! S1e   135 exact (window) 135 exact (1.00/scope) 0.125  0          0
+//! S1e long 135 exact   135 exact             —         0                0
 //! ```
 //!
-//! (S1c's rows are the tree after L9 C4: 1 of the scopes and 1 of the chunks are the
-//! narrowphase's, every scope holds exactly one chunk, and 12 of the 4,352 long-run frames,
-//! all in the window, read 134 where the rest read 122. S1e is the same pile with contact
-//! reuse off, and its rows are what S1c's read after L11 C2. Before L9 C4, S1c's rows: after
+//! (S1c's rows are the tree after S4: 1 of the scopes and 1 of the chunks are the
+//! narrowphase's, 1 and 1 the solve setup's, every scope holds exactly one chunk, and 12 of the
+//! 4,352 long-run frames, all in the window, read 135 where the rest read 123. S1e is the same
+//! pile with contact reuse off. After L9 C4 and before S4 both read one less on every frame
+//! (122..134 and 134), and S1e's pre-S4 rows are what S1c's read after L11 C2. Before L9 C4,
+//! S1c's rows: after
 //! L11 C2 they read 134 / 134 on every frame. After the default parallel
 //! narrowphase (L5 C4), on the 25-word view, they read 134 / 230 at 1.72 chunks per scope;
 //! after the default SIMD flip 133 / 229. After A7b on the scalar kernel
@@ -541,19 +573,22 @@
 //!
 //! * `scope` = the `Box<ScopeShared>` of `Schedule::run`'s install frame, of each
 //!   `par_iter` fan-out, of the narrowphase's one dispatch (L5, on by default since
-//!   C4), and of each dispatched colour in each of the solver's 12 colour passes:
-//!   `1 + np + 12 x` the dispatched colours, asserted on every steady frame with `np`
-//!   READ from the narrowphase's own counter (1 on every frame here). On the
-//!   1240-body pile that is `1 + 1 + 12 x 10 = 122` on 4,340 of the long run's 4,352
-//!   frames and `1 + 1 + 12 x 11 = 134` on the other 12, all in the census window (since
-//!   L9 C4; before it 134 on every frame; before L5 C4, 133; after A7a alone,
+//!   C4), of the solve setup's one dispatch (S4, W8S lane commit 4), and of each
+//!   dispatched colour in each of the solver's 12 colour passes: `1 + np + setup + 12 x`
+//!   the dispatched colours, asserted on every steady frame with `np` READ from the
+//!   narrowphase's own counter and `setup` from the solver's (`setup_dispatches`), each 1 on
+//!   every frame here. On the 1240-body pile that is `1 + 1 + 1 + 12 x 10 = 123` on 4,340 of
+//!   the long run's 4,352 frames and `1 + 1 + 1 + 12 x 11 = 135` on the other 12, all in the
+//!   census window (since S4; from L9 C4 until S4 one less; before L9 C4 134 on every frame,
+//!   and before L5 C4, 133; after A7a alone,
 //!   `1 + 12 x 10 = 121` on 255 of the window's 256 frames and 133 on one, and
 //!   `1 + 12 x 9 = 109` later in the long run; before A7a, 121 on all 256). Per
 //!   stage: `Schedule::run`'s install frame owns 1 scope + 1 chunk of every step,
 //!   `physics_narrowphase` owns 1 scope + 1 chunk of every step that dispatches (its
 //!   24 task cells fit the scope's first block; the attribution binary's D2′), and
-//!   `physics_solve_colored` owns every other dispatch object. In the census window
-//!   that is 120.562 scopes + 120.562 chunks of the 245.250 (after L11 C2, 132 + 132 of
+//!   `physics_solve_colored` owns every other dispatch object, the setup's scope among them.
+//!   In the census window that is 121.562 scopes + 121.562 chunks of the 247.250 since S4
+//!   (from L9 C4 until S4, 120.562 + 120.562 of the 245.250; after L11 C2, 132 + 132 of
 //!   the 268.125; after L5 C4 on the 25-word view,
 //!   132 + 228 of the 364.125; after A7b on the scalar kernel,
 //!   132 + 239.109 of the 373.234; after A7a alone, 120.047 + 213.938 of the
@@ -594,7 +629,9 @@
 //! dispatch MAX 221 over the long run — pinned with the release pin's shape: the
 //! long run's envelope, no upward headroom (header, "S1c after the default parallel
 //! narrowphase"); L11 C2's debug long run reproduced every one of those figures, so
-//! the cell shrink moved nothing here. (After A7b it read 97..=109 / 97..=109, MAX
+//! the cell shrink moved nothing here. S4 adds the solve setup's scope and chunk on every
+//! frame: 99..=111, dispatch MAX 223 (header, "S1c and S1e after S4"). (After A7b it read
+//! 97..=109 / 97..=109, MAX
 //! 220, dispatch 219; before A7b it read 85..=97 in the window and 73..=97 over 4,352
 //! steps before A7a, 85..=97 after it, MAX 196, pinned 73..=97 / 195.)
 //!
@@ -619,18 +656,26 @@
 //!
 //! S1c's number is DATA-DEPENDENT: its warm-up spans 290..387 as the pile
 //! collapses, and after it the count moves in whole dispatched colours as the
-//! contact set settles (244..269 per step over 4,352 steps since L9 C4; 268..269 after
-//! L11 C2; 364..365
+//! contact set settles (246..271 per step over 4,352 steps since S4; 244..269 from L9 C4
+//! until S4; 268..269 after L11 C2; 364..365
 //! after L5 C4 on the 25-word view; 362..363
 //! after the default SIMD flip; 362..375 after A7b on the scalar kernel; 314..350
 //! after A7a alone; 302..339 before it). Quote it as a range, never as a figure.
 //! Its release pins are that long run's envelope with NO upward headroom — scope
-//! 122..=134, chunk 122..=134, dispatch MAX 269 (after L11 C2: 134..=134, 134..=134,
-//! 269; after L5 C4 on the 25-word view:
+//! 123..=135, chunk 123..=135, dispatch MAX 271 since S4 (from L9 C4 until S4: 122..=134,
+//! 122..=134, 269; after L11 C2: 134..=134, 134..=134, 269; after L5 C4 on the 25-word view:
 //! 134..=134, 230..=230, 365; after the default SIMD flip:
 //! 133..=133, 229..=229, 363; after A7b on the scalar kernel:
 //! 133..=133, 229..=241, 375; after A7a alone: 109..=133,
 //! 205..=217, 350; before A7a: 109..=121, 193..=217, 339):
+//!
+//! * **The seventh re-pin, after S4 (W8S lane, commit 4), is a +1 / +1 shift of S1c and S1e,
+//!   in both profiles, attributed by a counter** — the fourth re-pin's form. The solve
+//!   setup's own counter (`ColoredSoftStepSolver::setup_dispatches`) moved by one on every one
+//!   of the 4,352 long-run frames, the per-frame structural assertion subtracts it, and every
+//!   long-run histogram is L9 C4's moved by +2 bin for bin (header, "S1c and S1e after S4").
+//!   The pins moved by exactly the object the lane added and keep no headroom either way; the
+//!   fan-out regression (+12 scope and +12 chunks a frame) still lands 12 above them.
 //!
 //! * **The sixth re-pin, after L9 C4, moves the floor DOWN and nothing else, and it is
 //!   attributed by an A/B on one binary.** Contact reuse on by default changes the contact
@@ -831,7 +876,7 @@ use boyko_physics::components::{
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::{add_physics_colored_solve, add_physics_systems};
 use boyko_physics::resources::{IslandSleep, Manifolds, PhysicsConfig};
-use boyko_physics::solver::SoftStepSolver;
+use boyko_physics::solver::{ColoredSoftStepSolver, SoftStepSolver};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Report output — libtest's capture contract, without libtest
@@ -2098,6 +2143,13 @@ fn run_pyramid_arm(
     // pin would see it).
     let np_after_setup = world.resource::<Manifolds>().narrowphase_dispatches();
     let mut np_log: Vec<u64> = Vec::with_capacity(TOTAL_FRAMES + 2);
+    // S4's own count of steps whose solve setup opened its scope, logged the same way and for
+    // the same reason (0 on the reference pipeline, which has no colored solver).
+    let setup_of = |world: &EcsMaster| {
+        world.try_resource::<ColoredSoftStepSolver>().map_or(0, ColoredSoftStepSolver::setup_dispatches)
+    };
+    let setup_after_setup = setup_of(&world);
+    let mut setup_log: Vec<u64> = Vec::with_capacity(TOTAL_FRAMES + 2);
     // A sleeping arm's witness that the frozen path ran inside the window: steady frames on
     // which some row is frozen. Read from `IslandSleep` after each frame; the read allocates
     // nothing, so it cannot move the counts it sits beside.
@@ -2108,6 +2160,7 @@ fn run_pyramid_arm(
         || {
             schedule.run(&mut world);
             np_log.push(world.resource::<Manifolds>().narrowphase_dispatches());
+            setup_log.push(setup_of(&world));
             frame += 1;
             if sleeping && frame > WARM_BUDGET {
                 let sleep = world.resource::<IslandSleep>();
@@ -2119,8 +2172,10 @@ fn run_pyramid_arm(
     let (control, live) = liveness_probe(label, &samples, || {
         schedule.run(&mut world);
         np_log.push(world.resource::<Manifolds>().narrowphase_dispatches());
+        setup_log.push(setup_of(&world));
     });
     assert_eq!(np_log.len(), TOTAL_FRAMES + 2, "one counter reading per driven frame");
+    assert_eq!(setup_log.len(), TOTAL_FRAMES + 2, "one setup reading per driven frame");
 
     // Which side of the contact-reuse A/B this arm ran, read from the last step's pair
     // classes after the last window closed (O(pairs), allocates nothing). S1c and S1e differ
@@ -2148,13 +2203,14 @@ fn run_pyramid_arm(
 
     // ── The structural claim, per frame: a parallel step opens ONE install frame,
     // ONE nested scope when the narrowphase dispatches (L5; its own counter says
-    // whether it did), plus one nested scope per dispatched colour per colour pass,
-    // and every pass walks the same colours (the constraint graph is built once per
-    // step). So on EVERY steady frame `scope - 1 - np` is a multiple of the pass
-    // count `substeps * (1 + relax_iterations)` — the relax loop is nested inside the
-    // substep loop. A frame that breaks this has an allocation source the class
-    // accounting does not know about. The narrowphase runs once per step, so its
-    // counter moves by at most one per frame.
+    // whether it did), ONE when S4's solve setup dispatches (W8S lane, commit 4, ruling
+    // 7 of 2026-09-26; its own counter likewise), plus one nested scope per dispatched
+    // colour per colour pass, and every pass walks the same colours (the constraint
+    // graph is built once per step). So on EVERY steady frame `scope - 1 - np - setup`
+    // is a multiple of the pass count `substeps * (1 + relax_iterations)` — the relax
+    // loop is nested inside the substep loop. A frame that breaks this has an
+    // allocation source the class accounting does not know about. The narrowphase and
+    // the solve each run once per step, so each counter moves by at most one per frame.
     if parallel {
         let (substeps, relax) = {
             let cfg = world.resource::<PhysicsConfig>();
@@ -2164,21 +2220,29 @@ fn run_pyramid_arm(
         for (i, f) in samples[WARM_BUDGET..].iter().enumerate() {
             let j = WARM_BUDGET + i;
             let np = np_log[j] - if j == 0 { np_after_setup } else { np_log[j - 1] };
+            let setup = setup_log[j] - if j == 0 { setup_after_setup } else { setup_log[j - 1] };
             assert!(
                 np <= 1,
                 "{label}: steady frame {i} moved `narrowphase_dispatches` by {np}; the \
                  narrowphase runs once per step, so it dispatches at most once"
             );
             assert!(
-                f.scope > passes + np && (f.scope - 1 - np).is_multiple_of(passes),
-                "{label}: steady frame {i} opened {} scope frames with {np} narrowphase \
-                 dispatch(es); with {passes} colour passes (substeps {substeps} x (1 + relax \
-                 {relax})) it must be 1 + {np} + {passes} x (dispatched colours >= 1)",
+                setup <= 1,
+                "{label}: steady frame {i} moved `setup_dispatches` by {setup}; the solve \
+                 builds once per step, so its setup dispatches at most once"
+            );
+            assert!(
+                f.scope > passes + np + setup && (f.scope - 1 - np - setup).is_multiple_of(passes),
+                "{label}: steady frame {i} opened {} scope frames with {np} narrowphase and \
+                 {setup} setup dispatch(es); with {passes} colour passes (substeps {substeps} x \
+                 (1 + relax {relax})) it must be 1 + {np} + {setup} + {passes} x (dispatched \
+                 colours >= 1)",
                 f.scope
             );
         }
     }
     let np_window = np_log[TOTAL_FRAMES - 1] - np_log[WARM_BUDGET - 1];
+    let setup_window = setup_log[TOTAL_FRAMES - 1] - setup_log[WARM_BUDGET - 1];
 
     // ── Anti-vacuity: the scene is DOING something ──
     let contacts = world.resource::<Manifolds>().manifolds().len();
@@ -2218,7 +2282,8 @@ fn run_pyramid_arm(
             "{} dynamic bodies + 1 static floor, {workers} worker(s), sleeping {}, \
              dt=1/60. Frame = ONE fixed step = one real physics `Schedule::run`. \
              Steady-state contacts = {contacts}; sampled bodies moved up to {max_move:.3} m; \
-             the narrowphase dispatched on {np_window} of the {STEADY_FRAMES} steady frames; \
+             the narrowphase dispatched on {np_window} and the solve setup (S4) on \
+             {setup_window} of the {STEADY_FRAMES} steady frames; \
              a row was frozen on {frozen_frames} of them; contact reuse {reuse_side}, \n             {reused} box pairs served from reuse records on the last step.",
             bodies.len(),
             if sleeping { "ON" } else { "OFF" }
@@ -2626,6 +2691,12 @@ fn s8b_sleep_skip_parallel_narrowphase(rows: &mut Vec<Row>, kind: boyko_physics:
         cfg.sleeping = true;
         cfg.substeps as u64 * (1 + cfg.relax_iterations as u64)
     };
+    // The Tree arm stays on the tree path whatever `TREE_BRUTE_MAX_ROWS` is, as S8-tree does:
+    // phase B's rows (sliders despawned) would otherwise fall to the brute loop once the tree
+    // lane raises the threshold (W8S cut, Q11).
+    if kind == boyko_physics::resources::BroadphaseKind::Tree {
+        world.resource_mut::<boyko_physics::broadphase_tree::BroadphaseTree>().set_brute_max_rows(0);
+    }
     let mut schedule = builder.build(&mut world);
     let steer = |world: &mut EcsMaster, sliders: &[Entity], frame: usize| {
         for &e in sliders {
@@ -3235,12 +3306,16 @@ fn pins() -> [Pin; 18] {
             // L11 C2 long run digit for digit (header, "S1c after L9 C4"). The rule keeps
             // no upward headroom; the cost is that the fan-out regression reds here only
             // on the 12 eleven-colour frames (measured). S1e, below, reds on all 256.
+            // RE-PINNED +1 / +1 after S4 (W8S lane commit 4, 2026-09-27): the solve setup's one
+            // scope and its one block on every one of 4,352 long-run frames, its own counter +1 on
+            // each, every histogram bin +2 with the same frame counts (header, "S1c and S1e after
+            // S4"). No headroom either way.
             Pin {
                 scene: "S1c",
                 workers: 4,
-                scope: (122, 134),
-                chunk: (122, 134),
-                dispatch_max: 269,
+                scope: (123, 135),
+                chunk: (123, 135),
+                dispatch_max: 271,
                 other_per_frame: 0,
                 realloc_sum: 0,
             }
@@ -3262,13 +3337,15 @@ fn pins() -> [Pin; 18] {
             // contact reuse on reaches the same envelope (98..=110, dispatch MAX 221), but
             // its nine-colour frames no longer fall in the census window, so this arm no
             // longer reds on the fan-out regression (measured); S1e's debug arm, below,
-            // does (header, "S1c after L9 C4").
+            // does (header, "S1c after L9 C4"). RE-PINNED +1 / +1 after S4 (W8S lane commit 4,
+            // 2026-09-27): the solve setup's scope and block on every frame of the 4,352-step
+            // debug long run, its counter +1 on each (header, "S1c and S1e after S4").
             Pin {
                 scene: "S1c",
                 workers: 4,
-                scope: (98, 110),
-                chunk: (98, 110),
-                dispatch_max: 221,
+                scope: (99, 111),
+                chunk: (99, 111),
+                dispatch_max: 223,
                 other_per_frame: 1,
                 realloc_sum: 0,
             }
@@ -3279,13 +3356,15 @@ fn pins() -> [Pin; 18] {
             // off: 134 / 134 on all 4,352 frames, dispatch MAX 269 (header, "S1c after L9 C4").
             // No headroom either way. This is the every-frame arm of the fan-out gate: that
             // regression lands at 146 / 146 and 292..293 on all 256 window frames here
-            // (measured, 2026-09-25), where S1c's pin sees it on 12.
+            // (measured, 2026-09-25), where S1c's pin sees it on 12. RE-PINNED +1 / +1 after S4
+            // (W8S lane commit 4, 2026-09-27): 135 / 135 on all 4,352 long-run frames, dispatch
+            // MAX 271, the solve setup's counter +1 on each (header, "S1c and S1e after S4").
             Pin {
                 scene: "S1e",
                 workers: 4,
-                scope: (134, 134),
-                chunk: (134, 134),
-                dispatch_max: 269,
+                scope: (135, 135),
+                chunk: (135, 135),
+                dispatch_max: 271,
                 other_per_frame: 0,
                 realloc_sum: 0,
             }
@@ -3295,12 +3374,14 @@ fn pins() -> [Pin; 18] {
             // dispatch MAX 221, and the census window holds 12 of the nine-colour frames
             // (header, "S1c after L9 C4"). The fan-out regression reds here through those 12
             // (measured, 2026-09-25: scope 110..=122, dispatch 244), where S1c's pin is green.
+            // RE-PINNED +1 / +1 after S4 (W8S lane commit 4, 2026-09-27): 99 or 111 on the
+            // 4,352-step debug long run, dispatch MAX 223 (header, "S1c and S1e after S4").
             Pin {
                 scene: "S1e",
                 workers: 4,
-                scope: (98, 110),
-                chunk: (98, 110),
-                dispatch_max: 221,
+                scope: (99, 111),
+                chunk: (99, 111),
+                dispatch_max: 223,
                 other_per_frame: 1,
                 realloc_sum: 0,
             }

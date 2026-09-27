@@ -44,14 +44,17 @@
 //! | [`PHYS_BP_QUERY`] | its queries and Wide-row loops | 1 on a tree-path step, else 0 |
 //! | [`PHYS_BP_ASSEMBLE`] | its pair assembly | 1 on a tree-path step, else 0 |
 //! | [`PHYS_SB_BODIES`] | `build_bodies` + the warm cursor's remap classification | 1 |
-//! | [`PHYS_SB_PA`] | the build's P-a: the tags and the warm source search | 1 |
+//! | [`PHYS_SB_PA`] | the build's P-a: the sizing and the tags | 1 |
 //! | [`PHYS_SB_PB`] | the build's P-b: the cohort layout | 1 |
-//! | [`PHYS_SB_PC`] | the build's P-c: the cohort fill | 1 |
+//! | [`PHYS_SB_PC`] | the build's P-c: the warm source search and the cohort fill | 1 |
 //!
 //! The four `phys_sb_*` spans (W8S, `docs/physics/perf-campaign/levers/scaling/01-DESIGN.md` §7)
 //! split [`PHYS_SOLVE_BUILD`]: they nest inside it and do not overlap, so `phys_solve_build`
 //! equals their sum plus a residue (the build's asserts and its statistics). They open on the
-//! no-awake fast path as well, which still builds.
+//! no-awake fast path as well, which still builds. Since S4 the warm source search runs after
+//! P-b (the layout reads only the tags' counts and frozen flags), so it is P-c's, not P-a's:
+//! commit (1) of `u/phys-w8s` measured it inside `phys_sb_pa`, commit (4) inside `phys_sb_pc`.
+//! An armed setup wave closes `phys_sb_pc` at its join.
 //!
 //! On a step of the colored solve's no-awake fast path (L10 C3a: sleeping on, no dynamic row
 //! awake and no contact point laid out) the substep loop, the restitution pass and the freeze
@@ -101,10 +104,10 @@
 //!
 //! # The W8S telemetry (armed only)
 //!
-//! Thirty-three more counters read the dispatch machinery itself (W8S instruments 2 to 4,
-//! `levers/scaling/01-DESIGN.md` §7, and the seven its review added, §10.1b). Each is pushed
-//! from the thread that called the solve or the narrowphase, never from a worker's task (ruling
-//! 3, 2026-09-26):
+//! Thirty-four more counters read the dispatch machinery itself (W8S instruments 2 to 4,
+//! `levers/scaling/01-DESIGN.md` §7, the seven its review added, §10.1b, and S4's setup
+//! counter). Each is pushed from the thread that called the solve or the narrowphase, never
+//! from a worker's task (ruling 3, 2026-09-26):
 //!
 //! | Counter | Samples | Value per sample |
 //! |---|---|---|
@@ -125,11 +128,22 @@
 //! | [`PHYS_WAVE_PASS_RAMP`] | 1 per solving step | Σ over the step's passes of the ramp of each pass's first dispatched colour wave |
 //! | [`PHYS_NP_WAVE_JOIN`] | 1 when the narrowphase dispatched | its wave's join latency, as [`PHYS_WAVE_JOIN`]'s; at most [`PHYS_NP_WAVE_TAIL`] |
 //! | [`PHYS_NP_ROUTE_WORKER`] | 1 when the narrowphase dispatched | 1 when its wave's joiner was a worker of the pool, else 0 (the colour waves' [`PHYS_ROUTE_WORKER`] rule) |
+//! | [`PHYS_SETUP_CHUNKS`] | 1 per solving step | the tasks S4's setup scope spawned: 0 when P-c ran inline, else `2..=`[`SETUP_MAX_TASKS`] |
 //!
-//! A dispatched solve wave is a colour whose `pool.scope` opened: a wide colour of a pass when
+//! A dispatched solve wave is a colour whose `pool.scope` opened — a wide colour of a pass when
 //! the step's parallel gate holds (`parallel_solve`, a pool of at least two workers, the widest
-//! colour at least [`WIDE_COLOR_MIN_SLOTS`]). The ramp and tail are raw clock ticks, like a
+//! colour at least [`WIDE_COLOR_MIN_SLOTS`]) — or S4's setup scope, which opens under the same
+//! gate when the step has at least two setup tasks' worth of points and cohorts (the setup wave:
+//! one per such step, counted by the wave sums and the route counters, not by
+//! [`PHYS_COLOR_SCOPES`] / [`PHYS_COLOR_TASKS`]). The ramp and tail are raw clock ticks, like a
 //! span's value; a reader scales them by the calibrated ticks per nanosecond.
+//!
+//! **S4's setup task count** is `tasks = min(lanes × `[`SETUP_CHUNKS_PER_LANE`]`, points /
+//! `[`SETUP_MIN_POINTS_PER_CHUNK`]`, cohorts, `[`SETUP_MAX_TASKS`]`)`; when it is at least 2 the
+//! cohorts are cut by a point quota of `points / tasks` (rounded up) on cohort boundaries, the
+//! last range taking the rest, and the scope opens when that cut makes at least two ranges (a
+//! lumpy cut can make fewer than `tasks`). [`PHYS_SETUP_CHUNKS`] is the range count. A reader
+//! recomputes both from the world as the per-colour task count is recomputed.
 //!
 //! **How a wave is read, and what it costs.** The caller decides armed once per wave from the
 //! colour span's own guard (the narrowphase: its dispatch span's guard), so a disarmed wave adds
@@ -312,13 +326,14 @@ declare_zone!(PHYS_WAVE_FIRST_TAIL, name = "phys_wave_first_tail", scope = ROOT_
 declare_zone!(PHYS_WAVE_PASS_RAMP, name = "phys_wave_pass_ramp", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_NP_WAVE_JOIN, name = "phys_np_wave_join", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_NP_ROUTE_WORKER, name = "phys_np_route_worker", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_SETUP_CHUNKS, name = "phys_setup_chunks", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 
 /// Span zones this crate declares: the length of [`SPAN_ZONES`], so a reader's expectation
 /// table is typed by it and a zone without an expectation does not compile.
 pub const SPAN_ZONE_COUNT: usize = 26;
 
 /// Counter zones this crate declares: the length of [`COUNTER_ZONES`].
-pub const COUNTER_ZONE_COUNT: usize = 47;
+pub const COUNTER_ZONE_COUNT: usize = 48;
 
 /// Every span zone this crate declares, in the order of the table in the module docs.
 ///
@@ -403,7 +418,19 @@ pub static COUNTER_ZONES: [&ZoneHandle; COUNTER_ZONE_COUNT] = [
     &PHYS_WAVE_PASS_RAMP,
     &PHYS_NP_WAVE_JOIN,
     &PHYS_NP_ROUTE_WORKER,
+    &PHYS_SETUP_CHUNKS,
 ];
+
+/// S4's point floor per setup task: the solver's own constant, re-exported so a reader recomputes
+/// the setup's task count with the solver's number.
+pub const SETUP_MIN_POINTS_PER_CHUNK: usize = crate::solver::colored::SETUP_MIN_POINTS_PER_CHUNK;
+
+/// S4's setup task cap (the scope's one-block cell budget).
+pub const SETUP_MAX_TASKS: usize = crate::solver::colored::SETUP_MAX_TASKS;
+
+/// S4's setup tasks per worker lane: the colour cut's `CHUNKS_PER_WORKER`, which the setup's lanes
+/// term shares.
+pub const SETUP_CHUNKS_PER_LANE: usize = crate::solver::colored::CHUNKS_PER_WORKER;
 
 /// The histogram's bins.
 pub const HIST_BINS: usize = 5;
@@ -459,7 +486,7 @@ pub static CANARY_ZONES: [&ZoneHandle; 5] =
     [&PHYS_SOLVE_BUILD, &PHYS_SB_BODIES, &PHYS_SB_PA, &PHYS_SB_PB, &PHYS_SB_PC];
 
 /// Whether this build compiles the physics zones at all. Every zone is `Deep`, so one `const`
-/// answers for all seventy-three; `false` under a profile whose tier ceiling is below `Deep`, where
+/// answers for all seventy-four; `false` under a profile whose tier ceiling is below `Deep`, where
 /// every site folds to nothing and an armed profiler records none of them.
 pub const ZONES_COMPILED: bool = (PHYS_SOLVE_BUILD::TIER as u8) <= (GLOBAL_TIER as u8);
 
@@ -798,7 +825,7 @@ pub(crate) struct WaveTally {
 
 impl WaveTally {
     /// Adds one solve wave's reading. `colour` is the wave's colour index, `None` for a solve
-    /// scope that is not a colour's (none before S4). A colour index at or below the previous
+    /// scope that is not a colour's (S4's setup scope). A colour index at or below the previous
     /// colour wave's starts a new pass: a pass visits its colours in ascending order, each once.
     #[cold]
     #[inline(never)]
