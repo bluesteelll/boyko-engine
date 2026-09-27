@@ -211,8 +211,16 @@
 //! solver's own cut walk; `phys_wave_overflow` 0; the two route counters summing to the scopes;
 //! the ten histogram counters equal to the colours and slots recomputed per bin; the two S6
 //! counters 0 or 1, the P-b hit never without the graph hit; and the narrowphase's five wave
-//! counters one sample each exactly when it dispatched, its overflow 0. The summary's `w8s`
-//! object carries their sums over the window (the ramp and tail in ns), and `host` the logical
+//! counters one sample each exactly when it dispatched, its overflow 0. The review's seven
+//! (`01-DESIGN.md` §10.1b) are one sample per solving step (`phys_wave_join`, `_helped`,
+//! `_first_ramp`, `_first_tail`, `_pass_ramp`) or per dispatched narrowphase
+//! (`phys_np_wave_join`, `phys_np_route_worker`), and must satisfy: join ≤ tail on both sides,
+//! first tail ≤ tail, first ramp ≤ pass ramp ≤ ramp, helped ≤ the solve scopes, no helped wave
+//! ⇒ a ramp of 0, and the narrowphase route 0 or 1. The summary's `w8s`
+//! object carries their sums over the window (the ramp and tail in ns; the join and the
+//! imbalance, tail − join, per wave; the ramp per helped wave; the first wave's ramp and tail per
+//! step that dispatched; each pass's first ramp per pass, sweeps × those steps, since every sweep
+//! of a dispatching step dispatches the same wide colours), and `host` the logical
 //! core count (`std::thread::available_parallelism`; the physical count is the window driver's,
 //! cut Q6). The route counter classes a joiner by `boyko_threadpool::current_worker_id`: an id
 //! below the pool's worker count is the worker route, the dispatcher's `install` frame and an
@@ -411,14 +419,16 @@ use boyko_physics::profiling::{
     PHYS_HIST_SLOTS_GE256, PHYS_HIST_SLOTS_LT32, PHYS_HIST_SLOTS_LT64, PHYS_HIST_SLOTS_LT128,
     PHYS_HIST_SLOTS_LT256, PHYS_INTEGRATE, PHYS_NP_AXIS_COMMIT, PHYS_NP_CHUNKS, PHYS_NP_COMPACT,
     PHYS_NP_DISPATCH, PHYS_NP_FULL, PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS,
-    PHYS_NP_REUSED, PHYS_NP_SEP_HITS, PHYS_NP_WAVE_INFLIGHT, PHYS_NP_WAVE_LANES,
-    PHYS_NP_WAVE_OVERFLOW, PHYS_NP_WAVE_RAMP, PHYS_NP_WAVE_TAIL, PHYS_PASS_BIASED,
-    PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_ROUTE_EXTERNAL, PHYS_ROUTE_WORKER, PHYS_S6_GRAPH_HIT,
-    PHYS_S6_PB_HIT, PHYS_SB_BODIES, PHYS_SB_PA, PHYS_SB_PB, PHYS_SB_PC, PHYS_SLEEP_BEGIN,
-    PHYS_SLEEP_CLASSIFY, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD, PHYS_SLOTS_NARROW,
-    PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY, PHYS_WAVE_INFLIGHT,
-    PHYS_WAVE_LANES, PHYS_WAVE_OVERFLOW, PHYS_WAVE_RAMP, PHYS_WAVE_TAIL, PHYS_WRITE_BACK,
-    SPAN_ZONE_COUNT, SPAN_ZONES, WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED, hist_bin,
+    PHYS_NP_REUSED, PHYS_NP_ROUTE_WORKER, PHYS_NP_SEP_HITS, PHYS_NP_WAVE_INFLIGHT,
+    PHYS_NP_WAVE_JOIN, PHYS_NP_WAVE_LANES, PHYS_NP_WAVE_OVERFLOW, PHYS_NP_WAVE_RAMP,
+    PHYS_NP_WAVE_TAIL, PHYS_PASS_BIASED, PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_ROUTE_EXTERNAL,
+    PHYS_ROUTE_WORKER, PHYS_S6_GRAPH_HIT, PHYS_S6_PB_HIT, PHYS_SB_BODIES, PHYS_SB_PA,
+    PHYS_SB_PB, PHYS_SB_PC, PHYS_SLEEP_BEGIN, PHYS_SLEEP_CLASSIFY, PHYS_SLEEP_END,
+    PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD,
+    PHYS_STORE, PHYS_WARM_APPLY, PHYS_WAVE_FIRST_RAMP, PHYS_WAVE_FIRST_TAIL, PHYS_WAVE_HELPED,
+    PHYS_WAVE_INFLIGHT, PHYS_WAVE_JOIN, PHYS_WAVE_LANES, PHYS_WAVE_OVERFLOW, PHYS_WAVE_PASS_RAMP,
+    PHYS_WAVE_RAMP, PHYS_WAVE_TAIL, PHYS_WRITE_BACK, SPAN_ZONE_COUNT, SPAN_ZONES,
+    WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED, hist_bin,
 };
 use boyko_physics::resources::{
     BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
@@ -1605,6 +1615,13 @@ fn check_step(
         (&PHYS_NP_WAVE_INFLIGHT, np, Want::Within(1, threads)),
         (&PHYS_NP_WAVE_LANES, np, Want::Within(1, threads)),
         (&PHYS_NP_WAVE_OVERFLOW, np, Want::Exact(0)),
+        (&PHYS_WAVE_JOIN, c, Want::Any),
+        (&PHYS_WAVE_HELPED, c, Want::Within(0, waves)),
+        (&PHYS_WAVE_FIRST_RAMP, c, Want::Any),
+        (&PHYS_WAVE_FIRST_TAIL, c, Want::Any),
+        (&PHYS_WAVE_PASS_RAMP, c, Want::Any),
+        (&PHYS_NP_WAVE_JOIN, np, Want::Any),
+        (&PHYS_NP_ROUTE_WORKER, np, Want::Within(0, 1)),
     ];
     for &(handle, want_n, want) in &expected_counters {
         let k = base + counter_index(handle);
@@ -1638,6 +1655,29 @@ fn check_step(
     if value(&PHYS_S6_PB_HIT) > value(&PHYS_S6_GRAPH_HIT) {
         return Err("S6: a P-b hit without a graph hit".to_owned());
     }
+    // The review's relations (module docs, "The W8S instrument").
+    let (ramp, tail, join) = (value(&PHYS_WAVE_RAMP), value(&PHYS_WAVE_TAIL), value(&PHYS_WAVE_JOIN));
+    let (first_ramp, first_tail) = (value(&PHYS_WAVE_FIRST_RAMP), value(&PHYS_WAVE_FIRST_TAIL));
+    let (pass_ramp, helped) = (value(&PHYS_WAVE_PASS_RAMP), value(&PHYS_WAVE_HELPED));
+    let (np_join, np_tail) = (value(&PHYS_NP_WAVE_JOIN), value(&PHYS_NP_WAVE_TAIL));
+    let scopes = value(&PHYS_ROUTE_WORKER) + value(&PHYS_ROUTE_EXTERNAL);
+    let relations = [
+        (join <= tail, "phys_wave_join ≤ phys_wave_tail"),
+        (first_tail <= tail, "phys_wave_first_tail ≤ phys_wave_tail"),
+        (first_ramp <= pass_ramp && pass_ramp <= ramp, "first ramp ≤ pass ramp ≤ ramp"),
+        (helped <= scopes, "phys_wave_helped ≤ the solve scopes"),
+        (helped > 0 || ramp == 0, "no helped wave, yet a ramp"),
+        (np_join <= np_tail, "phys_np_wave_join ≤ phys_np_wave_tail"),
+    ];
+    let failed: Vec<&str> = relations.iter().filter(|(holds, _)| !holds).map(|&(_, what)| what).collect();
+    if !failed.is_empty() {
+        return Err(format!(
+            "W8S: {} fail (ramp {ramp}, tail {tail}, join {join}, first ramp {first_ramp}, \
+             first tail {first_tail}, pass ramp {pass_ramp}, helped {helped} of {scopes} scopes, \
+             np join {np_join}, np tail {np_tail})",
+            failed.join("; ")
+        ));
+    }
     Ok(())
 }
 
@@ -1665,14 +1705,37 @@ struct W8sSums {
     np_inflight: u64,
     np_lanes: u64,
     np_overflow: u64,
+    join: u64,
+    helped: u64,
+    first_ramp: u64,
+    first_tail: u64,
+    /// Steps that dispatched a colour wave: the first-wave readings' count.
+    first_waves: u64,
+    pass_ramp: u64,
+    /// Passes whose first colour wave dispatched: `sweeps` per step that dispatched one.
+    pass_waves: u64,
+    np_join: u64,
+    np_route_worker: u64,
 }
 
 impl W8sSums {
-    /// Adds one armed step: `counts` / `values` per column, the counters after `base`.
-    fn add(&mut self, counts: &[u64], values: &[u64], base: usize) {
+    /// Adds one armed step: `counts` / `values` per column, the counters after `base`; `sweeps`
+    /// is the step's passes (every sweep of a step whose colours dispatch dispatches the same
+    /// wide colours, so each pass has a first wave).
+    fn add(&mut self, counts: &[u64], values: &[u64], base: usize, sweeps: u64) {
         let v = |h: &ZoneHandle| values[base + counter_index(h)];
         let n = |h: &ZoneHandle| counts[base + counter_index(h)];
         self.steps += 1;
+        self.join += v(&PHYS_WAVE_JOIN);
+        self.helped += v(&PHYS_WAVE_HELPED);
+        self.first_ramp += v(&PHYS_WAVE_FIRST_RAMP);
+        self.first_tail += v(&PHYS_WAVE_FIRST_TAIL);
+        self.pass_ramp += v(&PHYS_WAVE_PASS_RAMP);
+        let dispatched = v(&PHYS_COLOR_SCOPES) > 0;
+        self.first_waves += u64::from(dispatched);
+        self.pass_waves += if dispatched { sweeps } else { 0 };
+        self.np_join += v(&PHYS_NP_WAVE_JOIN);
+        self.np_route_worker += v(&PHYS_NP_ROUTE_WORKER);
         // The wave readings are per-step sums; their waves are the step's solve scopes.
         self.waves += v(&PHYS_ROUTE_WORKER) + v(&PHYS_ROUTE_EXTERNAL);
         self.ramp += v(&PHYS_WAVE_RAMP);
@@ -1709,7 +1772,11 @@ impl W8sSums {
              \"hist_bins\":[\"1-31\",\"32-63\",\"64-127\",\"128-255\",\"256+\"],\
              \"hist_colors\":[{}],\"hist_slots\":[{}],\"s6_graph_hits\":{},\"s6_pb_hits\":{},\
              \"np_waves\":{},\"np_ramp_ns_mean\":{},\"np_tail_ns_mean\":{},\
-             \"np_inflight_mean\":{},\"np_lanes_mean\":{}}}",
+             \"np_inflight_mean\":{},\"np_lanes_mean\":{},\
+             \"join_ns_mean\":{},\"imbalance_ns_mean\":{},\"helped_waves\":{},\
+             \"ramp_ns_mean_helped\":{},\"first_waves\":{},\"first_ramp_ns_mean\":{},\
+             \"first_tail_ns_mean\":{},\"pass_waves\":{},\"pass_ramp_ns_mean\":{},\
+             \"np_join_ns_mean\":{},\"np_imbalance_ns_mean\":{},\"np_route_worker\":{}}}",
             window.0,
             window.1,
             self.steps,
@@ -1732,6 +1799,18 @@ impl W8sSums {
             json_f64(mean(self.np_tail, self.np_waves) / tpn),
             json_f64(mean(self.np_inflight, self.np_waves)),
             json_f64(mean(self.np_lanes, self.np_waves)),
+            json_f64(mean(self.join, self.waves) / tpn),
+            json_f64(mean(self.tail.saturating_sub(self.join), self.waves) / tpn),
+            self.helped,
+            json_f64(mean(self.ramp, self.helped) / tpn),
+            self.first_waves,
+            json_f64(mean(self.first_ramp, self.first_waves) / tpn),
+            json_f64(mean(self.first_tail, self.first_waves) / tpn),
+            self.pass_waves,
+            json_f64(mean(self.pass_ramp, self.pass_waves) / tpn),
+            json_f64(mean(self.np_join, self.np_waves) / tpn),
+            json_f64(mean(self.np_tail.saturating_sub(self.np_join), self.np_waves) / tpn),
+            self.np_route_worker,
         )
     }
 }
@@ -2141,7 +2220,12 @@ fn run(args: &Args) -> ExitCode {
                 first_void.get_or_insert_with(|| format!("step {step}: {why}"));
             }
             if (window.0..window.1).contains(&step) {
-                w8s.add(&counts, &values, n_sys + SPAN_ZONES.len());
+                w8s.add(
+                    &counts,
+                    &values,
+                    n_sys + SPAN_ZONES.len(),
+                    structure.substeps * (1 + structure.relax),
+                );
             }
             let sys_sum: f64 = (0..n_sys).map(|k| ns(values[k])).sum();
             let in_solve: f64 = [

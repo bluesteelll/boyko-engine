@@ -28,6 +28,8 @@
 //! | the ten `phys_hist_*` counters (W8S) | 1 each, the colours and slots per bin, recomputed |
 //! | `phys_s6_graph_hit` / `phys_s6_pb_hit` (W8S) | 1 each, 0 or 1, the P-b hit never without the graph hit, both 0 on the first armed step |
 //! | `phys_np_wave_*` (W8S) | 1 each when the narrowphase dispatched; in-flight and lanes in `[1, W + 1]`, overflow 0 |
+//! | `phys_wave_join` / `_helped` / `_first_ramp` / `_first_tail` / `_pass_ramp` (W8S review) | 1 each; join ≤ tail, first tail ≤ tail, first ramp ≤ pass ramp ≤ ramp, helped ≤ the solve scopes, and no helped wave means a ramp of 0 |
+//! | `phys_np_wave_join` / `phys_np_route_worker` (W8S review) | 1 each when the narrowphase dispatched; join ≤ its tail, route 0 or 1 |
 //! | every system of the schedule (its `SystemSpan`) | 1 |
 //!
 //! The W8S dispatch counters are recomputed from the same graph and manifolds: a colour
@@ -73,6 +75,9 @@
 //! Also asserted: the physics zones' ids are distinct from each other and from every system's,
 //! so no two rows are one row; and the store reports no dropped sample.
 //!
+//! A step's counter rows and their relations are checked together and reported together: a
+//! mutation that silences several counters names every one of them in one run.
+//!
 //! Under a profile whose tier folds the zones, the correct reading is zero everywhere, and that
 //! is what is asserted instead.
 //!
@@ -114,14 +119,15 @@ use boyko_physics::profiling::{
     PHYS_HIST_SLOTS_LT64, PHYS_HIST_SLOTS_LT128, PHYS_HIST_SLOTS_LT256, PHYS_INTEGRATE,
     PHYS_NP_AXIS_COMMIT, PHYS_NP_CHUNKS, PHYS_NP_COMPACT, PHYS_NP_DISPATCH, PHYS_NP_FULL,
     PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS, PHYS_NP_REUSED, PHYS_NP_SEP_HITS,
-    PHYS_NP_WAVE_INFLIGHT, PHYS_NP_WAVE_LANES, PHYS_NP_WAVE_OVERFLOW, PHYS_NP_WAVE_RAMP,
-    PHYS_NP_WAVE_TAIL, PHYS_PASS_BIASED, PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_ROUTE_EXTERNAL,
-    PHYS_ROUTE_WORKER, PHYS_S6_GRAPH_HIT, PHYS_S6_PB_HIT, PHYS_SB_BODIES, PHYS_SB_PA,
-    PHYS_SB_PB, PHYS_SB_PC, PHYS_SLEEP_BEGIN, PHYS_SLEEP_CLASSIFY, PHYS_SLEEP_END,
-    PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD,
-    PHYS_STORE, PHYS_WARM_APPLY, PHYS_WAVE_INFLIGHT, PHYS_WAVE_LANES, PHYS_WAVE_OVERFLOW,
-    PHYS_WAVE_RAMP, PHYS_WAVE_TAIL, PHYS_WRITE_BACK, SPAN_ZONE_COUNT, SPAN_ZONES,
-    WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED, hist_bin,
+    PHYS_NP_ROUTE_WORKER, PHYS_NP_WAVE_INFLIGHT, PHYS_NP_WAVE_JOIN, PHYS_NP_WAVE_LANES,
+    PHYS_NP_WAVE_OVERFLOW, PHYS_NP_WAVE_RAMP, PHYS_NP_WAVE_TAIL, PHYS_PASS_BIASED,
+    PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_ROUTE_EXTERNAL, PHYS_ROUTE_WORKER, PHYS_S6_GRAPH_HIT,
+    PHYS_S6_PB_HIT, PHYS_SB_BODIES, PHYS_SB_PA, PHYS_SB_PB, PHYS_SB_PC, PHYS_SLEEP_BEGIN,
+    PHYS_SLEEP_CLASSIFY, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD, PHYS_SLOTS_NARROW,
+    PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY, PHYS_WAVE_FIRST_RAMP,
+    PHYS_WAVE_FIRST_TAIL, PHYS_WAVE_HELPED, PHYS_WAVE_INFLIGHT, PHYS_WAVE_JOIN, PHYS_WAVE_LANES,
+    PHYS_WAVE_OVERFLOW, PHYS_WAVE_PASS_RAMP, PHYS_WAVE_RAMP, PHYS_WAVE_TAIL, PHYS_WRITE_BACK,
+    SPAN_ZONE_COUNT, SPAN_ZONES, WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED, hist_bin,
 };
 use boyko_physics::broadphase_tree::BroadphaseTree;
 use boyko_physics::components::ColliderShape;
@@ -529,8 +535,17 @@ fn physics_zones_count_exactly() {
             (&PHYS_NP_WAVE_INFLIGHT, np, None),
             (&PHYS_NP_WAVE_LANES, np, None),
             (&PHYS_NP_WAVE_OVERFLOW, np, Some(0)),
+            (&PHYS_WAVE_JOIN, 1, None),
+            (&PHYS_WAVE_HELPED, 1, None),
+            (&PHYS_WAVE_FIRST_RAMP, 1, None),
+            (&PHYS_WAVE_FIRST_TAIL, 1, None),
+            (&PHYS_WAVE_PASS_RAMP, 1, None),
+            (&PHYS_NP_WAVE_JOIN, np, None),
+            (&PHYS_NP_ROUTE_WORKER, np, None),
         ];
         let mut totals = [0u64; COUNTER_ZONE_COUNT];
+        // Every mismatch of the step, reported together (module docs).
+        let mut wrong: Vec<String> = Vec::new();
         for (k, &(handle, samples, value)) in expected_counters.iter().enumerate() {
             assert!(
                 std::ptr::eq(handle, COUNTER_ZONES[k]),
@@ -539,20 +554,21 @@ fn physics_zones_count_exactly() {
             let count = counters_after[k].0 - counters_before[k].0;
             let total = counters_after[k].1 - counters_before[k].1;
             totals[k] = total;
-            assert_eq!(
-                count,
-                samples * on,
-                "step {step}: counter `{}` recorded {count} samples, the step has {samples}",
-                name_of(handle)
-            );
-            if let Some(value) = value {
-                assert_eq!(
-                    total,
-                    value * samples * on,
+            if count != samples * on {
+                wrong.push(format!(
+                    "step {step}: counter `{}` recorded {count} samples, the step has {}",
+                    name_of(handle),
+                    samples * on
+                ));
+            }
+            if let Some(value) = value
+                && total != value * samples * on
+            {
+                wrong.push(format!(
                     "step {step}: counter `{}` totalled {total}, the step has {value} a sample \
                      ({samples} samples)",
                     name_of(handle)
-                );
+                ));
             }
         }
         // The W8S rows whose value is a range or a relation (module docs' table).
@@ -566,17 +582,49 @@ fn physics_zones_count_exactly() {
             (&PHYS_NP_WAVE_LANES, np),
         ] {
             let t = total_of(h);
-            assert!(
-                (n * on..=n * threads * on).contains(&t),
-                "step {step}: `{}` totalled {t} over {n} waves, outside [1, W + 1] a wave",
-                name_of(h)
-            );
+            if !(n * on..=n * threads * on).contains(&t) {
+                wrong.push(format!(
+                    "step {step}: `{}` totalled {t} over {n} waves, outside [1, W + 1] a wave",
+                    name_of(h)
+                ));
+            }
         }
-        assert_eq!(
-            total_of(&PHYS_ROUTE_WORKER) + total_of(&PHYS_ROUTE_EXTERNAL),
-            waves * on,
-            "step {step}: the route counters sum to the solve scopes"
-        );
+        let scopes = total_of(&PHYS_ROUTE_WORKER) + total_of(&PHYS_ROUTE_EXTERNAL);
+        if scopes != waves * on {
+            wrong.push(format!(
+                "step {step}: the route counters sum to {scopes}, the solve scopes are {}",
+                waves * on
+            ));
+        }
+        // The review's relations (B1, B2, N3, N6): a tail is its imbalance plus its join, one
+        // wave's ramp and tail are within the step's sums, a helped wave is a solve scope, and a
+        // step no helper reached reads a ramp of 0.
+        let (ramp, tail) = (total_of(&PHYS_WAVE_RAMP), total_of(&PHYS_WAVE_TAIL));
+        let (first_ramp, first_tail) =
+            (total_of(&PHYS_WAVE_FIRST_RAMP), total_of(&PHYS_WAVE_FIRST_TAIL));
+        let (pass_ramp, helped) = (total_of(&PHYS_WAVE_PASS_RAMP), total_of(&PHYS_WAVE_HELPED));
+        let (np_join, np_tail) = (total_of(&PHYS_NP_WAVE_JOIN), total_of(&PHYS_NP_WAVE_TAIL));
+        let relations = [
+            (total_of(&PHYS_WAVE_JOIN) <= tail, "phys_wave_join ≤ phys_wave_tail"),
+            (first_tail <= tail, "phys_wave_first_tail ≤ phys_wave_tail"),
+            (first_ramp <= pass_ramp && pass_ramp <= ramp, "first ramp ≤ pass ramp ≤ ramp"),
+            (helped <= scopes, "phys_wave_helped ≤ the solve scopes"),
+            (helped > 0 || ramp == 0, "no helped wave, yet a ramp"),
+            (np_join <= np_tail, "phys_np_wave_join ≤ phys_np_wave_tail"),
+            (total_of(&PHYS_NP_ROUTE_WORKER) <= np * on, "phys_np_route_worker is 0 or 1"),
+        ];
+        for (holds, what) in relations {
+            if !holds {
+                wrong.push(format!(
+                    "step {step}: {what} fails: join {}, tail {tail}, ramp {ramp}, first ramp \
+                     {first_ramp}, first tail {first_tail}, pass ramp {pass_ramp}, helped {helped} \
+                     of {scopes} scopes, np join {np_join}, np tail {np_tail}, np route {}",
+                    total_of(&PHYS_WAVE_JOIN),
+                    total_of(&PHYS_NP_ROUTE_WORKER)
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{} counter check(s) failed:\n{}", wrong.len(), wrong.join("\n"));
         let (g, pb) = (total_of(&PHYS_S6_GRAPH_HIT), total_of(&PHYS_S6_PB_HIT));
         assert!(g <= 1 && pb <= g, "step {step}: S6 hits (graph {g}, P-b {pb}) are 0/1, P-b under graph");
         if step == 0 {

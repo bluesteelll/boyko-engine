@@ -848,7 +848,8 @@ the disarmed spawn loops are the loops that were there.
   tail, in-flight and lanes, the unstamped tasks, the colour scopes and their tasks, the two routes, the ten
   histogram bins and the two S6 hits; and the narrowphase wave's five. A reader's per-wave mean is the sum divided by
   the solve scopes (the two routes' total); the split of L(8) into ramp, imbalance and join is a sum to begin with.
-- **The wave record** (`profiling::WaveStamps`, 3 KiB, stack-local to one armed wave): the stamped task is the
+- **The wave record** (`profiling::WaveStamps`, 3 KiB in commit (1), 8.3 KiB since §10.1b, stack-local to one armed
+  wave): the stamped task is the
   disarmed task wrapped with one reference (104 B + 8 = 112 B, inside row D's cell budget); the record is reduced
   after the colour's span closes.
 - **The spawn witness** (review W4): `profiling::wave_records_built` counts every record ever built. A stamped task
@@ -878,6 +879,44 @@ narrowphase task closures; `WarmRecords::find`; the five `simd` kernels). `fill_
 applies and the gravity dispatcher exist only inlined into `solve_colored_inner`, which the instrument edits by design
 (the sub-zones and the S6 probe), so no symbol-level receipt can isolate them; they are dropped from the codegen claim.
 Their source is unchanged by commit (1).
+
+### 10.1b The instrument's review fixes (commit 1b)
+
+A build-free review of commit (1) found two readings §6.1 and §3 need that per-step sums cannot give, and three
+smaller gaps. The orchestrator's disposition (2026-09-27) put all five in one commit before the CI step; window 8 ran
+on commit (1) for every other row, and the per-wave split is read in window 8b on the S4-AB parent, which carries this
+commit.
+
+- **B1, the first-wave ramp.** A step's ramp sum cannot tell one slow recruitment from a small ramp on every wave:
+  on J-T W8 the sum (~96 waves × 0.78 µs ≈ 75 µs) bounds the first wave's ramp only to ≤ 75 µs, no tighter than
+  §6.1's 0–70 µs prior. Per solving step now also: `phys_wave_first_ramp` and `phys_wave_first_tail` (the step's
+  first dispatched colour wave), and `phys_wave_pass_ramp` (Σ over the passes of each pass's first dispatched colour
+  wave's ramp). A pass is recognised in the armed tally with no marker on the disarmed path: a pass visits its colours
+  in ascending order, so a stamped colour index at or below the previous one opens a new pass. Every sweep of a
+  dispatching step dispatches the same wide colours with the same cut, so a step has `sweeps` pass-first waves; the
+  runner divides by that.
+- **N3, folded into B1.** A wave the caller ran alone reads ramp 0; `phys_wave_helped` counts the waves a thread
+  other than the caller started a task in, so the mean ramp of a recruited wave is the ramp sum over it.
+- **B2, the tail's split.** The tail is the end imbalance plus the join's own latency. `phys_wave_join` (Σ over the
+  solve waves) and `phys_np_wave_join` measure the join from the later of the spawn loop's end and the last task's
+  end, on any thread, to its return; so join ≤ tail by construction (a spawn loop that ends after every task makes
+  them equal), and the imbalance is tail − join. The runner voids a step where join > tail.
+- **N6, the np wave's route.** `phys_np_route_worker`, 1 when the narrowphase wave's joiner was a pool worker.
+- **N2, the stamps' own traffic.** A task stamp is its own 64-byte line and the slot counter another
+  (`#[repr(C, align(64))]`, pinned by `const` asserts), so no two workers write one line and no worker writes the
+  caller's. The record grows from 3 KiB to 8.3 KiB; its zeroing stays on the calling thread before the scope's
+  opening stamp, so it lands in the colour span (the D(W) reduction rule), never in a ramp, tail or join.
+- **N4, ω(W, gap)'s participation receipt** (bench-local): each task off the opener records its start with one
+  `Relaxed` `fetch_min`; a row reports `helped_reps` and `first_helper_ns_median`. The self-check asserts the receipt
+  reads no helper on a one-worker pool.
+
+Seven counters, at most seven samples a step on the calling thread's lane. **The disarmed path**: the spawn loops,
+the task bodies and every pinned body of the codegen receipt are untouched; the one change a disarmed step executes
+is the per-step `WaveTally`'s zero-initialisation, which grows from 72 to 120 bytes, once per solving step, in
+`solve_colored_inner` (a dispatcher body outside the receipt's claim since commit (1)). The reductions are exact on
+synthetic stamps (the profiling module's unit tests); the runner and `profiling_zone_counts` check the relations
+(join ≤ tail on both sides, first tail ≤ tail, first ramp ≤ pass ramp ≤ ramp, helped ≤ the solve scopes, no helped
+wave ⇒ ramp 0, np route 0 or 1), and `profiling_zone_counts` now reports every failing counter of a step together.
 
 ### 10.2 `--bp-kernel` (commit 2)
 

@@ -101,9 +101,10 @@
 //!
 //! # The W8S telemetry (armed only)
 //!
-//! Twenty-six more counters read the dispatch machinery itself (W8S instruments 2 to 4,
-//! `levers/scaling/01-DESIGN.md` §7). Each is pushed from the thread that called the solve or
-//! the narrowphase, never from a worker's task (ruling 3, 2026-09-26):
+//! Thirty-three more counters read the dispatch machinery itself (W8S instruments 2 to 4,
+//! `levers/scaling/01-DESIGN.md` §7, and the seven its review added, §10.1b). Each is pushed
+//! from the thread that called the solve or the narrowphase, never from a worker's task (ruling
+//! 3, 2026-09-26):
 //!
 //! | Counter | Samples | Value per sample |
 //! |---|---|---|
@@ -118,6 +119,12 @@
 //! | `phys_hist_colors_*` / `phys_hist_slots_*` ([`HIST_COLOR_ZONES`], [`HIST_SLOT_ZONES`]) | 1 each per solving step | colours, and their slots, whose width lies in the bin: [1,32) [32,64) [64,128) [128,256) [256,∞) ([`HIST_BIN_EDGES`]); a colour with no slot is in no bin |
 //! | [`PHYS_S6_GRAPH_HIT`] / [`PHYS_S6_PB_HIT`] | 1 each per solving step | 1 when the step's graph (and P-b's layout) inputs equal the previous armed step's, else 0 (S6's hit-rate counter; 0 on the first armed step) |
 //! | [`PHYS_NP_WAVE_RAMP`], [`PHYS_NP_WAVE_TAIL`], [`PHYS_NP_WAVE_INFLIGHT`], [`PHYS_NP_WAVE_LANES`], [`PHYS_NP_WAVE_OVERFLOW`] | 1 each when the narrowphase dispatched | the same four readings for its one wave, and its unstamped tasks |
+//! | [`PHYS_WAVE_JOIN`] | 1 per solving step | Σ over the step's dispatched solve waves of the join's own latency: the ticks from the moment the join could first return — the later of the end of the caller's spawn loop and the last task's end, on any thread — to its return. At most [`PHYS_WAVE_TAIL`]; the tail less it is the end imbalance |
+//! | [`PHYS_WAVE_HELPED`] | 1 per solving step | the step's dispatched solve waves in which a thread other than the caller started a task: the waves whose ramp is a reading, not the 0 of a wave the caller ran alone |
+//! | [`PHYS_WAVE_FIRST_RAMP`] / [`PHYS_WAVE_FIRST_TAIL`] | 1 each per solving step | the ramp and the tail of the step's first dispatched colour wave (0 on a step that dispatched none) |
+//! | [`PHYS_WAVE_PASS_RAMP`] | 1 per solving step | Σ over the step's passes of the ramp of each pass's first dispatched colour wave |
+//! | [`PHYS_NP_WAVE_JOIN`] | 1 when the narrowphase dispatched | its wave's join latency, as [`PHYS_WAVE_JOIN`]'s; at most [`PHYS_NP_WAVE_TAIL`] |
+//! | [`PHYS_NP_ROUTE_WORKER`] | 1 when the narrowphase dispatched | 1 when its wave's joiner was a worker of the pool, else 0 (the colour waves' [`PHYS_ROUTE_WORKER`] rule) |
 //!
 //! A dispatched solve wave is a colour whose `pool.scope` opened: a wide colour of a pass when
 //! the step's parallel gate holds (`parallel_solve`, a pool of at least two workers, the widest
@@ -150,6 +157,27 @@
 //! As sums the instrument's load no longer grows with the waves: on the same rows the most one
 //! worker lane held in a step reads 277 on the rest pile and 266 on J-T, 1 to 55 samples above
 //! the parent's step for step.
+//!
+//! **What a sum cannot say, and the counters that say it** (the instrument's review, B1, B2,
+//! N3, N6; `01-DESIGN.md` §10.1b). A step's ramp sum cannot tell one slow recruitment on the
+//! step's first wave from a small ramp on every wave, so the first dispatched colour wave's ramp
+//! and tail are kept apart ([`PHYS_WAVE_FIRST_RAMP`], [`PHYS_WAVE_FIRST_TAIL`]), and so is the
+//! sum over each pass's first wave ([`PHYS_WAVE_PASS_RAMP`]), where a pool that parked between
+//! passes pays its wake. A pass is recognised without a marker on the disarmed path: a pass walks
+//! its colours in ascending order, so a stamped colour index at or below the previous stamped one
+//! opens a new pass. A wave the caller ran alone reads a ramp of 0, so the waves whose ramp is a
+//! reading are counted ([`PHYS_WAVE_HELPED`]): the mean ramp of a recruited wave is the ramp sum
+//! over that count. The tail is the end imbalance plus the join's own latency; the join's is
+//! kept apart ([`PHYS_WAVE_JOIN`], [`PHYS_NP_WAVE_JOIN`]), measured from the later of the spawn
+//! loop's end and the last task's end, so it never exceeds the tail and the imbalance is the
+//! difference. The narrowphase's one wave records its route ([`PHYS_NP_ROUTE_WORKER`]), which
+//! its ramp is read by. Seven samples at most per step on the calling thread's lane.
+//!
+//! **What the stamps cost the armed wave.** A task's stamp is its own 64-byte line and the slot
+//! counter another, so no two workers write one line and no worker writes the caller's (the
+//! review's N2: 24-byte slots put about three tasks of different workers on one line, and the slot
+//! counter shared the caller's). The record is 8.3 KiB, zeroed on the calling thread before the
+//! scope's opening stamp: its cost lands in the colour span, never in a ramp, tail or join.
 //!
 //! The three narrowphase class counters are computed after the pair loop from the pairs' tags,
 //! and close: `PHYS_NP_FULL + PHYS_NP_REUSED + PHYS_NP_SEP_HITS` plus the non-box pairs and the
@@ -277,13 +305,20 @@ declare_zone!(PHYS_NP_WAVE_TAIL, name = "phys_np_wave_tail", scope = ROOT_SCOPE,
 declare_zone!(PHYS_NP_WAVE_INFLIGHT, name = "phys_np_wave_inflight", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_NP_WAVE_LANES, name = "phys_np_wave_lanes", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_NP_WAVE_OVERFLOW, name = "phys_np_wave_overflow", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_WAVE_JOIN, name = "phys_wave_join", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_WAVE_HELPED, name = "phys_wave_helped", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_WAVE_FIRST_RAMP, name = "phys_wave_first_ramp", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_WAVE_FIRST_TAIL, name = "phys_wave_first_tail", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_WAVE_PASS_RAMP, name = "phys_wave_pass_ramp", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_NP_WAVE_JOIN, name = "phys_np_wave_join", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_NP_ROUTE_WORKER, name = "phys_np_route_worker", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 
 /// Span zones this crate declares: the length of [`SPAN_ZONES`], so a reader's expectation
 /// table is typed by it and a zone without an expectation does not compile.
 pub const SPAN_ZONE_COUNT: usize = 26;
 
 /// Counter zones this crate declares: the length of [`COUNTER_ZONES`].
-pub const COUNTER_ZONE_COUNT: usize = 40;
+pub const COUNTER_ZONE_COUNT: usize = 47;
 
 /// Every span zone this crate declares, in the order of the table in the module docs.
 ///
@@ -361,6 +396,13 @@ pub static COUNTER_ZONES: [&ZoneHandle; COUNTER_ZONE_COUNT] = [
     &PHYS_NP_WAVE_INFLIGHT,
     &PHYS_NP_WAVE_LANES,
     &PHYS_NP_WAVE_OVERFLOW,
+    &PHYS_WAVE_JOIN,
+    &PHYS_WAVE_HELPED,
+    &PHYS_WAVE_FIRST_RAMP,
+    &PHYS_WAVE_FIRST_TAIL,
+    &PHYS_WAVE_PASS_RAMP,
+    &PHYS_NP_WAVE_JOIN,
+    &PHYS_NP_ROUTE_WORKER,
 ];
 
 /// The histogram's bins.
@@ -417,7 +459,7 @@ pub static CANARY_ZONES: [&ZoneHandle; 5] =
     [&PHYS_SOLVE_BUILD, &PHYS_SB_BODIES, &PHYS_SB_PA, &PHYS_SB_PB, &PHYS_SB_PC];
 
 /// Whether this build compiles the physics zones at all. Every zone is `Deep`, so one `const`
-/// answers for all sixty-six; `false` under a profile whose tier ceiling is below `Deep`, where
+/// answers for all seventy-three; `false` under a profile whose tier ceiling is below `Deep`, where
 /// every site folds to nothing and an armed profiler records none of them.
 pub const ZONES_COMPILED: bool = (PHYS_SOLVE_BUILD::TIER as u8) <= (GLOBAL_TIER as u8);
 
@@ -483,7 +525,10 @@ pub fn wave_records_built() -> u64 {
     WAVE_RECORDS.load(Ordering::Relaxed)
 }
 
-/// One task's interval and thread, written by the task itself.
+/// One task's interval and thread, written by the task itself. A line of its own (review N2):
+/// the tasks of one wave run on different workers, and a slot that shared a line with another
+/// task's slot made each stamp a cross-core line transfer inside the wave it measures.
+#[repr(C, align(64))]
 struct TaskStamp {
     start: AtomicU64,
     end: AtomicU64,
@@ -497,6 +542,11 @@ impl TaskStamp {
     }
 }
 
+/// The record's slot counter, on a line of its own (review N2): every task of the wave
+/// `fetch_add`s it, and the caller's own stamps must not share its line.
+#[repr(C, align(64))]
+struct SlotCounter(AtomicU32);
+
 /// One parallel wave's telemetry record (W8S, ruling 3): the calling thread's stamps of the
 /// scope's opening, the end of its spawn loop and the join's return, and one [`TaskStamp`] per
 /// task. Stack-local to the armed arm of one wave — transient function-local scratch, never a
@@ -505,9 +555,13 @@ impl TaskStamp {
 /// Every field is an atomic written `Relaxed`: a task claims its slot with one `fetch_add`, so
 /// no two tasks write one slot, and the caller reads the record only after the scope's join, whose
 /// completion protocol orders every task's stores before the join returns.
+///
+/// The layout is the point of `repr(C)`: the slot counter's line, then the caller's line (its
+/// five stamps and ids), then one line per task slot.
+#[repr(C)]
 pub(crate) struct WaveStamps {
     /// The next free slot; after the join, the number of tasks that ran.
-    next: AtomicU32,
+    next: SlotCounter,
     /// The scope's opening, `0` until the wave dispatched.
     open: AtomicU64,
     /// The end of the caller's spawn loop.
@@ -522,6 +576,15 @@ pub(crate) struct WaveStamps {
     slots: [TaskStamp; WAVE_STAMP_CAPACITY],
 }
 
+const _: () = assert!(
+    size_of::<TaskStamp>() == 64 && align_of::<TaskStamp>() == 64,
+    "a task stamp is one cache line"
+);
+const _: () = assert!(
+    std::mem::offset_of!(WaveStamps, open) == 64 && std::mem::offset_of!(WaveStamps, slots) == 128,
+    "the slot counter, the caller's stamps and the slots each begin a line of their own"
+);
+
 /// What one wave's record reduces to.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct WaveReading {
@@ -533,23 +596,29 @@ pub(crate) struct WaveReading {
     pub(crate) inflight: u64,
     /// [`PHYS_WAVE_LANES`]'s value.
     pub(crate) lanes: u64,
+    /// [`PHYS_WAVE_JOIN`]'s value: the join's own latency, at most `tail`.
+    pub(crate) join: u64,
     /// Tasks that ran.
     pub(crate) tasks: u64,
     /// Of those, the ones past [`WAVE_STAMP_CAPACITY`].
     pub(crate) overflow: u64,
     /// Whether the joiner was a worker of the pool (the worker route).
     pub(crate) worker_route: bool,
+    /// Whether a thread other than the caller started a task ([`PHYS_WAVE_HELPED`]); `ramp` is 0
+    /// when it did not.
+    pub(crate) helped: bool,
 }
 
 impl WaveStamps {
-    /// An empty record. Out of line: it runs only armed, and its 3 KiB initialisation stays out
-    /// of the disarmed caller's body.
+    /// An empty record. Out of line: it runs only armed, and its 8.3 KiB initialisation stays out
+    /// of the disarmed caller's body. The one `fetch_add` on the process-wide witness is the
+    /// review-W4 exception (caller-side, once per armed wave, uncontended in a physics step).
     #[cold]
     #[inline(never)]
     pub(crate) fn new() -> Self {
         WAVE_RECORDS.fetch_add(1, Ordering::Relaxed);
         Self {
-            next: AtomicU32::new(0),
+            next: SlotCounter(AtomicU32::new(0)),
             open: AtomicU64::new(0),
             spawned: AtomicU64::new(0),
             joined: AtomicU64::new(0),
@@ -585,7 +654,7 @@ impl WaveStamps {
     /// start, end and thread stores into that slot (ruling 3's letter, cut Q2).
     #[inline]
     pub(crate) fn task(&self, body: impl FnOnce()) {
-        let slot = self.next.fetch_add(1, Ordering::Relaxed) as usize;
+        let slot = self.next.0.fetch_add(1, Ordering::Relaxed) as usize;
         let start = clock::ticks();
         body();
         let end = clock::ticks();
@@ -605,14 +674,18 @@ impl WaveStamps {
         if open == 0 {
             return None;
         }
-        let tasks = u64::from(self.next.load(Ordering::Relaxed));
+        let tasks = u64::from(self.next.0.load(Ordering::Relaxed));
         let n = usize::try_from(tasks).map_or(WAVE_STAMP_CAPACITY, |t| t.min(WAVE_STAMP_CAPACITY));
         let caller = self.caller.load(Ordering::Relaxed);
         let workers = self.workers.load(Ordering::Relaxed);
         let mut starts = [0u64; WAVE_STAMP_CAPACITY];
         let mut ends = [0u64; WAVE_STAMP_CAPACITY];
         let mut first_helper = u64::MAX;
-        let mut caller_last = self.spawned.load(Ordering::Relaxed);
+        let spawned = self.spawned.load(Ordering::Relaxed);
+        let mut caller_last = spawned;
+        // The join could not return before the spawn loop ended nor before the last task ended,
+        // on whichever thread ran it.
+        let mut join_ready = spawned;
         // Distinct threads: worker ids below 64 as bits, the two sentinels (dispatcher,
         // unattached) as two more.
         let mut workers_seen = 0u64;
@@ -622,6 +695,7 @@ impl WaveStamps {
             let lane = s.lane.load(Ordering::Relaxed);
             starts[i] = start;
             ends[i] = end;
+            join_ready = join_ready.max(end);
             if lane == caller {
                 caller_last = caller_last.max(end);
             } else {
@@ -647,20 +721,29 @@ impl WaveStamps {
             open_now += 1;
             inflight = inflight.max(open_now);
         }
+        let joined = self.joined.load(Ordering::Relaxed);
+        let helped = first_helper != u64::MAX;
+        let tail = joined.saturating_sub(caller_last);
+        // `join_ready >= caller_last`: both start at `spawned`, and every task end that moves
+        // `caller_last` moves `join_ready` too.
+        let join = joined.saturating_sub(join_ready);
+        debug_assert!(join <= tail, "invariant: the join's latency is part of the tail");
         Some(WaveReading {
-            ramp: if first_helper == u64::MAX { 0 } else { first_helper.saturating_sub(open) },
-            tail: self.joined.load(Ordering::Relaxed).saturating_sub(caller_last),
+            ramp: if helped { first_helper.saturating_sub(open) } else { 0 },
+            tail,
             inflight,
             lanes: u64::from(workers_seen.count_ones()) + u64::from(sentinels_seen.count_ones()),
+            join,
             tasks,
             overflow: tasks.saturating_sub(WAVE_STAMP_CAPACITY as u64),
             worker_route: caller < workers,
+            helped,
         })
     }
 }
 
 impl WaveReading {
-    /// Pushes the narrowphase wave's five counters.
+    /// Pushes the narrowphase wave's seven counters.
     #[cold]
     #[inline(never)]
     pub(crate) fn push_np(&self) {
@@ -669,12 +752,15 @@ impl WaveReading {
         counter!(PHYS_NP_WAVE_INFLIGHT, self.inflight);
         counter!(PHYS_NP_WAVE_LANES, self.lanes);
         counter!(PHYS_NP_WAVE_OVERFLOW, self.overflow);
+        counter!(PHYS_NP_WAVE_JOIN, self.join);
+        counter!(PHYS_NP_ROUTE_WORKER, u64::from(self.worker_route));
     }
 }
 
 /// One solving step's dispatch totals (W8S), summed over its waves on the calling thread and
 /// pushed once at the step's end, never per wave (module docs, "Why the four wave readings are
-/// per-step sums"). Written only in the armed arm of a wave.
+/// per-step sums"). Written only in the armed arm of a wave; a disarmed step pays its
+/// zero-initialisation, once per solving step (120 bytes, 72 before the review's five sums).
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct WaveTally {
     /// Σ of the solve waves' ramps, in ticks.
@@ -695,21 +781,46 @@ pub(crate) struct WaveTally {
     pub(crate) route_worker: u64,
     /// Solve scopes joined by anything else.
     pub(crate) route_external: u64,
+    /// Σ of the solve waves' join latencies ([`PHYS_WAVE_JOIN`]).
+    pub(crate) join: u64,
+    /// Solve waves a thread other than the caller helped ([`PHYS_WAVE_HELPED`]).
+    pub(crate) helped: u64,
+    /// The step's first dispatched colour wave's ramp ([`PHYS_WAVE_FIRST_RAMP`]).
+    pub(crate) first_ramp: u64,
+    /// Its tail ([`PHYS_WAVE_FIRST_TAIL`]).
+    pub(crate) first_tail: u64,
+    /// Σ of each pass's first dispatched colour wave's ramp ([`PHYS_WAVE_PASS_RAMP`]).
+    pub(crate) pass_ramp: u64,
+    /// The colour index of the last colour wave added, `None` before the step's first: how
+    /// [`add`](Self::add) recognises a pass without a marker on the disarmed path.
+    last_colour: Option<u32>,
 }
 
 impl WaveTally {
-    /// Adds one solve wave's reading. `colour` is false for a solve scope that is not a
-    /// colour's (none before S4).
+    /// Adds one solve wave's reading. `colour` is the wave's colour index, `None` for a solve
+    /// scope that is not a colour's (none before S4). A colour index at or below the previous
+    /// colour wave's starts a new pass: a pass visits its colours in ascending order, each once.
     #[cold]
     #[inline(never)]
-    pub(crate) fn add(&mut self, r: &WaveReading, colour: bool) {
+    pub(crate) fn add(&mut self, r: &WaveReading, colour: Option<usize>) {
         self.ramp += r.ramp;
         self.tail += r.tail;
         self.inflight += r.inflight;
         self.lanes += r.lanes;
-        if colour {
+        self.join += r.join;
+        self.helped += u64::from(r.helped);
+        if let Some(c) = colour {
+            let c = u32::try_from(c).unwrap_or(u32::MAX);
             self.scopes += 1;
             self.tasks += r.tasks;
+            if self.last_colour.is_none() {
+                self.first_ramp = r.ramp;
+                self.first_tail = r.tail;
+            }
+            if self.last_colour.is_none_or(|last| c <= last) {
+                self.pass_ramp += r.ramp;
+            }
+            self.last_colour = Some(c);
         }
         self.overflow += r.overflow;
         if r.worker_route {
@@ -719,7 +830,7 @@ impl WaveTally {
         }
     }
 
-    /// Pushes the step's nine totals.
+    /// Pushes the step's fourteen totals.
     #[cold]
     #[inline(never)]
     pub(crate) fn push(&self) {
@@ -732,6 +843,11 @@ impl WaveTally {
         counter!(PHYS_COLOR_TASKS, self.tasks);
         counter!(PHYS_ROUTE_WORKER, self.route_worker);
         counter!(PHYS_ROUTE_EXTERNAL, self.route_external);
+        counter!(PHYS_WAVE_JOIN, self.join);
+        counter!(PHYS_WAVE_HELPED, self.helped);
+        counter!(PHYS_WAVE_FIRST_RAMP, self.first_ramp);
+        counter!(PHYS_WAVE_FIRST_TAIL, self.first_tail);
+        counter!(PHYS_WAVE_PASS_RAMP, self.pass_ramp);
     }
 }
 
@@ -789,5 +905,110 @@ fn spin_ns(ns: u64) {
     let start = Instant::now();
     while start.elapsed() < target {
         std::hint::spin_loop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The W8S record's reduction and the step tally on synthetic stamps (the instrument's
+    //! review, `levers/scaling/01-DESIGN.md` §10.1b): exact values a live wave cannot give.
+
+    use std::sync::atomic::Ordering;
+
+    use boyko_threadpool::WORKER_ID_DISPATCHER;
+
+    use super::{WaveReading, WaveStamps, WaveTally};
+
+    /// A record opened at tick 100 by `caller` on a pool of `workers`, its spawn loop ending at
+    /// `spawned` and its join returning at `joined`, with one task per `(start, end, lane)`.
+    fn record(
+        caller: u32,
+        workers: u32,
+        spawned: u64,
+        joined: u64,
+        tasks: &[(u64, u64, u32)],
+    ) -> WaveStamps {
+        let rec = WaveStamps::new();
+        rec.caller.store(caller, Ordering::Relaxed);
+        rec.workers.store(workers, Ordering::Relaxed);
+        rec.open.store(100, Ordering::Relaxed);
+        rec.spawned.store(spawned, Ordering::Relaxed);
+        rec.joined.store(joined, Ordering::Relaxed);
+        for &(start, end, lane) in tasks {
+            let slot = rec.next.0.fetch_add(1, Ordering::Relaxed) as usize;
+            rec.slots[slot].start.store(start, Ordering::Relaxed);
+            rec.slots[slot].end.store(end, Ordering::Relaxed);
+            rec.slots[slot].lane.store(lane, Ordering::Relaxed);
+        }
+        rec
+    }
+
+    /// A reading of `ramp` and `tail`, helped when `ramp > 0`, joined in `tail / 4`.
+    fn reading(ramp: u64, tail: u64) -> WaveReading {
+        WaveReading { ramp, tail, join: tail / 4, helped: ramp > 0, tasks: 3, ..WaveReading::default() }
+    }
+
+    #[test]
+    fn w8s_reduce_splits_the_tail_into_imbalance_and_join() {
+        // Caller 0 ends its own task at 200; helpers 1 and 2 end at 350 and 300; the join returns
+        // at 400: the tail is 400 − 200, of which the join's own latency is 400 − 350.
+        let r = record(0, 4, 150, 400, &[(160, 200, 0), (120, 350, 1), (130, 300, 2)])
+            .reduce()
+            .expect("a dispatched wave reduces");
+        assert_eq!((r.tail, r.join), (200, 50), "tail and join: {r:?}");
+        // The spawn loop ended after every task: the join could not return before it, so the
+        // join is the whole tail and the imbalance is 0.
+        let r = record(0, 4, 500, 520, &[(120, 200, 1)]).reduce().expect("a dispatched wave reduces");
+        assert_eq!((r.tail, r.join), (20, 20), "a spawn loop that ends last: {r:?}");
+    }
+
+    #[test]
+    fn w8s_reduce_reads_helped_and_ramp() {
+        let helped = record(0, 4, 150, 400, &[(160, 200, 0), (120, 350, 1)])
+            .reduce()
+            .expect("a dispatched wave reduces");
+        assert_eq!((helped.helped, helped.ramp), (true, 20), "helper 1 started at 120: {helped:?}");
+        assert!(helped.worker_route, "a worker joined: {helped:?}");
+        let d = WORKER_ID_DISPATCHER;
+        let alone = record(d, 4, 150, 300, &[(160, 200, d), (200, 260, d)])
+            .reduce()
+            .expect("a dispatched wave reduces");
+        assert_eq!((alone.helped, alone.ramp), (false, 0), "the caller ran every task: {alone:?}");
+        assert!(!alone.worker_route, "the dispatcher joined: {alone:?}");
+    }
+
+    #[test]
+    fn w8s_tally_keeps_the_step_first_colour_wave() {
+        let mut t = WaveTally::default();
+        // A solve wave that is not a colour's (S4's setup) comes first and is not the first
+        // colour wave.
+        t.add(&reading(1000, 7), None);
+        for (c, ramp, tail) in [(2, 10, 20), (5, 11, 21), (2, 12, 22), (5, 13, 23)] {
+            t.add(&reading(ramp, tail), Some(c));
+        }
+        assert_eq!((t.first_ramp, t.first_tail), (10, 20), "the step's first colour wave: {t:?}");
+        assert_eq!(
+            (t.scopes, t.route_worker + t.route_external),
+            (4, 5),
+            "colour scopes, solve scopes: {t:?}"
+        );
+        assert_eq!((t.helped, t.join), (5, 1 + 5 + 5 + 5 + 5), "helped waves and the join sum: {t:?}");
+    }
+
+    #[test]
+    fn w8s_tally_sums_each_pass_first_colour_wave() {
+        // Three passes over colours 2 and 5: each pass's first wave is its colour 2.
+        let mut t = WaveTally::default();
+        t.add(&reading(1000, 7), None);
+        for (c, ramp) in [(2, 10), (5, 11), (2, 12), (5, 13), (2, 14), (5, 15)] {
+            t.add(&reading(ramp, 1), Some(c));
+        }
+        assert_eq!(t.pass_ramp, 10 + 12 + 14, "each pass's colour 2: {t:?}");
+        // One wide colour per pass: every wave opens a pass.
+        let mut t = WaveTally::default();
+        for ramp in [1, 2, 4] {
+            t.add(&reading(ramp, 1), Some(4));
+        }
+        assert_eq!(t.pass_ramp, 7, "one colour a pass: {t:?}");
     }
 }

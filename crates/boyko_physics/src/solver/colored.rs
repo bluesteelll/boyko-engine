@@ -4026,7 +4026,7 @@ impl ColoredSoftStepSolver {
         );
         drop(color_zone);
         if let Some(reading) = stamps.reduce() {
-            tally.add(&reading, true);
+            tally.add(&reading, Some(color));
         }
     }
 

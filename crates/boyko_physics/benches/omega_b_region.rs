@@ -55,6 +55,16 @@
 //! scope pays the park→wake cost. The difference is what separates dispatch from wake in W8S's
 //! per-wave loss.
 //!
+//! # The participation receipt (the instrument's review, N4)
+//!
+//! A scope wall alone cannot say whether any helper took part: an opener that ran all
+//! [`OMEGA_TASKS`] tasks itself before a helper woke reads the same short wall as a pool that was
+//! spinning. Each task therefore reads `current_worker_id()`, and a task on a thread other than
+//! the opener's records the ns from the scope's opening to its start with one `Relaxed`
+//! `fetch_min`. A row's summary carries `helped_reps` (reps where some task ran off the opener)
+//! and `first_helper_ns_median` over those reps. The receipt's cost lands inside the timed scope:
+//! one thread-local read per task, and a clock read and a `fetch_min` per task off the opener.
+//!
 //! # Running
 //!
 //! ```text
@@ -70,8 +80,9 @@
 //! Without `--bench` (the `cargo test --all-targets` run) the binary runs an untimed functional
 //! self-check: the region at 1, 2 and 4 participants on both routes, every block of every
 //! execution run exactly once, each stage's writes visible to the next, the completion count's
-//! reset exercised by re-executing entries, and a bounded spin that panics rather than hangs; and
-//! ω's scope at W 2 on both routes.
+//! reset exercised by re-executing entries, and a bounded spin that panics rather than hangs; ω's
+//! scope at W 2 on both routes; and the participation receipt reading no helper on a one-worker
+//! pool.
 
 use std::hint::spin_loop;
 use std::process::ExitCode;
@@ -476,11 +487,24 @@ fn self_check() {
             println!("  region: {participants} participant(s), {} route: ok", route.name());
         }
         let pool = ThreadPoolBuilder::new().num_threads(2).build();
-        let (wall, id) = on_route(&pool, route, |inner| omega_scope(inner, 0));
+        let ((wall, _), id) = on_route(&pool, route, |inner| omega_scope(inner, 0));
         assert_route(route, id, 2);
         assert!(wall > Duration::ZERO, "the zero-work scope ran");
         println!("  omega: W 2, {} route: ok", route.name());
     }
+    // The participation receipt cannot claim a helper where none exists: one worker opening the
+    // scope on the worker route is the only thread that can run its tasks (the bench thread is
+    // no joiner).
+    let pool = ThreadPoolBuilder::new().num_threads(1).build();
+    let (firsts, id) = on_route(&pool, Route::Worker, |inner| {
+        (0..8).map(|_| omega_scope(inner, 0).1).collect::<Vec<_>>()
+    });
+    assert_route(Route::Worker, id, 1);
+    assert!(
+        firsts.iter().all(Option::is_none),
+        "the receipt saw a helper on a one-worker pool: {firsts:?}"
+    );
+    println!("  omega receipt: W 1, worker route, no helper: ok");
     println!("omega_b_region self-check: ok");
 }
 
@@ -514,36 +538,58 @@ fn omega_b_row(participants: u32, route: Route, regions: u32, stages: u32, block
 }
 
 /// One zero-work scope of [`OMEGA_TASKS`] tasks after a `gap_us` busy-wait; returns the scope's
-/// wall.
-fn omega_scope(pool: &PoolInner, gap_us: u64) -> Duration {
+/// wall and its participation receipt: the ns from the scope's opening to the first task a thread
+/// other than the opener started, `None` when the opener ran every task (module docs, "The
+/// participation receipt").
+fn omega_scope(pool: &PoolInner, gap_us: u64) -> (Duration, Option<u64>) {
     let gap = Duration::from_micros(gap_us);
     let t = Instant::now();
     while t.elapsed() < gap {
         spin_loop();
     }
+    let opener = current_worker_id();
+    let first_helper = AtomicU64::new(u64::MAX);
     let t0 = Instant::now();
     pool.scope(|scope| {
         for _ in 0..OMEGA_TASKS {
-            scope.spawn(|| {});
+            scope.spawn(|| {
+                if current_worker_id() != opener {
+                    let ns = u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX - 1);
+                    first_helper.fetch_min(ns, Ordering::Relaxed);
+                }
+            });
         }
     });
-    t0.elapsed()
+    let wall = t0.elapsed();
+    // Relaxed: the scope's join orders every task's `fetch_min` before this load.
+    let first = first_helper.load(Ordering::Relaxed);
+    (wall, (first != u64::MAX).then_some(first))
 }
 
 /// One ω(W, gap) row.
 fn omega_row(workers: usize, gap_us: u64, route: Route, reps: u32) {
     let pool = ThreadPoolBuilder::new().num_threads(workers).build();
-    let (walls, id): (Vec<u64>, u32) = on_route(&pool, route, move |inner| {
-        (0..reps).map(|_| omega_scope(inner, gap_us).as_nanos() as u64).collect()
+    let (runs, id): (Vec<(u64, Option<u64>)>, u32) = on_route(&pool, route, move |inner| {
+        (0..reps)
+            .map(|_| {
+                let (wall, first) = omega_scope(inner, gap_us);
+                (wall.as_nanos() as u64, first)
+            })
+            .collect()
     });
     assert_route(route, id, workers);
-    let mut sorted = walls;
+    let mut sorted: Vec<u64> = runs.iter().map(|&(wall, _)| wall).collect();
     sorted.sort_unstable();
     let median = sorted[sorted.len() / 2];
     let mean = sorted.iter().sum::<u64>() as f64 / sorted.len() as f64;
+    let mut firsts: Vec<u64> = runs.iter().filter_map(|&(_, first)| first).collect();
+    firsts.sort_unstable();
+    let first_median = firsts.get(firsts.len() / 2).map_or_else(|| "null".to_owned(), u64::to_string);
     println!(
         "SUMMARY {{\"bench\":\"omega\",\"route\":\"{}\",\"workers\":{workers},\"gap_us\":{gap_us},\
-         \"tasks\":{OMEGA_TASKS},\"reps\":{reps},\"scope_ns_median\":{median},\"scope_ns_mean\":{mean}}}",
-        route.name()
+         \"tasks\":{OMEGA_TASKS},\"reps\":{reps},\"scope_ns_median\":{median},\"scope_ns_mean\":{mean},\
+         \"helped_reps\":{},\"first_helper_ns_median\":{first_median}}}",
+        route.name(),
+        firsts.len()
     );
 }
