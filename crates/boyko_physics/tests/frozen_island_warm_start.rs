@@ -1122,6 +1122,9 @@ struct CrowdObservation {
     /// The statistics of the last held step before the wake, and of the wake step.
     last_held: WarmSeedStats,
     wake: WarmSeedStats,
+    /// Per compared world, in `CROWD_WORKERS` order: the steps whose solve setup opened its
+    /// scope (S4's `ColoredSoftStepSolver::setup_dispatches`, W8S lane commit 4).
+    setup_dispatches: Vec<u64>,
 }
 
 /// Steps every world once and asserts each is bit-identical to the first: every box's full
@@ -1241,6 +1244,10 @@ fn run_crowd() -> CrowdObservation {
         steps_with_carry_misses,
         last_held,
         wake,
+        setup_dispatches: worlds
+            .iter()
+            .map(|w| w.world.resource::<ColoredSoftStepSolver>().setup_dispatches())
+            .collect(),
     }
 }
 
@@ -1275,6 +1282,20 @@ fn frozen_islands_carried_beside_a_parallel_solve_are_bit_identical_across_worke
         "anti-vacuity: no step carried a warm entry while a pushed color reached the solver's \
          dispatch floor of {MIN_PARALLEL_SLOTS_PER_COLOR} slots, so the worker counts were never \
          compared on a carry beside a parallel solve ({obs:?})"
+    );
+    // S4 (W8S lane, commit 4): this crowd cannot cross the parallel setup's gate. Its widest
+    // pushed colour reaches the colour floor, but its laid-out points stay under two setup tasks'
+    // worth (the wake step lays out 352), so the setup runs inline in every world and the carry
+    // is compared beside parallel colours only. Asserted, so a crowd grown past the gate says so
+    // here rather than silently changing what this test covers; the parallel setup's {1, N}
+    // gates are the colored solver's own (`colored_tests.rs`, G3 and S4's G4-A).
+    assert!(
+        obs.setup_dispatches.iter().all(|&s| s == 0),
+        "S4: the setup dispatched {:?} times per world ({:?} workers); this crowd lays out under \
+         two setup tasks' worth of points, so no world should — update the comment above and \
+         assert the dispatch instead",
+        obs.setup_dispatches,
+        obs.pool_threads
     );
     assert!(
         obs.last_held.carry_hits > 0 && obs.wake.point_hits == obs.last_held.carry_hits,

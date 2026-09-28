@@ -287,7 +287,7 @@
 
         let mut solver = ColoredSoftStepSolver::default();
         solver.build_bodies(&bodies, &[]);
-        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
+        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
         let cols = &solver.columns;
 
         // The total live point count = 1 + 1 + 4 = 6.
@@ -450,7 +450,7 @@
             let (bodies, manifolds, graph) = random_scene(seed);
             let mut solver = ColoredSoftStepSolver::default();
             solver.build_bodies(&bodies, &[]);
-            solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
+            solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
             let cols = &solver.columns;
 
             let n_colors = cols.color_offsets().len().saturating_sub(1);
@@ -930,6 +930,18 @@
     /// parallel path finds the ambient pool. Returns the final body snapshot bits.
     #[cfg(not(miri))]
     fn run_dense_in_pool(n: usize, steps: usize, parallel_solve: bool, workers: usize) -> Vec<u32> {
+        run_dense_in_pool_counted(n, steps, parallel_solve, workers).0
+    }
+
+    /// [`run_dense_in_pool`], and the steps whose solve setup opened its scope (S4's
+    /// `setup_dispatches`), so a {1, N} gate can show it covered the parallel setup.
+    #[cfg(not(miri))]
+    fn run_dense_in_pool_counted(
+        n: usize,
+        steps: usize,
+        parallel_solve: bool,
+        workers: usize,
+    ) -> (Vec<u32>, u64) {
         use boyko_threadpool::ThreadPoolBuilder;
 
         let cfg = PhysicsConfig {
@@ -951,7 +963,7 @@
                 solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
             }
         });
-        snapshot_bits(&scratch)
+        (snapshot_bits(&scratch), solver.setup_dispatches())
     }
 
     /// One G3 run: the layout and record bytes after the last step, and the padding
@@ -961,6 +973,8 @@
         layout: Vec<u32>,
         records: Vec<u32>,
         padding: PaddingAudit,
+        /// S4: the steps whose setup opened its scope.
+        setup: u64,
     }
 
     /// Like [`run_dense_in_pool`] but over the churned stream, with `simd_solve` as
@@ -998,6 +1012,7 @@
             layout: layout_snapshot(&solver.columns),
             records: records_snapshot(&solver),
             padding: audit_padding(&solver.columns),
+            setup: solver.setup_dispatches(),
         }
     }
 
@@ -1050,9 +1065,18 @@
         // (b) Parallel == serial, byte for byte, across {1, 2, 4, 8, 16} workers, on
         // both kernels. Every worker writes the SAME bytes into the SAME lanes
         // regardless of worker count, and identical to the single-threaded reference.
+        assert_eq!(single_a.setup, 0, "S4: a serial run never opens the setup scope");
         for simd in [false, true] {
             for workers in [1usize, 2, 4, 8, 16] {
                 let run = run_layout_in_pool(n, 12, true, simd, workers);
+                // S4's non-vacuity: the {1, N} bytes below cover the parallel setup's ranges on
+                // every multi-worker run (the scene crosses its gate on every step), and a
+                // one-worker pool takes the inline path (the gate's lanes term).
+                assert_eq!(
+                    run.setup,
+                    if workers >= 2 { 12 } else { 0 },
+                    "S4: the setup's dispatches over the 12 steps at {workers} workers (simd {simd})"
+                );
                 assert_eq!(
                     single_a.layout, run.layout,
                     "G3: the layout bytes at {workers} workers (simd {simd}) must equal the single-threaded scalar layout"
@@ -1115,6 +1139,10 @@
     #[test]
     #[cfg(not(miri))]
     fn parallel_solve_is_bit_identical_across_worker_counts() {
+        // S4 (W8S lane, commit 4): twelve bodies never reach the colour floor, so neither the
+        // colours nor S4's setup (whose gate is the colours' own) dispatch here; the parallel
+        // setup's {1, N} bytes are `cohort_layout_bytes_are_identical_across_workers_and_runs`'s
+        // and the random-scene gate's below, and S4's G4-A.
         let single = run_dense_in_pool(12, 40, false, 1);
         let p1 = run_dense_in_pool(12, 40, true, 1);
         let p2 = run_dense_in_pool(12, 40, true, 2);
@@ -1150,7 +1178,7 @@
         let graph = build_graph(&bodies, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
         solver.build_bodies(&bodies, &[]);
-        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
+        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
         let cols = &solver.columns;
         let n_colors = cols.color_offsets().len().saturating_sub(1);
         (0..n_colors)
@@ -1311,18 +1339,29 @@
     fn parallel_solve_bit_identical_across_workers_on_random_scenes() {
         // Worker spin-up dominates; keep the case count modest but the worker sweep
         // wide. Each case runs 6 worker configs × 8 steps over up to ~520 bodies.
+        // S4 (W8S lane, commit 4): the upper part of the range lays out enough points for the
+        // parallel setup to dispatch at 2 / 4 / 8 workers, and at one worker it never does; the
+        // count is summed over the cases so a run that never covered the setup cannot pass.
+        let setups = std::cell::Cell::new(0u64);
         proptest!(ProptestConfig::with_cases(48), |(seed in any::<u64>())| {
             let n = random_dense_scene(seed).len() - 1; // dyn count (last row = floor)
             let single = run_dense_in_pool(n, 8, false, 1);
-            let p1 = run_dense_in_pool(n, 8, true, 1);
-            let p2 = run_dense_in_pool(n, 8, true, 2);
-            let p4 = run_dense_in_pool(n, 8, true, 4);
-            let p8 = run_dense_in_pool(n, 8, true, 8);
+            let (p1, s1) = run_dense_in_pool_counted(n, 8, true, 1);
+            let (p2, s2) = run_dense_in_pool_counted(n, 8, true, 2);
+            let (p4, s4) = run_dense_in_pool_counted(n, 8, true, 4);
+            let (p8, s8) = run_dense_in_pool_counted(n, 8, true, 8);
+            prop_assert_eq!(s1, 0, "S4: one worker never dispatches the setup (seed {})", seed);
+            setups.set(setups.get() + s2 + s4 + s8);
             prop_assert_eq!(&p1, &single, "parallel(1) == single-threaded (seed {})", seed);
             prop_assert_eq!(&p1, &p2, "parallel: 1 vs 2 workers bit-identical (seed {})", seed);
             prop_assert_eq!(&p1, &p4, "parallel: 1 vs 4 workers bit-identical (seed {})", seed);
             prop_assert_eq!(&p1, &p8, "parallel: 1 vs 8 workers bit-identical (seed {})", seed);
         });
+        assert!(
+            setups.get() > 0,
+            "anti-vacuity: no case dispatched S4's parallel setup, so the {{1, N}} bits never \
+             covered it"
+        );
     }
 
     /// Gate 5 (extended to the PARALLEL multi-worker path over random scenes): every
@@ -1567,7 +1606,7 @@
             // ── Scalar arm ──────────────────────────────────────────────────
             let mut solver_scalar = ColoredSoftStepSolver::default();
             solver_scalar.build_bodies(&bodies, &[]);
-            solver_scalar.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
+            solver_scalar.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
             let cols_scalar = &solver_scalar.columns;
             let n_colors = cols_scalar.color_offsets().len() - 1;
             let bodies_scalar = body_scratch_from(&pristine_bodies);
@@ -1594,7 +1633,7 @@
             // ── SIMD arm ─────────────────────────────────────────────────────
             let mut solver_simd = ColoredSoftStepSolver::default();
             solver_simd.build_bodies(&bodies, &[]);
-            solver_simd.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
+            solver_simd.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
             let cols_simd = &solver_simd.columns;
             let bodies_simd = body_scratch_from(&pristine_bodies);
             {
@@ -1843,7 +1882,7 @@
         let graph = build_graph(&states, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
         solver.build_bodies(&states, &[]);
-        solver.build_columns(&manifolds, &graph, &states, None, RowRemap::Identity, None);
+        solver.build_columns(&manifolds, &graph, &states, None, RowRemap::Identity, None, false);
         assert_eq!(solver.columns.color_offsets().len(), 2, "body-disjoint specs form one color");
         assert_eq!(solver.columns.group_start().len(), groups.len() + 1, "one group per spec");
         // The seeds are the specs' (the fresh warm store seeded zero).
@@ -2452,7 +2491,7 @@
         let graph = build_graph(&bodies, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
         solver.build_bodies(&bodies, &[]);
-        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None);
+        solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
         let mut rng = SplitMix64(0x11C3_5EED_A1B2_C3D4);
         seed_live_lanes(&mut solver, &mut rng);
 
@@ -4189,6 +4228,12 @@
     // SDF manifolds, frozen subsets and every remap class, chained over steps so
     // the carry feeds the next lookup. Pool-free and column-backed, so it runs
     // native and under Miri (G8: the store, the carry and the cold index at small n).
+    //
+    // Since S4 (W8S lane, commit 4) the path it drives, `plan_sources`, is the shipped
+    // path of every step whose setup runs inline (W1, and every step under S4's gate).
+    // On a step whose setup dispatches, the laid-out manifolds' runs are searched by
+    // shape F inside the fill instead; there this path is the ORACLE, and S4's G4-A
+    // (`s4_setup`) compares F against it byte for byte on random frames.
 
     mod g2_records {
         use std::cell::Cell;
@@ -5384,4 +5429,447 @@
         let want = WarmRecord::solved(&m, 0, 2, [&[2.0, 2.0], &[4.0, 4.0], &[6.0, 6.0]]);
         assert_eq!(kept_rec.as_read_slice()[0].words(), want.words(), "the capture is the carry, not the stored record");
         assert_eq!(held_warm, 2, "both points hit");
+    }
+
+    // ── S4 (W8S lane, commit 4): the parallel setup against the parent path, byte for byte ──
+    //
+    // G4-A: random frames — up to 256 manifolds, SDF pairs, duplicate keys and feature ids, empty
+    // manifolds, frozen islands, every remap class (Identity, Rows with flips, jumpers and
+    // `NO_ROW`, Reset), a strict or non-strict read side, L10's restore source, warm start on and
+    // off — built by the parent path (P-a's stream-order search, then the fill over every cohort
+    // on one thread: `SetupMode::Auto` with no pool), by shape F serially (`SerialFused`), and by
+    // the setup scope at W 2 / 4 / 8 (`Pool`). Every output must equal the parent's: the layout
+    // bytes (heads, cold, blocks, `vn0`, tags, plan, the CSRs), the write side's keys, strictness
+    // and records, the warm stats, every `SetupCounters` field but `backward_searches` (which
+    // counts differently by design), and L10's restore search and hit counts. Comparing against
+    // the parent path rather than against serial F is what lets a deterministic relocation error
+    // — a search of the wrong key, a restore mark set or missed — show (critique W1).
+    //
+    // G4-F: the same comparison pool-free, on scoped std threads (`Threads`), on frames small
+    // enough for Miri: the Stacked Borrows and Tree Borrows legs of the raw per-range writes.
+
+    mod s4_setup {
+        use super::*;
+        use crate::row_identity::NO_ROW;
+        use crate::scratch_ids::warm_table_id;
+        use crate::solver::warm_records::{WarmRecord, WarmRecords, ord};
+
+        /// How a frame's rows relate to the rows its read side was keyed in.
+        enum RemapSpec {
+            Identity,
+            Rows(Vec<u32>),
+            Reset,
+        }
+
+        impl RemapSpec {
+            fn remap(&self) -> RowRemap<'_> {
+                match self {
+                    Self::Identity => RowRemap::Identity,
+                    Self::Rows(prev) => RowRemap::Rows(prev),
+                    Self::Reset => RowRemap::Reset,
+                }
+            }
+        }
+
+        /// One generated frame: the step's inputs, the read side, the restore source.
+        struct Frame {
+            bodies: Vec<BodyState>,
+            manifolds: Vec<Manifold>,
+            frozen_rows: Vec<usize>,
+            remap: RemapSpec,
+            read: (Vec<u64>, Vec<WarmRecord>, bool),
+            restore: Option<(Vec<u64>, Vec<WarmRecord>)>,
+            warm: bool,
+        }
+
+        /// A record carrying `m`'s feature ids with distinct synthetic impulses.
+        fn record_of(m: &Manifold, rng: &mut Lcg) -> WarmRecord {
+            let mut rec = WarmRecord::EMPTY;
+            rec.set_shape(m);
+            for p in 0..usize::from(m.count) {
+                rec.set_impulses(p, [rng.f01() + 0.5, rng.f01() - 0.5, rng.f01() * 0.25]);
+            }
+            rec
+        }
+
+        /// A random frame of at most `max_m` manifolds over `n_rows` rows (row 0 the static
+        /// floor).
+        fn random_frame(seed: u64, max_m: u32) -> Frame {
+            let mut rng = Lcg(seed ^ 0x2545_F491_4F6C_DD1D);
+            let n_rows = rng.range(6, 40);
+            let mut bodies = vec![static_body(Vec3::ZERO)];
+            for i in 1..n_rows {
+                let p = Vec3::new(rng.f01() * 10.0, 0.5 + i as f32 * 0.1, rng.f01() * 10.0);
+                bodies.push(dyn_sphere(p, 0.5 + rng.f01(), rng.f01(), if rng.f01() < 0.3 { 0.6 } else { 0.0 }));
+            }
+            let m_count = rng.range(1, max_m + 1) as usize;
+            let mut manifolds = Vec::with_capacity(m_count);
+            for _ in 0..m_count {
+                let a = rng.range(0, n_rows);
+                let (a, b) = if rng.f01() < 0.15 && a != 0 {
+                    (a, SDF_SENTINEL.0)
+                } else {
+                    let mut b = rng.range(0, n_rows);
+                    if b == a {
+                        b = (a + 1) % n_rows;
+                    }
+                    (a.min(b), a.max(b))
+                };
+                let count = if rng.f01() < 0.08 { 0 } else { rng.range(1, 5) as usize };
+                let mut m = Manifold::new(BodyIndex(a), BodyIndex(b));
+                m.normal = Vec3::new(0.0, 1.0, 0.0);
+                for p in 0..count {
+                    m.points[p] = ContactPoint {
+                        anchor_a: Vec3::new(rng.f01(), rng.f01(), rng.f01()),
+                        anchor_b: Vec3::new(rng.f01(), rng.f01(), rng.f01()),
+                        separation: -0.01 * rng.f01(),
+                        feature_id: rng.range(0, 6),
+                    };
+                }
+                m.count = count as u8;
+                manifolds.push(m);
+            }
+            if rng.f01() < 0.8 {
+                manifolds.sort_by_key(|m| ord(m.body_a.0, m.body_b.0));
+            }
+            let remap = match rng.range(0, 6) {
+                0..=2 => RemapSpec::Identity,
+                3 | 4 => {
+                    // An injective partial map onto the previous rows: a permutation (flips
+                    // and jumpers) with some rows new (`NO_ROW`).
+                    let mut perm: Vec<u32> = (0..n_rows).collect();
+                    for i in (1..perm.len()).rev() {
+                        let j = rng.range(0, i as u32 + 1) as usize;
+                        perm.swap(i, j);
+                    }
+                    RemapSpec::Rows(perm.into_iter().map(|p| if rng.f01() < 0.85 { p } else { NO_ROW }).collect())
+                }
+                _ => RemapSpec::Reset,
+            };
+            // The read side: most of the stream's translated pairs, plus strays; strict (sorted,
+            // unique) four times in five.
+            let mut read: Vec<(u64, WarmRecord)> = Vec::new();
+            let mut misses: Vec<(u64, WarmRecord)> = Vec::new();
+            for m in &manifolds {
+                if let Some((la, lb)) = remap.remap().manifold_pair(m) {
+                    let pair = (ord(la, lb), record_of(m, &mut rng));
+                    if rng.f01() < 0.7 { read.push(pair) } else { misses.push(pair) }
+                }
+            }
+            for _ in 0..rng.range(0, 6) {
+                let a = rng.range(0, n_rows);
+                let b = a + 1 + rng.range(0, 4);
+                let mut m = Manifold::new(BodyIndex(a), BodyIndex(b));
+                m.count = rng.range(1, 5) as u8;
+                for p in 0..usize::from(m.count) {
+                    m.points[p].feature_id = rng.range(0, 6);
+                }
+                read.push((ord(a, b), record_of(&m, &mut rng)));
+            }
+            let strict = rng.f01() < 0.8;
+            if strict {
+                read.sort_by_key(|e| e.0);
+                read.dedup_by_key(|e| e.0);
+            }
+            // The restore source: some of the read side's misses, strictly sorted and disjoint
+            // from its keys (L10: no stream manifold of the step that wrote the read side named a
+            // held row).
+            let restore = (rng.f01() < 0.5).then(|| {
+                let mut r: Vec<(u64, WarmRecord)> = misses
+                    .into_iter()
+                    .filter(|(k, _)| !read.iter().any(|e| e.0 == *k))
+                    .collect();
+                r.sort_by_key(|e| e.0);
+                r.dedup_by_key(|e| e.0);
+                r.into_iter().unzip()
+            });
+            // Frozen islands: an island freezes only when every row of it sleeps, so whole islands
+            // are picked (a coin per island) rather than rows, or a frame's one large island would
+            // almost never freeze and the carry would go unexercised.
+            let frozen_rows = if rng.f01() < 0.35 {
+                let graph = build_graph(&bodies, &manifolds);
+                let mut coins: Vec<(u32, bool)> = Vec::new();
+                let mut rows = Vec::new();
+                for row in 1..n_rows {
+                    let isl = graph.island_of(row);
+                    if isl == ConstraintGraph::NO_ISLAND {
+                        continue;
+                    }
+                    let frozen = match coins.iter().find(|c| c.0 == isl) {
+                        Some(&(_, f)) => f,
+                        None => {
+                            let f = rng.f01() < 0.5;
+                            coins.push((isl, f));
+                            f
+                        }
+                    };
+                    if frozen {
+                        rows.push(row as usize);
+                    }
+                }
+                rows
+            } else {
+                Vec::new()
+            };
+            let (keys, recs) = read.into_iter().unzip();
+            Frame { bodies, manifolds, frozen_rows, remap, read: (keys, recs, strict), restore, warm: rng.f01() < 0.85 }
+        }
+
+        /// How a build runs.
+        #[derive(Clone, Copy, Debug)]
+        enum Mode {
+            /// The production gate with no pool: P-a's stream-order search, one range here.
+            Parent,
+            /// Shape F's fused search, one range here.
+            SerialFused,
+            /// `tasks` ranges on a pool of `workers`.
+            Pool { workers: usize, tasks: usize },
+            /// `tasks` ranges on scoped std threads.
+            Threads(usize),
+        }
+
+        /// Everything a build writes, byte for byte, and what it counted.
+        #[derive(Debug, PartialEq)]
+        struct Built {
+            layout: Vec<u32>,
+            keys_w: Vec<u64>,
+            strict_w: bool,
+            recs_w: Vec<u32>,
+            stats: WarmSeedStats,
+            /// `SetupCounters` without `backward_searches`.
+            counters: [u64; 6],
+            restore: (u32, u32),
+        }
+
+        /// One build's result, and what the comparison does not cover.
+        struct Run {
+            built: Built,
+            backward: u64,
+            dispatched: u64,
+            /// Per laid-out manifold, the setup range that filled it (`None` for a one-range run).
+            owner: Vec<Option<usize>>,
+            /// Restore hits per range: the manifolds whose run lies in the restore source.
+            restore_ranges: usize,
+        }
+
+        fn words(w: &WarmRecords) -> Vec<u32> {
+            w.recs().iter().flat_map(|r| r.words()).collect()
+        }
+
+        /// Builds `frame` once in `mode` on a fresh solver.
+        fn build(frame: &Frame, mode: Mode) -> Run {
+            let mut solver = ColoredSoftStepSolver::with_warm_start(frame.warm);
+            {
+                let (keys, recs, strict) = &frame.read;
+                let read = &mut solver.warm[0];
+                read.resize(keys.len());
+                read.keys_mut().as_mut_slice().copy_from_slice(keys);
+                read.recs_mut().as_mut_slice().copy_from_slice(recs);
+                read.set_strict(*strict);
+            }
+            let restore = frame.restore.as_ref().map(|(keys, recs)| {
+                let mut w = WarmRecords::with_capacity(warm_table_id(4), warm_table_id(2), keys.len().max(1));
+                w.resize(keys.len());
+                w.keys_mut().as_mut_slice().copy_from_slice(keys);
+                w.recs_mut().as_mut_slice().copy_from_slice(recs);
+                w.set_strict(true);
+                w
+            });
+            solver.setup_mode = match mode {
+                Mode::Parent => SetupMode::Auto,
+                Mode::SerialFused => SetupMode::SerialFused,
+                Mode::Pool { tasks, .. } => SetupMode::Pool(tasks),
+                Mode::Threads(t) => SetupMode::Threads(t),
+            };
+            let graph = build_graph(&frame.bodies, &frame.manifolds);
+            let n_rows = frame.bodies.len();
+            let sleep = (!frame.frozen_rows.is_empty()).then(|| {
+                let mut sleep = IslandSleep::with_capacity(n_rows, n_rows);
+                sleep.begin_step(&graph, n_rows);
+                for &row in &frame.frozen_rows {
+                    sleep.force_sleep_row(row);
+                }
+                sleep.begin_step(&graph, n_rows);
+                sleep
+            });
+            // The effective body rows the fill reads (the solve builds them before the columns).
+            solver.build_bodies(&frame.bodies, &[]);
+            let mut go = || {
+                solver.build_columns(
+                    &frame.manifolds,
+                    &graph,
+                    &frame.bodies,
+                    sleep.as_ref(),
+                    frame.remap.remap(),
+                    restore.as_ref(),
+                    true,
+                )
+            };
+            let out = match mode {
+                Mode::Pool { workers, .. } => {
+                    let pool = boyko_threadpool::ThreadPoolBuilder::new().num_threads(workers).build();
+                    pool.install(|_| go())
+                }
+                _ => go(),
+            };
+            let cols = &solver.columns;
+            // Which range filled each laid-out manifold: the cuts `build_columns` took, rebuilt
+            // from the final heads (the widths it cut by are the layout's).
+            let mut owner = vec![None; frame.manifolds.len()];
+            let mut restore_ranges = 0;
+            if let Mode::Pool { tasks, .. } | Mode::Threads(tasks) = mode
+                && solver.setup_dispatches() > 0
+            {
+                let points: usize = cols.heads().iter().map(|h| h.width.iter().map(|&w| usize::from(w)).sum::<usize>()).sum();
+                let mut cuts = [(0u32, 0u32); SETUP_MAX_TASKS];
+                let tasks = tasks.min(cols.heads().len()).min(SETUP_MAX_TASKS);
+                let n = setup_cuts(cols.heads(), points, tasks, &mut cuts);
+                let mut hit_ranges = vec![false; n];
+                for (r, &(lo, hi)) in cuts[..n].iter().enumerate() {
+                    for (head, cold) in cols.heads()[lo as usize..hi as usize].iter().zip(&cols.cold.as_read_slice()[lo as usize..hi as usize]) {
+                        for l in 0..head.nlanes as usize {
+                            let mi = cold.mi[l] as usize;
+                            owner[mi] = Some(r);
+                            hit_ranges[r] |= cols.tags()[mi].src_restore();
+                        }
+                    }
+                }
+                restore_ranges = hit_ranges.iter().filter(|&&h| h).count();
+            }
+            let w = &solver.warm[1];
+            let c = solver.setup_counters();
+            Run {
+                built: Built {
+                    layout: layout_snapshot(cols),
+                    keys_w: w.keys().to_vec(),
+                    strict_w: w.strict(),
+                    recs_w: words(w),
+                    stats: solver.warm_seed_stats(),
+                    counters: [c.carry_hits, c.misses, c.cold_index_steps, c.duplicate_fids_met, c.disabled_steps, c.restitution_applied],
+                    restore: (out.restore_searches, out.restore_hits),
+                },
+                backward: c.backward_searches,
+                dispatched: solver.setup_dispatches(),
+                owner,
+                restore_ranges,
+            }
+        }
+
+        /// What the comparisons met, so a green run is shown to have exercised every path.
+        /// `Copy`, so proptest's `Fn` body can carry it through a `Cell`.
+        #[derive(Clone, Copy, Debug, Default)]
+        struct Tally {
+            dispatched: u64,
+            fused_descents: u64,
+            restore_hits: u64,
+            non_strict_dispatched: u64,
+            carried: u64,
+            sdf: u64,
+            rows: u64,
+            resets: u64,
+            cold: u64,
+            restore_split: u64,
+            /// Shape F builds whose restore hits (the tasks' `SRC_RESTORE` read-modify-writes)
+            /// fell in two ranges or more.
+            fused_restore_split: u64,
+            adjacent_split: u64,
+        }
+
+        /// Builds `frame` in every mode of `modes` and requires each equal to the parent path.
+        fn compare(frame: &Frame, modes: &[Mode], tally: &mut Tally) {
+            let parent = build(frame, Mode::Parent);
+            assert_eq!(parent.dispatched, 0, "the parent path never opens the setup scope");
+            for &mode in modes {
+                let run = build(frame, mode);
+                assert_eq!(
+                    run.built, parent.built,
+                    "S4 {mode:?}: the setup's outputs must equal the parent path's, byte for byte"
+                );
+                if run.dispatched > 0 {
+                    tally.dispatched += 1;
+                    let fused = frame.warm && frame.read.2 && !matches!(frame.remap, RemapSpec::Reset);
+                    tally.fused_descents += u64::from(fused && run.backward > 0);
+                    tally.non_strict_dispatched += u64::from(!frame.read.2);
+                    tally.restore_split += u64::from(run.restore_ranges >= 2);
+                    tally.fused_restore_split += u64::from(fused && run.restore_ranges >= 2);
+                    tally.adjacent_split += u64::from(
+                        run.owner.windows(2).any(|w| matches!((w[0], w[1]), (Some(a), Some(b)) if a != b)),
+                    );
+                }
+            }
+            tally.restore_hits += u64::from(parent.built.restore.1);
+            tally.carried += u64::from(parent.built.stats.carry_points > 0);
+            tally.sdf += u64::from(frame.manifolds.iter().any(|m| m.body_b == SDF_SENTINEL));
+            tally.rows += u64::from(matches!(frame.remap, RemapSpec::Rows(_)));
+            tally.resets += u64::from(matches!(frame.remap, RemapSpec::Reset));
+            tally.cold += u64::from(!frame.warm);
+        }
+
+        /// G4-A: random frames, every mode against the parent path, and every path met.
+        #[test]
+        #[cfg(not(miri))]
+        fn s4_setup_matches_the_parent_path_on_random_frames() {
+            let modes = [
+                Mode::SerialFused,
+                Mode::Pool { workers: 2, tasks: 2 },
+                Mode::Pool { workers: 4, tasks: 5 },
+                Mode::Pool { workers: 8, tasks: 16 },
+            ];
+            let acc = std::cell::Cell::new(Tally::default());
+            proptest!(ProptestConfig::with_cases(96), |(seed in any::<u64>())| {
+                let mut tally = acc.get();
+                compare(&random_frame(seed, 256), &modes, &mut tally);
+                acc.set(tally);
+            });
+            let tally = acc.get();
+            println!("S4 G4-A tally: {tally:?}");
+            let t = &tally;
+            for (name, n) in [
+                ("dispatched builds", t.dispatched),
+                ("fused builds whose ranges searched below a cursor (a descent)", t.fused_descents),
+                ("frames with a restore hit", t.restore_hits),
+                ("shape F builds whose restore hits fell in two ranges", t.fused_restore_split),
+                ("non-strict read sides served by a dispatched build", t.non_strict_dispatched),
+                ("frames carrying a frozen manifold", t.carried),
+                ("frames with an SDF manifold", t.sdf),
+                ("Rows frames", t.rows),
+                ("Reset frames", t.resets),
+                ("warm-off frames", t.cold),
+            ] {
+                assert!(n > 0, "anti-vacuity: S4's comparison met no {name}: {t:?}");
+            }
+        }
+
+        /// G4-F: the setup's ranges on scoped std threads against the parent path, on fixed
+        /// seeds small enough for Miri — the SB and TB legs of the per-range raw writes. The seeds
+        /// must between them put shape F's restore hits in two ranges and adjacent laid-out
+        /// manifolds in different ranges, so the raw `plan` / `tags` / record writes of
+        /// neighbouring elements run on different threads (review O5), and meet the carry, a
+        /// non-strict read side, a Reset and warm start off.
+        #[test]
+        fn s4_miri_threads_match_the_parent_path() {
+            // Chosen by an untimed sweep of seeds 0..300 (W8S lane, commit 4): 0 carries a frozen
+            // manifold under shape F, 1 is warm-off, 3 a Reset, 15 puts shape F's restore hits in
+            // both ranges, 41 dispatches over a non-strict read side (P-a serial, the fill parallel).
+            let mut tally = Tally::default();
+            for seed in [0u64, 1, 3, 15, 41] {
+                compare(&random_frame(seed, 40), &[Mode::Threads(2), Mode::Threads(3)], &mut tally);
+            }
+            println!("S4 G4-F tally: {tally:?}");
+            let t = &tally;
+            assert!(
+                t.dispatched > 0
+                    && t.fused_descents > 0
+                    && t.fused_restore_split > 0
+                    && t.adjacent_split > 0
+                    && t.carried > 0
+                    && t.non_strict_dispatched > 0
+                    && t.resets > 0
+                    && t.cold > 0,
+                "anti-vacuity: the fixed seeds must dispatch shape F with a descent, put its restore \
+                 hits in two ranges and adjacent laid-out manifolds in different ranges, carry a \
+                 frozen manifold, and meet a non-strict read side, a Reset and warm start off: \
+                 {tally:?}"
+            );
+        }
     }

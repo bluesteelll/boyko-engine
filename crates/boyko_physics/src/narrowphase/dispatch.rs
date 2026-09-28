@@ -102,15 +102,16 @@
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use boyko_diag::profiling_abi::ZoneGuard;
 use boyko_diag::zone;
 use boyko_ecs::ecs::core::component::scratch::{ScratchColumn, ScratchSolveView};
-use boyko_threadpool::try_with_active_pool;
+use boyko_threadpool::{PoolInner, Scope, try_with_active_pool};
 
 use crate::manifold::{BodyIndex, Manifold};
 use crate::narrowphase::axis_cache::{AXIS_NONE, AxisHints, SAT_AXIS_COUNT};
 use crate::narrowphase::carry::{CarryIn, PairJoin, PairTag};
 use crate::narrowphase::reuse::{ReuseRecord, RowFrame, fill_row_frames};
-use crate::profiling::{PHYS_NP_AXIS_COMMIT, PHYS_NP_COMPACT, PHYS_NP_DISPATCH};
+use crate::profiling::{PHYS_NP_AXIS_COMMIT, PHYS_NP_COMPACT, PHYS_NP_DISPATCH, WaveStamps};
 use crate::components::ColliderShape;
 use crate::resources::{BodyState, Manifolds};
 use crate::sleep_sets::{NpCounts, NpSets, Route, RowCls, np_route, sensor_pair};
@@ -320,7 +321,15 @@ fn grow_stage(stage: &mut ScratchColumn<Manifold>, n: usize) {
 ///   guarantees.
 /// * Nothing holds a slice over the stage, the commit, the tags or the records until every chunk
 ///   of the step has returned (the scope's join, or `std::thread::scope`'s).
-pub(crate) unsafe fn np_chunk<const SETS: bool>(
+///
+/// `STAMPED` is read nowhere in the body. It is W8S's instantiation tag: the armed wave's stamped
+/// task calls `np_chunk::<SETS, true>`, a function of its own with closure-generic callees of its
+/// own, so the disarmed task's `np_chunk::<SETS, false>` keeps its single caller and the compiler
+/// inlines the same tree into it as before the instrument. Measured (the codegen receipt,
+/// 2026-09-26, release, codegen-units = 1): with one shared instantiation the disarmed task went
+/// from 1518 instructions to a 91-instruction call-out; forcing `inline(always)` on this body
+/// alone moved its callees out instead (337).
+pub(crate) unsafe fn np_chunk<const SETS: bool, const STAMPED: bool>(
     ctx: NpChunkCtx<'_>,
     chunk: usize,
     lo: usize,
@@ -586,8 +595,8 @@ pub(crate) fn try_parallel_sets<const SETS: bool>(
         } else {
             (&[], &[])
         };
+        let dispatch_zone = zone!(PHYS_NP_DISPATCH);
         {
-            let _zone = zone!(PHYS_NP_DISPATCH);
             // `ctx.meta` is cut to the step's chunk count, so a task reads `chunks` and `n`
             // from the context and captures two words: `&ctx` (it is `Sync` and outlives the
             // scope) and its chunk index. A task cell is then 16 bytes of header plus 16 of
@@ -599,30 +608,14 @@ pub(crate) fn try_parallel_sets<const SETS: bool>(
             // L10 (ruling W2): the restore route is L9's join over the restore pair source.
             let restore = ctx.join().restored(np.keys, np.tags, np.reuse);
             let ctx = ctx.with_sleep(np.cls, skips, restore, restores);
-            let ctx = &ctx;
-            pool.scope(|scope| {
-                for chunk in 0..chunks {
-                    scope.spawn(move || {
-                        let chunks = ctx.meta.len();
-                        let n = ctx.pairs.len();
-                        let (lo, hi) = chunk_bounds(chunk, chunks, n);
-                        debug_assert!(
-                            (chunk == 0 || lo == chunk_bounds(chunk - 1, chunks, n).1)
-                                && (chunk + 1 < chunks || hi == n),
-                            "invariant: the cuts partition [0, n)"
-                        );
-                        // SAFETY: `ctx` came from `prepare` for these pairs; the closed-form
-                        //   cuts partition `[0, n)` into ascending, disjoint ranges with
-                        //   distinct chunk indices, so no two tasks share a stage row, a
-                        //   commit row, a tag row, a record row or a `meta` slot; nothing takes
-                        //   a slice over the stage, the commit, the tags or the records until
-                        //   `pool.scope` has joined every task. On the `Sets` arm `ctx.skips`
-                        //   and `ctx.restores` hold one slot per chunk, and a chunk stores only
-                        //   its own; the restore join is shared read-only, like the carry's.
-                        unsafe { np_chunk::<SETS>(*ctx, chunk, lo, hi) }
-                    });
-                }
-            });
+            // W8S (armed only, ruling 3): the dispatch span's own guard decides the wave. An armed
+            // wave runs out of line with its record and closes the span at its join; a disarmed
+            // one is the scope the parallel narrowphase always opened, and its frame reserves no
+            // record slot.
+            match dispatch_zone {
+                None => np_wave::<SETS, false>(pool, &ctx, chunks, None),
+                Some(zone) => np_wave_stamped::<SETS>(pool, &ctx, chunks, zone),
+            }
         }
         {
             let _zone = zone!(PHYS_NP_COMPACT);
@@ -646,6 +639,105 @@ pub(crate) fn try_parallel_sets<const SETS: bool>(
         (chunks, counts)
     })
     .unwrap_or((0, NpCounts::default()))
+}
+
+/// The step's wave: ONE `pool.scope` over its chunk tasks, spawned by the disarmed loop or, when
+/// `STAMPED` with a record, by the stamped one. Two functions, two `np_chunk` instantiations: the
+/// disarmed arm is the task that was always spawned, and the only caller of its `np_chunk` (W8S's
+/// codegen receipt, G1-C). Each instantiation has one caller — [`try_parallel_sets`] the disarmed
+/// one, [`np_wave_stamped`] the armed one — and the scope is the physics slice's one site for both.
+#[inline]
+fn np_wave<const SETS: bool, const STAMPED: bool>(
+    pool: &PoolInner,
+    ctx: &NpChunkCtx<'_>,
+    chunks: usize,
+    stamps: Option<&WaveStamps>,
+) {
+    pool.scope(|scope| {
+        if STAMPED && let Some(stamps) = stamps {
+            spawn_chunks_stamped::<SETS>(scope, ctx, chunks, stamps);
+        } else {
+            spawn_chunks::<SETS>(scope, ctx, chunks);
+        }
+    });
+}
+
+/// [`np_wave`] for an armed step (W8S, ruling 3). The 8.3 KiB wave record lives in this frame,
+/// cold and out of line, so the disarmed dispatch frame never reserves a slot for it (review W1:
+/// an `Option` of the record in `try_parallel_sets` put two record slots in both narrowphase
+/// systems' frames on every step). The dispatch span (`zone`, moved in) closes at the join,
+/// before the record is reduced, so it reads the wave alone.
+#[cold]
+#[inline(never)]
+fn np_wave_stamped<const SETS: bool>(
+    pool: &PoolInner,
+    ctx: &NpChunkCtx<'_>,
+    chunks: usize,
+    zone: ZoneGuard,
+) {
+    let stamps = WaveStamps::new();
+    stamps.begin(pool.num_threads());
+    np_wave::<SETS, true>(pool, ctx, chunks, Some(&stamps));
+    stamps.joined();
+    drop(zone);
+    if let Some(reading) = stamps.reduce() {
+        reading.push_np();
+    }
+}
+
+/// Spawns the step's `chunks` chunk tasks into `scope`, each colliding its closed-form cut of the
+/// pairs through [`np_chunk`]: the loop the parallel narrowphase always ran, and the only caller of
+/// `np_chunk::<SETS, false>`, which its task inlines.
+#[inline]
+fn spawn_chunks<'s, 'a: 's, const SETS: bool>(scope: &Scope<'s>, ctx: &'s NpChunkCtx<'a>, chunks: usize) {
+    for chunk in 0..chunks {
+        scope.spawn(move || {
+            let chunks = ctx.meta.len();
+            let n = ctx.pairs.len();
+            let (lo, hi) = chunk_bounds(chunk, chunks, n);
+            debug_assert!(
+                (chunk == 0 || lo == chunk_bounds(chunk - 1, chunks, n).1)
+                    && (chunk + 1 < chunks || hi == n),
+                "invariant: the cuts partition [0, n)"
+            );
+            // SAFETY: `ctx` came from `prepare` for these pairs; the closed-form
+            //   cuts partition `[0, n)` into ascending, disjoint ranges with
+            //   distinct chunk indices, so no two tasks share a stage row, a
+            //   commit row, a tag row, a record row or a `meta` slot; nothing takes
+            //   a slice over the stage, the commit, the tags or the records until
+            //   `pool.scope` has joined every task. On the `Sets` arm `ctx.skips`
+            //   and `ctx.restores` hold one slot per chunk, and a chunk stores only
+            //   its own; the restore join is shared read-only, like the carry's.
+            unsafe { np_chunk::<SETS, false>(*ctx, chunk, lo, hi) }
+        });
+    }
+}
+
+/// [`spawn_chunks`] for an armed wave (W8S, ruling 3): the same tasks, each wrapped in
+/// `WaveStamps::task` over `stamps`, then the end of the spawn loop stamped. It calls its own
+/// `np_chunk::<SETS, true>`, so the disarmed task's instantiation keeps its single caller.
+#[cold]
+#[inline(never)]
+fn spawn_chunks_stamped<'s, 'a: 's, const SETS: bool>(
+    scope: &Scope<'s>,
+    ctx: &'s NpChunkCtx<'a>,
+    chunks: usize,
+    stamps: &'s WaveStamps,
+) {
+    for chunk in 0..chunks {
+        scope.spawn(move || {
+            stamps.task(|| {
+                let chunks = ctx.meta.len();
+                let n = ctx.pairs.len();
+                let (lo, hi) = chunk_bounds(chunk, chunks, n);
+                // SAFETY: as `spawn_chunks` — the same closed-form cuts of the same `ctx` from
+                //   `prepare`, disjoint rows and slots per chunk, nothing sliced until the join;
+                //   the stamps touch only the wave record's own atomics.
+                unsafe { np_chunk::<SETS, true>(*ctx, chunk, lo, hi) }
+            });
+        });
+    }
+    stamps.spawned();
 }
 
 /// The step has more candidate pairs than the staging column (7.06M rows natively), the
@@ -951,7 +1043,7 @@ mod tests {
             //   n, so the chunks' ranges are disjoint, and they run one after another on this
             //   thread; no slice over the stage, the commit, the tags or the records is taken
             //   until `compact`.
-            unsafe { np_chunk::<false>(ctx, chunk, cuts[chunk], cuts[chunk + 1]) };
+            unsafe { np_chunk::<false, false>(ctx, chunk, cuts[chunk], cuts[chunk + 1]) };
         }
         compact(m, chunks, |c| (cuts[c], cuts[c + 1]), &meta);
         m.box_axis_cache.commit_axes(&scene.pairs);
@@ -1346,7 +1438,7 @@ mod tests {
                         //   partition `[0, n)`, so the three threads write disjoint rows and
                         //   distinct `meta` slots; nothing reads the stage, the commit, the tags
                         //   or the records until `std::thread::scope` has joined all three.
-                        unsafe { np_chunk::<false>(ctx, chunk, lo, hi) }
+                        unsafe { np_chunk::<false, false>(ctx, chunk, lo, hi) }
                     });
                 }
             });
@@ -1489,7 +1581,7 @@ mod tests {
             //   thread; each writes only its own `meta`, `skips` and `restores` slot, and no
             //   slice over the stage, the commit, the tags or the records is taken until
             //   `compact`.
-            unsafe { np_chunk::<true>(ctx, chunk, cuts[chunk], cuts[chunk + 1]) };
+            unsafe { np_chunk::<true, false>(ctx, chunk, cuts[chunk], cuts[chunk + 1]) };
         }
         compact(m, chunks, |c| (cuts[c], cuts[c + 1]), &meta);
         m.box_axis_cache.commit_axes(&scene.pairs);
@@ -1644,7 +1736,7 @@ mod tests {
                     //   distinct `meta`, `skips` and `restores` slots; nothing reads the stage,
                     //   the commit, the tags or the records until `std::thread::scope` has joined
                     //   all three.
-                    unsafe { np_chunk::<true>(ctx, chunk, lo, hi) }
+                    unsafe { np_chunk::<true, false>(ctx, chunk, lo, hi) }
                 });
             }
         });

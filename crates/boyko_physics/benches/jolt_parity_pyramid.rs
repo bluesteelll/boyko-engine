@@ -162,6 +162,84 @@
 //! nameable outside the kernel, so the key is built by writing that index into a copy of the
 //! canary's own key.
 //!
+//! F is any positive fraction, above 1 included: W8S's wall ladder runs rungs of 0.5, 1, 1.5 and
+//! 2 × the smallest wall-gated effect (`docs/physics/perf-campaign/levers/scaling/01-DESIGN.md`
+//! §7), disarmed, and reads which rungs the wall resolves.
+//!
+//! # The in-zone canary (`--canary-zone Z --canary-ns N`, W8S)
+//!
+//! The span gate's own resolution check: the solver busy-waits N ns on the calling thread each
+//! time zone Z opens armed (`ColoredSoftStepSolver::set_zone_canary`). Z is one of
+//! `boyko_physics::profiling::CANARY_ZONES` by name — `phys_solve_build` and its four
+//! `phys_sb_*` sub-zones. Refused (exit 2) without `--arm-profiler`, since a disarmed zone never
+//! spins, and off the colored solver. A step whose span of Z reads below N × its samples is void
+//! (exit 3), and so is a run whose solver counted a different number of canary spins than Z's
+//! armed openings (`ColoredSoftStepSolver::zone_canary_spins`): the span check alone cannot see a
+//! canary that never ran when Z's own cost already exceeds N, which `phys_solve_build`'s does.
+//!
+//! # The query kernel (`--bp-kernel K`)
+//!
+//! Selects the tree broadphase's query kernel inside one binary (lever ruling 2026-09-24,
+//! `docs/physics/perf-campaign/levers/00-RULINGS.md`: "the runner gains `--bp-kernel` … The flag
+//! changes no default and no pose"), so a kernel A/B is timed same-binary. `rowwalk` is the per-row
+//! walk (`QueryKernel::RowWalk`), `leaflist` the per-leaf list (`QueryKernel::LeafList`, the tree's
+//! default), `leaflist-kd` tree F3's kernel (`QueryKernel::LeafListKd`: the leaf list's query over
+//! an active tree built in the kd median-split leaf order; opt-in, and pose-neutral against
+//! `leaflist` by F3's design). The value is parsed by name, never by an exhaustive match on
+//! `QueryKernel`, so a kernel the tree gains compiles here until it is named. Unset, the tree's own
+//! default stands.
+//!
+//! Refused (exit 2) unless the row's configuration resolves to the tree under `Manual` selection
+//! (`--broadphase tree`), where the kernel would be read: elsewhere the row would carry a kernel
+//! that never ran. With the flag, the run's cumulative `TreeDiag` must name the chosen kernel as the
+//! one that answered its active leaves and never the other, and must show the active tree built in
+//! the kd order exactly when the kernel is `leaflist-kd` (`kd_order_builds > 0`;
+//! `benches/broadphase.rs`'s `assert_kernel_receipt` rule, read over the whole run so a step whose
+//! rows were all withheld asleep voids nothing), or the run is void (exit 3). The summary carries
+//! `bp_kernel`, the three leaf receipts (`leaf_list_leaves`, `fallback_leaves`, `row_walk_leaves`)
+//! and `kd_order_builds` in `broadphase_tree`; a line prints the kernel and the tree's `TreeDiag`
+//! with `{:?}`.
+//!
+//! # The W8S instrument (armed)
+//!
+//! `boyko_physics::profiling`'s module docs carry the whole table. Per armed step the runner
+//! checks, besides the rows above: each `phys_sb_*` sub-zone 1 per solving step; the four
+//! wave counters (`phys_wave_ramp`, `_tail`, `_inflight`, `_lanes`) one sample per solving step,
+//! each the sum over the step's dispatched colour waves — wide colours × sweeps when the
+//! recomputed parallel gate holds (`parallel_solve`, W ≥ 2, the widest colour at least
+//! `WIDE_COLOR_MIN_SLOTS`, not the fast path), else 0 — with the in-flight and lane sums each in
+//! `[waves, waves × (W + 1)]` (the caller may be the dispatcher, one thread past the pool; a
+//! sample per wave overran the solve lane's region, `boyko_physics::profiling`'s module docs);
+//! `phys_color_scopes` equal to those waves;
+//! `phys_color_tasks` equal to the task count [`expected_color_tasks`] recomputes by the
+//! solver's own cut walk; `phys_wave_overflow` 0; the two route counters summing to the scopes;
+//! the ten histogram counters equal to the colours and slots recomputed per bin; the two S6
+//! counters 0 or 1, the P-b hit never without the graph hit; and the narrowphase's five wave
+//! counters one sample each exactly when it dispatched, its overflow 0. The review's seven
+//! (`01-DESIGN.md` §10.1b) are one sample per solving step (`phys_wave_join`, `_helped`,
+//! `_first_ramp`, `_first_tail`, `_pass_ramp`) or per dispatched narrowphase
+//! (`phys_np_wave_join`, `phys_np_route_worker`), and must satisfy: join ≤ tail on both sides,
+//! first tail ≤ tail, first ramp ≤ pass ramp ≤ ramp, helped ≤ the solve scopes, no helped wave
+//! ⇒ a ramp of 0, and the narrowphase route 0 or 1. The summary's `w8s`
+//! object carries their sums over the window (the ramp and tail in ns; the join and the
+//! imbalance, tail − join, per wave; the ramp per helped wave; the first wave's ramp and tail per
+//! step that dispatched; each pass's first ramp per pass, sweeps × those steps, since every sweep
+//! of a dispatching step dispatches the same wide colours), and `host` the logical
+//! core count (`std::thread::available_parallelism`; the physical count is the window driver's,
+//! cut Q6). The route counter classes a joiner by `boyko_threadpool::current_worker_id`: an id
+//! below the pool's worker count is the worker route, the dispatcher's `install` frame and an
+//! unattached thread are external, and a worker of another pool would read as a worker — the
+//! physics schedule creates none (cut Q4; `route_note` in the summary says so).
+//!
+//! **S4's setup wave.** Under the same gate, a step with at least two setup tasks' worth of
+//! points and cohorts fills its cohorts under one more `pool.scope`: `phys_setup_chunks` must equal
+//! the task count [`expected_setup_tasks`] recomputes (0 inline), the wave sums and the route
+//! counters count that scope besides the colours', and `phys_color_scopes` / `phys_color_tasks` do
+//! not. `phys_setup_stamped`, one sample exactly on a step whose setup dispatched, must equal the
+//! same count: it is the tasks the setup wave's record stamped, the one receipt that the reading
+//! the wave sums take in was stamped (review round 2, O1; `boyko_physics::profiling`'s module
+//! docs).
+//!
 //! # Flags
 //!
 //! ```text
@@ -194,8 +272,13 @@
 //! --frozen-by K                void unless every dynamic row is frozen on step K (R-S: 300;
 //!                              with --sleeping on)
 //! --arm-profiler               the armed profile run
-//! --canary-frac F              with --canary-ref-ns T: the canary spins F*T ns
+//! --canary-frac F              with --canary-ref-ns T: the canary spins F*T ns (F > 0)
 //! --canary-ref-ns T
+//! --canary-zone Z              with --canary-ns N and --arm-profiler: zone Z (phys_solve_build
+//! --canary-ns N                or a phys_sb_* sub-zone) spins N ns each armed opening (W8S)
+//! --bp-kernel rowwalk|leaflist|leaflist-kd
+//!                              select the tree query kernel (with --broadphase tree); unset, the
+//!                              tree's default; leaflist-kd is tree F3's kd leaf order
 //! --csv PATH                   the per-step CSV
 //! --pose-out PATH              write the final pose bytes (every dynamic body's full state)
 //! --expect-pose PATH           compare the final pose bytes with a file; exit 4 if they differ
@@ -338,18 +421,28 @@ use boyko_physics::components::{
 use boyko_physics::manifold::BodyIndex;
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::narrowphase::{NP_CHUNKS_PER_LANE, NP_MAX_CHUNKS, NP_MIN_PAIRS_PER_CHUNK};
-use boyko_physics::broadphase_tree::{BroadphaseTree, TreeDiag};
+use boyko_physics::broadphase_tree::{BroadphaseTree, QueryKernel, TreeDiag};
 use boyko_physics::plugin::{PhysicsStageKeys, add_physics_colored_solve, add_physics_systems};
 use boyko_physics::profiling::{
-    COUNTER_ZONE_COUNT, COUNTER_ZONES, PHYS_BP_ASSEMBLE, PHYS_BP_BUILD, PHYS_BP_MEMBERS,
-    PHYS_BP_PAIRS, PHYS_BP_QUERIED, PHYS_BP_QUERY, PHYS_BP_REBUILDS, PHYS_BP_VERIFY,
-    PHYS_COLOR_NARROW, PHYS_COLOR_WIDE, PHYS_GRAVITY, PHYS_INTEGRATE, PHYS_NP_AXIS_COMMIT,
-    PHYS_NP_CHUNKS, PHYS_NP_COMPACT, PHYS_NP_DISPATCH, PHYS_NP_FULL, PHYS_NP_MANIFOLDS,
-    PHYS_NP_PAIRS, PHYS_NP_POINTS, PHYS_NP_REUSED, PHYS_NP_SEP_HITS, PHYS_PASS_BIASED, PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_SLEEP_BEGIN,
-    PHYS_SLEEP_CLASSIFY, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD, PHYS_SLOTS_NARROW,
-    PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD,
-    PHYS_STORE, PHYS_WARM_APPLY, PHYS_WRITE_BACK, SPAN_ZONE_COUNT, SPAN_ZONES,
-    WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED,
+    CANARY_ZONES, COUNTER_ZONE_COUNT, COUNTER_ZONES, HIST_BINS, HIST_COLOR_ZONES, HIST_SLOT_ZONES,
+    PHYS_BP_ASSEMBLE, PHYS_BP_BUILD, PHYS_BP_MEMBERS, PHYS_BP_PAIRS, PHYS_BP_QUERIED,
+    PHYS_BP_QUERY, PHYS_BP_REBUILDS, PHYS_BP_VERIFY, PHYS_COLOR_NARROW, PHYS_COLOR_SCOPES,
+    PHYS_COLOR_TASKS, PHYS_COLOR_WIDE, PHYS_GRAVITY, PHYS_HIST_COLORS_GE256,
+    PHYS_HIST_COLORS_LT32, PHYS_HIST_COLORS_LT64, PHYS_HIST_COLORS_LT128, PHYS_HIST_COLORS_LT256,
+    PHYS_HIST_SLOTS_GE256, PHYS_HIST_SLOTS_LT32, PHYS_HIST_SLOTS_LT64, PHYS_HIST_SLOTS_LT128,
+    PHYS_HIST_SLOTS_LT256, PHYS_INTEGRATE, PHYS_NP_AXIS_COMMIT, PHYS_NP_CHUNKS, PHYS_NP_COMPACT,
+    PHYS_NP_DISPATCH, PHYS_NP_FULL, PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS,
+    PHYS_NP_REUSED, PHYS_NP_ROUTE_WORKER, PHYS_NP_SEP_HITS, PHYS_NP_WAVE_INFLIGHT,
+    PHYS_NP_WAVE_JOIN, PHYS_NP_WAVE_LANES, PHYS_NP_WAVE_OVERFLOW, PHYS_NP_WAVE_RAMP,
+    PHYS_NP_WAVE_TAIL, PHYS_PASS_BIASED, PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_ROUTE_EXTERNAL,
+    PHYS_ROUTE_WORKER, PHYS_S6_GRAPH_HIT, PHYS_S6_PB_HIT, PHYS_SB_BODIES, PHYS_SB_PA,
+    PHYS_SB_PB, PHYS_SB_PC, PHYS_SETUP_CHUNKS, PHYS_SETUP_STAMPED, PHYS_SLEEP_BEGIN,
+    PHYS_SLEEP_CLASSIFY, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE,
+    PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY, PHYS_WAVE_FIRST_RAMP, PHYS_WAVE_FIRST_TAIL,
+    PHYS_WAVE_HELPED, PHYS_WAVE_INFLIGHT, PHYS_WAVE_JOIN, PHYS_WAVE_LANES, PHYS_WAVE_OVERFLOW,
+    PHYS_WAVE_PASS_RAMP, PHYS_WAVE_RAMP, PHYS_WAVE_TAIL, PHYS_WRITE_BACK,
+    SETUP_CHUNKS_PER_LANE, SETUP_MAX_TASKS, SETUP_MIN_POINTS_PER_CHUNK, SPAN_ZONE_COUNT,
+    SPAN_ZONES, WIDE_COLOR_MIN_SLOTS, ZONES_COMPILED, hist_bin,
 };
 use boyko_physics::resources::{
     BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
@@ -403,6 +496,14 @@ const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// The self-check's step count.
 const SELF_CHECK_STEPS: usize = 3;
+/// The colour cut's lanes factor: `solver/colored.rs`'s `CHUNKS_PER_WORKER`, copied here as
+/// [`expected_np_chunks`] copies the narrowphase's rule, so the recomputed task count is a second
+/// derivation rather than a read of the solver.
+const COLOR_CHUNKS_PER_WORKER: usize = 6;
+/// The colour cut's work floor: `solver/colored.rs`'s `MIN_SLOTS_PER_CHUNK`.
+const COLOR_MIN_SLOTS_PER_CHUNK: usize = 64;
+/// The SIMD cohort width the cut snaps to: `solver/colored.rs`'s `COHORT`.
+const COLOR_COHORT: usize = 8;
 /// The steps a contact-reuse row must reuse a record in, or be void (L9 design, "Integration":
 /// J's pile settles before step ~188, so a reuse-on row that reused nothing here measured nothing).
 const REUSE_PROBE: (usize, usize) = (100, 500);
@@ -524,6 +625,12 @@ struct Args {
     arm_profiler: bool,
     canary_frac: Option<f64>,
     canary_ref_ns: Option<u64>,
+    /// W8S: the in-zone canary's zone, by name (`--canary-zone`).
+    canary_zone: Option<String>,
+    /// W8S: its busy-wait per armed opening (`--canary-ns`).
+    canary_zone_ns: Option<u64>,
+    /// `--bp-kernel`: the tree query kernel; `None` leaves the tree's default.
+    bp_kernel: Option<QueryKernel>,
     csv: Option<PathBuf>,
     pose_out: Option<PathBuf>,
     expect_pose: Option<PathBuf>,
@@ -550,7 +657,8 @@ fn usage_error(msg: &str) -> ExitCode {
          [--parallel-np on|off] [--contact-reuse on|off] [--reuse-distance D] \
          [--broadphase allpairs|tree|grid] [--sleeping [on|off]] [--sleep-skip off|sets] \
          [--threshold T] \
-         [--frozen-by K] [--arm-profiler] [--canary-frac F --canary-ref-ns T] [--csv PATH] \
+         [--frozen-by K] [--arm-profiler] [--canary-frac F --canary-ref-ns T] \
+         [--canary-zone Z --canary-ns N] [--bp-kernel rowwalk|leaflist|leaflist-kd] [--csv PATH] \
          [--pose-out PATH] [--expect-pose PATH] [--label TEXT]"
     );
     ExitCode::from(EXIT_USAGE)
@@ -594,6 +702,9 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     let mut arm_profiler = false;
     let mut canary_frac = None;
     let mut canary_ref_ns = None;
+    let mut canary_zone = None;
+    let mut canary_zone_ns = None;
+    let mut bp_kernel = None;
     let mut csv = None;
     let mut pose_out = None;
     let mut expect_pose = None;
@@ -684,6 +795,9 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
             "--arm-profiler" => arm_profiler = true,
             "--canary-frac" => canary_frac = Some(parse_num::<f64>("--canary-frac", it.next())?),
             "--canary-ref-ns" => canary_ref_ns = Some(parse_num::<u64>("--canary-ref-ns", it.next())?),
+            "--canary-zone" => canary_zone = Some(it.next().ok_or("--canary-zone needs a zone name")?),
+            "--canary-ns" => canary_zone_ns = Some(parse_num::<u64>("--canary-ns", it.next())?),
+            "--bp-kernel" => bp_kernel = Some(parse_bp_kernel(it.next())?),
             "--csv" => csv = Some(PathBuf::from(it.next().ok_or("--csv needs a path")?)),
             "--pose-out" => pose_out = Some(PathBuf::from(it.next().ok_or("--pose-out needs a path")?)),
             "--expect-pose" => {
@@ -715,6 +829,9 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
         arm_profiler,
         canary_frac,
         canary_ref_ns,
+        canary_zone,
+        canary_zone_ns,
+        bp_kernel,
         csv,
         pose_out,
         expect_pose,
@@ -723,6 +840,18 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     };
     validate(&args)?;
     Ok(Mode::Run(Box::new(args)))
+}
+
+/// `--bp-kernel`'s value, by name (module docs, "The query kernel"). A string match with an error
+/// arm, never an exhaustive match on `QueryKernel` (ruling Q10 of the W8S lane): a kernel the tree
+/// gains compiles here and stays unnamed until this match names it.
+fn parse_bp_kernel(value: Option<String>) -> Result<QueryKernel, String> {
+    match value.as_deref() {
+        Some("rowwalk") => Ok(QueryKernel::RowWalk),
+        Some("leaflist") => Ok(QueryKernel::LeafList),
+        Some("leaflist-kd") => Ok(QueryKernel::LeafListKd),
+        other => Err(format!("--bp-kernel: expected rowwalk|leaflist|leaflist-kd, got {other:?}")),
+    }
 }
 
 /// Refuses every combination a row could be mislabelled by.
@@ -795,11 +924,48 @@ fn validate(a: &Args) -> Result<(), String> {
     match (a.canary_frac, a.canary_ref_ns) {
         (None, None) => {}
         (Some(f), Some(t)) => {
-            if !(f > 0.0 && f < 1.0) || t == 0 {
-                return Err(format!("--canary-frac {f} must be in (0, 1) and --canary-ref-ns {t} > 0"));
+            if !(f > 0.0 && f.is_finite()) || t == 0 {
+                return Err(format!("--canary-frac {f} must be finite and > 0 and --canary-ref-ns {t} > 0"));
             }
         }
         _ => return Err("--canary-frac and --canary-ref-ns go together".into()),
+    }
+    if let Some(kernel) = a.bp_kernel {
+        // The configuration the row will run, resolved as `build` resolves it.
+        let mut cfg = PhysicsConfig::default();
+        configure(&mut cfg, a);
+        if cfg.broadphase != BroadphaseKind::Tree
+            || cfg.broadphase_select != BroadphaseSelectMode::Manual
+        {
+            return Err(format!(
+                "--bp-kernel {kernel:?} needs the tree broadphase under Manual selection \
+                 (--broadphase tree); this row resolves to {:?} / {:?}, so the kernel would never run",
+                cfg.broadphase, cfg.broadphase_select
+            ));
+        }
+    }
+    match (&a.canary_zone, a.canary_zone_ns) {
+        (None, None) => {}
+        (Some(z), Some(n)) => {
+            if canary_zone(z).is_none() {
+                let names: Vec<&str> = CANARY_ZONES.iter().map(|h| h.desc.name).collect();
+                return Err(format!("--canary-zone {z:?}: expected one of {names:?}"));
+            }
+            if n == 0 {
+                return Err("--canary-ns must be > 0".into());
+            }
+            if !a.arm_profiler {
+                return Err(
+                    "--canary-zone needs --arm-profiler: a disarmed zone never spins, so the row \
+                     would carry a canary it never ran"
+                        .into(),
+                );
+            }
+            if a.solver != SolverKind::Colored {
+                return Err("--canary-zone names a zone of the colored solve".into());
+            }
+        }
+        _ => return Err("--canary-zone and --canary-ns go together".into()),
     }
     if a.arm_profiler && !(ZONES_COMPILED && SYSTEM_ZONES_COMPILED) {
         return Err(format!(
@@ -814,6 +980,11 @@ fn validate(a: &Args) -> Result<(), String> {
         return Err(format!("--expect-pose: {} is not a file", p.display()));
     }
     Ok(())
+}
+
+/// The in-zone canary's zone named `name`, one of [`CANARY_ZONES`].
+fn canary_zone(name: &str) -> Option<&'static ZoneHandle> {
+    CANARY_ZONES.iter().copied().find(|h| h.desc.name == name)
 }
 
 // ── The scene ─────────────────────────────────────────────────────────────────
@@ -1110,6 +1281,15 @@ struct Shape {
     withheld: u64,
     /// Dynamic rows awake this step (`IslandSleep::is_row_awake`), `0` with sleeping off.
     awake_dynamic: u64,
+    /// W8S: the tasks one sweep's wide colours cut into, by [`expected_color_tasks`] (a colour
+    /// that is not dispatched still counts here; the check scales by the dispatch).
+    wide_tasks: u64,
+    /// W8S: colours per histogram bin, recomputed like the classes.
+    hist_colors: [u64; HIST_BINS],
+    /// W8S: their slots.
+    hist_slots: [u64; HIST_BINS],
+    /// S4: the setup tasks the step's gate spawns, by [`expected_setup_tasks`] (0 inline).
+    setup_tasks: u64,
 }
 
 /// Whether the step took the colored solve's no-awake fast path (L10 C3a), derived from public
@@ -1124,7 +1304,14 @@ fn fast_path(shape: &Shape, colored: bool, sleeping: bool) -> bool {
 /// excluded exactly as `build_columns` excludes them — the manifold's island is its dynamic side's
 /// — using the per-step decision `IslandSleep::is_island_frozen` reports (`end_step` does not
 /// change it, so it still describes the step that just ran).
-fn step_shape(world: &EcsMaster, colored: bool, sleeping: bool, bp_prev: &mut TreeDiag) -> Shape {
+fn step_shape(
+    world: &EcsMaster,
+    colored: bool,
+    sleeping: bool,
+    bp_prev: &mut TreeDiag,
+    lanes: usize,
+    simd_solve: bool,
+) -> Shape {
     // The stream the graph colours: `ConstraintGraph::color` indexes it (L10 C2a).
     let manifolds = world.resource::<Manifolds>().solver_manifolds();
     let bp = world.resource::<BroadphaseTree>().diag();
@@ -1157,33 +1344,114 @@ fn step_shape(world: &EcsMaster, colored: bool, sleeping: bool, bp_prev: &mut Tr
         (0..bodies.len()).filter(|&r| bodies[r].inv_mass != 0.0 && s.is_row_awake(r)).count() as u64
     });
     shape.colors = u64::from(graph.n_colors());
+    // W8S: one colour's laid-out groups' points, in the layout's order (the colour's manifolds
+    // ascending, frozen and empty ones skipped), reused across colours.
+    let mut groups: Vec<u32> = Vec::new();
+    // S4: every cohort's points, in the layout's order (a colour's groups, eight at a time).
+    let mut cohorts: Vec<u32> = Vec::new();
     for c in 0..graph.n_colors() {
-        let slots: u32 = graph
-            .color(c)
-            .iter()
-            .map(|&mi| &manifolds[mi as usize])
-            .filter(|m| {
-                sleep.is_none_or(|s| {
-                    let isl_a = graph.island_of(m.body_a.0);
-                    let isl = if isl_a != ConstraintGraph::NO_ISLAND {
-                        isl_a
-                    } else {
-                        graph.island_of(m.body_b.0)
-                    };
-                    isl == ConstraintGraph::NO_ISLAND || !s.is_island_frozen(isl)
+        groups.clear();
+        groups.extend(
+            graph
+                .color(c)
+                .iter()
+                .map(|&mi| &manifolds[mi as usize])
+                .filter(|m| {
+                    sleep.is_none_or(|s| {
+                        let isl_a = graph.island_of(m.body_a.0);
+                        let isl = if isl_a != ConstraintGraph::NO_ISLAND {
+                            isl_a
+                        } else {
+                            graph.island_of(m.body_b.0)
+                        };
+                        isl == ConstraintGraph::NO_ISLAND || !s.is_island_frozen(isl)
+                    })
                 })
-            })
-            .map(|m| u32::from(m.count))
-            .sum();
+                .map(|m| u32::from(m.count))
+                .filter(|&n| n != 0),
+        );
+        let slots: u32 = groups.iter().sum();
+        cohorts.extend(groups.chunks(COLOR_COHORT).map(|c| c.iter().sum::<u32>()));
         if slots >= WIDE_COLOR_MIN_SLOTS {
             shape.wide_colors += 1;
             shape.wide_slots += u64::from(slots);
+            shape.wide_tasks += expected_color_tasks(&groups, lanes, simd_solve);
         } else {
             shape.narrow_colors += 1;
             shape.narrow_slots += u64::from(slots);
         }
+        if let Some(bin) = hist_bin(slots) {
+            shape.hist_colors[bin] += 1;
+            shape.hist_slots[bin] += u64::from(slots);
+        }
     }
+    // S4's gate is the colour dispatch's P2 predicate (the caller's `parallel`) AND two tasks;
+    // here the task count, which the check scales by P2.
+    shape.setup_tasks = expected_setup_tasks(&cohorts, lanes);
     shape
+}
+
+/// The tasks S4's setup scope spawns for a step whose cohorts hold `cohorts` points each, in the
+/// layout's order, on `lanes` workers — 0 when the task count or the cut's range count is under two
+/// and P-c runs inline, before
+/// the P2 predicate the caller applies: this runner's copy of `setup_chunk_count` and
+/// `setup_cuts` (`solver/colored.rs`), from the exported `SETUP_*` constants.
+fn expected_setup_tasks(cohorts: &[u32], lanes: usize) -> u64 {
+    let points: usize = cohorts.iter().map(|&p| p as usize).sum();
+    let tasks = (lanes * SETUP_CHUNKS_PER_LANE)
+        .min(points / SETUP_MIN_POINTS_PER_CHUNK)
+        .min(cohorts.len())
+        .min(SETUP_MAX_TASKS);
+    if tasks < 2 {
+        return 0;
+    }
+    let target = points.div_ceil(tasks).max(1);
+    let (mut n, mut lo, mut acc) = (0usize, 0usize, 0usize);
+    for (k, &p) in cohorts.iter().enumerate() {
+        acc += p as usize;
+        if acc >= target && n + 1 < tasks {
+            n += 1;
+            lo = k + 1;
+            acc = 0;
+        }
+    }
+    if lo < cohorts.len() {
+        n += 1;
+    }
+    // A cut of one range runs inline: the solver opens no scope for it.
+    if n < 2 { 0 } else { n as u64 }
+}
+
+/// The tasks one dispatched colour spawns, whose laid-out groups hold `groups` points each in
+/// order: this runner's copy of `solve_color_parallel`'s chunk count and cut walk (the lanes and
+/// work terms, the group clamp, the per-chunk point quota and the SIMD cohort snapping), from
+/// the copied constants above, so a solver whose wave telemetry disagrees voids the row.
+fn expected_color_tasks(groups: &[u32], lanes: usize, simd_solve: bool) -> u64 {
+    let n_groups = groups.len();
+    if n_groups == 0 {
+        return 0;
+    }
+    let total: usize = groups.iter().map(|&g| g as usize).sum();
+    let by_work = (total / COLOR_MIN_SLOTS_PER_CHUNK).max(1);
+    let n_chunks = (lanes * COLOR_CHUNKS_PER_WORKER).min(by_work).clamp(1, n_groups);
+    let target = total.div_ceil(n_chunks).max(1);
+    let step = if simd_solve { COLOR_COHORT } else { 1 };
+    // `start[g]` is the point offset of group `g`, as the solver's `group_start` CSR.
+    let mut start = Vec::with_capacity(n_groups + 1);
+    start.push(0usize);
+    for &g in groups {
+        start.push(start.last().copied().unwrap_or(0) + g as usize);
+    }
+    let (mut lo, mut tasks) = (0usize, 0u64);
+    while lo < n_groups {
+        let mut hi = (lo + step).min(n_groups);
+        while hi < n_groups && start[hi] - start[lo] < target {
+            hi = (hi + step).min(n_groups);
+        }
+        tasks += 1;
+        lo = hi;
+    }
+    tasks
 }
 
 /// Σ over every lane and both regions of the samples pending and the samples refused: every push
@@ -1219,6 +1487,17 @@ struct Structure {
     /// L10's step mode is `Sets`: the colored pipeline with sleeping on and
     /// `PhysicsConfig::sleep_skip == Sets`, so the broadphase runs the sleep-skip's prologue.
     sets: bool,
+    /// `PhysicsConfig::parallel_solve`: with W ≥ 2 and a wide colour, the solve dispatches.
+    parallel_solve: bool,
+}
+
+/// What a counter's per-step total must be (the W8S rows): its value times the samples,
+/// anywhere in `[lo, hi]` times the samples, or anything (a timing).
+#[derive(Clone, Copy)]
+enum Want {
+    Exact(u64),
+    Within(u64, u64),
+    Any,
 }
 
 /// The narrowphase's chunk count for a step of `pairs` candidate pairs, or 0 when it runs the
@@ -1256,6 +1535,7 @@ fn check_step(
         brute_max_rows,
         contact_reuse,
         sets,
+        parallel_solve,
     } = st;
     let n_sys = zones.systems.len();
     for (k, (name, _)) in zones.systems.iter().enumerate() {
@@ -1307,6 +1587,10 @@ fn check_step(
         (&PHYS_BP_BUILD, tp),
         (&PHYS_BP_QUERY, tp),
         (&PHYS_BP_ASSEMBLE, tp),
+        (&PHYS_SB_BODIES, c),
+        (&PHYS_SB_PA, c),
+        (&PHYS_SB_PB, c),
+        (&PHYS_SB_PC, c),
     ];
     for &(handle, want) in &expected {
         let got = spans[span_index(handle)];
@@ -1329,37 +1613,275 @@ fn check_step(
             shape.non_box
         ));
     }
+    // W8S: the dispatched colour waves, recomputed — the solve's parallel gate (the flag, a pool
+    // of two, a wide colour, not the fast path) times every wide colour of every sweep.
+    let parallel = parallel_solve && lanes >= 2 && shape.wide_colors > 0;
+    let waves = c * run * u64::from(parallel) * shape.wide_colors * sweeps;
+    let tasks = c * run * u64::from(parallel) * shape.wide_tasks * sweeps;
+    // S4: the setup wave, under the same P2 predicate (the fast path lays nothing out, so it never
+    // reaches it).
+    let setup_tasks = c * u64::from(parallel) * shape.setup_tasks;
+    let solve_waves = waves + u64::from(setup_tasks >= 2);
+    let threads = lanes as u64 + 1;
+    let [h0, h1, h2, h3, h4] = shape.hist_colors;
+    let [s0, s1, s2, s3, s4] = shape.hist_slots;
     // On a tree-path step every row is queried or a member (`q + m == N`: these scenes have no
     // Wide or Excluded row), so the queried value is `N − members`.
-    let expected_counters: [(&ZoneHandle, u64, u64); COUNTER_ZONE_COUNT] = [
-        (&PHYS_SLOTS_WIDE, c, shape.wide_slots),
-        (&PHYS_SLOTS_NARROW, c, shape.narrow_slots),
-        (&PHYS_NP_PAIRS, 1, stream),
-        (&PHYS_NP_MANIFOLDS, 1, shape.manifolds),
-        (&PHYS_NP_POINTS, 1, shape.points),
-        (&PHYS_BP_PAIRS, 1, shape.pairs),
-        (&PHYS_NP_CHUNKS, 1, np_chunks),
-        (&PHYS_BP_QUERIED, tp, shape.rows - shape.bp_members),
-        (&PHYS_BP_MEMBERS, tp, shape.bp_members),
-        (&PHYS_BP_REBUILDS, tp, shape.bp_rebuilds),
-        (&PHYS_NP_REUSED, 1, cl.reused),
-        (&PHYS_NP_SEP_HITS, 1, cl.sep_hits),
-        (&PHYS_NP_FULL, 1, cl.full),
-        (&PHYS_SLEEP_HELD, l10, shape.held_rows),
+    let expected_counters: [(&ZoneHandle, u64, Want); COUNTER_ZONE_COUNT] = [
+        (&PHYS_SLOTS_WIDE, c, Want::Exact(shape.wide_slots)),
+        (&PHYS_SLOTS_NARROW, c, Want::Exact(shape.narrow_slots)),
+        (&PHYS_NP_PAIRS, 1, Want::Exact(stream)),
+        (&PHYS_NP_MANIFOLDS, 1, Want::Exact(shape.manifolds)),
+        (&PHYS_NP_POINTS, 1, Want::Exact(shape.points)),
+        (&PHYS_BP_PAIRS, 1, Want::Exact(shape.pairs)),
+        (&PHYS_NP_CHUNKS, 1, Want::Exact(np_chunks)),
+        (&PHYS_BP_QUERIED, tp, Want::Exact(shape.rows - shape.bp_members)),
+        (&PHYS_BP_MEMBERS, tp, Want::Exact(shape.bp_members)),
+        (&PHYS_BP_REBUILDS, tp, Want::Exact(shape.bp_rebuilds)),
+        (&PHYS_NP_REUSED, 1, Want::Exact(cl.reused)),
+        (&PHYS_NP_SEP_HITS, 1, Want::Exact(cl.sep_hits)),
+        (&PHYS_NP_FULL, 1, Want::Exact(cl.full)),
+        (&PHYS_SLEEP_HELD, l10, Want::Exact(shape.held_rows)),
+        (&PHYS_WAVE_RAMP, c, Want::Any),
+        (&PHYS_WAVE_TAIL, c, Want::Any),
+        (&PHYS_WAVE_INFLIGHT, c, Want::Within(solve_waves, solve_waves * threads)),
+        (&PHYS_WAVE_LANES, c, Want::Within(solve_waves, solve_waves * threads)),
+        (&PHYS_WAVE_OVERFLOW, c, Want::Exact(0)),
+        (&PHYS_COLOR_SCOPES, c, Want::Exact(waves)),
+        (&PHYS_COLOR_TASKS, c, Want::Exact(tasks)),
+        (&PHYS_ROUTE_WORKER, c, Want::Any),
+        (&PHYS_ROUTE_EXTERNAL, c, Want::Any),
+        (&PHYS_HIST_COLORS_LT32, c, Want::Exact(h0)),
+        (&PHYS_HIST_COLORS_LT64, c, Want::Exact(h1)),
+        (&PHYS_HIST_COLORS_LT128, c, Want::Exact(h2)),
+        (&PHYS_HIST_COLORS_LT256, c, Want::Exact(h3)),
+        (&PHYS_HIST_COLORS_GE256, c, Want::Exact(h4)),
+        (&PHYS_HIST_SLOTS_LT32, c, Want::Exact(s0)),
+        (&PHYS_HIST_SLOTS_LT64, c, Want::Exact(s1)),
+        (&PHYS_HIST_SLOTS_LT128, c, Want::Exact(s2)),
+        (&PHYS_HIST_SLOTS_LT256, c, Want::Exact(s3)),
+        (&PHYS_HIST_SLOTS_GE256, c, Want::Exact(s4)),
+        (&PHYS_S6_GRAPH_HIT, c, Want::Within(0, 1)),
+        (&PHYS_S6_PB_HIT, c, Want::Within(0, 1)),
+        (&PHYS_NP_WAVE_RAMP, np, Want::Any),
+        (&PHYS_NP_WAVE_TAIL, np, Want::Any),
+        (&PHYS_NP_WAVE_INFLIGHT, np, Want::Within(1, threads)),
+        (&PHYS_NP_WAVE_LANES, np, Want::Within(1, threads)),
+        (&PHYS_NP_WAVE_OVERFLOW, np, Want::Exact(0)),
+        (&PHYS_WAVE_JOIN, c, Want::Any),
+        (&PHYS_WAVE_HELPED, c, Want::Within(0, solve_waves)),
+        (&PHYS_WAVE_FIRST_RAMP, c, Want::Any),
+        (&PHYS_WAVE_FIRST_TAIL, c, Want::Any),
+        (&PHYS_WAVE_PASS_RAMP, c, Want::Any),
+        (&PHYS_NP_WAVE_JOIN, np, Want::Any),
+        (&PHYS_NP_ROUTE_WORKER, np, Want::Within(0, 1)),
+        (&PHYS_SETUP_CHUNKS, c, Want::Exact(setup_tasks)),
+        (&PHYS_SETUP_STAMPED, u64::from(setup_tasks >= 2), Want::Exact(setup_tasks)),
     ];
-    for &(handle, want_n, want_v) in &expected_counters {
+    for &(handle, want_n, want) in &expected_counters {
         let k = base + counter_index(handle);
         let (n, v) = (counts[k], values[k]);
-        if (n, v) != (want_n, want_v * want_n) {
+        let ok = n == want_n
+            && match want {
+                Want::Exact(x) => v == x * want_n,
+                Want::Within(lo, hi) => (lo * want_n..=hi * want_n).contains(&v),
+                Want::Any => true,
+            };
+        if !ok {
+            let expected = match want {
+                Want::Exact(x) => format!("{}", x * want_n),
+                Want::Within(lo, hi) => format!("{}..={}", lo * want_n, hi * want_n),
+                Want::Any => "any".to_owned(),
+            };
             return Err(format!(
-                "counter `{}` recorded (samples, value) = ({n}, {v}), the step has ({want_n}, {})",
-                handle.desc.name,
-                want_v * want_n
+                "counter `{}` recorded (samples, value) = ({n}, {v}), the step has ({want_n}, {expected})",
+                handle.desc.name
             ));
         }
     }
+    let value = |h: &ZoneHandle| values[base + counter_index(h)];
+    if value(&PHYS_ROUTE_WORKER) + value(&PHYS_ROUTE_EXTERNAL) != solve_waves {
+        return Err(format!(
+            "the route counters ({} worker + {} external) do not sum to the {solve_waves} solve \
+             scopes",
+            value(&PHYS_ROUTE_WORKER),
+            value(&PHYS_ROUTE_EXTERNAL)
+        ));
+    }
+    if value(&PHYS_S6_PB_HIT) > value(&PHYS_S6_GRAPH_HIT) {
+        return Err("S6: a P-b hit without a graph hit".to_owned());
+    }
+    // The review's relations (module docs, "The W8S instrument").
+    let (ramp, tail, join) = (value(&PHYS_WAVE_RAMP), value(&PHYS_WAVE_TAIL), value(&PHYS_WAVE_JOIN));
+    let (first_ramp, first_tail) = (value(&PHYS_WAVE_FIRST_RAMP), value(&PHYS_WAVE_FIRST_TAIL));
+    let (pass_ramp, helped) = (value(&PHYS_WAVE_PASS_RAMP), value(&PHYS_WAVE_HELPED));
+    let (np_join, np_tail) = (value(&PHYS_NP_WAVE_JOIN), value(&PHYS_NP_WAVE_TAIL));
+    let scopes = value(&PHYS_ROUTE_WORKER) + value(&PHYS_ROUTE_EXTERNAL);
+    let relations = [
+        (join <= tail, "phys_wave_join ≤ phys_wave_tail"),
+        (first_tail <= tail, "phys_wave_first_tail ≤ phys_wave_tail"),
+        (first_ramp <= pass_ramp && pass_ramp <= ramp, "first ramp ≤ pass ramp ≤ ramp"),
+        (helped <= scopes, "phys_wave_helped ≤ the solve scopes"),
+        (helped > 0 || ramp == 0, "no helped wave, yet a ramp"),
+        (np_join <= np_tail, "phys_np_wave_join ≤ phys_np_wave_tail"),
+    ];
+    let failed: Vec<&str> = relations.iter().filter(|(holds, _)| !holds).map(|&(_, what)| what).collect();
+    if !failed.is_empty() {
+        return Err(format!(
+            "W8S: {} fail (ramp {ramp}, tail {tail}, join {join}, first ramp {first_ramp}, \
+             first tail {first_tail}, pass ramp {pass_ramp}, helped {helped} of {scopes} scopes, \
+             np join {np_join}, np tail {np_tail})",
+            failed.join("; ")
+        ));
+    }
     Ok(())
 }
+
+/// The W8S telemetry summed over the summary's window (armed rows only).
+#[derive(Default)]
+struct W8sSums {
+    steps: u64,
+    waves: u64,
+    ramp: u64,
+    tail: u64,
+    inflight: u64,
+    lanes: u64,
+    overflow: u64,
+    scopes: u64,
+    tasks: u64,
+    route_worker: u64,
+    route_external: u64,
+    hist_colors: [u64; HIST_BINS],
+    hist_slots: [u64; HIST_BINS],
+    s6_graph: u64,
+    s6_pb: u64,
+    np_waves: u64,
+    np_ramp: u64,
+    np_tail: u64,
+    np_inflight: u64,
+    np_lanes: u64,
+    np_overflow: u64,
+    join: u64,
+    helped: u64,
+    first_ramp: u64,
+    first_tail: u64,
+    /// Steps that dispatched a colour wave: the first-wave readings' count.
+    first_waves: u64,
+    pass_ramp: u64,
+    /// Passes whose first colour wave dispatched: `sweeps` per step that dispatched one.
+    pass_waves: u64,
+    np_join: u64,
+    np_route_worker: u64,
+    setup_steps: u64,
+    setup_tasks: u64,
+}
+
+impl W8sSums {
+    /// Adds one armed step: `counts` / `values` per column, the counters after `base`; `sweeps`
+    /// is the step's passes (every sweep of a step whose colours dispatch dispatches the same
+    /// wide colours, so each pass has a first wave).
+    fn add(&mut self, counts: &[u64], values: &[u64], base: usize, sweeps: u64) {
+        let v = |h: &ZoneHandle| values[base + counter_index(h)];
+        let n = |h: &ZoneHandle| counts[base + counter_index(h)];
+        self.steps += 1;
+        self.join += v(&PHYS_WAVE_JOIN);
+        self.helped += v(&PHYS_WAVE_HELPED);
+        self.first_ramp += v(&PHYS_WAVE_FIRST_RAMP);
+        self.first_tail += v(&PHYS_WAVE_FIRST_TAIL);
+        self.pass_ramp += v(&PHYS_WAVE_PASS_RAMP);
+        let dispatched = v(&PHYS_COLOR_SCOPES) > 0;
+        self.first_waves += u64::from(dispatched);
+        self.pass_waves += if dispatched { sweeps } else { 0 };
+        self.np_join += v(&PHYS_NP_WAVE_JOIN);
+        self.np_route_worker += v(&PHYS_NP_ROUTE_WORKER);
+        // The wave readings are per-step sums; their waves are the step's solve scopes.
+        self.waves += v(&PHYS_ROUTE_WORKER) + v(&PHYS_ROUTE_EXTERNAL);
+        self.ramp += v(&PHYS_WAVE_RAMP);
+        self.tail += v(&PHYS_WAVE_TAIL);
+        self.inflight += v(&PHYS_WAVE_INFLIGHT);
+        self.lanes += v(&PHYS_WAVE_LANES);
+        self.overflow += v(&PHYS_WAVE_OVERFLOW) + v(&PHYS_NP_WAVE_OVERFLOW);
+        self.scopes += v(&PHYS_COLOR_SCOPES);
+        self.tasks += v(&PHYS_COLOR_TASKS);
+        self.route_worker += v(&PHYS_ROUTE_WORKER);
+        self.route_external += v(&PHYS_ROUTE_EXTERNAL);
+        for b in 0..HIST_BINS {
+            self.hist_colors[b] += v(HIST_COLOR_ZONES[b]);
+            self.hist_slots[b] += v(HIST_SLOT_ZONES[b]);
+        }
+        self.s6_graph += v(&PHYS_S6_GRAPH_HIT);
+        self.s6_pb += v(&PHYS_S6_PB_HIT);
+        self.np_waves += n(&PHYS_NP_WAVE_RAMP);
+        self.np_ramp += v(&PHYS_NP_WAVE_RAMP);
+        self.np_tail += v(&PHYS_NP_WAVE_TAIL);
+        self.np_inflight += v(&PHYS_NP_WAVE_INFLIGHT);
+        self.np_lanes += v(&PHYS_NP_WAVE_LANES);
+        self.np_overflow += v(&PHYS_NP_WAVE_OVERFLOW);
+        self.setup_steps += u64::from(v(&PHYS_SETUP_CHUNKS) > 0);
+        self.setup_tasks += v(&PHYS_SETUP_CHUNKS);
+    }
+
+    /// The summary's `w8s` object: sums, and per-wave means (the ramp and tail in ns).
+    fn json(&self, window: (usize, usize), tpn: f64) -> String {
+        let mean = |sum: u64, n: u64| if n == 0 { f64::NAN } else { sum as f64 / n as f64 };
+        let arr = |a: &[u64; HIST_BINS]| a.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+        format!(
+            "{{\"window\":[{},{}],\"steps\":{},\"waves\":{},\"ramp_ns_mean\":{},\
+             \"tail_ns_mean\":{},\"inflight_mean\":{},\"lanes_mean\":{},\"overflow\":{},\
+             \"color_scopes\":{},\"color_tasks\":{},\"route_worker\":{},\"route_external\":{},\
+             \"hist_bins\":[\"1-31\",\"32-63\",\"64-127\",\"128-255\",\"256+\"],\
+             \"hist_colors\":[{}],\"hist_slots\":[{}],\"s6_graph_hits\":{},\"s6_pb_hits\":{},\
+             \"np_waves\":{},\"np_ramp_ns_mean\":{},\"np_tail_ns_mean\":{},\
+             \"np_inflight_mean\":{},\"np_lanes_mean\":{},\
+             \"join_ns_mean\":{},\"imbalance_ns_mean\":{},\"helped_waves\":{},\
+             \"ramp_ns_mean_helped\":{},\"first_waves\":{},\"first_ramp_ns_mean\":{},\
+             \"first_tail_ns_mean\":{},\"pass_waves\":{},\"pass_ramp_ns_mean\":{},\
+             \"np_join_ns_mean\":{},\"np_imbalance_ns_mean\":{},\"np_route_worker\":{},\
+             \"setup_steps\":{},\"setup_tasks\":{}}}",
+            window.0,
+            window.1,
+            self.steps,
+            self.waves,
+            json_f64(mean(self.ramp, self.waves) / tpn),
+            json_f64(mean(self.tail, self.waves) / tpn),
+            json_f64(mean(self.inflight, self.waves)),
+            json_f64(mean(self.lanes, self.waves)),
+            self.overflow,
+            self.scopes,
+            self.tasks,
+            self.route_worker,
+            self.route_external,
+            arr(&self.hist_colors),
+            arr(&self.hist_slots),
+            self.s6_graph,
+            self.s6_pb,
+            self.np_waves,
+            json_f64(mean(self.np_ramp, self.np_waves) / tpn),
+            json_f64(mean(self.np_tail, self.np_waves) / tpn),
+            json_f64(mean(self.np_inflight, self.np_waves)),
+            json_f64(mean(self.np_lanes, self.np_waves)),
+            json_f64(mean(self.join, self.waves) / tpn),
+            json_f64(mean(self.tail.saturating_sub(self.join), self.waves) / tpn),
+            self.helped,
+            json_f64(mean(self.ramp, self.helped) / tpn),
+            self.first_waves,
+            json_f64(mean(self.first_ramp, self.first_waves) / tpn),
+            json_f64(mean(self.first_tail, self.first_waves) / tpn),
+            self.pass_waves,
+            json_f64(mean(self.pass_ramp, self.pass_waves) / tpn),
+            json_f64(mean(self.np_join, self.np_waves) / tpn),
+            json_f64(mean(self.np_tail.saturating_sub(self.np_join), self.np_waves) / tpn),
+            self.np_route_worker,
+            self.setup_steps,
+            self.setup_tasks,
+        )
+    }
+}
+
+/// What the route counter can and cannot tell apart (cut Q4), for the summary.
+const ROUTE_NOTE: &str = "worker = boyko_threadpool::current_worker_id() below the pool's worker \
+     count; the dispatcher's install frame and an unattached thread are external; a worker of \
+     another pool would read as a worker, and the physics schedule creates none";
 
 // ── Recording ─────────────────────────────────────────────────────────────────
 
@@ -1514,6 +2036,9 @@ fn self_check() -> ExitCode {
         arm_profiler: false,
         canary_frac: None,
         canary_ref_ns: None,
+        canary_zone: None,
+        canary_zone_ns: None,
+        bp_kernel: None,
         csv: None,
         pose_out: None,
         expect_pose: None,
@@ -1546,7 +2071,19 @@ fn run(args: &Args) -> ExitCode {
     let traffic_before = ring_traffic();
     let mut rig = build(args, canary_ns);
     let colored = args.solver == SolverKind::Colored;
-    let (substeps, relax, sleeping, sleep_skip, parallel_np, contact_reuse, config_json) = {
+    // W8S: the in-zone canary (validated: armed, colored, a known zone).
+    let zone_canary = args.canary_zone.as_deref().and_then(canary_zone).zip(args.canary_zone_ns);
+    if let Some((zone, ns)) = zone_canary {
+        assert!(
+            rig.world.resource_mut::<ColoredSoftStepSolver>().set_zone_canary(zone, ns),
+            "invariant: validate() admitted only a zone of CANARY_ZONES"
+        );
+    }
+    // `--bp-kernel`: the tree is inserted at plugin setup, so it is here before step 0.
+    if let Some(kernel) = args.bp_kernel {
+        rig.world.resource_mut::<BroadphaseTree>().set_query_kernel(kernel);
+    }
+    let (substeps, relax, sleeping, sleep_skip, parallel_np, contact_reuse, parallel_solve, simd_solve, config_json) = {
         let cfg = rig.world.resource::<PhysicsConfig>();
         let tree_brute_max_rows = rig.world.resource::<BroadphaseTree>().brute_max_rows();
         let json = format!(
@@ -1582,6 +2119,8 @@ fn run(args: &Args) -> ExitCode {
             cfg.sleep_skip,
             cfg.parallel_narrowphase,
             cfg.contact_reuse,
+            cfg.parallel_solve,
+            cfg.simd_solve,
             json,
         )
     };
@@ -1611,6 +2150,7 @@ fn run(args: &Args) -> ExitCode {
         brute_max_rows,
         contact_reuse,
         sets: colored && sleeping && sleep_skip == SleepSkip::Sets,
+        parallel_solve,
     };
     let mut bp_prev = rig.world.resource::<BroadphaseTree>().diag();
     let n_cols = zones.as_ref().map_or(0, ZoneTable::len);
@@ -1630,6 +2170,10 @@ fn run(args: &Args) -> ExitCode {
     // L10 C3a: armed steps whose recomputed structure is the no-awake fast path.
     let mut fast_steps_derived = 0u64;
     let mut first_frozen_step: Option<usize> = None;
+    // W8S: the telemetry over the summary's window, armed.
+    let mut w8s = W8sSums::default();
+    // W8S: the in-zone canary's zone openings over the armed run (its spin receipt).
+    let mut canary_openings = 0u64;
     // L10 C3b: the held set's witness (untimed): steps with a held row, and the most rows held.
     let (mut held_steps, mut held_rows_max) = (0u64, 0u32);
     // L10 C3c: the tree seam's witness (untimed): steps with a withheld pair, the most pairs
@@ -1709,19 +2253,43 @@ fn run(args: &Args) -> ExitCode {
                 before[k] = (acc.count, acc.total);
                 deltas.push((counts[k], values[k]));
             }
-            let shape = step_shape(&rig.world, colored, sleeping, &mut bp_prev);
+            let shape = step_shape(&rig.world, colored, sleeping, &mut bp_prev, args.workers, simd_solve);
             let fast = fast_path(&shape, colored, sleeping);
             fast_steps_derived += u64::from(fast);
-            let verdict = check_step(zones, &counts, &values, &shape, structure);
+            let mut verdict = check_step(zones, &counts, &values, &shape, structure);
+
+            let ns = |ticks: u64| ticks as f64 / tpn;
+            let n_sys = zones.systems.len();
+            let span = |h: &ZoneHandle| n_sys + span_index(h);
+            // W8S: the in-zone canary landed where the row says: its zone spun at least N ns per
+            // opening.
+            if let Some((zone, _)) = zone_canary {
+                canary_openings += counts[span(zone)];
+            }
+            if let Some((zone, canary)) = zone_canary
+                && verdict.is_ok()
+            {
+                let (k, total) = (counts[span(zone)], ns(values[span(zone)]));
+                if k > 0 && total < (canary * k) as f64 {
+                    verdict = Err(format!(
+                        "the in-zone canary: `{}` read {total:.0} ns over {k} spans, below {canary} ns each",
+                        zone.desc.name
+                    ));
+                }
+            }
             let void = verdict.is_err();
             if let Err(why) = verdict {
                 void_steps += 1;
                 first_void.get_or_insert_with(|| format!("step {step}: {why}"));
             }
-
-            let ns = |ticks: u64| ticks as f64 / tpn;
-            let n_sys = zones.systems.len();
-            let span = |h: &ZoneHandle| n_sys + span_index(h);
+            if (window.0..window.1).contains(&step) {
+                w8s.add(
+                    &counts,
+                    &values,
+                    n_sys + SPAN_ZONES.len(),
+                    structure.substeps * (1 + structure.relax),
+                );
+            }
             let sys_sum: f64 = (0..n_sys).map(|k| ns(values[k])).sum();
             let in_solve: f64 = [
                 &PHYS_SOLVE_BUILD,
@@ -1790,6 +2358,43 @@ fn run(args: &Args) -> ExitCode {
                  {fast_steps_derived}"
             )
         });
+    }
+    // `--bp-kernel`: the run's cumulative receipt names the chosen kernel as the one that answered
+    // its active leaves, and never the other, and shows the kd leaf order built iff the kernel is
+    // `LeafListKd` (`benches/broadphase.rs`'s `assert_kernel_receipt` rule), over the whole run
+    // (module docs, "The query kernel"). An `if` chain, never an exhaustive match (ruling Q10): a
+    // kernel the tree gains and this chain does not name voids the run.
+    if let Some(kernel) = args.bp_kernel {
+        let d = rig.world.resource::<BroadphaseTree>().diag();
+        let kd = d.kd_order_builds > 0;
+        let ok = if kernel == QueryKernel::RowWalk {
+            d.row_walk_leaves > 0 && d.leaf_list_leaves == 0 && d.fallback_leaves == 0 && !kd
+        } else if kernel == QueryKernel::LeafList {
+            d.leaf_list_leaves + d.fallback_leaves > 0 && d.row_walk_leaves == 0 && !kd
+        } else if kernel == QueryKernel::LeafListKd {
+            d.leaf_list_leaves + d.fallback_leaves > 0 && d.row_walk_leaves == 0 && kd
+        } else {
+            false
+        };
+        if !ok {
+            void_steps += 1;
+            first_void.get_or_insert_with(|| {
+                format!("--bp-kernel {kernel:?}: the tree's leaf receipt does not name it: {d:?}")
+            });
+        }
+    }
+    // W8S: the in-zone canary spun once per armed opening of its zone, and at least once.
+    if let Some((zone, _)) = zone_canary {
+        let spins = rig.world.resource::<ColoredSoftStepSolver>().zone_canary_spins();
+        if spins != canary_openings || spins == 0 {
+            void_steps += 1;
+            first_void.get_or_insert_with(|| {
+                format!(
+                    "the in-zone canary spun {spins} times over {canary_openings} armed openings of `{}`",
+                    zone.desc.name
+                )
+            });
+        }
     }
     let drops = rig.world.contains_resource::<Profiler>().then(|| rig.world.resource::<Profiler>().drops());
     if let Some(d) = drops
@@ -1900,7 +2505,8 @@ fn run(args: &Args) -> ExitCode {
     let bp_json = format!(
         "{{\"static_rebuilds\":{},\"sleeper_rebuilds\":{},\"evictions\":{},\"translations\":{},\
          \"patches\":{},\"hint_candidates\":{},\"wide_rows\":{},\"excluded_rows\":{},\
-         \"locator_resets\":{},\"members\":{}}}",
+         \"locator_resets\":{},\"members\":{},\"leaf_list_leaves\":{},\"fallback_leaves\":{},\
+         \"row_walk_leaves\":{},\"kd_order_builds\":{},\"bp_kernel\":{}}}",
         bp.static_rebuilds,
         bp.sleeper_rebuilds,
         bp.evictions,
@@ -1911,8 +2517,15 @@ fn run(args: &Args) -> ExitCode {
         bp.excluded_rows,
         bp.locator_resets,
         bp.members,
+        bp.leaf_list_leaves,
+        bp.fallback_leaves,
+        bp.row_walk_leaves,
+        bp.kd_order_builds,
+        json_str(&format!("{:?}", rig.world.resource::<BroadphaseTree>().query_kernel())),
     );
     let census_json = fallback_census_json();
+    let w8s_json = if armed { w8s.json(window, tpn) } else { "null".to_owned() };
+    let logical_cores = std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get);
 
     println!(
         "jolt_parity_pyramid: scene {} gap {} friction {} bodies {} workers {} solver {:?} cfg {:?} \
@@ -1957,6 +2570,12 @@ fn run(args: &Args) -> ExitCode {
             rig.world.resource::<BroadphaseTree>().sleeper_members()
         );
     }
+    if args.bp_kernel.is_some() {
+        println!(
+            "bp kernel {:?} (--bp-kernel): tree diag {bp:?}",
+            rig.world.resource::<BroadphaseTree>().query_kernel()
+        );
+    }
     if let Some(why) = &first_void {
         println!("VOID: {why}");
     }
@@ -1974,8 +2593,10 @@ fn run(args: &Args) -> ExitCode {
          \"void_steps\":{void_steps},\"first_void\":{},\"drops_total\":{},\
          \"disarmed_ring_traffic\":{},\"ticks_per_ns\":{},\"waves_total\":{waves_total},\
          \"first_frozen_step\":{},\"frozen_by\":{},\"awake_max_from_frozen_by\":{},\
-         \"broadphase_tree\":{bp_json},\"fallback_census\":{census_json},\
-         \"pair_classes\":{classes_json},\
+         \"broadphase_tree\":{bp_json},\"bp_kernel_flag\":{},\"fallback_census\":{census_json},\
+         \"pair_classes\":{classes_json},\"w8s\":{w8s_json},\
+         \"canary_zone\":{},\"canary_zone_ns\":{},\"route_note\":{},\
+         \"host\":{{\"logical_cores\":{logical_cores}}},\
          \"threads\":{{\"pool_workers\":{},\"dispatcher\":1,\"solve_on_dispatcher_steps\":\
          {solve_on_dispatcher_steps},\"armed_steps\":{},\"dispatcher_lane_samples_max\":{disp_max}}}}}",
         json_str(RUNNER_ID),
@@ -2019,6 +2640,10 @@ fn run(args: &Args) -> ExitCode {
         first_frozen_step.map_or_else(|| "null".to_owned(), |k| k.to_string()),
         args.frozen_by.map_or_else(|| "null".to_owned(), |k| k.to_string()),
         awake_after.map_or_else(|| "null".to_owned(), |k| k.to_string()),
+        args.bp_kernel.map_or_else(|| "null".to_owned(), |k| json_str(&format!("{k:?}"))),
+        args.canary_zone.as_deref().map_or_else(|| "null".to_owned(), json_str),
+        args.canary_zone_ns.map_or_else(|| "null".to_owned(), |n| n.to_string()),
+        json_str(ROUTE_NOTE),
         args.workers,
         armed_rows.len(),
     );

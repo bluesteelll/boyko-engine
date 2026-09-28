@@ -368,6 +368,14 @@ impl WarmRecords {
         self.recs.build_view()
     }
 
+    /// The records' write-capable raw base (S4's parallel fill): `ScratchColumn::solve_base`, with
+    /// no slice interposed, valid for [`len`](WarmRecords::keys)`()` records and address-stable
+    /// across a grow. A caller writes through it only records no other thread touches.
+    #[inline]
+    pub(crate) fn recs_base(&self) -> *mut WarmRecord {
+        self.recs.solve_base()
+    }
+
     /// Records whether the keys written this step are strictly increasing.
     #[inline]
     pub(crate) fn set_strict(&mut self, strict: bool) {
@@ -575,6 +583,82 @@ impl WarmLookup<'_> {
     }
 }
 
+/// The two cursors of one sequential walk of D2's search (S4): the read side's and the restore
+/// source's. A walk starts both at 0; [`WarmRecords::find`] is exact from any cursor, so a walk may
+/// start anywhere and visit lookups in any order — the cursors only decide its cost and its
+/// `backward` count.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SearchCursors {
+    /// The read side's cursor.
+    read: usize,
+    /// The restore source's cursor.
+    restore: usize,
+}
+
+/// One manifold's warm run (D2, ruling W1; L10 design 06 A3): the read side searched for the
+/// ordinal of the rows the manifold's pair held when the read side was written — D2's cursor
+/// search on a strict side, the cold index otherwise — and, on a miss, L10's restore source by the
+/// same routine with a cursor of its own. `manifold_pair` is `None` on a `Reset` and for an
+/// untranslatable pair: both miss without a search. Returns the run and whether it names
+/// positions of the restore source (the caller's `SRC_RESTORE`), and counts into `counts`.
+///
+/// The one per-manifold routine of both walks: [`plan_sources_restored`]'s stream-order pass and
+/// S4's fused search, which runs it per lane inside the parallel fill.
+#[inline]
+pub(crate) fn source_of(
+    m: &Manifold,
+    remap: RowRemap<'_>,
+    read: &WarmRecords,
+    index: &WarmIndex,
+    restore: Option<&WarmRecords>,
+    cursors: &mut SearchCursors,
+    counts: &mut PlanCounts,
+) -> (WarmRun, bool) {
+    search_source(m, remap, read, index, restore, cursors, counts)
+}
+
+/// [`source_of`]'s body, forced inline into [`plan_sources_restored`]'s loop only: the pass that
+/// every step whose setup does not dispatch (W = 1 always) runs over every manifold.
+///
+/// `inline(always)` is measured, not doctrinal (review W2, 2026-09-28, the parity runner's
+/// post-fat-LTO asm): with `source_of` called from that loop and from S4's fused walks, LLVM kept
+/// it out of line in the loop — 331 instructions, six pushes and pops, six stack-passed arguments
+/// and an sret reload per manifold, the cursors in memory — where the parent `fc4d17ea`, whose
+/// loop held this search in its own body, inlined all of it with the cursor in a register. The
+/// fused walks keep `source_of` and the inliner's own choice.
+#[inline(always)]
+fn search_source(
+    m: &Manifold,
+    remap: RowRemap<'_>,
+    read: &WarmRecords,
+    index: &WarmIndex,
+    restore: Option<&WarmRecords>,
+    cursors: &mut SearchCursors,
+    counts: &mut PlanCounts,
+) -> (WarmRun, bool) {
+    let Some((la, lb)) = remap.manifold_pair(m) else {
+        return (WarmRun::MISS, false);
+    };
+    let lookup = ord(la, lb);
+    let run = if read.strict() {
+        let found = read.find(&mut cursors.read, lookup);
+        counts.backward_searches += u32::from(found.backward);
+        found.run
+    } else {
+        index.run(lookup)
+    };
+    match restore {
+        Some(restore) if run == WarmRun::MISS => {
+            counts.restore_searches += 1;
+            let found = restore.find(&mut cursors.restore, lookup);
+            let hit = found.run != WarmRun::MISS;
+            counts.restore_hits += u32::from(hit);
+            (found.run, hit)
+        }
+        _ => (run, false),
+    }
+}
+
 /// [`plan_sources_restored`] with no restore source: the entry the L11 gates drive.
 #[cfg(test)]
 pub(crate) fn plan_sources(
@@ -656,40 +740,69 @@ pub(crate) fn plan_sources_restored(
             "invariant: one key per manifold"
         );
         let mut prev = 0u64;
-        let mut cursor = 0usize;
-        let mut restore_cursor = 0usize;
+        let mut cursors = SearchCursors::default();
         for (mi, m) in manifolds.iter().enumerate() {
             let key = ord(m.body_a.0, m.body_b.0);
             strict &= mi == 0 || key > prev;
             prev = key;
             keys_w[mi] = key;
-            // `manifold_pair` is `None` on a `Reset` and for an untranslatable pair:
-            // both miss without a search.
-            plan[mi] = match remap.manifold_pair(m) {
-                Some((la, lb)) => {
-                    let lookup = ord(la, lb);
-                    let run = if read.strict() {
-                        let found = read.find(&mut cursor, lookup);
-                        counts.backward_searches += u32::from(found.backward);
-                        found.run
-                    } else {
-                        index.run(lookup)
-                    };
-                    match restore {
-                        Some(restore) if run == WarmRun::MISS => {
-                            counts.restore_searches += 1;
-                            let found = restore.find(&mut restore_cursor, lookup);
-                            if found.run != WarmRun::MISS {
-                                counts.restore_hits += 1;
-                                on_restore(mi);
-                            }
-                            found.run
-                        }
-                        _ => run,
-                    }
-                }
-                None => WarmRun::MISS,
-            };
+            let (run, restored) =
+                search_source(m, remap, read, index, restore, &mut cursors, &mut counts);
+            if restored {
+                on_restore(mi);
+            }
+            plan[mi] = run;
+        }
+    }
+    write.set_strict(strict);
+    counts
+}
+
+/// S4's serial P-a1 (shape F): [`plan_sources_restored`] for a step whose solved manifolds' runs
+/// the parallel fill searches itself. Writes every manifold's ordinal and the write side's
+/// strictness exactly as that pass does, and the run of every manifold `laid_out` refuses — a
+/// frozen one, whose record the store carries from it, and an empty one — through the same
+/// [`source_of`] walk; a laid-out manifold's `plan` entry is left for its fill task. Requires a
+/// strict read side, warm start on and a lookup (not `Reset`): the fused search is D2's cursor
+/// search, which the cold index is not.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn plan_sources_unsolved(
+    manifolds: &[Manifold],
+    remap: RowRemap<'_>,
+    read: &WarmRecords,
+    write: &mut WarmRecords,
+    index: &WarmIndex,
+    plan: &mut [WarmRun],
+    restore: Option<&WarmRecords>,
+    laid_out: impl Fn(usize) -> bool,
+    mut on_restore: impl FnMut(usize),
+) -> PlanCounts {
+    debug_assert!(
+        read.strict() && !matches!(remap, RowRemap::Reset),
+        "invariant: the fused search serves a strict read side that is looked up"
+    );
+    let mut counts = PlanCounts::default();
+    let mut strict = true;
+    {
+        let mut keys_w = write.keys_mut();
+        let keys_w = keys_w.as_mut_slice();
+        debug_assert_eq!(keys_w.len(), manifolds.len(), "invariant: one key per manifold");
+        let mut prev = 0u64;
+        let mut cursors = SearchCursors::default();
+        for (mi, m) in manifolds.iter().enumerate() {
+            let key = ord(m.body_a.0, m.body_b.0);
+            strict &= mi == 0 || key > prev;
+            prev = key;
+            keys_w[mi] = key;
+            if laid_out(mi) {
+                continue;
+            }
+            let (run, restored) =
+                source_of(m, remap, read, index, restore, &mut cursors, &mut counts);
+            if restored {
+                on_restore(mi);
+            }
+            plan[mi] = run;
         }
     }
     write.set_strict(strict);

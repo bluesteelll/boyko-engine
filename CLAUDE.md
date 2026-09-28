@@ -209,12 +209,12 @@ The repair belongs in those two crates, not in the gate.
 
 The four commands above run **none** of the `#[ignore]`d tests.
 [tests/ignore_reasons_census.rs](tests/ignore_reasons_census.rs) prints what exists on every run
-(`cargo test -p boyko-engine --test ignore_reasons_census -- --nocapture`). Measured 2026-09-26 on
-the trunk at the `u/dm1` merge (first parent `efcda36d`; rung D-M0 adds one `solo` site to B3's
-`7d5a0015` reading, `u/fix-cq-sb`, L9 C4, PC-24 and L10b each add one `.rs` file, L10 adds six, C1 adds five, none of those adds a site; DM1 adds nineteen `.rs` files and twelve `gpu-windowed` sites), it read:
+(`cargo test -p boyko-engine --test ignore_reasons_census -- --nocapture`). Measured 2026-09-28 on
+the trunk at the `u/phys-w8s` merge (first parent `ff6869ec`; rung D-M0 adds one `solo` site to B3's
+`7d5a0015` reading, `u/fix-cq-sb`, L9 C4, PC-24, L10b and W8S each add one `.rs` file, L10 adds six, C1 adds five, none of those adds a site; DM1 adds nineteen `.rs` files and twelve `gpu-windowed` sites), it read:
 
 ```text
-[ignore census] 368 sites (204 plain, 164 cfg_attr) across 12 crates, 1857 .rs files walked, 0 waivers
+[ignore census] 368 sites (204 plain, 164 cfg_attr) across 12 crates, 1858 .rs files walked, 0 waivers
 [ignore classes] <none>=1, deferred=19, feature+gpu=1, feature+gpu-cap=3, feature+gpu-windowed+gpu-cap=4,
   feature+miri-slow=1, flaky=1, generator=7, gpu=29, gpu-cap=1, gpu-windowed=132, gpu-windowed+gpu-cap=1,
   miri-slow=130, miri-unsupported=27, slow=9, solo=2; scopes: miri-only=156, native=211, release-only=1;

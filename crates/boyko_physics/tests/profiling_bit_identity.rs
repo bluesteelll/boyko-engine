@@ -30,6 +30,13 @@
 //!    physics zone's and each system's lifetime sample count is above zero, each physics span
 //!    zone's own interval count rose, and the store dropped nothing.
 //!
+//! **The W8S spawn witness (cut review W4).** A disarmed wave must spawn the task it always
+//! spawned, not the stamped wrapper — and a wrapper whose stamps were never pushed would leave
+//! the lanes silent and the census green (the wrapper fits the same 128 B cell). So the process's
+//! count of per-wave records (`boyko_physics::profiling::wave_records_built`) must not move
+//! across the disarmed run and must rise across the armed one: a stamped task borrows a record,
+//! so a disarmed path that spawned the wrapper had to build one.
+//!
 //! Under a profile whose tier folds the zones, the armed run's correct reading is zero on every
 //! physics zone, and that is what is asserted instead.
 //!
@@ -41,6 +48,10 @@
 //!   push per step) — the disarmed clause can fail;
 //! * the relax-pass zone deleted: "never opened `phys_pass_relax`"; the broadphase counter
 //!   deleted: "no sample on `phys_bp_pairs`" — the armed clause can fail, for spans and counters.
+//!
+//! W8S's own reds (2026-09-26, msvc, debug) are recorded in commit (1) of `u/phys-w8s`: a
+//! wave counter pushed without its gate reds the disarmed clause, and the disarmed colour
+//! loop spawning the stamped wrapper reds the spawn witness.
 //!
 //! # How to run
 //!
@@ -59,7 +70,7 @@ use boyko_diag::profiling_abi::{ZoneHandle, any_armed};
 use boyko_diag::sample::{Region, overflow, pending};
 use boyko_ecs::ecs::core::profiling::SYSTEM_ZONES_COMPILED;
 use boyko_physics::components::RigidBody;
-use boyko_physics::profiling::{COUNTER_ZONES, SPAN_ZONES, ZONES_COMPILED};
+use boyko_physics::profiling::{COUNTER_ZONES, SPAN_ZONES, ZONES_COMPILED, wave_records_built};
 
 use harness::{Scene, run_single_test};
 
@@ -146,6 +157,7 @@ fn instrumented_step_is_bit_identical_armed_and_disarmed() {
     assert!(!any_armed(), "the disarmed run must start before anything in the process armed");
     let traffic_before = ring_traffic();
     let calls_before = span_calls();
+    let records_before = wave_records_built();
     let disarmed = {
         let mut scene = Scene::spawn();
         run(&mut scene, |_| {})
@@ -164,11 +176,23 @@ fn instrumented_step_is_bit_identical_armed_and_disarmed() {
             name_of(SPAN_ZONES[k])
         );
     }
+    assert_eq!(
+        wave_records_built(),
+        records_before,
+        "the disarmed run built a W8S wave record, so a disarmed wave spawned the stamped task"
+    );
 
     // ── 2. Armed ──
     let mut scene = Scene::spawn();
     scene.arm_profiler();
+    let records_armed = wave_records_built();
     let armed = run(&mut scene, Scene::fold);
+    if ZONES_COMPILED {
+        assert!(
+            wave_records_built() > records_armed,
+            "the armed run built no W8S wave record, so the spawn witness above proves nothing"
+        );
+    }
 
     for (step, (a, d)) in armed.iter().zip(&disarmed).enumerate() {
         if let Some(i) = (0..a.len()).find(|&i| a[i] != d[i]) {
