@@ -963,8 +963,9 @@ manifolds' warm source search fused into the fill tasks.
   handed to the solve, AND at least two setup ranges: `tasks = min(lanes × 6, points / 256, cohorts, 32)` at least
   two, and the cohorts, cut on cohort boundaries by a point quota of `points / tasks` (rounded up), falling into at
   least two ranges (a lumpy cut can make fewer than `tasks`; one range runs inline rather than spawning one task and
-  waiting). A step that fails it runs the parent's path byte for byte: P-a's stream-order search of every manifold,
-  then the fill over every cohort on the calling thread. Tying it to P2 keeps every step whose colours all run inline
+  waiting). A step that fails it runs the parent's path, its output byte for byte: P-a's stream-order search of every
+  manifold, then the fill over every cohort on the calling thread (its code as well since §10.5 W2, which restored
+  the parent's inlined search in the shipped build). Tying it to P2 keeps every step whose colours all run inline
   on that path, which is why S8b's exact `scope == 1 + np` needed no edit.
 - **The order**: sizing and tags (P-a, `phys_sb_pa`), the layout (P-b), then the sources and the fill (`phys_sb_pc`).
   The layout reads only the tags' counts and frozen flags, never `SRC_RESTORE`, so the sources can follow it, and
@@ -1012,6 +1013,18 @@ Follow-up commits on the lane, value-neutral; the receipts are the release lib a
   the sync commit once the impl-block index in a callee's mangled path is collapsed (S4 added impl blocks to
   `colored.rs`, so the colour task's call to `solve_color_dispatch` names `Mse_` where it named `Msc_`; the body is
   otherwise byte-equal, and the receipt, taken on commit 4 for the first time here, reads RED without that step).
+- **W2, the inline path's source search is inline again** (S4). S4 made `plan_sources_restored`'s loop call
+  `warm_records::source_of`, the routine the fused walks share; with three callers, fat LTO kept it out of line in
+  that loop, so the path every W = 1 step runs (and any step under the gate) paid, per manifold, six stack-passed
+  arguments, a 331-instruction call with six pushes and pops and an sret reload, the cursors in memory. The parent
+  `fc4d17ea` inlined the whole search there. The loop now calls `search_source`, `source_of`'s body under
+  `#[inline(always)]`, applied at the one site where the asm showed the inliner declining; the fused walks keep
+  `source_of` and the inliner's own choice. The P-a loop in the parity build: the parent's is 326 instructions with 0
+  calls and 16 key compares; commit 4's was a 50-instruction loop around the call; it is now 307 instructions, 0
+  calls, 16 key compares, and no `source_of`, `find` or `plan_sources*` symbol is left in the binary, as in the
+  parent. The inliner now also takes `source_of` into the fused serial walk, so `solve_colored_inner` grows from
+  6,581 to 8,271 instructions (the parent's is 6,668); that walk runs only on dispatched steps and searches only the
+  manifolds that are not laid out.
 
 ---
 

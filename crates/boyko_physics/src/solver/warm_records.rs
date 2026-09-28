@@ -614,6 +614,28 @@ pub(crate) fn source_of(
     cursors: &mut SearchCursors,
     counts: &mut PlanCounts,
 ) -> (WarmRun, bool) {
+    search_source(m, remap, read, index, restore, cursors, counts)
+}
+
+/// [`source_of`]'s body, forced inline into [`plan_sources_restored`]'s loop only: the pass that
+/// every step whose setup does not dispatch (W = 1 always) runs over every manifold.
+///
+/// `inline(always)` is measured, not doctrinal (review W2, 2026-09-28, the parity runner's
+/// post-fat-LTO asm): with `source_of` called from that loop and from S4's fused walks, LLVM kept
+/// it out of line in the loop — 331 instructions, six pushes and pops, six stack-passed arguments
+/// and an sret reload per manifold, the cursors in memory — where the parent `fc4d17ea`, whose
+/// loop held this search in its own body, inlined all of it with the cursor in a register. The
+/// fused walks keep `source_of` and the inliner's own choice.
+#[inline(always)]
+fn search_source(
+    m: &Manifold,
+    remap: RowRemap<'_>,
+    read: &WarmRecords,
+    index: &WarmIndex,
+    restore: Option<&WarmRecords>,
+    cursors: &mut SearchCursors,
+    counts: &mut PlanCounts,
+) -> (WarmRun, bool) {
     let Some((la, lb)) = remap.manifold_pair(m) else {
         return (WarmRun::MISS, false);
     };
@@ -725,7 +747,7 @@ pub(crate) fn plan_sources_restored(
             prev = key;
             keys_w[mi] = key;
             let (run, restored) =
-                source_of(m, remap, read, index, restore, &mut cursors, &mut counts);
+                search_source(m, remap, read, index, restore, &mut cursors, &mut counts);
             if restored {
                 on_restore(mi);
             }
