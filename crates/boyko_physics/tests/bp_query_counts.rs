@@ -38,9 +38,16 @@
 //!   model's J figures are pinned on the J snapshot with contact reuse off, the default's until
 //!   L9 C4; the default snapshot's J pin is the tree's reading (`G_LL3_PINS`).
 //!
+//! **The kd leaf order (F3, `levers/broadphase/06-DESIGN-F3.md`).** Every scene above is counted
+//! again under [`QueryKernel::LeafListKd`], the active tree built in the kd median-split order:
+//! G-F3-9 pins the design model's kd figures (`sim.py`'s `kd_order`, extracted beside its Morton
+//! figures by the same extraction, which reproduces every Morton pin above) on the three scenes
+//! the model was validated on, the default J snapshot's kd figures as the tree's reading, and that
+//! the kd order moves every scene's counts.
+//!
 //! A second test counts the same at the G4 small sizes (17, 64, 128, 256), over a scene with a
 //! multi-leaf static tree, and at 10k and 100k (the leaf list's fallback count; no oracle there),
-//! the C3b review's W5.
+//! the C3b review's W5 — on both leaf orders.
 //!
 //! Compiled only under the non-default `bp-query-counts` feature. Without it this file is
 //! empty and `running 0 tests` is the expected output — it is not a pass of anything.
@@ -130,9 +137,10 @@ fn copy_stage<I: Iterator<Item = (u32, u32, u32)>>((stream, records): (&[u32], I
     (stream.to_vec(), records.collect())
 }
 
-/// Drives `bodies` to the bench's steady state and counts that step's query pass, checking the
-/// step's pair set against AllPairs when `oracle` is set (not at 100k rows).
-fn count(label: &str, bodies: &[BodyState], oracle: bool) -> Counted {
+/// Drives `bodies` to the bench's steady state under the query kernel `kernel` and counts that
+/// step's query pass, checking the step's pair set against AllPairs when `oracle` is set (not at
+/// 100k rows).
+fn count(label: &str, bodies: &[BodyState], oracle: bool, kernel: QueryKernel) -> Counted {
     let n = bodies.len();
     let mut want = ContactPairs::with_capacity(0);
     if oracle {
@@ -143,6 +151,7 @@ fn count(label: &str, bodies: &[BodyState], oracle: bool) -> Counted {
     let mut tree = BroadphaseTree::with_capacity(n);
     tree.set_brute_max_rows(0);
     assert_eq!(tree.query_kernel(), QueryKernel::LeafList, "the default kernel is the leaf list");
+    tree.set_query_kernel(kernel);
     let mut out = ContactPairs::with_capacity(0);
     // `TREE_WARM_STEPS` untimed steps, then one more: the step every timed iteration repeats.
     let mut fallback_before = 0;
@@ -157,9 +166,15 @@ fn count(label: &str, bodies: &[BodyState], oracle: bool) -> Counted {
     }
     assert!(!out.pairs().is_empty(), "anti-vacuity: {label} must produce pairs");
     let fallback_leaves = tree.diag().fallback_leaves - fallback_before;
+    assert_eq!(
+        tree.diag().kd_order_builds > 0,
+        kernel == QueryKernel::LeafListKd,
+        "{label}: the kd leaf order ran iff {kernel:?} selects it"
+    );
 
-    // G-LL1 on the bench's scene: the step's query stage under each kernel, byte for byte. The
-    // leaf-list re-run leaves the pass's counts as the step's.
+    // G-LL1 on the bench's scene: the step's query stage under each kernel, byte for byte, over the
+    // step's tree (under `LeafListKd`, its kd leaves: a re-run does not rebuild). The leaf-list
+    // re-run leaves the pass's counts as the step's.
     let leaf_list_stage = copy_stage(tree.query_stage(QueryKernel::LeafList));
     let row_walk_stage = copy_stage(tree.query_stage(QueryKernel::RowWalk));
     assert!(!leaf_list_stage.0.is_empty(), "anti-vacuity: {label}'s stream holds segments");
@@ -273,6 +288,31 @@ const G_LL3_PINS: [(&str, [u64; 6]); 3] = [
 /// off no reuse code runs.
 const G_LL3_J_REUSE_OFF: (&str, [u64; 6]) =
     ("bp_g4_scene/tree/j100/reuse-off", [1953, 5663, 155, 6216, 15575, 9564]);
+
+/// G-F3-9: G-LL3 under [`QueryKernel::LeafListKd`] — the design model's kd figures (`sim.py`,
+/// `kd_order` on the active tree; `sim_out_kd.json`, `levers/broadphase/06-DESIGN-F3.md` §5) on the
+/// three scenes the model was validated on: the J snapshot with contact reuse off, uniform/1000
+/// and disparity/1000. The same extraction reproduces [`G_LL3_J_REUSE_OFF`] and the uniform and
+/// disparity rows of [`G_LL3_PINS`] bit for bit.
+///
+/// **Re-pin rule.** [`G_LL3_PINS`]'s, and these are the MODEL's figures: a mismatch on one scene
+/// means `kd_sort` and `kd_order` disagree (most likely a tie rule on the uniform lattice), which is
+/// investigated, never re-pinned to the tree's reading.
+const G_LL3_KD_PINS: [(&str, [u64; 6]); 3] = [
+    ("bp_g4_scene/tree_kd/j100/reuse-off", [1809, 3417, 155, 3968, 10603, 9564]),
+    ("bp_g4_uniform/tree_kd/1000", [1095, 2247, 0, 2688, 5394, 2400]),
+    ("bp_g4_disparity/tree_kd/1000", [1354, 3098, 0, 3568, 8861, 6706]),
+];
+
+/// G-F3-9 on the default J snapshot (contact reuse on): the tree's reading, not the model's —
+/// `sim.py` lives out of tree and was not run on the reuse-on dump.
+///
+/// **Recorded by the tree lane F3 (its C5), in [`G_LL3_PINS`]'s re-pin form.** Old: none (a new
+/// pin). New: the figures below. Command: `cargo test -p boyko-physics --features bp-query-counts
+/// --test bp_query_counts`, the `left` line of the assert below, msvc debug and release. Reason:
+/// the kd kernel is new, and the reuse-on J snapshot has no model reading. Re-pin rule:
+/// [`G_LL3_PINS`]'s.
+const G_LL3_KD_J: (&str, [u64; 6]) = ("bp_g4_scene/tree_kd/j100", [1777, 3511, 155, 4048, 10671, 9549]);
 
 /// The six G-LL3 figures of a pass.
 fn g_ll3_figures(c: &LeafListCounts) -> [u64; 6] {
@@ -440,9 +480,9 @@ fn query_counts_on_the_g4_scenes() {
     let snapshot_reuse_off = j_snapshot_with_reuse(Some(false));
 
     let counted = [
-        count(&format!("bp_g4_scene/tree/j{J_SNAPSHOT_STEPS}"), &snapshot, true),
-        count("bp_g4_uniform/tree/1000", &uniform, true),
-        count("bp_g4_disparity/tree/1000", &disparity, true),
+        count(&format!("bp_g4_scene/tree/j{J_SNAPSHOT_STEPS}"), &snapshot, true, QueryKernel::LeafList),
+        count("bp_g4_uniform/tree/1000", &uniform, true, QueryKernel::LeafList),
+        count("bp_g4_disparity/tree/1000", &disparity, true, QueryKernel::LeafList),
     ];
 
     // G-LL3: the pass's counts are the design model's.
@@ -460,7 +500,12 @@ fn query_counts_on_the_g4_scenes() {
 
     // G-LL3 on the reuse-off J snapshot: the pre-C4 figures, bit for bit.
     let (label, pins) = G_LL3_J_REUSE_OFF;
-    let reuse_off = count(&format!("bp_g4_scene/tree/j{J_SNAPSHOT_STEPS}/reuse-off"), &snapshot_reuse_off, true);
+    let reuse_off = count(
+        &format!("bp_g4_scene/tree/j{J_SNAPSHOT_STEPS}/reuse-off"),
+        &snapshot_reuse_off,
+        true,
+        QueryKernel::LeafList,
+    );
     assert_eq!(reuse_off.label, label, "the reuse-off pin names its scene");
     assert_eq!(reuse_off.fallback_leaves, 0, "{label}: no fallback at 1 241 rows");
     assert_eq!(reuse_off.leaf_list.collect_box_static, 0, "{label}: a one-level static tree needs no box test");
@@ -476,6 +521,46 @@ fn query_counts_on_the_g4_scenes() {
         g_ll3_figures(&counted[0].leaf_list),
         pins,
         "anti-vacuity: the default J snapshot (contact reuse on) differs from the reuse-off one"
+    );
+
+    // G-F3-9: the kd leaf order. The model's figures on its three scenes (every mismatching scene
+    // is reported, so a red names each), the tree's reading on the default J snapshot, and the kd
+    // order moving every scene's counts.
+    let kd_counted = [
+        count(
+            &format!("bp_g4_scene/tree_kd/j{J_SNAPSHOT_STEPS}/reuse-off"),
+            &snapshot_reuse_off,
+            true,
+            QueryKernel::LeafListKd,
+        ),
+        count("bp_g4_uniform/tree_kd/1000", &uniform, true, QueryKernel::LeafListKd),
+        count("bp_g4_disparity/tree_kd/1000", &disparity, true, QueryKernel::LeafListKd),
+    ];
+    let mut off_model = Vec::new();
+    for ((c, (label, pins)), morton) in kd_counted.iter().zip(G_LL3_KD_PINS).zip([&reuse_off, &counted[1], &counted[2]]) {
+        assert_eq!(c.label, label, "the kd pins are in scene order");
+        assert_eq!(c.fallback_leaves, 0, "{label}: no fallback at 1 000 rows");
+        let figures = g_ll3_figures(&c.leaf_list);
+        if figures != pins {
+            off_model.push(format!("{label}: {figures:?}, the model {pins:?}; full counts {:?}", c.leaf_list));
+        }
+        assert_ne!(figures, g_ll3_figures(&morton.leaf_list), "anti-vacuity: {label}: the kd order moves the counts");
+    }
+    assert!(off_model.is_empty(), "G-F3-9: G-LL3 under the kd order differs from the model's figures on {off_model:?}");
+    let kd_j = count(&format!("bp_g4_scene/tree_kd/j{J_SNAPSHOT_STEPS}"), &snapshot, true, QueryKernel::LeafListKd);
+    let (label, pins) = G_LL3_KD_J;
+    assert_eq!(kd_j.label, label, "the kd J pin names its scene");
+    assert_eq!(kd_j.fallback_leaves, 0, "{label}: no fallback at 1 241 rows");
+    assert_eq!(
+        g_ll3_figures(&kd_j.leaf_list),
+        pins,
+        "{label}: G-F3-9 on the default J snapshot, the tree's reading; full counts {:?}",
+        kd_j.leaf_list
+    );
+    assert_ne!(
+        g_ll3_figures(&kd_j.leaf_list),
+        g_ll3_figures(&counted[0].leaf_list),
+        "anti-vacuity: the kd order moves the default J snapshot's counts"
     );
 
     println!("\n## Summary against the design (04-DESIGN-REV2.md)\n");
@@ -513,6 +598,12 @@ fn query_counts_on_the_g4_scenes() {
     for c in counted.iter().chain([&reuse_off]) {
         println!("\n{}: leaf-list pass {:?}", c.label, c.leaf_list);
     }
+    println!("\n## The kd leaf order (F3)");
+    let kd_all: Vec<&Counted> = kd_counted.iter().chain([&kd_j]).collect();
+    for c in &kd_all {
+        println!("\n{}: leaf-list pass {:?}; G-LL3 figures {:?}", c.label, c.leaf_list, g_ll3_figures(&c.leaf_list));
+    }
+    print_before_after(&kd_counted);
 }
 
 /// The C3b review's W5: the same counts at the G4 small sizes (where the brute threshold and the
@@ -526,10 +617,12 @@ fn leaf_list_counts_at_the_small_and_large_sizes_and_over_a_multi_leaf_static_tr
         let oracle = n <= 10_000;
         let mut uniform = scene(n);
         make_dynamic(&mut uniform);
-        counted.push(count(&format!("bp_g4_uniform/tree/{n}"), &uniform, oracle));
         let mut disparity = disparity_scene(n);
         make_dynamic(&mut disparity);
-        counted.push(count(&format!("bp_g4_disparity/tree/{n}"), &disparity, oracle));
+        for (tree, kernel) in [("tree", QueryKernel::LeafList), ("tree_kd", QueryKernel::LeafListKd)] {
+            counted.push(count(&format!("bp_g4_uniform/{tree}/{n}"), &uniform, oracle, kernel));
+            counted.push(count(&format!("bp_g4_disparity/{tree}/{n}"), &disparity, oracle, kernel));
+        }
     }
     // Every fourth body of the uniform lattice dynamic, the rest static: after the warm-up the
     // statics are members and the dynamics query a static tree of many leaf nodes.
@@ -538,10 +631,12 @@ fn leaf_list_counts_at_the_small_and_large_sizes_and_over_a_multi_leaf_static_tr
         for (i, body) in mixed.iter_mut().enumerate() {
             body.inv_mass = if i % 4 == 0 { 1.0 } else { 0.0 };
         }
-        let c = count(&format!("mixed_static/tree/{n}"), &mixed, true);
-        assert!(c.statics.levels >= 2, "{}: a static tree with internal nodes", c.label);
-        assert!(c.leaf_list.collect_box_static > 0 && c.leaf_list.cands_static > 0, "{}: the static collection ran", c.label);
-        counted.push(c);
+        for (tree, kernel) in [("tree", QueryKernel::LeafList), ("tree_kd", QueryKernel::LeafListKd)] {
+            let c = count(&format!("mixed_static/{tree}/{n}"), &mixed, true, kernel);
+            assert!(c.statics.levels >= 2, "{}: a static tree with internal nodes", c.label);
+            assert!(c.leaf_list.collect_box_static > 0 && c.leaf_list.cands_static > 0, "{}: the static collection ran", c.label);
+            counted.push(c);
+        }
     }
     print_before_after(&counted);
     for c in &counted {
