@@ -989,7 +989,9 @@ manifolds' warm source search fused into the fill tasks.
   +1 dispatch scope per dispatching step (ruling 7), which moves `alloc_frame_census`'s S1c and S1e pins by exactly
   that scope and its chunk, re-derived by the census's fourth re-pin form (the counter-attributed shift) from the
   17 × 256-step long run, and `alloc_frame_attribution`'s row D per-frame structure subtracts the per-frame setup
-  count. No value moves: poses, `WarmSeedStats`, the setup digest and every other pin are the parent's.
+  count. UG-02's physics slice rises by one `pool.scope` and one `try_with_active_pool` site (§10.5 F1, a reasoned
+  `merge-raise` line in `docs/memory/ledger/ug02-pins.tsv`). No value moves: poses, `WarmSeedStats`, the setup digest
+  and every other pin are the parent's.
 - **O2, accepted**: shape F writes `plan[mi]` for every laid-out lane from colour-ordered tasks, onto 8-entry lines
   several tasks share (4.5k stores a step on J-T); ruling Q1's byte-equal claim on `plan` / `tags` needs them, and the
   store never reads them for a solved manifold. If window 8b reads S4 under its bar, dropping them (and narrowing G3 /
@@ -1025,6 +1027,21 @@ Follow-up commits on the lane, value-neutral; the receipts are the release lib a
   parent. The inliner now also takes `source_of` into the fused serial walk, so `solve_colored_inner` grows from
   6,581 to 8,271 instructions (the parent's is 6,668); that walk runs only on dispatched steps and searches only the
   manifolds that are not laid out.
+- **F1, UG-02's physics slice** (S4). `runtime_data_ledger_gate` pins the physics crate's hand-rolled `pool.scope`
+  and `try_with_active_pool` sites so that they only fall; S4 raised them from 5 and 5 to 7 and 6 without declaring
+  it, and the gate was red. The disarmed and the stamped setup waves now share one scope site,
+  `fill_scope::<STAMPED>` (the pattern of `solve_color_parallel`), which leaves one new scope site (ruling 7's setup
+  scope) and one new pool access (`fill_parallel`'s dispatch; the lanes probe in `build_columns` is the parent's,
+  moved from `solve_colored_inner`). They are declared by the pins file's own rule: rung `W8S-S4`, a `merge-raise`
+  line with its reason, 5 → 6 and 5 → 6, every other count and floor unchanged. Sharing one pool access between the
+  probe and the dispatch would put S4's whole P-c inside the pool closure, with a second call of it for the no-pool
+  path, around the W = 1 code W2 restores; it was not taken.
+- **Dispatcher bodies**, stated as G1-C asks, with the three fixes together: the parity build's
+  `solve_all_colors` grows from 560 to 641 instructions because the drop of the colour span's `Option<ZoneGuard>`,
+  a call after every colour at commit 4, is now inlined (a test of the `None` on the disarmed path; the armed close
+  calls `mint_cold`); W1 and F1 moved two of that glue's callers to a plain `ZoneGuard`, the likely cause, not
+  isolated per commit. `solve_color_stamped`
+  goes from 416 to 478. The lib asm's `solve_all_colors` goes from 485 to 500 and `solve_color_stamped` from 393 to 397.
 
 ---
 

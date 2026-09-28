@@ -2629,16 +2629,12 @@ impl ColoredSoftStepSolver {
             }
         };
         // `Some(reading)` when a pool ran the scope (`reading` is the armed wave's, else `None`).
-        let dispatched = try_with_active_pool(|pool| {
-            if zone.is_some() {
-                return Self::fill_parallel_stamped(pool, cuts, task, zone);
+        let dispatched = try_with_active_pool(|pool| match zone {
+            None => {
+                Self::fill_scope::<false, _>(pool, cuts, &task, None);
+                None
             }
-            pool.scope(|scope| {
-                for (i, &cut) in cuts.iter().enumerate() {
-                    scope.spawn(task(i, cut));
-                }
-            });
-            None
+            Some(zone) => Self::fill_parallel_stamped(pool, cuts, &task, zone),
         });
         match dispatched {
             Some(reading) => (true, reading),
@@ -2651,30 +2647,51 @@ impl ColoredSoftStepSolver {
         }
     }
 
+    /// The setup wave: ONE `pool.scope` (ruling 7) spawning `task(i, cut)` for every cut — as is
+    /// when disarmed, each wrapped by `WaveStamps::task` over `stamps` when `STAMPED` with a record.
+    /// Each instantiation has one caller — [`fill_parallel`](Self::fill_parallel) the disarmed one,
+    /// [`fill_parallel_stamped`](Self::fill_parallel_stamped) the armed one — so the scope is the
+    /// physics slice's one site for both, as [`solve_color_parallel`](Self::solve_color_parallel)'s
+    /// is for the colour waves.
+    #[inline]
+    fn fill_scope<const STAMPED: bool, F: FnOnce() + Send>(
+        pool: &boyko_threadpool::PoolInner,
+        cuts: &[(u32, u32)],
+        task: &(impl Fn(usize, (u32, u32)) -> F + Sync),
+        stamps: Option<&WaveStamps>,
+    ) {
+        pool.scope(|scope| {
+            if STAMPED && let Some(stamps) = stamps {
+                for (i, &cut) in cuts.iter().enumerate() {
+                    let t = task(i, cut);
+                    scope.spawn(move || stamps.task(t));
+                }
+                stamps.spawned();
+            } else {
+                for (i, &cut) in cuts.iter().enumerate() {
+                    scope.spawn(task(i, cut));
+                }
+            }
+        });
+    }
+
     /// [`fill_parallel`](Self::fill_parallel) for an armed setup wave (W8S, ruling 3): the same
-    /// tasks, each wrapped by `WaveStamps::task` over a record on this frame; P-c's span (`zone`)
-    /// closes at the join, and the record is reduced after it, so the reduction of at most
-    /// [`SETUP_MAX_TASKS`] stamps lands in `phys_solve_build`'s armed span and never in
-    /// `phys_sb_pc`'s. Only the reading leaves: the 8.3 KiB record never widens the build's frame
-    /// on the disarmed path.
+    /// tasks through [`fill_scope`](Self::fill_scope), each wrapped by `WaveStamps::task` over a
+    /// record on this frame; P-c's span (`zone`) closes at the join, and the record is reduced
+    /// after it, so the reduction of at most [`SETUP_MAX_TASKS`] stamps lands in
+    /// `phys_solve_build`'s armed span and never in `phys_sb_pc`'s. Only the reading leaves: the
+    /// 8.3 KiB record never widens the build's frame on the disarmed path.
     #[cold]
     #[inline(never)]
     fn fill_parallel_stamped<F: FnOnce() + Send>(
         pool: &boyko_threadpool::PoolInner,
         cuts: &[(u32, u32)],
-        task: impl Fn(usize, (u32, u32)) -> F + Sync,
-        zone: Option<ZoneGuard>,
+        task: &(impl Fn(usize, (u32, u32)) -> F + Sync),
+        zone: ZoneGuard,
     ) -> Option<WaveReading> {
         let stamps = WaveStamps::new();
         stamps.begin(pool.num_threads());
-        pool.scope(|scope| {
-            for (i, &cut) in cuts.iter().enumerate() {
-                let t = task(i, cut);
-                let stamps = &stamps;
-                scope.spawn(move || stamps.task(t));
-            }
-            stamps.spawned();
-        });
+        Self::fill_scope::<true, F>(pool, cuts, task, Some(&stamps));
         stamps.joined();
         drop(zone);
         stamps.reduce()
