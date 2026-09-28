@@ -31,6 +31,7 @@
 //! | `phys_wave_join` / `_helped` / `_first_ramp` / `_first_tail` / `_pass_ramp` (W8S review) | 1 each; join ≤ tail, first tail ≤ tail, first ramp ≤ pass ramp ≤ ramp, helped ≤ the solve scopes, and no helped wave means a ramp of 0 |
 //! | `phys_np_wave_join` / `phys_np_route_worker` (W8S review) | 1 each when the narrowphase dispatched; join ≤ its tail, route 0 or 1 |
 //! | `phys_setup_chunks` (S4) | 1, S4's setup task count recomputed from the cohorts (0 inline); a dispatched setup adds one wave to the wave sums and the route counters |
+//! | `phys_setup_stamped` (S4, review round 2 O1) | 1 when the setup dispatched (every step here), the same task count: the tasks the setup wave's record stamped |
 //! | every system of the schedule (its `SystemSpan`) | 1 |
 //!
 //! The W8S dispatch counters are recomputed from the same graph and manifolds: a colour
@@ -126,6 +127,7 @@ use boyko_physics::profiling::{
     PHYS_NP_WAVE_OVERFLOW, PHYS_NP_WAVE_RAMP, PHYS_NP_WAVE_TAIL, PHYS_PASS_BIASED,
     PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_ROUTE_EXTERNAL, PHYS_ROUTE_WORKER, PHYS_S6_GRAPH_HIT,
     PHYS_S6_PB_HIT, PHYS_SB_BODIES, PHYS_SB_PA, PHYS_SB_PB, PHYS_SB_PC, PHYS_SETUP_CHUNKS,
+    PHYS_SETUP_STAMPED,
     PHYS_SLEEP_BEGIN, PHYS_SLEEP_CLASSIFY, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD,
     PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY,
     PHYS_WAVE_FIRST_RAMP, PHYS_WAVE_FIRST_TAIL, PHYS_WAVE_HELPED, PHYS_WAVE_INFLIGHT,
@@ -590,6 +592,8 @@ fn physics_zones_count_exactly() {
             (&PHYS_NP_WAVE_JOIN, np, None),
             (&PHYS_NP_ROUTE_WORKER, np, None),
             (&PHYS_SETUP_CHUNKS, 1, Some(shape.setup_tasks)),
+            // Review round 2, O1: the setup wave's record stamped every task it spawned.
+            (&PHYS_SETUP_STAMPED, 1, Some(shape.setup_tasks)),
         ];
         let mut totals = [0u64; COUNTER_ZONE_COUNT];
         // Every mismatch of the step, reported together (module docs).

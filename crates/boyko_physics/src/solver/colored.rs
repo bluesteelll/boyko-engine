@@ -117,8 +117,8 @@ use crate::profiling::{
     PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_S6_GRAPH_HIT, PHYS_S6_PB_HIT, PHYS_SB_BODIES,
     PHYS_SB_PA, PHYS_SB_PB, PHYS_SB_PC, PHYS_SLEEP_BEGIN, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE,
     PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY,
-    PHYS_SETUP_CHUNKS, PHYS_WRITE_BACK, WaveReading, WaveStamps, WaveTally, ZoneCanary, counter,
-    hist_bin,
+    PHYS_SETUP_CHUNKS, PHYS_SETUP_STAMPED, PHYS_WRITE_BACK, WaveReading, WaveStamps, WaveTally,
+    ZoneCanary, counter, hist_bin,
 };
 use crate::resources::{
     BodyState, ConstraintGraph, IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
@@ -2680,7 +2680,9 @@ impl ColoredSoftStepSolver {
     /// record on this frame; P-c's span (`zone`) closes at the join, and the record is reduced
     /// after it, so the reduction of at most [`SETUP_MAX_TASKS`] stamps lands in
     /// `phys_solve_build`'s armed span and never in `phys_sb_pc`'s. Only the reading leaves: the
-    /// 8.3 KiB record never widens the build's frame on the disarmed path.
+    /// 8.3 KiB record never widens the build's frame on the disarmed path. The reading's task
+    /// count is pushed as `phys_setup_stamped` (review round 2, O1): the one receipt that the
+    /// reading the step's wave sums take in was stamped.
     #[cold]
     #[inline(never)]
     fn fill_parallel_stamped<F: FnOnce() + Send>(
@@ -2694,7 +2696,9 @@ impl ColoredSoftStepSolver {
         Self::fill_scope::<true, F>(pool, cuts, task, Some(&stamps));
         stamps.joined();
         drop(zone);
-        stamps.reduce()
+        let reading = stamps.reduce();
+        counter!(PHYS_SETUP_STAMPED, reading.map_or(0, |r| r.tasks));
+        reading
     }
 
     /// S4, test builds: runs `cuts` on scoped std threads, one per range — the pool-free twin of

@@ -987,7 +987,8 @@ manifolds' warm source search fused into the fill tasks.
 - **Counters**: `ColoredSoftStepSolver::setup_dispatches()` (the `narrowphase_dispatches` pattern) and the armed
   counter `phys_setup_chunks` (the range count, 0 inline). An armed setup wave is stamped like a colour wave; its
   reading joins the step's wave sums and routes (not the colour scopes, not B1's first-wave or pass counters), and it
-  is reduced after `phys_sb_pc` closes, inside `phys_solve_build`'s armed span.
+  is reduced after `phys_sb_pc` closes, inside `phys_solve_build`'s armed span. Its task count is a counter of its
+  own since review round 2, `phys_setup_stamped` (§10.6 O1).
 - **Declared changes**: `SetupCounters::backward_searches` counts per range (its readers are `> 0` anti-vacuity gates);
   +1 dispatch scope per dispatching step (ruling 7), which moves `alloc_frame_census`'s S1c and S1e pins by exactly
   that scope and its chunk, re-derived by the census's fourth re-pin form (the counter-attributed shift) from the
@@ -1062,6 +1063,25 @@ Follow-up commits on the lane, value-neutral; the receipts are the release lib a
   (`0x6cbe24bf8fafda26`) are pose-equal between `leaflist` and `leaflist-kd` at W 1 and 8. The receipt's kd clause
   was shown able to fail both ways: with the flag's `LeafListKd` applied as `LeafList`, and with `leaflist`
   applied as `LeafListKd`, the run is void (exit 3), and with the clause dropped each of those runs passes.
+- **O1, the setup wave's stamps are gated** (commit 4's instrument). Commit 4 says the setup wave pushes commit (1)'s
+  per-wave counters too, and no gate could fail on it: with the armed wave spawned unstamped (`fill_scope::<false>`
+  under a record), the record still reduced to a reading — no task, a tail and a join equal to the join's absolute
+  tick, since neither the spawn-loop stamp nor a task stamp was ever taken — and that reading entered the step's
+  ramp, tail and join sums, which window 8b's split rows read. Every check passed: the tail and join are `Any`,
+  `join ≤ tail` holds with equality, the in-flight and lane sums over about a hundred colour waves absorb one zero,
+  and `phys_setup_chunks` counts the ranges spawned, not the record. The cold armed arm,
+  `fill_parallel_stamped`, now pushes the reading's task count as `phys_setup_stamped` (one sample on a step whose
+  setup dispatched, the forty-ninth physics counter), and the parity runner and `profiling_zone_counts` check it
+  exactly against the setup task count they recompute, the value `phys_setup_chunks` must also have. Red first: with
+  the wave unstamped, `profiling_zone_counts` fails ("`phys_setup_stamped` totalled 0, the step has 3") and the
+  runner's armed J-T voids every step at W 2, 4 and 8 (exit 3); with the push removed both fail on the missing
+  sample, and `profiling_bit_identity` reports the counter silent. The disarmed path is unchanged: the codegen
+  receipt is green on its twelve classes against the round's parent with `solve_all_colors`, `solve_colored_inner`
+  and `solve_color_stamped` byte-identical, and in the lib asm only `fill_parallel_stamped` changes (and panic
+  locations' line numbers). In the parity build two `held_store` sort instantiations (`ipnsort` over `RestoreSort`
+  and `KeptPair`) change their run-reversal loop's register use (116 → 122 and 124 → 139 instructions); they are
+  identical in the one-unit lib asm, so the likely cause is the parity build's codegen-unit placement, which a new
+  function moves, not added work.
 
 ---
 

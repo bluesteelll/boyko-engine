@@ -235,7 +235,10 @@
 //! points and cohorts fills its cohorts under one more `pool.scope`: `phys_setup_chunks` must equal
 //! the task count [`expected_setup_tasks`] recomputes (0 inline), the wave sums and the route
 //! counters count that scope besides the colours', and `phys_color_scopes` / `phys_color_tasks` do
-//! not.
+//! not. `phys_setup_stamped`, one sample exactly on a step whose setup dispatched, must equal the
+//! same count: it is the tasks the setup wave's record stamped, the one receipt that the reading
+//! the wave sums take in was stamped (review round 2, O1; `boyko_physics::profiling`'s module
+//! docs).
 //!
 //! # Flags
 //!
@@ -433,8 +436,8 @@ use boyko_physics::profiling::{
     PHYS_NP_WAVE_JOIN, PHYS_NP_WAVE_LANES, PHYS_NP_WAVE_OVERFLOW, PHYS_NP_WAVE_RAMP,
     PHYS_NP_WAVE_TAIL, PHYS_PASS_BIASED, PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_ROUTE_EXTERNAL,
     PHYS_ROUTE_WORKER, PHYS_S6_GRAPH_HIT, PHYS_S6_PB_HIT, PHYS_SB_BODIES, PHYS_SB_PA,
-    PHYS_SB_PB, PHYS_SB_PC, PHYS_SETUP_CHUNKS, PHYS_SLEEP_BEGIN, PHYS_SLEEP_CLASSIFY,
-    PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE,
+    PHYS_SB_PB, PHYS_SB_PC, PHYS_SETUP_CHUNKS, PHYS_SETUP_STAMPED, PHYS_SLEEP_BEGIN,
+    PHYS_SLEEP_CLASSIFY, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD, PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE,
     PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY, PHYS_WAVE_FIRST_RAMP, PHYS_WAVE_FIRST_TAIL,
     PHYS_WAVE_HELPED, PHYS_WAVE_INFLIGHT, PHYS_WAVE_JOIN, PHYS_WAVE_LANES, PHYS_WAVE_OVERFLOW,
     PHYS_WAVE_PASS_RAMP, PHYS_WAVE_RAMP, PHYS_WAVE_TAIL, PHYS_WRITE_BACK,
@@ -1673,6 +1676,7 @@ fn check_step(
         (&PHYS_NP_WAVE_JOIN, np, Want::Any),
         (&PHYS_NP_ROUTE_WORKER, np, Want::Within(0, 1)),
         (&PHYS_SETUP_CHUNKS, c, Want::Exact(setup_tasks)),
+        (&PHYS_SETUP_STAMPED, u64::from(setup_tasks >= 2), Want::Exact(setup_tasks)),
     ];
     for &(handle, want_n, want) in &expected_counters {
         let k = base + counter_index(handle);

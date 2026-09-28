@@ -104,10 +104,10 @@
 //!
 //! # The W8S telemetry (armed only)
 //!
-//! Thirty-four more counters read the dispatch machinery itself (W8S instruments 2 to 4,
-//! `levers/scaling/01-DESIGN.md` §7, the seven its review added, §10.1b, and S4's setup
-//! counter). Each is pushed from the thread that called the solve or the narrowphase, never
-//! from a worker's task (ruling 3, 2026-09-26):
+//! Thirty-five more counters read the dispatch machinery itself (W8S instruments 2 to 4,
+//! `levers/scaling/01-DESIGN.md` §7, the seven its review added, §10.1b, and S4's two setup
+//! counters, §10.4 and §10.6). Each is pushed from the thread that called the solve or the
+//! narrowphase, never from a worker's task (ruling 3, 2026-09-26):
 //!
 //! | Counter | Samples | Value per sample |
 //! |---|---|---|
@@ -129,6 +129,7 @@
 //! | [`PHYS_NP_WAVE_JOIN`] | 1 when the narrowphase dispatched | its wave's join latency, as [`PHYS_WAVE_JOIN`]'s; at most [`PHYS_NP_WAVE_TAIL`] |
 //! | [`PHYS_NP_ROUTE_WORKER`] | 1 when the narrowphase dispatched | 1 when its wave's joiner was a worker of the pool, else 0 (the colour waves' [`PHYS_ROUTE_WORKER`] rule) |
 //! | [`PHYS_SETUP_CHUNKS`] | 1 per solving step | the tasks S4's setup scope spawned: 0 when P-c ran inline, else `2..=`[`SETUP_MAX_TASKS`] |
+//! | [`PHYS_SETUP_STAMPED`] | 1 when the setup scope dispatched | the tasks the setup wave's record stamped: every task it spawned, so [`PHYS_SETUP_CHUNKS`]'s value on that step |
 //!
 //! A dispatched solve wave is a colour whose `pool.scope` opened — a wide colour of a pass when
 //! the step's parallel gate holds (`parallel_solve`, a pool of at least two workers, the widest
@@ -144,6 +145,15 @@
 //! last range taking the rest, and the scope opens when that cut makes at least two ranges (a
 //! lumpy cut can make fewer than `tasks`). [`PHYS_SETUP_CHUNKS`] is the range count. A reader
 //! recomputes both from the world as the per-colour task count is recomputed.
+//!
+//! **Why the setup wave has a stamp counter of its own** (review round 2, O1). A colour wave's
+//! stamped tasks are [`PHYS_COLOR_TASKS`], which a reader checks exactly, but the setup wave's
+//! reading enters only the sums, and [`PHYS_SETUP_CHUNKS`] counts the ranges spawned, not the
+//! record. A setup wave spawned without its stamps still reduces to a reading — no task, a tail
+//! and a join equal to the join's absolute tick — that the ramp, tail and join sums take in, and
+//! no range check on them can see one such wave among a step's hundred colour waves.
+//! [`PHYS_SETUP_STAMPED`] is that record's task count, pushed with its reading after the join, so a
+//! reader that checks it equal to [`PHYS_SETUP_CHUNKS`] sees an unstamped setup wave.
 //!
 //! **How a wave is read, and what it costs.** The caller decides armed once per wave from the
 //! colour span's own guard (the narrowphase: its dispatch span's guard), so a disarmed wave adds
@@ -327,13 +337,14 @@ declare_zone!(PHYS_WAVE_PASS_RAMP, name = "phys_wave_pass_ramp", scope = ROOT_SC
 declare_zone!(PHYS_NP_WAVE_JOIN, name = "phys_np_wave_join", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_NP_ROUTE_WORKER, name = "phys_np_route_worker", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_SETUP_CHUNKS, name = "phys_setup_chunks", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_SETUP_STAMPED, name = "phys_setup_stamped", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 
 /// Span zones this crate declares: the length of [`SPAN_ZONES`], so a reader's expectation
 /// table is typed by it and a zone without an expectation does not compile.
 pub const SPAN_ZONE_COUNT: usize = 26;
 
 /// Counter zones this crate declares: the length of [`COUNTER_ZONES`].
-pub const COUNTER_ZONE_COUNT: usize = 48;
+pub const COUNTER_ZONE_COUNT: usize = 49;
 
 /// Every span zone this crate declares, in the order of the table in the module docs.
 ///
@@ -419,6 +430,7 @@ pub static COUNTER_ZONES: [&ZoneHandle; COUNTER_ZONE_COUNT] = [
     &PHYS_NP_WAVE_JOIN,
     &PHYS_NP_ROUTE_WORKER,
     &PHYS_SETUP_CHUNKS,
+    &PHYS_SETUP_STAMPED,
 ];
 
 /// S4's point floor per setup task: the solver's own constant, re-exported so a reader recomputes
@@ -486,7 +498,7 @@ pub static CANARY_ZONES: [&ZoneHandle; 5] =
     [&PHYS_SOLVE_BUILD, &PHYS_SB_BODIES, &PHYS_SB_PA, &PHYS_SB_PB, &PHYS_SB_PC];
 
 /// Whether this build compiles the physics zones at all. Every zone is `Deep`, so one `const`
-/// answers for all seventy-four; `false` under a profile whose tier ceiling is below `Deep`, where
+/// answers for all seventy-five; `false` under a profile whose tier ceiling is below `Deep`, where
 /// every site folds to nothing and an armed profiler records none of them.
 pub const ZONES_COMPILED: bool = (PHYS_SOLVE_BUILD::TIER as u8) <= (GLOBAL_TIER as u8);
 
