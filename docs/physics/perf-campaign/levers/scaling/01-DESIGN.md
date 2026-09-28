@@ -994,6 +994,25 @@ manifolds' warm source search fused into the fill tasks.
   store never reads them for a solved manifold. If window 8b reads S4 under its bar, dropping them (and narrowing G3 /
   G4-A to the entries the store reads) is the first variant to try.
 
+### 10.5 Review round 1 fixes (after commit 4)
+
+Follow-up commits on the lane, value-neutral; the receipts are the release lib asm under the codegen receipt's recipe
+(`codegen-units = 1`) and the parity runner's post-fat-LTO asm, the shipped inlining.
+
+- **W1, the narrowphase wave record left the disarmed frames** (from commits 1 and 1b, not S4). Commit (1) kept the
+  wave's record as an `Option<WaveStamps>` local of `try_parallel_sets`, which is inlined into both narrowphase
+  systems, and the armed arm built it by value and copied it in: two 8,320-byte record slots in every call's frame,
+  armed or not. The disarmed frames went from 5,432 to 21,560 bytes (`narrowphase_step::<false>`) and from 8,504 to
+  24,632 (`physics_narrowphase_colored`), about 45 KiB of stack on the `Off` arm where the sync commit used about 14;
+  neither commit's statement of the dispatcher bodies named them. The armed wave now runs out of line, as the colour
+  and setup waves do: `np_wave_stamped` (`#[cold]`, `#[inline(never)]`) holds the record, and both arms open the
+  wave's one scope through `np_wave::<SETS, STAMPED>`, so the physics slice keeps one narrowphase scope site. The
+  disarmed frames are the sync commit's again, 5,432 and 8,504 bytes (21,304 → 5,176 and 24,376 → 8,248 in the
+  parity build). The codegen receipt's twelve pinned classes are unchanged, against commit 4 as they are and against
+  the sync commit once the impl-block index in a callee's mangled path is collapsed (S4 added impl blocks to
+  `colored.rs`, so the colour task's call to `solve_color_dispatch` names `Mse_` where it named `Msc_`; the body is
+  otherwise byte-equal, and the receipt, taken on commit 4 for the first time here, reads RED without that step).
+
 ---
 
 ## 11. Measured

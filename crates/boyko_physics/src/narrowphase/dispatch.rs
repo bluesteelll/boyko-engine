@@ -102,9 +102,10 @@
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use boyko_diag::profiling_abi::ZoneGuard;
 use boyko_diag::zone;
 use boyko_ecs::ecs::core::component::scratch::{ScratchColumn, ScratchSolveView};
-use boyko_threadpool::{Scope, try_with_active_pool};
+use boyko_threadpool::{PoolInner, Scope, try_with_active_pool};
 
 use crate::manifold::{BodyIndex, Manifold};
 use crate::narrowphase::axis_cache::{AXIS_NONE, AxisHints, SAT_AXIS_COUNT};
@@ -595,11 +596,7 @@ pub(crate) fn try_parallel_sets<const SETS: bool>(
             (&[], &[])
         };
         let dispatch_zone = zone!(PHYS_NP_DISPATCH);
-        // W8S (armed only, ruling 3): the wave's record, decided from the dispatch span's own
-        // guard, so a disarmed step adds no load.
-        let stamps = if dispatch_zone.is_some() { Some(WaveStamps::new()) } else { None };
         {
-            let stamps = stamps.as_ref();
             // `ctx.meta` is cut to the step's chunk count, so a task reads `chunks` and `n`
             // from the context and captures two words: `&ctx` (it is `Sync` and outlives the
             // scope) and its chunk index. A task cell is then 16 bytes of header plus 16 of
@@ -611,24 +608,14 @@ pub(crate) fn try_parallel_sets<const SETS: bool>(
             // L10 (ruling W2): the restore route is L9's join over the restore pair source.
             let restore = ctx.join().restored(np.keys, np.tags, np.reuse);
             let ctx = ctx.with_sleep(np.cls, skips, restore, restores);
-            let ctx = &ctx;
-            if let Some(stamps) = stamps {
-                stamps.begin(pool.num_threads());
+            // W8S (armed only, ruling 3): the dispatch span's own guard decides the wave. An armed
+            // wave runs out of line with its record and closes the span at its join; a disarmed
+            // one is the scope the parallel narrowphase always opened, and its frame reserves no
+            // record slot.
+            match dispatch_zone {
+                None => np_wave::<SETS, false>(pool, &ctx, chunks, None),
+                Some(zone) => np_wave_stamped::<SETS>(pool, &ctx, chunks, zone),
             }
-            // Two functions, two `np_chunk` instantiations: the disarmed arm is the task that was
-            // always spawned, and the only caller of its `np_chunk` (W8S's codegen receipt, G1-C).
-            pool.scope(|scope| match stamps {
-                None => spawn_chunks::<SETS>(scope, ctx, chunks),
-                Some(stamps) => spawn_chunks_stamped::<SETS>(scope, ctx, chunks, stamps),
-            });
-            if let Some(stamps) = stamps {
-                stamps.joined();
-            }
-        }
-        // The dispatch span closes before the record is reduced, so it reads the wave alone.
-        drop(dispatch_zone);
-        if let Some(reading) = stamps.as_ref().and_then(WaveStamps::reduce) {
-            reading.push_np();
         }
         {
             let _zone = zone!(PHYS_NP_COMPACT);
@@ -652,6 +639,50 @@ pub(crate) fn try_parallel_sets<const SETS: bool>(
         (chunks, counts)
     })
     .unwrap_or((0, NpCounts::default()))
+}
+
+/// The step's wave: ONE `pool.scope` over its chunk tasks, spawned by the disarmed loop or, when
+/// `STAMPED` with a record, by the stamped one. Two functions, two `np_chunk` instantiations: the
+/// disarmed arm is the task that was always spawned, and the only caller of its `np_chunk` (W8S's
+/// codegen receipt, G1-C). Each instantiation has one caller — [`try_parallel_sets`] the disarmed
+/// one, [`np_wave_stamped`] the armed one — and the scope is the physics slice's one site for both.
+#[inline]
+fn np_wave<const SETS: bool, const STAMPED: bool>(
+    pool: &PoolInner,
+    ctx: &NpChunkCtx<'_>,
+    chunks: usize,
+    stamps: Option<&WaveStamps>,
+) {
+    pool.scope(|scope| {
+        if STAMPED && let Some(stamps) = stamps {
+            spawn_chunks_stamped::<SETS>(scope, ctx, chunks, stamps);
+        } else {
+            spawn_chunks::<SETS>(scope, ctx, chunks);
+        }
+    });
+}
+
+/// [`np_wave`] for an armed step (W8S, ruling 3). The 8.3 KiB wave record lives in this frame,
+/// cold and out of line, so the disarmed dispatch frame never reserves a slot for it (review W1:
+/// an `Option` of the record in `try_parallel_sets` put two record slots in both narrowphase
+/// systems' frames on every step). The dispatch span (`zone`, moved in) closes at the join,
+/// before the record is reduced, so it reads the wave alone.
+#[cold]
+#[inline(never)]
+fn np_wave_stamped<const SETS: bool>(
+    pool: &PoolInner,
+    ctx: &NpChunkCtx<'_>,
+    chunks: usize,
+    zone: ZoneGuard,
+) {
+    let stamps = WaveStamps::new();
+    stamps.begin(pool.num_threads());
+    np_wave::<SETS, true>(pool, ctx, chunks, Some(&stamps));
+    stamps.joined();
+    drop(zone);
+    if let Some(reading) = stamps.reduce() {
+        reading.push_np();
+    }
 }
 
 /// Spawns the step's `chunks` chunk tasks into `scope`, each colliding its closed-form cut of the
