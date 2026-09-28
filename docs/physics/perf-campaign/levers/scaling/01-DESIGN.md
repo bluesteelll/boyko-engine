@@ -832,7 +832,7 @@ The lane's cut asked eleven questions of the orchestrator; the rulings, and what
 | Q7, ω(W, gap) | a second mode of the ω_b bench | `benches/omega_b_region.rs --mode omega` |
 | Q8, the ladder rows | disarmed wall rungs; the W 1/2/4 single rung is 0.060 ms at every W | runner `--canary-frac F` now accepts any F > 0 |
 | Q9, a Linux-only red of the count-feature step | a host-divergence finding for its own lane, never a reason to weaken the step | commit (3) |
-| Q10, `--bp-kernel`'s parse | a STRING match with an error arm (`rowwalk`, `leaflist`, `leaflist-kd`); `leaflist-kd` "not in this build" until F3 merges; the kernel and `TreeDiag` printed with `{:?}` | commit (2) |
+| Q10, `--bp-kernel`'s parse | a STRING match with an error arm (`rowwalk`, `leaflist`, `leaflist-kd`); `leaflist-kd` "not in this build" until F3 merges; the kernel and `TreeDiag` printed with `{:?}` | commit (2); `leaflist-kd` named since F3 reached the lane (§10.6 W3) |
 | Q11, S8b-tree's brute threshold | this lane owns `alloc_frame_census.rs` and adds `set_brute_max_rows(0)` to S8b-tree's Tree arm | commit (4) |
 
 ### 10.1 The instrument (commit 1)
@@ -921,16 +921,19 @@ wave ⇒ ramp 0, np route 0 or 1), and `profiling_zone_counts` now reports every
 ### 10.2 `--bp-kernel` (commit 2)
 
 The parity runner selects the tree's query kernel inside one binary (lever ruling 2026-09-24,
-`levers/00-RULINGS.md`): `--bp-kernel rowwalk|leaflist`, parsed by name with an error arm
-(ruling Q10), never by an exhaustive match on `QueryKernel`, so the tree lane's `LeafListKd` compiles
-in the runner until it is named; `leaflist-kd` exits 2 "not in this build" until F3 merges. Unset,
-the tree's own default stands. Refused (exit 2) unless the row resolves to the tree under `Manual`
-selection. The receipt is the tree's cumulative `TreeDiag` over the whole run — the chosen kernel
-answered leaves and the other none (`benches/broadphase.rs`'s `assert_kernel_receipt` rule),
-read over the run rather than per step, so a step whose rows were all withheld asleep voids
-nothing (review O6) — or the run is void. The summary carries the kernel and the three leaf
-receipts; the runner prints the kernel and `TreeDiag` with `{:?}`. The API was public already
-(`BroadphaseTree::set_query_kernel`), so nothing in `broadphase_tree/**` changed.
+`levers/00-RULINGS.md`): `--bp-kernel rowwalk|leaflist|leaflist-kd`, parsed by name with an error arm
+(ruling Q10), never by an exhaustive match on `QueryKernel`, so a kernel the tree gains compiles in
+the runner until it is named. As commit (2) built it, `leaflist-kd` exited 2 "not in this build"
+until F3 merged; F3 reached the lane with the trunk sync `14a72664`, and the runner names it since
+(§10.6 W3). Unset, the tree's own default stands. Refused (exit 2) unless the row resolves to the
+tree under `Manual` selection. The receipt is the tree's cumulative `TreeDiag` over the whole run —
+the chosen kernel answered leaves and the other none, and the active tree was built in the kd
+order (`kd_order_builds > 0`) exactly when the kernel is `LeafListKd` (`benches/broadphase.rs`'s
+`assert_kernel_receipt` rule), read over the run rather than per step, so a step whose rows were
+all withheld asleep voids nothing (review O6) — or the run is void; a kernel the receipt's `if`
+chain does not name voids too. The summary carries the kernel, the three leaf receipts and
+`kd_order_builds`; the runner prints the kernel and `TreeDiag` with `{:?}`. The API was public
+already (`BroadphaseTree::set_query_kernel`), so nothing in `broadphase_tree/**` changed.
 
 ### 10.3 The CI step (commit 3)
 
@@ -1042,6 +1045,23 @@ Follow-up commits on the lane, value-neutral; the receipts are the release lib a
   calls `mint_cold`); W1 and F1 moved two of that glue's callers to a plain `ZoneGuard`, the likely cause, not
   isolated per commit. `solve_color_stamped`
   goes from 416 to 478. The lib asm's `solve_all_colors` goes from 485 to 500 and `solve_color_stamped` from 393 to 397.
+
+### 10.6 Review round 2 fixes
+
+- **W3, `--bp-kernel leaflist-kd` is named** (commit 2, after the trunk sync). The sync `14a72664` brought tree F3
+  into the lane, which is the condition under which commit (2) promised to name F3's kernel; the runner still
+  refused it with "not in this build" (exit 2), and its receipt would have voided an accepted `LeafListKd` run,
+  so F3's window rows (`06-DESIGN-F3.md` §6 R1, R2, R4), which only this lane's runner can run, could not run on the
+  lane's tip. The parse arm now maps `leaflist-kd` to `QueryKernel::LeafListKd`, still a string match with an error
+  arm. The receipt is still an `if` chain whose `else` voids; it gains a `LeafListKd` arm (the leaf list's rule)
+  and, on every arm, `benches/broadphase.rs`'s post-F3 clause: `kd_order_builds > 0` exactly when the kernel is
+  `LeafListKd`. `broadphase_tree` in the summary carries `kd_order_builds`, which F3's pre-flight reads. Untimed, on
+  the parity build: `leaflist-kd` J500 reads `0x30c5438bc6ad9ffa` with no void step at W 1, 2, 4, 8 and 16, its
+  final pose bytes equal the `leaflist`, `rowwalk` and unset runs' at every W, and `kd_order_builds` is 500 there
+  and 0 in the `leaflist`, `rowwalk` and unset runs; reuse-off J500 (`0x32d5e235342b4143`) and rest-500
+  (`0x6cbe24bf8fafda26`) are pose-equal between `leaflist` and `leaflist-kd` at W 1 and 8. The receipt's kd clause
+  was shown able to fail both ways: with the flag's `LeafListKd` applied as `LeafList`, and with `leaflist`
+  applied as `LeafListKd`, the run is void (exit 3), and with the clause dropped each of those runs passes.
 
 ---
 

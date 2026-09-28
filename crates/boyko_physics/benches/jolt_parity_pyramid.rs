@@ -183,18 +183,22 @@
 //! `docs/physics/perf-campaign/levers/00-RULINGS.md`: "the runner gains `--bp-kernel` … The flag
 //! changes no default and no pose"), so a kernel A/B is timed same-binary. `rowwalk` is the per-row
 //! walk (`QueryKernel::RowWalk`), `leaflist` the per-leaf list (`QueryKernel::LeafList`, the tree's
-//! default); `leaflist-kd` names tree F3's kernel and reports "not in this build" (exit 2) until F3
-//! merges. The value is parsed by name, never by an exhaustive match on `QueryKernel`, so a kernel
-//! the tree gains compiles here until it is named. Unset, the tree's own default stands.
+//! default), `leaflist-kd` tree F3's kernel (`QueryKernel::LeafListKd`: the leaf list's query over
+//! an active tree built in the kd median-split leaf order; opt-in, and pose-neutral against
+//! `leaflist` by F3's design). The value is parsed by name, never by an exhaustive match on
+//! `QueryKernel`, so a kernel the tree gains compiles here until it is named. Unset, the tree's own
+//! default stands.
 //!
 //! Refused (exit 2) unless the row's configuration resolves to the tree under `Manual` selection
 //! (`--broadphase tree`), where the kernel would be read: elsewhere the row would carry a kernel
 //! that never ran. With the flag, the run's cumulative `TreeDiag` must name the chosen kernel as the
-//! one that answered its active leaves and never the other (`benches/broadphase.rs`'s
-//! `assert_kernel_receipt` rule, read over the whole run so a step whose rows were all withheld
-//! asleep voids nothing), or the run is void (exit 3). The summary carries `bp_kernel` and the
-//! three leaf receipts (`leaf_list_leaves`, `fallback_leaves`, `row_walk_leaves`) in
-//! `broadphase_tree`; a line prints the kernel and the tree's `TreeDiag` with `{:?}`.
+//! one that answered its active leaves and never the other, and must show the active tree built in
+//! the kd order exactly when the kernel is `leaflist-kd` (`kd_order_builds > 0`;
+//! `benches/broadphase.rs`'s `assert_kernel_receipt` rule, read over the whole run so a step whose
+//! rows were all withheld asleep voids nothing), or the run is void (exit 3). The summary carries
+//! `bp_kernel`, the three leaf receipts (`leaf_list_leaves`, `fallback_leaves`, `row_walk_leaves`)
+//! and `kd_order_builds` in `broadphase_tree`; a line prints the kernel and the tree's `TreeDiag`
+//! with `{:?}`.
 //!
 //! # The W8S instrument (armed)
 //!
@@ -271,7 +275,7 @@
 //! --canary-ns N                or a phys_sb_* sub-zone) spins N ns each armed opening (W8S)
 //! --bp-kernel rowwalk|leaflist|leaflist-kd
 //!                              select the tree query kernel (with --broadphase tree); unset, the
-//!                              tree's default; leaflist-kd is F3's and not in this build
+//!                              tree's default; leaflist-kd is tree F3's kd leaf order
 //! --csv PATH                   the per-step CSV
 //! --pose-out PATH              write the final pose bytes (every dynamic body's full state)
 //! --expect-pose PATH           compare the final pose bytes with a file; exit 4 if they differ
@@ -842,11 +846,7 @@ fn parse_bp_kernel(value: Option<String>) -> Result<QueryKernel, String> {
     match value.as_deref() {
         Some("rowwalk") => Ok(QueryKernel::RowWalk),
         Some("leaflist") => Ok(QueryKernel::LeafList),
-        Some("leaflist-kd") => Err(
-            "--bp-kernel leaflist-kd: not in this build (tree F3's kernel; it is named here when \
-             F3 merges)"
-                .into(),
-        ),
+        Some("leaflist-kd") => Ok(QueryKernel::LeafListKd),
         other => Err(format!("--bp-kernel: expected rowwalk|leaflist|leaflist-kd, got {other:?}")),
     }
 }
@@ -2356,14 +2356,19 @@ fn run(args: &Args) -> ExitCode {
         });
     }
     // `--bp-kernel`: the run's cumulative receipt names the chosen kernel as the one that answered
-    // its active leaves, and never the other (`benches/broadphase.rs`'s `assert_kernel_receipt`
-    // rule), over the whole run (module docs, "The query kernel").
+    // its active leaves, and never the other, and shows the kd leaf order built iff the kernel is
+    // `LeafListKd` (`benches/broadphase.rs`'s `assert_kernel_receipt` rule), over the whole run
+    // (module docs, "The query kernel"). An `if` chain, never an exhaustive match (ruling Q10): a
+    // kernel the tree gains and this chain does not name voids the run.
     if let Some(kernel) = args.bp_kernel {
         let d = rig.world.resource::<BroadphaseTree>().diag();
+        let kd = d.kd_order_builds > 0;
         let ok = if kernel == QueryKernel::RowWalk {
-            d.row_walk_leaves > 0 && d.leaf_list_leaves == 0 && d.fallback_leaves == 0
+            d.row_walk_leaves > 0 && d.leaf_list_leaves == 0 && d.fallback_leaves == 0 && !kd
         } else if kernel == QueryKernel::LeafList {
-            d.leaf_list_leaves + d.fallback_leaves > 0 && d.row_walk_leaves == 0
+            d.leaf_list_leaves + d.fallback_leaves > 0 && d.row_walk_leaves == 0 && !kd
+        } else if kernel == QueryKernel::LeafListKd {
+            d.leaf_list_leaves + d.fallback_leaves > 0 && d.row_walk_leaves == 0 && kd
         } else {
             false
         };
@@ -2497,7 +2502,7 @@ fn run(args: &Args) -> ExitCode {
         "{{\"static_rebuilds\":{},\"sleeper_rebuilds\":{},\"evictions\":{},\"translations\":{},\
          \"patches\":{},\"hint_candidates\":{},\"wide_rows\":{},\"excluded_rows\":{},\
          \"locator_resets\":{},\"members\":{},\"leaf_list_leaves\":{},\"fallback_leaves\":{},\
-         \"row_walk_leaves\":{},\"bp_kernel\":{}}}",
+         \"row_walk_leaves\":{},\"kd_order_builds\":{},\"bp_kernel\":{}}}",
         bp.static_rebuilds,
         bp.sleeper_rebuilds,
         bp.evictions,
@@ -2511,6 +2516,7 @@ fn run(args: &Args) -> ExitCode {
         bp.leaf_list_leaves,
         bp.fallback_leaves,
         bp.row_walk_leaves,
+        bp.kd_order_builds,
         json_str(&format!("{:?}", rig.world.resource::<BroadphaseTree>().query_kernel())),
     );
     let census_json = fallback_census_json();
