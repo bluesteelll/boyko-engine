@@ -594,6 +594,9 @@ its W8 (5.578 against 5.613), so 0 there.
 **Before S1** a lanes cap on the chunk count is a partial form. Whether the W16 loss is the cascade, SMT or
 serial-stage pressure is decided by §7's W16 spans.
 
+**Partial form as built: §13.** It caps the wave's participants, not its chunk count: window 8 measured the chunk
+count bound by the work term at both W8 and W16, so a lanes cap on it would change nothing (§13).
+
 ### 6.8 Deferred or rejected, with reasons
 
 - **A fused bp+np wave (Jolt's FindCollisions shape).** Three things block it:
@@ -655,7 +658,7 @@ L9 C4 re-pin (`:439`, `:627-628`), and 134..=134 belongs to **S1e**, the reuse-o
 | **S5** | +1 scope per step on every Tree step at W ≥ 2, in the bp system. It **can never be a stage of the solve region**, because a region cannot span ECS system boundaries. To reach J-T at all, S5 must ship default-on with the L4/L5 lanes term: `parallel_broadphase` defaults to `false` (`resources.rs:621`). Census reach: S8b-tree at W=4 (its structural form already subtracts `Δbp_dispatches`; its Tree arm pins the exact count, `levers/00-RULINGS.md:311-313`). S1c and S1e run AllPairs and are untouched | Ruling 7 in every case; then S8b-tree's exact Tree count is re-pinned +1 by the counter rule, iff S5 increments `bp_dispatches` |
 | **S2, S3** | None beyond S1's; they are stages. The G1 hash pins stay, being bit-identical | — |
 | **S6** | Any test that counts graph builds or layouts per step reads fewer on hit steps. The S6 lane enumerates them with `findReferences` on `ConstraintGraph::build_with_held` and `layout`. Poses are unchanged | Each such pin's own rule, declared in the S6 lane |
-| **S7** | None found. No census scene runs at W=16; S8b is W=4 and row D is W 2/4/8. S1's block-count pins are formulas in `participants` | — |
+| **S7** | None moves. Found in the build (§13): the shipped default caps at the host's physical-core count, so any pin taken at W above that count depends on the host. Row D runs W 2/4/8, and its strict scalar W4/W8 pair would red on a CI runner with fewer than 8 physical cores; its lane rows pin `LaneCap::Uncapped` since S7, with their figures unchanged. S1's block-count pins are formulas in `participants` | — |
 
 ---
 
@@ -1132,6 +1135,81 @@ trunk sync at the lane's start (`efcda36d`) changed no physics file.
 | G-L4-1 (`one_worker_parallel_solve_takes_the_inline_path`) | `default_world_worker_invariance.rs:439` | unmoved |
 | G3 / {1,N} / random {1,N} / S-c's `backward_searches > 0` | `colored_tests.rs:1024` / `:1117` / `:1311` / `:5272` | unmoved |
 | `ci.yml` `feature-legs` / its derived-leg check / `bench-compile` | `:330` / `:453` / `:486` | unmoved |
+
+---
+
+## 13. S7 partial, as built on `u/phys-s7`
+
+The window-8 rulings (`../00-RULINGS.md`, 2026-09-27, ruling 4) promoted §6.7's partial form: cap the colour waves
+at the machine's physical cores on today's scope path, before S1. Window 8 read W16 0.19–0.22 ms slower than W8 on
+J-T (`docs/measurements/2026-09-27-physics-window8/analysis.md` §9): 74 % of it in the wide colour waves, about
+28 % serial SMT interference.
+
+**A participant cap, not a chunk-count cap.** The chunk count is `min(lanes × 6, slots / 64)` clamped to the groups
+(`solve_color_parallel`), and window 8 measured 23.4 tasks a wave on J-T and 31.0 on J-A at W8 and W16 alike (§3 of
+the window's analysis): the work term binds, so capping `lanes` in it changes no task. What differs at W16 is how
+many threads run those tasks: 15.39 distinct lanes a wave against 8.00 at W8, because every idle worker of the
+Chase-Lev pool steals. So S7 bounds the threads, and keeps the chunks:
+
+- **The chunk set is the uncapped walk's.** The lane count, the chunk count, the target and the one-chunk refusal are
+  today's lines at every W, so `phys_color_tasks`, the parity runner's exact task check and the zone-count test's
+  recomputation stand unedited.
+- **The dispenser** is one CAS cursor on its own cache line (`ClaimCursor`) over today's greedy cut walk:
+  `min(cap − 1, n_chunks − 1)` runner tasks and the calling thread each claim the next cut with
+  `compare_exchange_weak(lo, next_cut(lo))` until the walk is out. `next_cut` is the walk's step, factored out of
+  the uncapped iterator, which calls it too; it is a pure function of `lo` over the frozen group CSR, so the cursor
+  holds exactly the walk's boundaries in order and each cut runs once, on the participant that claimed it. `Relaxed`
+  throughout: the chunks' results reach the caller through the scope's join. The calling thread alone can finish the
+  wave, so a runner that starts late costs width, never a stall. Stamped, each claimed chunk runs inside
+  `WaveStamps::task`, so the W8S readings keep their meaning (tasks are chunks, lanes are distinct threads).
+- **One scope site.** Both arms open their scope through one helper (`color_scope`), so the physics slice keeps its
+  UG-02 counts (6 `pool.scope`, 6 `try_with_active_pool`) and the App-1 lane binding stays.
+- **The uncapped path is the parent's code.** The sweep is generic over a zero-sized arm type: `UncappedWave` or
+  `CappedWave(cap)`, chosen once per call of the sweep in `solve_colored_inner`. `solve_all_colors::<UncappedWave>` and
+  `solve_color_stamped::<UncappedWave>` are the parent's functions instruction for instruction (release lib asm and
+  the parity build's post-LTO asm, 500 / 641 and 397 / 478 instructions, frames unchanged), and the twelve pinned
+  codegen classes are byte-identical. `solve_all_colors` is `#[inline(never)]` on both arms (the parent's was out of
+  line by the inliner's choice), so the capped arm's aligned cursor sits in `solve_all_colors::<CappedWave>`'s frame;
+  it is not cold, being the W16 hot path. `solve_colored_inner` carries the per-step decision and grows by one
+  128-byte stack granule; its realignment prologue is the parent's.
+
+**Which waves.** Colour waves only. The narrowphase wave is a W16 gain in window 8 (−0.015 ms), and the setup wave
+(S4) is one wave a step. Both stay uncapped until a window reads their W16 cost above W8.
+
+**The route.** The cap is taken against the pool's worker count, so on the external route (a bench's `install`
+frame, whose thread joins a wave as one more participant) a pool exactly as wide as the cap runs a wave on W + 1
+threads and does not engage. Production runs the worker route (window 8: `solve_on_dispatcher_steps` 0 on every
+row), where the caller is one of the W workers.
+
+**The physical-core read** (`solver/cpu_topology.rs`) runs once, when the solver resource is built, and is held by
+it (Principle 0: a resource's fact, no global):
+- Windows: `GetLogicalProcessorInformationEx(RelationProcessorCore)` into a 16 KiB stack buffer, the engine's
+  hand-declared FFI; the call is the one `unsafe` block and the record walk is safe code.
+- Linux: `/sys/devices/system/cpu/online`, then each online CPU's `topology/physical_package_id` and
+  `topology/core_id`; the count is the distinct `(package, core)` pairs. The files are read with the C library's
+  `open` / `read` / `close`, hand-declared, into stack buffers, so neither arm makes a std file call or touches the
+  heap.
+- A failed read, or another target: `available_parallelism` (the logical count). Under Miri no OS call runs, and the
+  default resolves to no cap.
+
+**The knobs** (on `ColoredSoftStepSolver`, not `PhysicsConfig`, so `StepInputs` does not change):
+`set_lane_cap(LaneCap)` with `PhysicalCores` (the default: the physical count, at least 2), `Uncapped` and
+`AtMost(n)` (at least 2); `physical_cores()`, `logical_cores()`, `topology_source()`; `lane_capped_steps()`, the
+steps whose waves ran capped, counted where `parallel` is decided so a fast-path step never counts. The cap binds
+only on a pool wider than it: at W ≤ the cap every wave is the uncapped one.
+
+**Receipts.** `tests/s7_lane_cap.rs` (engagement at W16 under `AtMost(8)`; inert at W 2/4/8 and under `Uncapped`;
+bit identity at W 1/2/4/8/16 under four caps on J-T and J-A; the host's read; the default engaging exactly where
+`max(physical, 2) < W`); `tests/s7_lane_cap_armed.rs` (the lanes bound at W16, `phys_wave_lanes ≤ 8 ×
+phys_color_scopes` plus the uncapped setup wave, and `phys_color_tasks` equal to the uncapped walk's, recomputed);
+`colored_tests.rs` (the capped arm's claim loop on scoped threads against the serial colour solve, under Miri on
+both borrow models; the pool arm bit-identical at W4/W8 under caps 2 and 3); `cpu_topology.rs` (the record walk and
+the sysfs parsers on synthetic input). Row D of `alloc_frame_attribution.rs` pins `Uncapped` on its lane rows and
+adds one capped row (W16 under `AtMost(8)`: `chunk == scope` on every frame, the uncapped rows' scope mean). On the
+owner's host the engine reads 8 physical, 16 logical, from the OS.
+
+**The claim** is window 8b's S7-AB block (the lane's cut, §5): W16 not slower than W8 on J-T and J-A, and W8 not slower
+than the parent, under the 2026-09-27 claim rule (K = 9, three passes, IQR AND SE).
 
 ---
 

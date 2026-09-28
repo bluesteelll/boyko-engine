@@ -5873,3 +5873,238 @@
             );
         }
     }
+
+    // ── S7: the colour waves' participant cap ────────────────────────────────
+
+    mod s7_lane_cap {
+        use super::*;
+
+        /// A built dense scene of `n` spheres: a solver whose columns are laid out (serially)
+        /// and whose body column is built, ready for a colour to be solved from it.
+        fn built_dense(n: usize) -> ColoredSoftStepSolver {
+            let bodies = dense_collision_scene(n);
+            let manifolds = dense_collision_manifolds(&bodies);
+            let graph = build_graph(&bodies, &manifolds);
+            let mut solver = ColoredSoftStepSolver::default();
+            solver.build_bodies(&bodies, &[]);
+            solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
+            solver
+        }
+
+        /// Every body row's velocity bits.
+        fn body_bits(solver: &ColoredSoftStepSolver) -> Vec<u32> {
+            solver
+                .bodies
+                .as_read_slice()
+                .iter()
+                .flat_map(|b| {
+                    [
+                        b.linear_velocity.x.to_bits(),
+                        b.linear_velocity.y.to_bits(),
+                        b.linear_velocity.z.to_bits(),
+                        b.angular_velocity.x.to_bits(),
+                        b.angular_velocity.y.to_bits(),
+                        b.angular_velocity.z.to_bits(),
+                    ]
+                })
+                .collect()
+        }
+
+        /// The colour's cuts as the serial walk makes them, recomputed here from the group CSR
+        /// (a second derivation, not a call of `next_cut`): `n_chunks` clamped to the groups,
+        /// the quota `slots / n_chunks` rounded up, single groups or cohorts of 8.
+        fn expected_cuts(cols: &CohortColumns, color: usize, n_chunks: usize, simd: bool) -> Vec<(usize, usize)> {
+            let gs = cols.group_start();
+            let (g_lo, g_hi) =
+                (cols.color_group_start()[color] as usize, cols.color_group_start()[color + 1] as usize);
+            if g_hi == g_lo {
+                return Vec::new();
+            }
+            let slots = (gs[g_hi] - gs[g_lo]) as usize;
+            let target = slots.div_ceil(n_chunks.clamp(1, g_hi - g_lo)).max(1);
+            let step = if simd { 8 } else { 1 };
+            let (mut lo, mut out) = (g_lo, Vec::new());
+            while lo < g_hi {
+                let mut hi = (lo + step).min(g_hi);
+                while hi < g_hi && ((gs[hi] - gs[lo]) as usize) < target {
+                    hi = (hi + step).min(g_hi);
+                }
+                out.push((lo, hi));
+                lo = hi;
+            }
+            out
+        }
+
+        /// What the twin runs met, so a green run is shown to have exercised every path.
+        #[derive(Debug, Default)]
+        struct Tally {
+            /// Colours whose cuts were claimed by two threads or more.
+            multi_thread: u64,
+            /// Colours the SIMD walk cut into two chunks or more.
+            simd_split: u64,
+            /// The same for the scalar walk.
+            scalar_split: u64,
+            /// Claims lost to another participant or a spurious weak-CAS failure.
+            lost: u64,
+        }
+
+        /// One scene solved colour by colour from one built state, serially on one solver and by
+        /// the twin on another; the bodies and the whole layout (the impulses included) must end
+        /// byte-equal, and the claimed cuts must be the serial walk's, each claimed once.
+        fn compare(n: usize, n_chunks: usize, participants: usize, simd: bool, tally: &mut Tally) {
+            let (bias_rate, mass_coeff, impulse_coeff) = (0.2, 0.9, 0.1);
+            let serial = built_dense(n);
+            let twin = built_dense(n);
+            assert_eq!(layout_snapshot(&serial.columns), layout_snapshot(&twin.columns), "two builds of one scene");
+            let n_colors = serial.columns.color_offsets().len() - 1;
+            for c in 0..n_colors {
+                let cols = &serial.columns;
+                let ctx = ColorCtx {
+                    g_base: cols.color_group_start()[c] as usize,
+                    k_base: cols.color_cohort_start()[c] as usize,
+                };
+                let g_hi = cols.color_group_start()[c + 1] as usize;
+                ColoredSoftStepSolver::solve_color_dispatch(
+                    cols.solve_view(),
+                    serial.bodies.solve_view(),
+                    ctx,
+                    ctx.g_base,
+                    g_hi,
+                    bias_rate,
+                    mass_coeff,
+                    impulse_coeff,
+                    true,
+                    simd,
+                );
+                let claims = ColoredSoftStepSolver::solve_color_threads(
+                    &twin.columns,
+                    twin.bodies.solve_view(),
+                    c,
+                    bias_rate,
+                    mass_coeff,
+                    impulse_coeff,
+                    true,
+                    simd,
+                    n_chunks,
+                    participants,
+                );
+                let mut cuts: Vec<(usize, usize)> = claims.iter().flat_map(|(c, _)| c.iter().copied()).collect();
+                cuts.sort_unstable();
+                let want = expected_cuts(&twin.columns, c, n_chunks, simd);
+                assert_eq!(
+                    cuts, want,
+                    "S7 twin: colour {c} ({participants} participants, {n_chunks} chunks, simd {simd}): the claimed \
+                     cuts must be the serial walk's, each once"
+                );
+                tally.multi_thread += u64::from(claims.iter().filter(|(c, _)| !c.is_empty()).count() >= 2);
+                if want.len() >= 2 {
+                    if simd {
+                        tally.simd_split += 1;
+                    } else {
+                        tally.scalar_split += 1;
+                    }
+                }
+                tally.lost += claims.iter().map(|&(_, l)| u64::from(l)).sum::<u64>();
+            }
+            assert_eq!(
+                body_bits(&twin),
+                body_bits(&serial),
+                "S7 twin ({participants} participants, {n_chunks} chunks, simd {simd}): the bodies must equal the \
+                 serial colour solve's, bit for bit"
+            );
+            assert_eq!(
+                layout_snapshot(&twin.columns),
+                layout_snapshot(&serial.columns),
+                "S7 twin ({participants} participants, {n_chunks} chunks, simd {simd}): the layout (impulses \
+                 included) must equal the serial colour solve's, bit for bit"
+            );
+        }
+
+        /// G2-7: the capped arm's claim loop, cut walk and chunk body on scoped std threads
+        /// against the serial colour solve, on a scene small enough for Miri (the SB and TB legs
+        /// of the chunks' concurrent per-element writes and the cursor's CAS). Two and three
+        /// participants, the SIMD and the scalar walk, two to five chunks. Anti-vacuity: some
+        /// colour's cuts were claimed on two threads or more, both walks cut a colour into two
+        /// chunks or more, and — under Miri, which fails `compare_exchange_weak` spuriously — at
+        /// least one claim was lost, so the retry path ran.
+        #[test]
+        fn s7_miri_capped_threads_match_the_parent_path() {
+            let mut tally = Tally::default();
+            let reps = if cfg!(miri) { 1 } else { 16 };
+            for _ in 0..reps {
+                for participants in [2, 3] {
+                    for (n_chunks, simd) in [(3, true), (2, false), (5, false)] {
+                        compare(24, n_chunks, participants, simd, &mut tally);
+                    }
+                }
+            }
+            println!("S7 G2-7 tally: {tally:?}");
+            assert!(
+                tally.multi_thread > 0 && tally.simd_split > 0 && tally.scalar_split > 0,
+                "anti-vacuity: the twin runs must claim one colour's cuts on two threads and cut a colour \
+                 into two chunks on both walks: {tally:?}"
+            );
+            if cfg!(miri) {
+                assert!(tally.lost > 0, "anti-vacuity: under Miri no claim was ever lost, so the retry path never ran: {tally:?}");
+            }
+        }
+
+        /// A dense scene's final body bits after `steps` colored solves in a `workers`-worker
+        /// pool with the solve's lane cap set to `cap`, and the steps that ran capped.
+        #[cfg(not(miri))]
+        fn run_dense_capped(n: usize, steps: usize, workers: usize, cap: LaneCap) -> (Vec<u32>, u64) {
+            use boyko_threadpool::ThreadPoolBuilder;
+
+            let cfg = PhysicsConfig { dt: 1.0 / 60.0, parallel_solve: true, ..PhysicsConfig::default() };
+            let mut solver = ColoredSoftStepSolver::default();
+            solver.set_lane_cap(cap);
+            let mut scratch = SolverScratch::with_capacity(n + 1);
+            scratch.set_bodies(&dense_collision_scene(n));
+            scratch.touched.reset(scratch.bodies().len());
+            let pool = ThreadPoolBuilder::new().num_threads(workers).build();
+            pool.install(|_scope| {
+                for _ in 0..steps {
+                    let manifolds = dense_collision_manifolds(scratch.bodies());
+                    let graph = build_graph(scratch.bodies(), &manifolds);
+                    scratch.touched.reset(scratch.bodies().len());
+                    solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+                }
+            });
+            (snapshot_bits(&scratch), solver.lane_capped_steps())
+        }
+
+        /// The production capped arm, through the pool: a dense scene whose floor colour
+        /// dispatches (520 slots), capped below the pool width, ends bit-equal to the serial
+        /// solve, and every step ran capped; at the pool's width the cap does not bind.
+        #[test]
+        #[cfg(not(miri))]
+        fn s7_capped_pool_waves_are_bit_identical() {
+            let (serial, _) = run_dense_capped(520, 8, 1, LaneCap::Uncapped);
+            let two = NonZeroU16::new(2).expect("2 is non-zero");
+            let three = NonZeroU16::new(3).expect("3 is non-zero");
+            for (workers, cap) in [(4, LaneCap::AtMost(two)), (8, LaneCap::AtMost(three)), (8, LaneCap::AtMost(two))] {
+                let (bits, capped) = run_dense_capped(520, 8, workers, cap);
+                assert_eq!(capped, 8, "S7: every step of W{workers} under {cap:?} ran capped");
+                assert_eq!(bits, serial, "S7: W{workers} under {cap:?} must equal the serial solve, bit for bit");
+            }
+            let (bits, capped) = run_dense_capped(520, 8, 4, LaneCap::AtMost(NonZeroU16::new(4).expect("4 is non-zero")));
+            assert_eq!(capped, 0, "S7: a cap equal to the pool width does not bind");
+            assert_eq!(bits, serial);
+        }
+
+        /// The policy's resolution: the floor of 2, no cap under `Uncapped` or on a Miri
+        /// topology, the physical count otherwise.
+        #[test]
+        fn lane_cap_resolves_with_a_floor_of_two() {
+            let os = CpuTopology { physical: 8, logical: 16, source: TopologySource::Os };
+            let one = CpuTopology { physical: 1, logical: 1, source: TopologySource::Fallback };
+            let miri = CpuTopology { physical: 1, logical: 1, source: TopologySource::Miri };
+            assert_eq!(LaneCap::PhysicalCores.resolve(os), 8);
+            assert_eq!(LaneCap::PhysicalCores.resolve(one), 2);
+            assert_eq!(LaneCap::PhysicalCores.resolve(miri), 0);
+            assert_eq!(LaneCap::Uncapped.resolve(os), 0);
+            assert_eq!(LaneCap::AtMost(NonZeroU16::new(1).expect("1 is non-zero")).resolve(os), 2);
+            assert_eq!(LaneCap::AtMost(NonZeroU16::new(5).expect("5 is non-zero")).resolve(miri), 5);
+            assert_eq!(LaneCap::default(), LaneCap::PhysicalCores);
+        }
+    }

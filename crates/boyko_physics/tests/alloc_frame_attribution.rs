@@ -214,7 +214,7 @@ use boyko_physics::components::{
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::{add_physics_colored_solve, add_physics_systems};
 use boyko_physics::resources::{Manifolds, PhysicsConfig};
-use boyko_physics::solver::{ColoredSoftStepSolver, SoftStepSolver};
+use boyko_physics::solver::{ColoredSoftStepSolver, LaneCap, SoftStepSolver};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Report output — libtest's capture contract, without libtest
@@ -2010,6 +2010,17 @@ impl Pile {
     fn setup_dispatches(&self) -> u64 {
         self.world.try_resource::<ColoredSoftStepSolver>().map_or(0, ColoredSoftStepSolver::setup_dispatches)
     }
+    /// S7: the colour waves' participant cap. Row D's lane rows pin `Uncapped` (see the D4
+    /// comment): the shipped default caps at the host's physical-core count, so a W8 row on a
+    /// host with fewer than 8 physical cores would run capped and its figures would depend on
+    /// the machine.
+    fn set_lane_cap(&mut self, cap: LaneCap) {
+        self.world.resource_mut::<ColoredSoftStepSolver>().set_lane_cap(cap);
+    }
+    /// S7: the steps whose colour waves ran capped.
+    fn lane_capped_steps(&self) -> u64 {
+        self.world.resource::<ColoredSoftStepSolver>().lane_capped_steps()
+    }
     /// Both loop counts at once. `PhysicsConfig` is read at the top of every
     /// step, so this takes effect on the next `step()` without a rebuild.
     fn set_passes(&mut self, substeps: u32, relax: u32) {
@@ -2376,9 +2387,20 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
     // field there on 2026-09-19, two runs; the equal rows are the evidence). The
     // strict form is gated by the physics release leg, `cargo test --release -p
     // boyko-physics --no-fail-fast` (CLAUDE.md), which runs this binary at height 15.
+    //
+    // S7 (lane `u/phys-s7`): every lane row pins `LaneCap::Uncapped`. The shipped default caps a
+    // colour wave at the host's physical-core count; a capped scope spawns at most `cap - 1`
+    // runners instead of one task per chunk, so on a host with fewer than 8 physical cores the
+    // scalar W=8 row's 35..=38-task scopes would spawn a handful of runners, never cross 34
+    // cells, and the strict "W=8 takes more chunks than W=4" pair below would red on correct
+    // code — on CI's release leg, whose runner has fewer cores than that. Pinned, the figures are
+    // today's on every host. One capped row follows the lane rows: W=16 under `AtMost(8)`, where
+    // the cap binds on every host, asserting `chunk == scope` on every frame and the uncapped
+    // rows' scope mean (the dispatch decision does not read the cap).
     let mut lane_points: Vec<(usize, Meas)> = Vec::with_capacity(4);
     for w in [1usize, 2, 4, 8] {
         let mut p = build_pile(w, true, 4, 2);
+        p.set_lane_cap(LaneCap::Uncapped);
         for _ in 0..PHYS_WARM {
             p.step();
         }
@@ -2430,12 +2452,54 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
         eight.scope
     );
 
+    // S7: the capped row (see the D4 comment's S7 paragraph).
+    {
+        let mut p = build_pile(16, true, 4, 2);
+        p.set_lane_cap(LaneCap::AtMost(std::num::NonZeroU16::new(8).expect("8 is non-zero")));
+        for _ in 0..PHYS_WARM {
+            p.step();
+        }
+        p.set_parallel_solve(true);
+        let capped_before = p.lane_capped_steps();
+        let per_frame = frames(4, PHYS_REPS, || p.step());
+        let m = summarise(&per_frame);
+        push(
+            rows,
+            "D",
+            "physics step, parallel_solve ON, 16 worker(s), lane cap 8 (S7)".to_owned(),
+            m,
+            verdict::SHOULD_NOT,
+        );
+        assert!(
+            p.lane_capped_steps() > capped_before,
+            "D: the W=16 row under AtMost(8) never ran a capped wave"
+        );
+        for (i, f) in per_frame.iter().enumerate() {
+            assert!(
+                f.chunk == f.scope,
+                "D: W=16 capped, frame {i}: {} chunks for {} scope frames — a capped scope spawns at most \
+                 7 runners, far inside its first block",
+                f.chunk,
+                f.scope
+            );
+        }
+        assert!(
+            m.scope == eight.scope,
+            "D: the capped W=16 row opened {:.3} scope frames a step against {:.3} uncapped at W=8 — the \
+             cap changes which thread runs a chunk, never which colours dispatch",
+            m.scope,
+            eight.scope
+        );
+        say!("  ⇒ W=16 capped at 8: {:.3} acquisitions a step, chunk == scope on every frame", m.mean);
+    }
+
     // The scalar pair: the same window with the scalar kernel at W=4 and W=8, warmed
     // on the default kernel (bit-identical, so the pile is the same pile) and flipped
     // before the window, as the 2026-09-21 measurement was taken.
     let mut scalar_points: Vec<(usize, Meas)> = Vec::with_capacity(2);
     for w in [4usize, 8] {
         let mut p = build_pile(w, true, 4, 2);
+        p.set_lane_cap(LaneCap::Uncapped);
         for _ in 0..PHYS_WARM {
             p.step();
         }

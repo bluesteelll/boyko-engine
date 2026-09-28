@@ -32,6 +32,7 @@
 
 pub mod colored;
 pub mod contact;
+mod cpu_topology;
 pub mod simd;
 pub mod soft_step;
 pub(crate) mod warm_records;
@@ -43,7 +44,8 @@ use boyko_macros::Resource as ResourceDerive;
 use crate::manifold::Manifold;
 use crate::resources::{PhysicsConfig, SolverScratch};
 
-pub use colored::ColoredSoftStepSolver;
+pub use colored::{ColoredSoftStepSolver, LaneCap};
+pub use cpu_topology::TopologySource;
 pub use soft_step::SoftStepSolver;
 pub use crate::row_identity::WarmSeedStats;
 

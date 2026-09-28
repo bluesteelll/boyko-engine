@@ -83,18 +83,21 @@
 
 use std::cell::Cell;
 use std::marker::PhantomData;
+use std::num::NonZeroU16;
 use std::ptr;
 use std::slice;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use boyko_diag::profiling_abi::{ZoneGuard, ZoneHandle};
 use boyko_diag::{zone, zone_enabled};
 use boyko_ecs::ecs::core::component::scratch::{ScratchColumn, ScratchSolveView};
 use boyko_macros::Resource as ResourceDerive;
-use boyko_threadpool::try_with_active_pool;
+use boyko_threadpool::{PoolInner, Scope, try_with_active_pool};
 
 use super::contact::{
     BodyEffective, effective_inv_mass, effective_mass, is_dynamic_row, tangent_basis,
 };
+use super::cpu_topology::{CpuTopology, TopologySource};
 use super::simd;
 // O2: the soft constants, the immovable-surface view, and the soft-coefficient
 // derivation are SHARED from the reference solver — a single source of truth so
@@ -933,6 +936,55 @@ struct ColorSolvePtrs<'a> {
 unsafe impl Send for ColorSolvePtrs<'_> {}
 unsafe impl Sync for ColorSolvePtrs<'_> {}
 
+/// S7: a capped colour wave's claim cursor — the first group of the next cut of the wave's
+/// walk — on a cache line of its own (the `SlotCounter` pattern of `profiling.rs`): every
+/// participant's claim takes this line exclusive, and nothing it shares a line with may be read
+/// by a participant in between. It lives in the capped arm's frame only — the
+/// `solve_all_colors::<CappedWave>` instantiation (review W1).
+#[repr(C, align(64))]
+struct ClaimCursor(AtomicUsize);
+
+const _: () = assert!(
+    size_of::<ClaimCursor>() == 64 && align_of::<ClaimCursor>() == 64,
+    "the claim cursor owns one cache line"
+);
+
+/// S7: which arm a step's colour waves take, as a type, so that the decision is taken once per
+/// call of the colour sweep and every per-colour function below it is instantiated per arm.
+/// [`UncappedWave`] is zero-sized: its instantiations carry no cap in their signatures or their
+/// bodies, and are the functions that were here (review W1). [`CappedWave`] carries the cap.
+trait WaveArm: Copy + Send + Sync {
+    /// Whether the waves run capped (the capped arm of `solve_color_parallel`).
+    const CAPPED: bool;
+    /// The participant cap; never read on the uncapped arm.
+    fn cap(self) -> usize;
+}
+
+/// S7: the uncapped colour waves, the parent's path: a step with no cap, or on a pool no wider
+/// than its cap.
+#[derive(Clone, Copy)]
+struct UncappedWave;
+
+impl WaveArm for UncappedWave {
+    const CAPPED: bool = false;
+    #[inline]
+    fn cap(self) -> usize {
+        0
+    }
+}
+
+/// S7: colour waves that run on at most this many threads (at least 2).
+#[derive(Clone, Copy)]
+struct CappedWave(usize);
+
+impl WaveArm for CappedWave {
+    const CAPPED: bool = true;
+    #[inline]
+    fn cap(self) -> usize {
+        self.0
+    }
+}
+
 // ── BodyEffective row access through the ScratchSolveView (mirror 1) ─────────────
 //
 // These three helpers are the ONLY way the colored kernels reach a body row now
@@ -1721,12 +1773,14 @@ impl<'a> FillCtx<'a> {
 }
 
 /// What the build reports to the solve (S4): L10's restore counts, the P2 predicate the solve's
-/// colour dispatch reuses, and the setup wave's W8S reading when it dispatched armed (added to
-/// the step's tally by the caller, like a colour wave's).
+/// colour dispatch reuses, the colour waves' participant cap for the step (S7: `0` where it does
+/// not bind), and the setup wave's W8S reading when it dispatched armed (added to the step's
+/// tally by the caller, like a colour wave's).
 struct BuildOut {
     restore_searches: u32,
     restore_hits: u32,
     p2: bool,
+    wave_cap: usize,
     setup_wave: Option<WaveReading>,
 }
 
@@ -1784,6 +1838,44 @@ struct S6Witness {
 #[inline]
 fn fnv_word(h: u64, v: u64) -> u64 {
     (h ^ v).wrapping_mul(0x0000_0100_0000_01b3)
+}
+
+/// S7: how many threads one colour wave of the parallel solve may run on
+/// ([`ColoredSoftStepSolver::set_lane_cap`]; the scaling plan's §6.7 and §13,
+/// `docs/physics/perf-campaign/levers/scaling/01-DESIGN.md`).
+///
+/// A cap changes WHICH thread runs a chunk, never the chunks or a value: a capped wave runs the
+/// uncapped walk's chunks, each once, on at most the cap's threads, and the solve is
+/// bit-identical at every worker count and every cap. A cap binds only where the pool has more
+/// workers than it; at or below it a wave is the uncapped one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LaneCap {
+    /// At most the machine's physical-core count ([`ColoredSoftStepSolver::physical_cores`]),
+    /// and at least 2 — the default. Past the physical cores a wave's extra threads are SMT
+    /// siblings, which window 8 measured slower (W16 9–11 % above W8 on J-T). Where the OS read
+    /// fell back to the logical count, that count; under Miri, no cap.
+    #[default]
+    PhysicalCores,
+    /// No cap: every pool worker may run a wave's chunks.
+    Uncapped,
+    /// At most this many threads, and at least 2.
+    AtMost(NonZeroU16),
+}
+
+impl LaneCap {
+    /// This policy's cap on `topology`: the most threads a wave may run on, `0` for none. The
+    /// floor of 2 keeps a capped wave a parallel one (the caller and one runner).
+    const fn resolve(self, topology: CpuTopology) -> usize {
+        let n = match self {
+            Self::Uncapped => return 0,
+            Self::PhysicalCores => match topology.source {
+                TopologySource::Miri => return 0,
+                TopologySource::Os | TopologySource::Fallback => topology.physical as usize,
+            },
+            Self::AtMost(n) => n.get() as usize,
+        };
+        if n < 2 { 2 } else { n }
+    }
 }
 
 /// The colored TGS-Soft rigid-body solver (Phase O5, Decision 7).
@@ -1854,6 +1946,16 @@ pub struct ColoredSoftStepSolver {
     canary: ZoneCanary,
     /// S4: steps whose P-c ran in the setup scope ([`setup_dispatches`](Self::setup_dispatches)).
     setup_dispatches: u64,
+    /// S7: the processor topology, read once when the solver is built
+    /// ([`physical_cores`](Self::physical_cores)).
+    topology: CpuTopology,
+    /// S7: the colour waves' participant cap ([`set_lane_cap`](Self::set_lane_cap)).
+    lane_cap: LaneCap,
+    /// S7: `lane_cap` resolved on `topology` — the most threads a colour wave may run on, `0`
+    /// for none. Kept in step with both, so a step reads one word.
+    resolved_cap: usize,
+    /// S7: steps whose colour waves ran capped ([`lane_capped_steps`](Self::lane_capped_steps)).
+    lane_capped_steps: u64,
     /// S4, test builds: the setup's forced shape.
     #[cfg(test)]
     pub(crate) setup_mode: SetupMode,
@@ -1878,6 +1980,7 @@ impl ColoredSoftStepSolver {
     pub fn with_capacity(bodies: usize, contacts: usize) -> Self {
         register_scratch_layouts();
         let reserve = bodies.max(scratch_reserve_rows(size_of::<BodyEffective>()));
+        let topology = CpuTopology::read();
         Self {
             bodies: ScratchColumn::new(body_eff_colored_id(), reserve),
             columns: CohortColumns::with_capacity(contacts),
@@ -1904,6 +2007,10 @@ impl ColoredSoftStepSolver {
             s6: S6Witness::default(),
             canary: ZoneCanary::default(),
             setup_dispatches: 0,
+            topology,
+            lane_cap: LaneCap::PhysicalCores,
+            resolved_cap: LaneCap::PhysicalCores.resolve(topology),
+            lane_capped_steps: 0,
             #[cfg(test)]
             setup_mode: SetupMode::Auto,
             #[cfg(test)]
@@ -1975,6 +2082,49 @@ impl ColoredSoftStepSolver {
     #[inline]
     pub fn setup_dispatches(&self) -> u64 {
         self.setup_dispatches
+    }
+
+    /// S7: sets how many threads one colour wave may run on, from the next step on. A scheduling
+    /// knob: it changes which thread runs a chunk, never a result ([`LaneCap`]).
+    #[inline]
+    pub fn set_lane_cap(&mut self, cap: LaneCap) {
+        self.lane_cap = cap;
+        self.resolved_cap = cap.resolve(self.topology);
+    }
+
+    /// S7: the colour waves' participant cap policy ([`LaneCap::PhysicalCores`] by default).
+    #[inline]
+    pub fn lane_cap(&self) -> LaneCap {
+        self.lane_cap
+    }
+
+    /// S7: the machine's physical-core count, read once when this solver was built — the
+    /// logical count where the OS read fell back ([`topology_source`](Self::topology_source)).
+    #[inline]
+    pub fn physical_cores(&self) -> u32 {
+        self.topology.physical
+    }
+
+    /// S7: the logical processors this process may run on, read with
+    /// [`physical_cores`](Self::physical_cores) (`std::thread::available_parallelism`).
+    #[inline]
+    pub fn logical_cores(&self) -> u32 {
+        self.topology.logical
+    }
+
+    /// S7: where [`physical_cores`](Self::physical_cores) came from.
+    #[inline]
+    pub fn topology_source(&self) -> TopologySource {
+        self.topology.source
+    }
+
+    /// S7: the steps whose colour waves ran capped, since construction: a step whose waves run
+    /// at all (the P2 predicate, not the no-awake fast path) on a pool wider than the resolved
+    /// [`LaneCap`]. The `setup_dispatches` pattern: a structural witness a reader can derive
+    /// from the pool width, the policy and [`physical_cores`](Self::physical_cores).
+    #[inline]
+    pub fn lane_capped_steps(&self) -> u64 {
+        self.lane_capped_steps
     }
 
     /// W8S: the in-zone canary's busy-waits since [`set_zone_canary`](Self::set_zone_canary) —
@@ -2282,6 +2432,7 @@ impl ColoredSoftStepSolver {
     ) -> BuildOut {
         #[cfg(test)]
         let setup_mode = self.setup_mode;
+        let resolved_cap = self.resolved_cap;
         if let RowRemap::Rows(prev_row) = remap {
             debug_assert_eq!(
                 prev_row.len(),
@@ -2383,6 +2534,9 @@ impl ColoredSoftStepSolver {
         let p2 = parallel_solve
             && lanes >= 2
             && cols.widest_color_slots() >= MIN_PARALLEL_SLOTS_PER_COLOR;
+        // S7, once per step beside P2: the colour waves' participant cap where the pool is wider
+        // than it, else 0 (the uncapped waves). The setup wave and its gate are not capped.
+        let wave_cap = if p2 && resolved_cap != 0 && lanes > resolved_cap { resolved_cap } else { 0 };
         let n_cohorts = cols.heads.len();
         let tasks = if p2 { setup_chunk_count(lanes, points as usize, n_cohorts) } else { 0 };
         #[cfg(test)]
@@ -2549,6 +2703,7 @@ impl ColoredSoftStepSolver {
             restore_searches: plan_counts.restore_searches,
             restore_hits: plan_counts.restore_hits,
             p2,
+            wave_cap,
             setup_wave,
         }
     }
@@ -4038,9 +4193,17 @@ impl ColoredSoftStepSolver {
     /// parallel result is bit-identical to the sequential one for any worker count
     /// (see [`solve_color_parallel`](Self::solve_color_parallel)).
     ///
+    /// `arm` (S7) is the step's colour-wave arm ([`WaveArm`]): [`UncappedWave`], a zero-sized
+    /// type whose instantiation is the sweep that was here, or [`CappedWave`] with the step's
+    /// participant cap. Out of line on both arms — as the parent's sweep already was, by the
+    /// inliner's choice — so the capped arm's cache-line-aligned claim cursor stays in its own
+    /// frame and never widens the step's (review W1). Not cold: at W > the cap every wide colour
+    /// of every pass runs in the capped instantiation.
+    ///
     /// `tally` takes the step's W8S dispatch totals, written only in a wave's armed arm.
+    #[inline(never)]
     #[allow(clippy::too_many_arguments)]
-    fn solve_all_colors(
+    fn solve_all_colors<A: WaveArm>(
         cols: &CohortColumns,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
         bias_rate: f32,
@@ -4048,6 +4211,7 @@ impl ColoredSoftStepSolver {
         impulse_coeff: f32,
         bias_active: bool,
         parallel: bool,
+        arm: A,
         simd: bool,
         tally: &mut WaveTally,
     ) {
@@ -4096,11 +4260,12 @@ impl ColoredSoftStepSolver {
                         impulse_coeff,
                         bias_active,
                         simd,
+                        arm,
                         tally,
                     );
                     continue;
                 }
-                Self::solve_color_parallel::<false>(
+                Self::solve_color_parallel::<false, A>(
                     cols,
                     view,
                     bodies_eff,
@@ -4112,6 +4277,7 @@ impl ColoredSoftStepSolver {
                     impulse_coeff,
                     bias_active,
                     simd,
+                    arm,
                     None,
                 );
             } else {
@@ -4218,8 +4384,24 @@ impl ColoredSoftStepSolver {
     /// is spawned wrapped by `WaveStamps::task`, and the caller stamps the scope's opening, the
     /// end of its spawn loop and the join's return; the cut, the chunk count and the task body
     /// are the disarmed wave's.
+    ///
+    /// # S7: the capped arm (`A = CappedWave`; the scaling plan's §6.7 and §13)
+    ///
+    /// `A = UncappedWave` is the wave above at every worker count; the arm is zero-sized and
+    /// unread. With `CappedWave(cap)` at most `cap` threads run the wave: the lane count, the
+    /// chunk count, the target and the one-chunk refusal are the lines above, so the chunks are
+    /// the uncapped walk's; but instead
+    /// of one task per chunk the scope spawns `min(cap − 1, n_chunks − 1)` runners, and the
+    /// runners and this thread each claim the next chunk of that walk with one CAS on a cursor
+    /// ([`claim_chunks`](Self::claim_chunks) over [`next_cut`](Self::next_cut)) until the walk
+    /// is out. Each chunk runs exactly once, on whichever participant claimed it; this thread
+    /// alone can finish the wave, so a runner that starts late costs width, never a stall. The
+    /// two arms open their one scope through [`color_scope`](Self::color_scope), each with its
+    /// own body, so the cursor exists only in the capped instantiation's frame
+    /// (`solve_all_colors::<CappedWave>`, into which this arm inlines). Stamped, each
+    /// claimed chunk runs inside `WaveStamps::task`, so a stamp is still one chunk.
     #[allow(clippy::too_many_arguments)]
-    fn solve_color_parallel<const STAMPED: bool>(
+    fn solve_color_parallel<const STAMPED: bool, A: WaveArm>(
         cols: &CohortColumns,
         view: CohortSolveView<'_>,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
@@ -4231,6 +4413,7 @@ impl ColoredSoftStepSolver {
         impulse_coeff: f32,
         bias_active: bool,
         simd: bool,
+        arm: A,
         stamps: Option<&WaveStamps>,
     ) {
         // The color's manifold-group range (indices into `group_start`).
@@ -4359,49 +4542,10 @@ impl ColoredSoftStepSolver {
                     if chunk_g_lo >= g_hi {
                         return None;
                     }
-                    // The chunk's first group's first point. Read via the view's raw
-                    // `group_start` base (no `&` borrow into `cols`).
-                    // SAFETY: `chunk_g_lo` is within `[g_lo, g_hi)`, a valid index
-                    //   into the live `group_start` column.
-                    let chunk_start = unsafe { ptrs.view.group_start_at(chunk_g_lo) } as usize;
-
-                    // Grow the chunk by WHOLE groups until its accumulated point run
-                    // reaches the per-chunk quota `target` (work-balanced) or the
-                    // color's last group is consumed. A group is never split: the
-                    // chunk boundary always falls on a group index, so every point of
-                    // one manifold-group stays on ONE lane (C1). Always includes ≥ 1
-                    // group (the first), so it makes progress.
-                    //
-                    // O7 cohort-snapping (Decision 7): when `simd`, advance in steps
-                    // of `COHORT` (8 groups) and clamp at `g_hi`, so every chunk
-                    // boundary falls on a cohort boundary (a multiple-of-8 group
-                    // offset from `g_lo`) — every task thus solves only whole
-                    // cohorts (plus the color's single possibly-partial trailing
-                    // cohort, on whichever task owns the last group) and OWNS their
-                    // heads and blocks. Bit-identity is chunk-shape-independent
-                    // (cohorts are pairwise body-disjoint), so snapping is a pure
-                    // perf knob.
-                    let step = if simd { COHORT } else { 1 };
-                    let mut chunk_g_hi = (chunk_g_lo + step).min(g_hi);
-                    while chunk_g_hi < g_hi {
-                        // SAFETY: `chunk_g_hi <= g_hi`, a valid `group_start` index.
-                        let so_far =
-                            unsafe { ptrs.view.group_start_at(chunk_g_hi) } as usize - chunk_start;
-                        if so_far >= target {
-                            break;
-                        }
-                        chunk_g_hi = (chunk_g_hi + step).min(g_hi);
-                    }
-
-                    debug_assert!(
-                        chunk_g_lo < chunk_g_hi && chunk_g_hi <= g_hi,
-                        "invariant: a group-chunk is non-empty and lies within the color"
-                    );
-                    debug_assert!(
-                        !simd || (chunk_g_lo - g_lo).is_multiple_of(COHORT),
-                        "invariant: a SIMD chunk's lo boundary is a cohort (8-group) boundary"
-                    );
-
+                    // SAFETY: `g_lo <= chunk_g_lo < g_hi` (the walk starts at `g_lo`, only
+                    //   advances, and stops at `g_hi`), and `g_hi` is the colour's end, a live
+                    //   index of the `group_start` column: `next_cut`'s contract.
+                    let chunk_g_hi = unsafe { Self::next_cut(ptrs.view, g_lo, chunk_g_lo, g_hi, target, simd) };
                     let cut = (chunk_g_lo, chunk_g_hi);
                     chunk_g_lo = chunk_g_hi;
                     Some(cut)
@@ -4411,7 +4555,65 @@ impl ColoredSoftStepSolver {
             if STAMPED && let Some(stamps) = stamps {
                 stamps.begin(lanes);
             }
-            pool.scope(|scope| {
+            if A::CAPPED {
+                // S7 (the method docs, "the capped arm"): `runners` pool tasks and this thread
+                // claim today's chunks from one cursor; at least one runner (a cap is at least 2,
+                // and `n_chunks >= 2` past the refusal above).
+                let cursor = ClaimCursor(AtomicUsize::new(g_lo));
+                let cursor = &cursor;
+                let runners = arm.cap().saturating_sub(1).min(n_chunks - 1);
+                Self::color_scope(pool, move |scope| {
+                    let claim = move || {
+                        Self::claim_chunks(
+                            &cursor.0,
+                            g_lo,
+                            g_hi,
+                            // SAFETY: `claim_chunks` calls this only with a value the cursor
+                            //   held that is below `g_hi`: `g_lo` or a cut's end, so `g_lo <= lo
+                            //   < g_hi`, and `g_hi` is the colour's end, a live index of the
+                            //   `group_start` column (`next_cut`'s contract).
+                            |lo| unsafe { Self::next_cut(ptrs.view, g_lo, lo, g_hi, target, simd) },
+                            |lo, hi| {
+                                // DISJOINTNESS: the uncapped task's argument below, with one
+                                // step more: each cut `[lo, hi)` is claimed by exactly one
+                                // successful CAS from `lo`, so the claimed cuts are the uncapped
+                                // walk's partition, each run by one thread; the views are the
+                                // same `Copy` views, and the scope's join outlives every runner.
+                                let chunk = move || {
+                                    Self::solve_color_dispatch(
+                                        ptrs.view,
+                                        ptrs.bodies,
+                                        ctx,
+                                        lo,
+                                        hi,
+                                        bias_rate,
+                                        mass_coeff,
+                                        impulse_coeff,
+                                        bias_active,
+                                        simd,
+                                    );
+                                };
+                                match stamps {
+                                    Some(stamps) if STAMPED => stamps.task(chunk),
+                                    _ => chunk(),
+                                }
+                            },
+                        );
+                    };
+                    for _ in 0..runners {
+                        scope.spawn(claim);
+                    }
+                    if STAMPED && let Some(stamps) = stamps {
+                        stamps.spawned();
+                    }
+                    claim();
+                });
+                if STAMPED && let Some(stamps) = stamps {
+                    stamps.joined();
+                }
+                return true;
+            }
+            Self::color_scope(pool, |scope| {
                 // The chunk task: a `Fn` over a cut that hands back that chunk's
                 // body, one spawn per cut. Every capture is `Copy` (the solve
                 // views, the color context and the step scalars), so each body owns
@@ -4521,16 +4723,193 @@ impl ColoredSoftStepSolver {
         }
     }
 
+    /// The colour wave's one `pool.scope` — the physics slice's site that UG-02 counts — for
+    /// both arms of [`solve_color_parallel`](Self::solve_color_parallel), each passing its own
+    /// body (S7), as [`fill_scope`](Self::fill_scope) is the setup wave's.
+    #[inline]
+    fn color_scope<'scope>(pool: &'scope PoolInner, body: impl FnOnce(&Scope<'scope>) + Send) {
+        pool.scope(body);
+    }
+
+    /// One step of a colour's cut walk: the end of the chunk that starts at group `lo`. It grows
+    /// the chunk by WHOLE groups until its point run reaches the per-chunk quota `target`
+    /// (work-balanced) or the colour's last group is consumed. A group is never split: the
+    /// boundary always falls on a group index, so every point of one manifold-group stays on ONE
+    /// lane (C1), and the chunk always holds at least its first group, so the walk makes
+    /// progress.
+    ///
+    /// O7 cohort-snapping (Decision 7): when `simd`, the walk advances in steps of `COHORT` (8
+    /// groups) and clamps at `g_hi`, so every boundary falls on a cohort boundary (a
+    /// multiple-of-8 group offset from `g_lo`) — every chunk solves only whole cohorts (plus the
+    /// colour's single possibly-partial trailing cohort, on whichever chunk owns the last group)
+    /// and OWNS their heads and blocks. Bit-identity is chunk-shape-independent (cohorts are
+    /// pairwise body-disjoint), so snapping is a pure perf knob.
+    ///
+    /// A pure function of `lo` over a frozen column: the uncapped walk (`cuts` in
+    /// [`solve_color_parallel`](Self::solve_color_parallel)) and every participant of a capped
+    /// wave ([`claim_chunks`](Self::claim_chunks)) step through the same cuts.
+    ///
+    /// # Safety
+    /// `g_lo <= lo < g_hi`, and `g_hi` is at most the view's group count, so every
+    /// `group_start` index read (`lo`, and up to `g_hi`) is a live element of the column; nothing
+    /// writes the column while a view is live (B4).
+    #[inline]
+    unsafe fn next_cut(
+        view: CohortSolveView<'_>,
+        g_lo: usize,
+        lo: usize,
+        g_hi: usize,
+        target: usize,
+        simd: bool,
+    ) -> usize {
+        debug_assert!(g_lo <= lo && lo < g_hi, "invariant: a cut starts inside the colour");
+        // The chunk's first group's first point, read via the view's raw `group_start` base (no
+        // `&` borrow into `cols`).
+        // SAFETY: `lo < g_hi`, a live `group_start` index (the contract).
+        let chunk_start = unsafe { view.group_start_at(lo) } as usize;
+        let step = if simd { COHORT } else { 1 };
+        let mut hi = (lo + step).min(g_hi);
+        while hi < g_hi {
+            // SAFETY: `hi < g_hi`, a live `group_start` index (the contract).
+            let so_far = unsafe { view.group_start_at(hi) } as usize - chunk_start;
+            if so_far >= target {
+                break;
+            }
+            hi = (hi + step).min(g_hi);
+        }
+        debug_assert!(
+            lo < hi && hi <= g_hi,
+            "invariant: a group-chunk is non-empty and lies within the color"
+        );
+        debug_assert!(
+            !simd || (lo - g_lo).is_multiple_of(COHORT),
+            "invariant: a SIMD chunk's lo boundary is a cohort (8-group) boundary"
+        );
+        hi
+    }
+
+    /// S7: one participant of a capped colour wave. It claims the next cut of the colour's walk
+    /// with one compare-exchange on `cursor` — from `lo` to `next(lo)` — runs it with `run(lo,
+    /// hi)`, and repeats until the cursor reaches `g_hi`; a failed claim retries from the value
+    /// the cursor holds. Returns the claims it lost (a receipt the test twin reads; production
+    /// ignores it and the count folds away).
+    ///
+    /// The cursor starts at `g_lo` and only ever moves from a value `v` to `next(v)`, so it holds
+    /// exactly the walk's cut boundaries in order; a successful CAS from `lo` is the only claim of
+    /// `[lo, next(lo))`, so every cut runs once, on one participant. `next` is called only with a
+    /// value the cursor held that is below `g_hi`. `Relaxed` throughout: the cursor hands out
+    /// indices and orders nothing — the chunks' writes reach the caller through the scope's join,
+    /// and what a chunk reads (the frozen tables, its own groups' rows) no other chunk writes.
+    #[inline]
+    fn claim_chunks(
+        cursor: &AtomicUsize,
+        g_lo: usize,
+        g_hi: usize,
+        next: impl Fn(usize) -> usize,
+        mut run: impl FnMut(usize, usize),
+    ) -> u32 {
+        let mut lost = 0u32;
+        let mut lo = cursor.load(Ordering::Relaxed);
+        while lo < g_hi {
+            debug_assert!(lo >= g_lo, "invariant: the cursor holds a cut boundary of the colour");
+            let hi = next(lo);
+            match cursor.compare_exchange_weak(lo, hi, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => {
+                    run(lo, hi);
+                    lo = cursor.load(Ordering::Relaxed);
+                }
+                Err(now) => {
+                    lost += 1;
+                    lo = now;
+                }
+            }
+        }
+        lost
+    }
+
+    /// S7, test builds: one colour's capped wave on scoped std threads — the pool-free twin of
+    /// [`solve_color_parallel`](Self::solve_color_parallel)'s capped arm that Miri drives
+    /// (G2-7), through the same claim loop ([`claim_chunks`](Self::claim_chunks)), cut walk
+    /// ([`next_cut`](Self::next_cut)) and chunk body (`solve_color_dispatch`). The chunk count
+    /// is forced, clamped to the colour's groups — the slot floor and the one-chunk refusal
+    /// waived, as S4's `Threads` shape waives the setup's gate — and `participants` threads
+    /// claim: this one and `participants − 1` spawned, released together by a barrier. Returns
+    /// each participant's claimed cuts and lost claims, this thread's first.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn solve_color_threads(
+        cols: &CohortColumns,
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
+        color: usize,
+        bias_rate: f32,
+        mass_coeff: f32,
+        impulse_coeff: f32,
+        bias_active: bool,
+        simd: bool,
+        n_chunks: usize,
+        participants: usize,
+    ) -> Vec<(Vec<(usize, usize)>, u32)> {
+        let color_offsets = cols.color_offsets();
+        let ctx = ColorCtx {
+            g_base: cols.color_group_start()[color] as usize,
+            k_base: cols.color_cohort_start()[color] as usize,
+        };
+        let (g_lo, g_hi) = (ctx.g_base, cols.color_group_start()[color + 1] as usize);
+        if g_hi == g_lo {
+            return vec![(Vec::new(), 0)];
+        }
+        let total_slots = (color_offsets[color + 1] - color_offsets[color]) as usize;
+        let target = total_slots.div_ceil(n_chunks.clamp(1, g_hi - g_lo)).max(1);
+        let ptrs = ColorSolvePtrs { bodies: bodies_eff, view: cols.solve_view() };
+        let cursor = ClaimCursor(AtomicUsize::new(g_lo));
+        let start = std::sync::Barrier::new(participants.max(1));
+        let claim = || {
+            start.wait();
+            let mut cuts = Vec::new();
+            let lost = Self::claim_chunks(
+                &cursor.0,
+                g_lo,
+                g_hi,
+                // SAFETY: as the capped arm's: `claim_chunks` passes only cursor values in
+                //   `[g_lo, g_hi)`, and `g_hi` is the colour's end, a live `group_start` index.
+                |lo| unsafe { Self::next_cut(ptrs.view, g_lo, lo, g_hi, target, simd) },
+                |lo, hi| {
+                    Self::solve_color_dispatch(
+                        ptrs.view,
+                        ptrs.bodies,
+                        ctx,
+                        lo,
+                        hi,
+                        bias_rate,
+                        mass_coeff,
+                        impulse_coeff,
+                        bias_active,
+                        simd,
+                    );
+                    cuts.push((lo, hi));
+                },
+            );
+            (cuts, lost)
+        };
+        std::thread::scope(|scope| {
+            let others: Vec<_> = (1..participants).map(|_| scope.spawn(claim)).collect();
+            let mut out = vec![claim()];
+            out.extend(others.into_iter().map(|h| h.join().expect("invariant: a participant thread completes")));
+            out
+        })
+    }
+
     /// W8S (armed only): one wide colour's wave, stamped. Runs
     /// [`solve_color_parallel`](Self::solve_color_parallel) with a stack-local record, closes
     /// the colour's span (`color_zone`, moved in) once the join has returned, and only then
     /// reduces the record and adds it to the step's `tally` — so the span reads the wave and not
     /// its bookkeeping. A wave that ran inline (no pool, or a single chunk) leaves no reading.
-    /// Out of line and cold: the disarmed colour loop never reaches it.
+    /// `arm` is the step's S7 colour-wave arm. Out of line and cold: the disarmed colour loop
+    /// never reaches it.
     #[cold]
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
-    fn solve_color_stamped(
+    fn solve_color_stamped<A: WaveArm>(
         color_zone: Option<ZoneGuard>,
         cols: &CohortColumns,
         view: CohortSolveView<'_>,
@@ -4543,10 +4922,11 @@ impl ColoredSoftStepSolver {
         impulse_coeff: f32,
         bias_active: bool,
         simd: bool,
+        arm: A,
         tally: &mut WaveTally,
     ) {
         let stamps = WaveStamps::new();
-        Self::solve_color_parallel::<true>(
+        Self::solve_color_parallel::<true, A>(
             cols,
             view,
             bodies_eff,
@@ -4558,6 +4938,7 @@ impl ColoredSoftStepSolver {
             impulse_coeff,
             bias_active,
             simd,
+            arm,
             Some(&stamps),
         );
         drop(color_zone);
@@ -4964,7 +5345,7 @@ impl ColoredSoftStepSolver {
         // below, the colour waves' in the passes) and pushed once after the substep loop.
         let mut tally = WaveTally::default();
 
-        let (p2, setup_wave) = {
+        let (p2, wave_cap, setup_wave) = {
             let build_zone = zone!(PHYS_SOLVE_BUILD);
             self.canary.at(&PHYS_SOLVE_BUILD, build_zone.is_some());
             let cls: &[RowCls] = held.as_ref().map_or(&[], |h| h.cls);
@@ -5001,7 +5382,7 @@ impl ColoredSoftStepSolver {
                 h.rules.restore_rec_searches += u64::from(built.restore_searches);
                 h.rules.restore_rec_hits += u64::from(built.restore_hits);
             }
-            (built.p2, built.setup_wave)
+            (built.p2, built.wave_cap, built.setup_wave)
         };
         // W8S (armed only): the setup wave's reading, a solve wave that is not a colour's.
         if let Some(reading) = setup_wave {
@@ -5118,6 +5499,10 @@ impl ColoredSoftStepSolver {
         // No pool attached ⇒ `None` ⇒ inline, as the per-color probe already did.
         // Gated red-first by `one_worker_parallel_solve_takes_the_inline_path`.
         let parallel = !fast && p2;
+        // S7: the step's colour-wave cap where its waves run at all, counted here, where
+        // `parallel` is decided, so a fast-path step never reads as capped (review O2).
+        let wave_cap = if parallel { wave_cap } else { 0 };
+        self.lane_capped_steps += u64::from(wave_cap != 0);
 
         // L10 C3a: the fast path runs no substep.
         let passes = if fast { 0 } else { substeps };
@@ -5147,17 +5532,33 @@ impl ColoredSoftStepSolver {
             // (3)+(4) Soft normal + friction sweep ACROSS colors (Gauss-Seidel).
             {
                 let _z = zone!(PHYS_PASS_BIASED);
-                Self::solve_all_colors(
-                    &self.columns,
-                    self.bodies.solve_view(),
-                    soft.bias_rate,
-                    soft.mass_coeff,
-                    soft.impulse_coeff,
-                    true,
-                    parallel,
-                    use_simd_solve,
-                    &mut tally,
-                );
+                if wave_cap == 0 {
+                    Self::solve_all_colors(
+                        &self.columns,
+                        self.bodies.solve_view(),
+                        soft.bias_rate,
+                        soft.mass_coeff,
+                        soft.impulse_coeff,
+                        true,
+                        parallel,
+                        UncappedWave,
+                        use_simd_solve,
+                        &mut tally,
+                    );
+                } else {
+                    Self::solve_all_colors(
+                        &self.columns,
+                        self.bodies.solve_view(),
+                        soft.bias_rate,
+                        soft.mass_coeff,
+                        soft.impulse_coeff,
+                        true,
+                        parallel,
+                        CappedWave(wave_cap),
+                        use_simd_solve,
+                        &mut tally,
+                    );
+                }
             }
 
             // (5) Position integrate (scalar — the reference's MEASURED-SCALAR
@@ -5184,17 +5585,33 @@ impl ColoredSoftStepSolver {
             // (6) Relax: re-solve bias-free to remove soft-bias energy.
             for _ in 0..config.relax_iterations {
                 let _z = zone!(PHYS_PASS_RELAX);
-                Self::solve_all_colors(
-                    &self.columns,
-                    self.bodies.solve_view(),
-                    soft.bias_rate,
-                    soft.mass_coeff,
-                    soft.impulse_coeff,
-                    false,
-                    parallel,
-                    use_simd_solve,
-                    &mut tally,
-                );
+                if wave_cap == 0 {
+                    Self::solve_all_colors(
+                        &self.columns,
+                        self.bodies.solve_view(),
+                        soft.bias_rate,
+                        soft.mass_coeff,
+                        soft.impulse_coeff,
+                        false,
+                        parallel,
+                        UncappedWave,
+                        use_simd_solve,
+                        &mut tally,
+                    );
+                } else {
+                    Self::solve_all_colors(
+                        &self.columns,
+                        self.bodies.solve_view(),
+                        soft.bias_rate,
+                        soft.mass_coeff,
+                        soft.impulse_coeff,
+                        false,
+                        parallel,
+                        CappedWave(wave_cap),
+                        use_simd_solve,
+                        &mut tally,
+                    );
+                }
             }
         }
 
