@@ -181,18 +181,21 @@ mod tests;
 
 /// Row counts at or below which the Tree runs the brute all-pairs loop instead of the tree.
 ///
-/// `[MEASURED 2026-09-25, window 7 wave 2 (Q3), bench profile, K=3]`: the largest G4 size at
-/// which `all_pairs` is not claimed slower than the shipped [`QueryKernel::LeafList`] `tree`,
-/// the smaller of the `bp_g4_uniform` and `bp_g4_disparity` answers — 144 in both (all_pairs/tree
-/// 1.0076 and 0.9929 there, neither claimed; the tree is claimed faster from 152 on). The
-/// recipe's rule (`treebp/g4_g5_recipe.md`), ruled in `levers/00-RULINGS.md` on 2026-09-25; the
-/// record is `docs/measurements/2026-09-25-physics-window7/wave2/`. It replaces the provisional
-/// 64, the arithmetic crossover. Measured on the Morton leaf order, so it is re-derived by the
-/// same rule if the default [`QueryKernel`] changes (`levers/broadphase/06-DESIGN-F3.md`).
+/// `[MEASURED 2026-09-28, window 8b's G4 block (16191fda + the G4-sizes patch, bench profile,
+/// K=3, the Q3 recipe)]`: `all_pairs` is claimed slower than the shipped [`QueryKernel::LeafList`]
+/// `tree` at 144 in both families (all_pairs/tree 1.1294 on `bp_g4_uniform`, 1.1003 on
+/// `bp_g4_disparity`), and the recipe's rule (`treebp/g4_g5_recipe.md`, ruled in
+/// `levers/00-RULINGS.md` on 2026-09-25) reads LO 128 / HI 136 there. Window 7 wave 2's 144 / 152
+/// (`docs/measurements/2026-09-25-physics-window7/wave2/`) did not reproduce; the figures and the
+/// binary evidence are in `levers/broadphase/07-C4-RECORD.md`.
+///
+/// **PROVISIONAL** (the 2026-09-29 rulings after window 8b, ruling 5): window 9's G4 re-read at
+/// sizes 96 to 160 in steps of 8, under ruling 1, sets the final value. Measured on the Morton
+/// leaf order, so it is re-derived by the same rule if the default [`QueryKernel`] changes.
 ///
 /// Value-neutral: the brute loop ([`all_pairs_into`]) and the tree path write the same pairs in
 /// the same `(min, max)` order (module docs, "What it computes").
-pub const TREE_BRUTE_MAX_ROWS: u32 = 144;
+pub const TREE_BRUTE_MAX_ROWS: u32 = 128;
 
 /// In a previous-row map handed to [`BroadphaseTree::step_translated`]: the row had no previous
 /// row (a spawn). The gather's own sentinel.

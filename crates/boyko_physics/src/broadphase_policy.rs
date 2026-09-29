@@ -210,34 +210,34 @@ pub fn select_broadphase(
     cfg.broadphase = if band { BroadphaseKind::Grid } else { BroadphaseKind::AllPairs };
 }
 
-// ---- the Tree's band (window 7 wave 2, Q3; wired into Auto by the tree broadphase's C4) -------
+// ---- the Tree's band (window 8b's G4 reading, provisional; the tree broadphase's C4) ----------
 
 /// Banded LOW edge of the Tree's side of [`Auto`](crate::resources::BroadphaseSelectMode::Auto):
 /// Auto's high side leaves [`Tree`](crate::resources::BroadphaseKind::Tree) for
 /// [`AllPairs`](crate::resources::BroadphaseKind::AllPairs) when the live body count drops to
 /// `<= AUTO_TREE_LO`.
 ///
-/// `[MEASURED 2026-09-25, window 7 wave 2 (Q3), bench profile, K=3]` — `benches/broadphase.rs`'s
-/// G4 pair finding, `all_pairs` against the shipped
-/// [`LeafList`](crate::broadphase_tree::QueryKernel::LeafList) `tree` at 12 sizes from 64 to 256,
-/// on `bp_g4_uniform` and `bp_g4_disparity` (`docs/measurements/2026-09-25-physics-window7/wave2/`,
-/// queue section 15.5). The recipe's rule (`treebp/g4_g5_recipe.md`, ruled in
+/// `[MEASURED 2026-09-28, window 8b's G4 block (16191fda + the G4-sizes patch, bench profile,
+/// K=3, the Q3 recipe)]` — `benches/broadphase.rs`'s G4 pair finding, `all_pairs` against the
+/// shipped [`LeafList`](crate::broadphase_tree::QueryKernel::LeafList) `tree`, on `bp_g4_uniform`
+/// and `bp_g4_disparity`. The recipe's rule (`treebp/g4_g5_recipe.md`, ruled in
 /// `levers/00-RULINGS.md` on 2026-09-25): LO is the largest size at which `all_pairs` is not
 /// claimed slower, HI the smallest at which `tree` is claimed faster, read on both families and
-/// the wider band taken. `all_pairs` is not claimed slower up to 144 in either family
-/// (all_pairs/tree 1.0076 uniform, 0.9929 disparity), and `tree` is claimed faster from 152 on in
-/// both. Measured on the Morton leaf order; re-derived by the same rule if the default query
-/// kernel changes (F3, `levers/broadphase/06-DESIGN-F3.md`).
+/// the wider band taken. `all_pairs` is claimed slower at 144 in both families (all_pairs/tree
+/// 1.1294 uniform, 1.1003 disparity) and the recipe reads LO 128 / HI 136; window 7 wave 2's
+/// 144 / 152 did not reproduce. Figures and the binary evidence: `levers/broadphase/07-C4-RECORD.md`.
 ///
-/// A constant only: [`select_broadphase`] still selects AllPairs ↔ Grid. Retargeting Auto's high
-/// side to the Tree is the tree broadphase's commit C4 (`04-DESIGN-REV2.md`, "Auto retargeted").
-pub const AUTO_TREE_LO: u32 = 144;
+/// **PROVISIONAL** (the 2026-09-29 rulings after window 8b, ruling 5): window 9's G4 re-read at
+/// sizes 96 to 160 in steps of 8, under ruling 1, sets the final value. Measured on the Morton
+/// leaf order; re-derived by the same rule if the default query kernel changes (F3,
+/// `levers/broadphase/06-DESIGN-F3.md`).
+pub const AUTO_TREE_LO: u32 = 128;
 
 /// Banded HIGH edge of the Tree's side of [`Auto`](crate::resources::BroadphaseSelectMode::Auto):
 /// Auto's high side selects [`Tree`](crate::resources::BroadphaseKind::Tree) when the live body
-/// count rises to `>= AUTO_TREE_HI`. Same measurement and rule as [`AUTO_TREE_LO`]; `LO < HI` is
-/// the hysteresis gap. A constant only until C4 wires it.
-pub const AUTO_TREE_HI: u32 = 152;
+/// count rises to `>= AUTO_TREE_HI`. Same measurement, rule and PROVISIONAL status as
+/// [`AUTO_TREE_LO`]; `LO < HI` is the hysteresis gap.
+pub const AUTO_TREE_HI: u32 = 136;
 
 const _: () = assert!(
     AUTO_TREE_LO < AUTO_TREE_HI,
@@ -268,20 +268,20 @@ mod tests {
         assert!(!banded(false, mid, GRID_LO, GRID_HI), "was-off stays off inside the band");
     }
 
-    /// The window-7 wave-2 constants (Q3) as ruled, and the Tree band's hysteresis through
-    /// [`banded`], the selector C4 will apply it with.
+    /// Window 8b's provisional constants (the tree broadphase's C4) as set, and the Tree band's
+    /// hysteresis through [`banded`], the selector Auto applies it with.
     #[test]
-    fn tree_band_and_brute_threshold_are_window_seven_wave_two() {
-        assert_eq!((AUTO_TREE_LO, AUTO_TREE_HI), (144, 152), "the ruled Tree band (window 7 wave 2, Q3)");
+    fn tree_band_and_brute_threshold_are_window_eight_b_provisional() {
+        assert_eq!((AUTO_TREE_LO, AUTO_TREE_HI), (128, 136), "the ruled Tree band (window 8b, provisional)");
         assert_eq!(
             crate::broadphase_tree::TREE_BRUTE_MAX_ROWS,
-            144,
-            "the ruled brute threshold (window 7 wave 2, Q3)"
+            128,
+            "the ruled brute threshold (window 8b, provisional)"
         );
-        assert!(!banded(true, 144, AUTO_TREE_LO, AUTO_TREE_HI), "at LO the band is off");
-        assert!(banded(true, 148, AUTO_TREE_LO, AUTO_TREE_HI), "inside the band, was-on stays on");
-        assert!(!banded(false, 148, AUTO_TREE_LO, AUTO_TREE_HI), "inside the band, was-off stays off");
-        assert!(banded(false, 152, AUTO_TREE_LO, AUTO_TREE_HI), "at HI the band is on");
+        assert!(!banded(true, 128, AUTO_TREE_LO, AUTO_TREE_HI), "at LO the band is off");
+        assert!(banded(true, 132, AUTO_TREE_LO, AUTO_TREE_HI), "inside the band, was-on stays on");
+        assert!(!banded(false, 132, AUTO_TREE_LO, AUTO_TREE_HI), "inside the band, was-off stays off");
+        assert!(banded(false, 136, AUTO_TREE_LO, AUTO_TREE_HI), "at HI the band is on");
     }
 
     #[test]
