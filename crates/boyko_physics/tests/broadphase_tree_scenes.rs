@@ -38,6 +38,21 @@
 //! it); `n < brute_max_rows` in `step_hinted` (the step at exactly the threshold takes the tree
 //! path). F3's scene (141 → 150 rows across 144) was shown blind to 128 before it was re-scened.
 //!
+//! # G-AUTO1: Auto's Tree band (the tree broadphase's C4)
+//!
+//! G-TH1's rig and script, with the Tree world set to `BroadphaseSelectMode::Auto` against a
+//! Manual AllPairs twin, sleeping off and on. The script's 124 → 137 rows cross both Auto edges
+//! (`AUTO_TREE_HI` up, `AUTO_TREE_LO` down). On every step the oracle and the twin's pose bytes
+//! hold; the kind Auto chose is the hysteresis of the row count and the previous side (Tree iff
+//! rows ≥ HI, or rows > LO with the band on); a Tree step runs the default `LeafList` kernel
+//! (ruling 4: the kd order is never auto-selected) and takes the tree path; an AllPairs step
+//! holds no sleeper and moves no tree counter (T6). Void unless both kinds ran, the band switched
+//! once each way per cycle, and (sleeping on) a Tree → AllPairs switch had a live sleeper set.
+//! Shown red at C4: the `clear_sleepers` guard before the kind arms deleted (the sleeping-on arm
+//! fails at the first such switch); `select_broadphase` writing `Grid` for the Tree (the kind
+//! assertion fails while the pose stays equal — every kind emits the same pairs, which is why the
+//! kind is asserted).
+//!
 //! # G-F3-8: the kd leaf order (`levers/broadphase/06-DESIGN-F3.md`)
 //!
 //! Every Tree rig above — J, R, S16, the churn arms, J-Son and R-S — runs again with the Tree's
@@ -80,7 +95,7 @@ use boyko_ecs::ecs::identifiers::primitives::ArchetypeId;
 use boyko_macros::{Component, Resource};
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
-use boyko_physics::broadphase_policy::AUTO_TREE_HI;
+use boyko_physics::broadphase_policy::{AUTO_TREE_HI, AUTO_TREE_LO, PhysicsStats};
 use boyko_physics::broadphase_tree::{
     BroadphaseTree, QueryKernel, TREE_BRUTE_MAX_ROWS, TreeDiag, all_pairs_into,
 };
@@ -89,7 +104,9 @@ use boyko_physics::components::{
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_colored_solve;
-use boyko_physics::resources::{BroadphaseKind, ContactPairs, PhysicsConfig, SolverScratch};
+use boyko_physics::resources::{
+    BroadphaseKind, BroadphaseSelectMode, ContactPairs, PhysicsConfig, SolverScratch,
+};
 
 // ── Scene constants (Jolt `PyramidScene.h`, as the parity runner transcribes them) ──
 
@@ -883,6 +900,105 @@ fn tree_threshold_band_is_value_neutral() {
 #[test]
 fn tree_threshold_band_is_value_neutral_sleeping_on() {
     assert_threshold_band(true);
+}
+
+// ── G-AUTO1: Auto's Tree band on the band scene (module docs) ────────────────
+
+/// G-AUTO1 on the band scene, sleeping `sleeping`: an Auto world (started on the Tree) against a
+/// Manual AllPairs twin (module docs).
+fn assert_auto_band(sleeping: bool) {
+    let label = if sleeping { "auto band, sleeping on" } else { "auto band, sleeping off" };
+    let mut auto = band_rig(BroadphaseKind::Tree, sleeping);
+    auto.world.resource_mut::<PhysicsConfig>().broadphase_select = BroadphaseSelectMode::Auto;
+    let mut all = band_rig(BroadphaseKind::AllPairs, sleeping);
+    let (lo, hi) = (AUTO_TREE_LO as usize, AUTO_TREE_HI as usize);
+    let script = band_script();
+    let (mut wt, mut wa) = (Witness::START, Witness::START);
+    let mut prev = auto.diag();
+    let mut prev_tree = auto.world.resource::<PhysicsStats>().broadphase_band;
+    let mut prev_sleepers = 0u64;
+    let (mut tree_steps, mut all_steps) = (0usize, 0usize);
+    let (mut to_tree, mut to_all, mut to_all_held) = (0usize, 0usize, 0usize);
+    for (step, &edit) in script.iter().enumerate() {
+        band_edit(&mut auto, edit);
+        band_edit(&mut all, edit);
+        auto.step();
+        all.step();
+        let (p_steps, mism, first) = auto.probe();
+        assert_eq!(p_steps, step as u64 + 1, "{label}: the probe runs once per step");
+        assert_eq!(mism, 0, "{label} step {step}: Auto's pairs differ from all-pairs' (first at {first:?})");
+        assert!(
+            auto.pose_bits() == all.pose_bits(),
+            "{label} step {step}: the Auto world's pose bytes differ from the AllPairs twin's"
+        );
+        wt.fold(&auto);
+        wa.fold(&all);
+
+        // The kind Auto chose this step is the hysteresis of the row count and the side it was on.
+        let rows = auto.world.resource::<SolverScratch>().bodies_len();
+        let want_tree = rows >= hi || (rows > lo && prev_tree);
+        let want = if want_tree { BroadphaseKind::Tree } else { BroadphaseKind::AllPairs };
+        let kind = auto.world.resource::<PhysicsConfig>().broadphase;
+        assert_eq!(
+            kind, want,
+            "{label} step {step}: rows {rows} with the band {} (LO {lo}, HI {hi}): Auto selected {kind:?}",
+            if prev_tree { "on" } else { "off" }
+        );
+        assert_eq!(auto.world.resource::<PhysicsStats>().broadphase_band, want_tree, "{label} step {step}: the band");
+        let d = auto.diag();
+        let tree = auto.world.resource::<BroadphaseTree>();
+        let sleepers = tree.sleeper_members();
+        if want_tree {
+            tree_steps += 1;
+            // Ruling 4 (2026-09-29): Auto selects the kind, never the query kernel.
+            assert_eq!(tree.query_kernel(), QueryKernel::LeafList, "{label} step {step}: the query kernel");
+            // Auto's Tree side starts above LO >= brute_max_rows, so every Tree step is a tree-path step.
+            let answered = d.leaf_list_leaves - prev.leaf_list_leaves;
+            assert!(
+                answered > 0 || sleepers > 0,
+                "{label} step {step}: a Tree step at {rows} rows answered no leaf-list leaf and holds no sleeper"
+            );
+        } else {
+            all_steps += 1;
+            // T6: a step on another kind leaves no sleeper, and never runs the tree.
+            assert_eq!(sleepers, 0, "{label} step {step}: an AllPairs step left {sleepers} sleepers (T6)");
+            assert_eq!(
+                TreeDiag { members: 0, ..d },
+                TreeDiag { members: 0, ..prev },
+                "{label} step {step}: an AllPairs step moves no tree counter"
+            );
+        }
+        to_tree += usize::from(want_tree && !prev_tree);
+        if prev_tree && !want_tree {
+            to_all += 1;
+            to_all_held += usize::from(prev_sleepers > 0);
+        }
+        (prev, prev_tree, prev_sleepers) = (d, want_tree, sleepers);
+    }
+    assert!(tree_steps > 0 && all_steps > 0, "{label}: void: Auto ran {tree_steps} Tree and {all_steps} AllPairs steps");
+    assert_eq!((to_tree, to_all), (BAND_CYCLES, BAND_CYCLES), "{label}: one switch each way per cycle");
+    if sleeping {
+        assert!(to_all_held > 0, "{label}: void: no Tree → AllPairs switch had a live sleeper set (T6 on a kind switch)");
+    }
+    println!(
+        "{label}: {} steps, {tree_steps} Tree, {all_steps} AllPairs; switches to the Tree {to_tree}, to AllPairs \
+         {to_all} ({to_all_held} with a live sleeper set); tree {:?}",
+        script.len(),
+        auto.diag()
+    );
+    report_witness(label, script.len(), wt, wa);
+}
+
+/// G-AUTO1, sleeping off (module docs).
+#[test]
+fn auto_tree_band_is_value_neutral() {
+    assert_auto_band(false);
+}
+
+/// G-AUTO1, sleeping on: a Tree → AllPairs switch dissolves the sleeper set (T6).
+#[test]
+fn auto_tree_band_is_value_neutral_sleeping_on() {
+    assert_auto_band(true);
 }
 
 // ── The churn scene (`benches/row_identity_churn.rs`, transcribed) ───────────

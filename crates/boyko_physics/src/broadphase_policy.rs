@@ -6,7 +6,7 @@
 //! carrier, NOT an ad-hoc `static`) plus the cold [`select_broadphase`] policy
 //! system; NO side store, NO `dyn`. The policy auto-selects the EXISTING
 //! [`PhysicsConfig::broadphase`](crate::resources::PhysicsConfig) gate
-//! (AllPairs ↔ Grid) from the live active-body count.
+//! (AllPairs ↔ Tree since the tree broadphase's C4) from the live active-body count.
 //!
 //! # Per-domain, not cross-crate
 //!
@@ -39,23 +39,23 @@
 //!
 //! # Result transparency (the P3 0%-result gate)
 //!
-//! The AllPairs and Grid arms are RESULT-EQUIVALENT: the Grid build emits the SAME
+//! The three arms are RESULT-EQUIVALENT: the Grid and the Tree emit the SAME
 //! feasibility-filtered, `(min, max)`-sorted candidate set as AllPairs (the O2
-//! 0%-correctness gate, asserted by the existing `production_grid_equals_all_pairs`
-//! test). So flipping `broadphase` in Auto mode changes WHICH broadphase runs,
-//! never a physics result bit — the narrowphase input (the candidate pairs) is
+//! 0%-correctness gate `production_grid_equals_all_pairs`; the tree broadphase's G1,
+//! by construction). So flipping `broadphase` in Auto mode changes WHICH broadphase
+//! runs, never a physics result bit — the narrowphase input (the candidate pairs) is
 //! identical either way.
 //!
 //! # Hysteresis (anti-thrash)
 //!
-//! The selector is banded: Grid switches ON at `count >= `[`GRID_HI`] and OFF at
-//! `count <= `[`GRID_LO`], keeping the current side ([`PhysicsStats::broadphase_band`])
-//! in the band `(LO, HI)`. A single threshold would flip every frame for a body
-//! count oscillating across it (Part 2.4); the band absorbs that. The Grid CSR
-//! buffers are PREALLOCATED at scene-load
-//! ([`BroadphaseGrid::with_capacity`](crate::resources::BroadphaseGrid::with_capacity)),
-//! so an AllPairs→Grid flip is a FILL (clear + refill, capacity reused), never a
-//! `Vec::new`/grow on the frame path (Principle 5; Part 2.4 transition cost).
+//! The selector is banded: the Tree switches ON at `count >= `[`AUTO_TREE_HI`] and OFF at
+//! `count <= `[`AUTO_TREE_LO`], keeping the current side ([`PhysicsStats::broadphase_band`])
+//! in the band `(LO, HI)`. A single threshold would flip every frame for a body count
+//! oscillating across it (Part 2.4); the band absorbs that. The Tree's columns are reserved
+//! at scene-load ([`BroadphaseTree::with_capacity`](crate::broadphase_tree::BroadphaseTree)),
+//! so an AllPairs→Tree flip fills them, never a `Vec::new` on the frame path (Principle 5).
+//! Grid is never auto-selected: P0b §8 measured it 2.46× slower than AllPairs on the Jolt
+//! pyramid, and [`GRID_LO`]/[`GRID_HI`] record its measured crossover for a Manual choice.
 
 use boyko_macros::Resource;
 
@@ -75,29 +75,29 @@ use crate::resources::{BroadphaseKind, BroadphaseSelectMode, PhysicsConfig, Solv
 /// band must clear. Only [`GRID_HI`]'s const-assert reads it.
 const DISPARITY_CROSSOVER_BODIES: u32 = 2_978;
 
-/// Banded LOW edge: in [`Auto`](crate::resources::BroadphaseSelectMode::Auto) mode the
-/// broadphase switches to [`AllPairs`](crate::resources::BroadphaseKind::AllPairs) when the
-/// live active-body count drops to `<= GRID_LO`.
+/// The Grid band's LOW edge, the AllPairs side of the measured AllPairs ↔ Grid crossover.
+/// [`Auto`](crate::resources::BroadphaseSelectMode::Auto) has not read it since the tree
+/// broadphase's C4 (Auto selects AllPairs ↔ Tree); it records the crossover for a Manual choice.
 ///
 /// `[MEASURED 2026-09-19, P0b §8, bench profile, K=1]` — a 10 % dead band under
 /// [`GRID_HI`]. A size-disparity scene held on Grid inside the band loses at most about 1.13×
 /// on the broadphase (the §8 disparity slope, interpolated at 2,700 bodies). The price, stated:
-/// on UNIFORM scenes between the uniform crossover (1,109) and [`GRID_HI`], Auto keeps
+/// on UNIFORM scenes between the uniform crossover (1,109) and [`GRID_HI`], the band kept
 /// AllPairs where Grid would be faster — by up to about 2.7× at 3,000 bodies (the §8 uniform
 /// slope, interpolated). Two measured scene families cannot calibrate a disparity classifier;
 /// the better policy belongs to the broadphase redesign.
 pub const GRID_LO: u32 = 2_700;
 
-/// Banded HIGH edge: in [`Auto`](crate::resources::BroadphaseSelectMode::Auto) mode the
-/// broadphase switches to [`Grid`](crate::resources::BroadphaseKind::Grid) when the live
-/// active-body count rises to `>= GRID_HI`.
+/// The Grid band's HIGH edge: the measured AllPairs ↔ Grid crossover, above which a Manual
+/// [`Grid`](crate::resources::BroadphaseKind::Grid) beats AllPairs on size-disparity scenes. Not
+/// read by [`Auto`](crate::resources::BroadphaseSelectMode::Auto) since the tree broadphase's C4.
 ///
 /// `[MEASURED 2026-09-19, P0b §8, bench profile, K=1]` — the size-disparity crossover
 /// (2,978 bodies) to two significant figures, which is all the precision one process in the
 /// `bench` profile supports. `GRID_LO < GRID_HI` is the hysteresis gap that prevents boundary
 /// thrash. The provisional 96 / 192 it replaces sat 6–31× below both crossovers, and Auto
-/// switched the Jolt pyramid to Grid at +3.07 ms per step (gated by
-/// `auto_keeps_all_pairs_on_the_jolt_pyramid`).
+/// switched the Jolt pyramid to Grid at +3.07 ms per step (gated since C4 by
+/// `auto_never_selects_grid_on_the_jolt_pyramid`).
 pub const GRID_HI: u32 = 3_000;
 
 const _: () = assert!(GRID_LO < GRID_HI, "hysteresis: the OFF edge must sit below the ON edge");
@@ -120,25 +120,25 @@ const _: () = assert!(
 ///   ([`SolverScratch::bodies`](crate::resources::SolverScratch)`.len()`) — the situation
 ///   key for the `BroadphaseKind` crossover. This IS the set the broadphase tests pairwise
 ///   (it applies no per-body filter), so it is the exact cost driver.
-/// - `broadphase_band`: the current side of the banded Grid selector (the named hysteresis
-///   carrier — Part 2.4; NOT an ad-hoc `static`). `true` ⇒ the band currently selects Grid,
-///   `false` ⇒ AllPairs. Meaningful only in
+/// - `broadphase_band`: the current side of the banded Tree selector (the named hysteresis
+///   carrier — Part 2.4; NOT an ad-hoc `static`). `true` ⇒ the band currently selects the
+///   Tree, `false` ⇒ AllPairs. Meaningful only in
 ///   [`Auto`](crate::resources::BroadphaseSelectMode::Auto) mode.
 #[derive(Resource)]
 #[repr(C)]
 pub struct PhysicsStats {
     /// Live broadphase body count (the `BroadphaseKind` situation key).
     pub active_body_count: u32,
-    /// Current side of the banded Grid selector (hysteresis carrier): `true` ⇒ Grid.
+    /// Current side of the banded Tree selector (hysteresis carrier): `true` ⇒ Tree.
     pub broadphase_band: bool,
 }
 
 impl Default for PhysicsStats {
     #[inline]
     fn default() -> Self {
-        // Band starts OFF (AllPairs) — matches `PhysicsConfig::broadphase`'s default
-        // `BroadphaseKind::AllPairs`, so the first Auto evaluation below `GRID_HI` keeps
-        // the kind on AllPairs (the 0%-gate anchor carries over to Auto's cold start).
+        // Band starts OFF (AllPairs): Auto's first evaluation keeps AllPairs below
+        // `AUTO_TREE_HI` and selects the Tree at or above it, whatever kind was configured —
+        // the cold side is the policy's, independent of `PhysicsConfig::broadphase`'s default.
         Self { active_body_count: 0, broadphase_band: false }
     }
 }
@@ -148,8 +148,8 @@ impl Default for PhysicsStats {
 /// and otherwise keeps `current` (the dead-band that absorbs boundary oscillation).
 ///
 /// `debug_assert!(lo < hi)` — a degenerate band (`lo >= hi`) has no dead zone and would
-/// thrash; the const-assert on [`GRID_LO`]/[`GRID_HI`] enforces this for the shipped band,
-/// and this guards any future caller.
+/// thrash; the const-assert on [`AUTO_TREE_LO`]/[`AUTO_TREE_HI`] enforces this for the
+/// shipped band, and this guards any future caller.
 #[inline]
 fn banded(current: bool, value: u32, lo: u32, hi: u32) -> bool {
     debug_assert!(lo < hi, "invariant: banded selector needs lo < hi for hysteresis");
@@ -167,7 +167,7 @@ fn banded(current: bool, value: u32, lo: u32, hi: u32) -> bool {
 /// The cold broadphase StrategyPolicy (P3) — counts the live active bodies and, in
 /// [`Auto`](crate::resources::BroadphaseSelectMode::Auto) mode, banded-selects
 /// [`PhysicsConfig::broadphase`](crate::resources::PhysicsConfig)
-/// (AllPairs ↔ Grid).
+/// (AllPairs ↔ Tree).
 ///
 /// Scheduled `.after(physics_gather)` (the body count is fresh) and
 /// `.before(physics_broadphase)` (this frame's decision feeds the build — no one-frame
@@ -180,9 +180,9 @@ fn banded(current: bool, value: u32, lo: u32, hi: u32) -> bool {
 ///    0%-gate): leaves [`PhysicsConfig::broadphase`](crate::resources::PhysicsConfig)
 ///    untouched (user-controlled, byte-identical to pre-P3).
 /// 3. In [`Auto`](crate::resources::BroadphaseSelectMode::Auto): applies the
-///    [`GRID_LO`]/[`GRID_HI`] [`banded`] hysteresis to the count and writes the result to
-///    BOTH [`PhysicsStats::broadphase_band`] and `broadphase` (`true` ⇒ Grid, `false` ⇒
-///    AllPairs). Because the two arms are result-equivalent, this is result-transparent.
+///    [`AUTO_TREE_LO`]/[`AUTO_TREE_HI`] [`banded`] hysteresis to the count and writes the
+///    result to BOTH [`PhysicsStats::broadphase_band`] and `broadphase` (`true` ⇒ Tree,
+///    `false` ⇒ AllPairs). The arms are result-equivalent, so this is result-transparent.
 //
 // `clippy::needless_pass_by_value`: `Res<_>` / `ResMut<_>` are by-value `SystemParam`s
 // read/written through reborrows — the same false-positive every physics system carries
@@ -205,9 +205,9 @@ pub fn select_broadphase(
         return;
     }
 
-    let band = banded(stats.broadphase_band, count, GRID_LO, GRID_HI);
+    let band = banded(stats.broadphase_band, count, AUTO_TREE_LO, AUTO_TREE_HI);
     stats.broadphase_band = band;
-    cfg.broadphase = if band { BroadphaseKind::Grid } else { BroadphaseKind::AllPairs };
+    cfg.broadphase = if band { BroadphaseKind::Tree } else { BroadphaseKind::AllPairs };
 }
 
 // ---- the Tree's band (window 8b's G4 reading, provisional; the tree broadphase's C4) ----------
@@ -288,6 +288,6 @@ mod tests {
     fn physics_stats_default_starts_band_off() {
         let s = PhysicsStats::default();
         assert_eq!(s.active_body_count, 0);
-        assert!(!s.broadphase_band, "the band cold-starts OFF (matches broadphase's AllPairs default)");
+        assert!(!s.broadphase_band, "the band cold-starts OFF (AllPairs below AUTO_TREE_HI)");
     }
 }
