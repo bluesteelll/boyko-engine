@@ -261,8 +261,8 @@ pub struct SoftStepSolver {
     /// [`ScratchColumn`] (audit Stage 4).
     points: ScratchColumn<PointConstraint>,
     /// V2: each body row's accumulated movement over the step, parallel to `bodies` (the
-    /// colored solver's column, for the same rule): reset and advanced only on a step with
-    /// `speculative_distance > 0`.
+    /// colored solver's column, for the same rule): reset and advanced only on a step whose
+    /// speculative contacts are on (`PhysicsConfig::speculative_contacts`).
     deltas: ScratchColumn<BodyDelta>,
     /// Last frame's converged impulses (W3) — probed to seed this frame's
     /// contacts at the start of [`solve`](Self::solve).
@@ -719,7 +719,7 @@ impl SoftStepSolver {
     // `bodies_eff[mc.ib]` (disjoint buffers) — a single `iter_mut` cannot express
     // the three-buffer Gauss-Seidel read/apply, so the explicit index is correct.
     ///
-    /// V2: `SPEC = true` (a step with `speculative_distance > 0`) solves each point on the
+    /// V2: `SPEC = true` (a step whose speculative contacts are on) solves each point on the
     /// separation the colored kernel's `SPEC` instance solves it on (its current one for a point
     /// speculative at gather, and for every point when `K3`), and a point whose separation is
     /// positive as speculative — `dλ = -mEff·(vn + s·inv_h)`, no push, in both passes. `deltas` is
@@ -1063,8 +1063,8 @@ impl RigidSolver for SoftStepSolver {
         let warm = self.warm_start_enabled && config.warm_start;
         let substeps = config.substeps.max(1);
         let h = config.dt / substeps as f32;
-        // V2: the speculative rule iff `speculative_distance > 0`; `1 / h` once.
-        let spec = config.speculative_distance > 0.0;
+        // V2: the speculative rule iff speculative contacts are on; `1 / h` once.
+        let spec = config.speculative_contacts();
         let inv_h = 1.0 / h;
 
         // Build the per-body views and per-contact constraints over the gather

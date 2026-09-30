@@ -311,6 +311,10 @@ pub(crate) struct SleepEpoch {
     /// `PhysicsConfig::speculative_distance`'s bits (V2): the narrowphase keeps a point while its
     /// separation is at most it, so `Off` would recompute a held island's manifolds differently.
     spec_bits: u32,
+    /// `PhysicsConfig::speculative_velocity_cap`'s bits (V2, the approach-velocity margin): a held
+    /// row keeps the velocity it froze with (`IslandSleep`), which the margin reads, so a change
+    /// of the cap can change what `Off` would recompute for a held island's pairs.
+    vcap_bits: u32,
     /// The live SDF edits by bits; the entries past `sdf_len` are zero.
     sdf_edits: [[u32; SDF_EDIT_WORDS]; MAX_SDF_EDITS],
 }
@@ -326,6 +330,7 @@ impl SleepEpoch {
         tau_bits: u32::MAX,
         dt_bits: u32::MAX,
         spec_bits: u32::MAX,
+        vcap_bits: u32::MAX,
         sdf_edits: [[0; SDF_EDIT_WORDS]; MAX_SDF_EDITS],
     };
 
@@ -360,6 +365,7 @@ impl SleepEpoch {
             tau_bits: cfg.contact_reuse_distance.to_bits(),
             dt_bits: cfg.dt.to_bits(),
             spec_bits: cfg.speculative_distance.to_bits(),
+            vcap_bits: cfg.speculative_velocity_cap.to_bits(),
             sdf_edits,
         }
     }
@@ -2043,5 +2049,26 @@ mod tests {
         }
         assert_eq!(found, 1, "anti-vacuity: sensor_pair's own test is found exactly once");
         assert!(sensor_pair(super::RowCls::SENSOR, 0) && !sensor_pair(0, 0), "the predicate itself");
+    }
+
+    /// V2: a change of either speculative parameter — the distance, or the approach-velocity cap
+    /// (ruling 9: a held row keeps the velocity it froze with, which the margin reads) — changes
+    /// the epoch, so it flushes every held island; a field the held outputs do not read (gravity)
+    /// does not. Red when the epoch drops the cap's bits.
+    #[test]
+    fn v2_the_epoch_carries_both_speculative_parameters() {
+        use super::SleepEpoch;
+        use crate::resources::{PhysicsConfig, SleepSkip};
+        let base = PhysicsConfig::default();
+        let epoch = |c: &PhysicsConfig| SleepEpoch::of(SleepSkip::Sets, true, c, None);
+        let mut d = base;
+        d.speculative_distance += 0.01;
+        let mut cap = base;
+        cap.speculative_velocity_cap = if base.speculative_velocity_cap > 0.0 { 0.0 } else { 0.5 };
+        let mut gravity = base;
+        gravity.gravity.y *= 0.5;
+        assert_ne!(epoch(&base), epoch(&d), "a speculative_distance change must flush the held islands");
+        assert_ne!(epoch(&base), epoch(&cap), "a speculative_velocity_cap change must flush the held islands");
+        assert_eq!(epoch(&base), epoch(&gravity), "control: gravity is not an input of a held island's outputs");
     }
 }

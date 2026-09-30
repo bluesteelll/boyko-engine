@@ -1823,7 +1823,9 @@ fn a7_r1_arm(arm: &'static str, contact_reuse: Option<bool>) -> CreepReading {
     a7_r1_arm_with(arm, contact_reuse, None)
 }
 
-/// [`a7_r1_arm`], with `speculative_distance` set to `speculative` when it is `Some` (V2).
+/// [`a7_r1_arm`], with `speculative_distance` set to `speculative` and the approach-velocity
+/// margin off (`speculative_velocity_cap = 0`) when it is `Some` (V2): `Some(0.0)` is the
+/// overlap-only rule.
 fn a7_r1_arm_with(
     arm: &'static str,
     contact_reuse: Option<bool>,
@@ -1838,6 +1840,7 @@ fn a7_r1_arm_with(
         }
         if let Some(d) = speculative {
             cfg.speculative_distance = d;
+            cfg.speculative_velocity_cap = 0.0;
         }
     }
     let reuse = h.world.resource::<PhysicsConfig>().contact_reuse;

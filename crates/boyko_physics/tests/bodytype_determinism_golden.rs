@@ -360,6 +360,7 @@ fn run_scene_hash_with(simd_solve: bool) -> u64 {
     world.resource_mut::<PhysicsConfig>().contact_reuse = false;
     // V2: the overlap-only rule (module docs, "Speculative contacts").
     world.resource_mut::<PhysicsConfig>().speculative_distance = 0.0;
+    world.resource_mut::<PhysicsConfig>().speculative_velocity_cap = 0.0;
 
     for _ in 0..STEPS {
         schedule.run(&mut world);

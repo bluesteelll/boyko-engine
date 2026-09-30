@@ -3031,6 +3031,7 @@ fn da9_rows(shape: Shape) -> Vec<Row> {
         contact_reuse: _,
         contact_reuse_distance: _,
         speculative_distance: _,
+        speculative_velocity_cap: _,
         sleeping: _,
         sleep_skip: _,
         sleep_threshold: _,
@@ -3075,6 +3076,14 @@ fn da9_rows(shape: Shape) -> Vec<Row> {
         Row { name: "contact_reuse_distance", write: |c| c.contact_reuse_distance = 0.0, class: O },
         // V2: relative, so it perturbs on both sides of the lane's flip of the default (0 -> 0.02).
         Row { name: "speculative_distance", write: |c| c.speculative_distance += 0.01, class: O },
+        // V2: a toggle (on to off, or off to the owner's cap), so it perturbs on both sides of the
+        // lane's flip of the default (0 -> 0.5); a relative write past the default would not bind
+        // (the cap is never reached in these scenes).
+        Row {
+            name: "speculative_velocity_cap",
+            write: |c| c.speculative_velocity_cap = if c.speculative_velocity_cap > 0.0 { 0.0 } else { 0.5 },
+            class: O,
+        },
         Row { name: "sleeping", write: |c| c.sleeping = !c.sleeping, class: O },
         // Off ≡ Sets (L10's invariant), and inert with sleeping off.
         Row { name: "sleep_skip", write: |c| c.sleep_skip = SleepSkip::Off, class: U },

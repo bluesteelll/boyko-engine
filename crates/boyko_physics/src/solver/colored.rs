@@ -15,8 +15,9 @@
 //! `PointConstraint` layout and the manifold-order `solve_velocities`
 //! Gauss-Seidel sweep — is **byte-untouched** by this solver and stays in the
 //! tree as the reference oracle. It carries the one contact rule both solvers
-//! share: V2's speculative branch (a step with `speculative_distance > 0`) is in
-//! both, through the same scalar helper, and a step at `0` runs the pre-V2 sweep
+//! share: V2's speculative branch (a step whose speculative contacts are on,
+//! `PhysicsConfig::speculative_contacts`) is in both, through the same scalar helper, and a
+//! step with them off runs the pre-V2 sweep
 //! in both. Since 2026-09-18 (owner decision) THIS solver is the default
 //! world's ([`DefaultRigidSolver`](super::DefaultRigidSolver)), with the O7 AVX2
 //! cohort kernel on (`PhysicsConfig::simd_solve`). Every `add_physics_*::<S>`
@@ -941,8 +942,9 @@ unsafe impl Send for ColorSolvePtrs<'_> {}
 unsafe impl Sync for ColorSolvePtrs<'_> {}
 
 /// The step's solve parameters (V2, `levers/V2-speculative/01-DESIGN.md` §2.4): the soft
-/// coefficients, `1 / h`, whether the speculative branch runs (`PhysicsConfig::speculative_distance
-/// > 0`), and the bodies' accumulated step movement that branch reads.
+/// coefficients, `1 / h`, whether the speculative branch runs
+/// (`PhysicsConfig::speculative_contacts`), and the bodies' accumulated step movement that branch
+/// reads.
 ///
 /// The dispatch hands ONE reference to every kernel call in place of the three coefficients it
 /// forwarded before, so the parallel colour task's capture keeps its size (a reference is two
@@ -960,8 +962,8 @@ struct SolveStep<'a> {
     /// `1 / h` for the substep `h`, computed once per step in `f32`, so every kernel multiplies a
     /// speculative separation by the same bits.
     inv_h: f32,
-    /// Whether the speculative branch runs: `speculative_distance > 0`. Off, every kernel runs its
-    /// `SPEC = false` instance, the pre-V2 instruction stream.
+    /// Whether the speculative branch runs: `PhysicsConfig::speculative_contacts`. Off, every
+    /// kernel runs its `SPEC = false` instance, the pre-V2 instruction stream.
     spec: bool,
     /// Each body row's accumulated movement over the step, written by the tracked integrate;
     /// read only when `spec` (empty otherwise). Never written during a sweep.
@@ -1861,7 +1863,7 @@ pub struct ColoredSoftStepSolver {
     bodies: ScratchColumn<BodyEffective>,
     /// V2: each body row's accumulated movement over the step (`dp`, `dq`), parallel to
     /// `bodies`, for the speculative current separation. Reset to `(0, IDENTITY)` for every row
-    /// at the build of a step with `speculative_distance > 0` and advanced by the tracked
+    /// at the build of a step whose speculative contacts are on and advanced by the tracked
     /// integrate; untouched (and unread) otherwise. Its own column, not a field of
     /// [`BodyEffective`], whose 64 B line every kernel gather reads.
     deltas: ScratchColumn<BodyDelta>,
@@ -3449,8 +3451,8 @@ impl ColoredSoftStepSolver {
     ///
     /// [O7]: https://github.com/bluesteelll/boyko-engine
     ///
-    /// V2: one branch per call picks the instance — `SPEC = false` (the step's
-    /// `speculative_distance` is 0), whose body is the pre-V2 kernel, or the speculative one with
+    /// V2: one branch per call picks the instance — `SPEC = false` (the step's speculative
+    /// contacts are off), whose body is the pre-V2 kernel, or the speculative one with
     /// the step's `K3` ([`CURRENT_SEPARATION_ALL_POINTS`]).
     fn solve_color(
         view: CohortSolveView<'_>,
@@ -4753,7 +4755,7 @@ impl ColoredSoftStepSolver {
     /// within a color are disjoint; cross-color the result is order-fixed). A
     /// zero-restitution contact is skipped, and only there is `vn0` unread (D9).
     ///
-    /// V2 (`spec`, a step with `speculative_distance > 0`): a point speculative at gather
+    /// V2 (`spec`, a step whose speculative contacts are on): a point speculative at gather
     /// (`s0 > 0`) whose normal impulse ended the substeps at `0` never touched this step, and gets
     /// no bounce — Box2D v3's rule ("the total normal impulse is 0 for speculative points").
     /// Without it such a point, approaching faster than the threshold, would be pushed apart
@@ -5096,9 +5098,10 @@ impl ColoredSoftStepSolver {
     ) {
         let substeps = config.substeps.max(1);
         let h = config.dt / substeps as f32;
-        // V2: the speculative branch runs iff `speculative_distance > 0` (`0` — and a NaN — is
-        // the pre-V2 kernel); `1 / h` once, so every kernel multiplies by the same bits.
-        let spec = config.speculative_distance > 0.0;
+        // V2: the speculative branch runs iff speculative contacts are on (a positive distance or
+        // a positive velocity cap; off — and a NaN — is the pre-V2 kernel); `1 / h` once, so every
+        // kernel multiplies by the same bits.
+        let spec = config.speculative_contacts();
         let inv_h = 1.0 / h;
 
         // Defect A (interim): re-key the sleep latch to this gather's rows BEFORE the early

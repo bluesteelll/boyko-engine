@@ -164,7 +164,8 @@ pub enum SleepSkip {
     /// colouring and the solve, and its contacts are kept for the views (DEFAULT). A held
     /// island is restored — collided again from what it kept — the step its inputs change
     /// (`sleep_sets.rs`), and a change of `contact_reuse`, `contact_reuse_distance`,
-    /// `speculative_distance`, `dt`, the effective warm start (the solver's setup flag AND
+    /// `speculative_distance`, `speculative_velocity_cap`, `dt`, the effective warm start (the
+    /// solver's setup flag AND
     /// [`PhysicsConfig::warm_start`], L10 D5b), the SDF field or its kernel restores every held
     /// island.
     #[default]
@@ -428,16 +429,33 @@ pub struct PhysicsConfig {
     pub contact_reuse_distance: f32,
     /// V2's speculative contact distance `d`, in metres (default `0.0`;
     /// [`DEFAULT_SPECULATIVE_DISTANCE`] is the owner's value, 2026-09-30). **It changes values**: a
-    /// contact point is kept while its separation is at most `d`, on every pair type (box-box,
+    /// contact point is kept while its separation is at most `d` plus the approach-velocity margin
+    /// ([`speculative_velocity_cap`](Self::speculative_velocity_cap)), on every pair type (box-box,
     /// sphere-sphere, sphere-box, SDF), a body's broadphase bounding sphere is inflated by `d / 2`
-    /// so every pair within `d` is a candidate, and the solvers solve a point whose current
-    /// separation is positive as a speculative contact (`bias = s / h`, no push) — Box2D v3's and
-    /// Jolt's rule. A pair with a sensor on either side uses `0`, so overlap reports stay exact.
+    /// (plus its own velocity term) so every such pair is a candidate, and the solvers solve a
+    /// point whose current separation is positive as a speculative contact (`bias = s / h`, no
+    /// push) — Box2D v3's and Jolt's rule. A pair with a sensor on either side uses the
+    /// overlap-only rule, so overlap reports stay exact.
     ///
-    /// **`0` is the overlap-only rule, bit for bit the engine before V2**: the value every
-    /// cross-window bridge runs. Must be finite and `>= 0`. A change takes effect at the next
-    /// broadphase, and restores every held island (L10's sleep epoch).
+    /// **`0`, with the velocity term off, is the overlap-only rule, bit for bit the engine before
+    /// V2**: the value every cross-window bridge runs. Must be finite and `>= 0`. A change takes
+    /// effect at the next broadphase, and restores every held island (L10's sleep epoch).
     pub speculative_distance: f32,
+    /// V2's approach-velocity margin (rulings 2026-09-30, item 9): the cap, in metres, on the
+    /// velocity term a pair's speculative margin adds to
+    /// [`speculative_distance`](Self::speculative_distance) — `d_eff = d + min(cap, max(0, approach)
+    /// · dt)`, `approach` the rate at which the two bodies close the gap at the start of the step
+    /// (per contact point, linear and angular; per SAT axis, the bound no point exceeds). Default
+    /// `0.0`, the term off; [`DEFAULT_SPECULATIVE_VELOCITY_CAP`] is the owner-ruled value. **It
+    /// changes values**: a pair that closes more than `d` in one step becomes a contact on the step
+    /// before it touches, instead of landing on whichever corner arrives first (F0g: J-T holds at
+    /// every drop height of the gap sweep with it, and at under half of them without it). Each
+    /// body's broadphase radius grows by `min(cap, (|v| + |ω| R) · dt)` to match.
+    ///
+    /// **`0` switches the term off**; with [`speculative_distance`](Self::speculative_distance)
+    /// `= 0` as well, the overlap-only rule. Must be finite and `>= 0`. A change takes effect at
+    /// the next broadphase, and restores every held island (L10's sleep epoch).
+    pub speculative_velocity_cap: f32,
     /// Opt into the O8 per-island SLEEPING / deactivation (default `false`).
     ///
     /// Effective only on the colored-solve path (the
@@ -610,6 +628,24 @@ pub const DEFAULT_CONTACT_REUSE_DISTANCE: f32 = 0.001;
 /// [`PhysicsConfig::speculative_distance`].
 pub const DEFAULT_SPECULATIVE_DISTANCE: f32 = 0.02;
 
+/// The owner-ruled cap on V2's approach-velocity margin (rulings 2026-09-30, item 9), in metres:
+/// half a metre, never reached on the J-T gap sweep F0g measured (a 2.0 m drop closes about
+/// 0.13 m per 1/60 s step). A NUMERICS-CHANGING value: see
+/// [`PhysicsConfig::speculative_velocity_cap`].
+pub const DEFAULT_SPECULATIVE_VELOCITY_CAP: f32 = 0.5;
+
+impl PhysicsConfig {
+    /// Whether V2's speculative contacts are on: a positive
+    /// [`speculative_distance`](Self::speculative_distance) or a positive
+    /// [`speculative_velocity_cap`](Self::speculative_velocity_cap). Off, every stage runs the
+    /// overlap-only rule, and both solvers their pre-V2 kernels.
+    #[inline]
+    #[must_use]
+    pub fn speculative_contacts(&self) -> bool {
+        self.speculative_distance > 0.0 || self.speculative_velocity_cap > 0.0
+    }
+}
+
 impl Default for PhysicsConfig {
     fn default() -> Self {
         Self {
@@ -689,6 +725,9 @@ impl Default for PhysicsConfig {
             // V2: `0` (the overlap-only rule, the engine before V2) until the lane's value-changing
             // commit makes `DEFAULT_SPECULATIVE_DISTANCE` the default.
             speculative_distance: 0.0,
+            // V2: the approach-velocity term off until the same commit makes
+            // `DEFAULT_SPECULATIVE_VELOCITY_CAP` the default.
+            speculative_velocity_cap: 0.0,
             // Default OFF so an un-opted colored world is BYTE-IDENTICAL to the O6/O7
             // colored solve (the campaign 0%-gate); sleeping is a pure opt-in.
             sleeping: false,

@@ -19,6 +19,9 @@
 //! step writes and the next step joins by the two bodies' rows (D9), which carry a separated box
 //! pair's separating axis so the SAT runs only once it stops separating (L9a (ii)), and a slow
 //! pair's record. Neither has `unsafe`; the chunks' tag and record writes are `dispatch`'s.
+//! `speculative` is V2's contact margin: how far apart a pair may be and still keep a point —
+//! the fixed speculative distance plus the approach-velocity term — which every generator's keep
+//! and early-out sites ask, and which sizes each body's broadphase margin. No `unsafe` either.
 //!
 //! # OBB convention
 //!
@@ -78,6 +81,7 @@ pub mod box_box;
 pub(crate) mod carry;
 pub(crate) mod dispatch;
 pub(crate) mod reuse;
+pub(crate) mod speculative;
 pub mod sphere_box;
 
 pub use dispatch::{NP_CHUNKS_PER_LANE, NP_MAX_CHUNKS, NP_MIN_PAIRS_PER_CHUNK};

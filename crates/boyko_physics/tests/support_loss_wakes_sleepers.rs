@@ -81,8 +81,8 @@ use boyko_physics::plugin::add_physics_colored_solve;
 #[cfg(not(miri))]
 use boyko_physics::resources::PairClasses;
 use boyko_physics::resources::{
-    ConstraintGraph, DEFAULT_SPECULATIVE_DISTANCE, IslandSleep, Manifolds, PhysicsConfig, SleepSkip,
-    SolverScratch,
+    ConstraintGraph, DEFAULT_SPECULATIVE_DISTANCE, DEFAULT_SPECULATIVE_VELOCITY_CAP, IslandSleep,
+    Manifolds, PhysicsConfig, SleepSkip, SolverScratch,
 };
 
 // ── Scene constants ──────────────────────────────────────────────────────────
@@ -726,18 +726,24 @@ struct BoxPileOutcome {
 /// Floor + cube S under cube U, contact reuse forced on, L10's sleep-skip `mode`; settle until
 /// both are latched; lower S by [`BOX_SUPPORT_DROP`]; run `POST_STEPS` steps.
 ///
-/// `speculative_distance = 0` (V2's overlap-only rule): the premise "a drop below τ_eff lifts
-/// every point of U's contact off" holds only while the drop exceeds the speculative distance,
-/// and this scene's drop is half a millimetre. The speculative rule has its own case,
+/// `speculative_distance = 0` and `speculative_velocity_cap = 0` (V2's overlap-only rule): the
+/// premise "a drop below τ_eff lifts every point of U's contact off" holds only while the drop
+/// exceeds the speculative margin, and this scene's drop is half a millimetre. The speculative rule has its own case,
 /// [`e_v2_lowering_a_box_support_by_more_than_d_wakes_the_box_it_carried`].
 #[cfg(not(miri))]
 fn box_pile_scene(mode: SleepSkip) -> BoxPileOutcome {
-    box_pile_scene_with(mode, 0.0, BOX_SUPPORT_DROP)
+    box_pile_scene_with(mode, 0.0, 0.0, BOX_SUPPORT_DROP)
 }
 
-/// [`box_pile_scene`] at `speculative_distance`, with S lowered by `drop`.
+/// [`box_pile_scene`] at `speculative_distance` and `speculative_velocity_cap`, with S lowered by
+/// `drop`.
 #[cfg(not(miri))]
-fn box_pile_scene_with(mode: SleepSkip, speculative_distance: f32, drop: f32) -> BoxPileOutcome {
+fn box_pile_scene_with(
+    mode: SleepSkip,
+    speculative_distance: f32,
+    speculative_velocity_cap: f32,
+    drop: f32,
+) -> BoxPileOutcome {
     let mut h = Harness::new();
     {
         let cfg = h.world.resource_mut::<PhysicsConfig>();
@@ -745,6 +751,7 @@ fn box_pile_scene_with(mode: SleepSkip, speculative_distance: f32, drop: f32) ->
         cfg.contact_reuse_distance = BOX_PILE_REUSE_DISTANCE;
         cfg.sleep_skip = mode;
         cfg.speculative_distance = speculative_distance;
+        cfg.speculative_velocity_cap = speculative_velocity_cap;
     }
     h.spawn(floor());
     let support = h.spawn(cube(SUPPORT, Vec3::new(0.0, CUBE_HALF, 0.0)));
@@ -947,7 +954,12 @@ const V2_SUPPORT_DROP: f32 = 1.5 * DEFAULT_SPECULATIVE_DISTANCE;
 fn e_v2_lowering_a_box_support_by_more_than_d_wakes_the_box_it_carried() {
     for mode in [SleepSkip::Off, SleepSkip::Sets] {
         let o = under_watchdog("box pile at the default speculative distance, S lowered by 1.5 d", move || {
-            box_pile_scene_with(mode, DEFAULT_SPECULATIVE_DISTANCE, V2_SUPPORT_DROP)
+            box_pile_scene_with(
+                mode,
+                DEFAULT_SPECULATIVE_DISTANCE,
+                DEFAULT_SPECULATIVE_VELOCITY_CAP,
+                V2_SUPPORT_DROP,
+            )
         });
         println!(
             "(e, V2, {mode:?}) box pile: latched after {} steps, U {} m deep on S, drop \

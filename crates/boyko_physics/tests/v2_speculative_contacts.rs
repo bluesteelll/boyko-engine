@@ -12,6 +12,10 @@
 //!   cube released within `d` touches down (S4, the relaxation pass); a speculative point that
 //!   does not close gets no restitution (S5); and a speculative pile keeps every bit identity
 //!   (S6: W 1/2/4/8/16, scalar against AVX2, sleeping W1 against W8). Each names its red.
+//! * **S7 (the approach-velocity margin, ruling 9)** — at `d = 0` with the velocity term on, the
+//!   fast cube of S2 is kept as a speculative contact on its velocity alone, and the solvers must
+//!   solve it by the speculative rule: the branch is keyed on speculative contacts being on, not on
+//!   `d > 0`.
 
 #![cfg(not(miri))]
 
@@ -37,6 +41,8 @@ use boyko_sdf_math::{SdfEdit, sdf_op};
 const DT: f32 = 1.0 / 60.0;
 /// The owner's distance (V2b).
 const D: f32 = 0.02;
+/// The owner-ruled cap on the approach-velocity term (ruling 9).
+const CAP: f32 = 0.5;
 
 /// Returns the bytes of a `#[repr(C)]` POD value for the raw `create_entity` path.
 fn as_bytes<T>(value: &T) -> &[u8] {
@@ -196,9 +202,13 @@ fn only_dynamic(world: &mut EcsMaster) -> RigidBody {
 }
 
 /// A unit cube 15 mm above the floor falling at 10 m/s (it travels 167 mm in one step), one step,
-/// on the given floor kind and kernel: its bottom's separation after the step.
-fn fast_landing(kernel: Kernel, d: f32, sdf: bool) -> f32 {
-    let (mut w, builder) = world_on(kernel, sdf, |cfg| cfg.speculative_distance = d);
+/// on the given floor kind and kernel, at speculative distance `d` and velocity cap `vcap`: its
+/// bottom's separation after the step.
+fn fast_landing(kernel: Kernel, d: f32, vcap: f32, sdf: bool) -> f32 {
+    let (mut w, builder) = world_on(kernel, sdf, |cfg| {
+        cfg.speculative_distance = d;
+        cfg.speculative_velocity_cap = vcap;
+    });
     if sdf {
         sdf_floor(&mut w);
     } else {
@@ -212,9 +222,10 @@ fn fast_landing(kernel: Kernel, d: f32, sdf: bool) -> f32 {
 }
 
 /// S2 + S3 (C4): a cube 15 mm above the floor at 10 m/s lands in one step on the face: at
-/// `d = 20 mm` the speculative points close the gap within the first substep and hold the cube at
-/// the face (within 1 mm either way), on every kernel. At `d = 0` it sinks by about
-/// `v·dt − 15 mm` (the pre-V2 narrowphase makes no point). Red on the pre-V2 solver at
+/// `d = 20 mm` (the velocity term off, so `d` alone keeps the points) the speculative points close
+/// the gap within the first substep and hold the cube at the face (within 1 mm either way), on
+/// every kernel. Under the overlap-only rule it sinks by about `v·dt − 15 mm` (the pre-V2
+/// narrowphase makes no point). Red on the pre-V2 solver at
 /// `d = 20 mm`: its soft rule on a positive separation is a ghost contact that stops the cube
 /// 11.5 mm above the face (measured at C4 on the C3 solver).
 ///
@@ -224,8 +235,8 @@ fn fast_landing(kernel: Kernel, d: f32, sdf: bool) -> f32 {
 #[test]
 fn s2_s3_a_fast_cube_lands_without_sinking_within_d() {
     for kernel in KERNELS {
-        let at_d = fast_landing(kernel, D, false);
-        let at_0 = fast_landing(kernel, 0.0, false);
+        let at_d = fast_landing(kernel, D, 0.0, false);
+        let at_0 = fast_landing(kernel, 0.0, 0.0, false);
         eprintln!("S2 ({kernel:?}): bottom {at_d} m at d = {D}, {at_0} m at d = 0");
         assert!(at_d.abs() <= 1.0e-3, "S2/S3 ({kernel:?}): the cube is {at_d} m off the face at d = {D}, over 1 mm");
         assert!(at_0 <= -0.1, "S2 ({kernel:?}): the pre-V2 rule sinks the cube ({at_0} m)");
@@ -240,11 +251,30 @@ fn s2_s3_a_fast_cube_lands_without_sinking_within_d() {
 #[test]
 fn s3_sdf_a_fast_cube_lands_on_the_field_without_sinking() {
     for kernel in KERNELS {
-        let at_d = fast_landing(kernel, D, true);
-        let at_0 = fast_landing(kernel, 0.0, true);
+        let at_d = fast_landing(kernel, D, 0.0, true);
+        let at_0 = fast_landing(kernel, 0.0, 0.0, true);
         eprintln!("S3-SDF ({kernel:?}): bottom {at_d} m at d = {D}, {at_0} m at d = 0");
         assert!(at_d.abs() <= 1.0e-3, "S3-SDF ({kernel:?}): the cube is {at_d} m off the field at d = {D}, over 1 mm");
         assert!(at_0 <= -0.1, "S3-SDF ({kernel:?}): the pre-V2 rule sinks the cube ({at_0} m)");
+    }
+}
+
+/// S7 (ruling 9): the cube of S2 at `d = 0` with the approach-velocity term on (the owner's cap):
+/// its 10 m/s approach alone keeps the four points (`d_eff = 167 mm`), and it lands within 1 mm
+/// of the face on every kernel, on a box floor and on an SDF floor; so it does with the whole rule
+/// (`d = 20 mm` and the term). Red under a speculative branch keyed on `speculative_distance > 0`:
+/// the kernels then solve the kept points by the pre-V2 soft rule on a positive separation, a
+/// ghost contact that holds the cube above the face.
+#[test]
+fn s7_the_velocity_term_alone_lands_a_fast_cube_by_the_speculative_rule() {
+    for kernel in KERNELS {
+        for sdf in [false, true] {
+            for (d, what) in [(0.0, "the velocity term alone"), (D, "the whole rule")] {
+                let at = fast_landing(kernel, d, CAP, sdf);
+                eprintln!("S7 ({kernel:?}, sdf {sdf}): bottom {at} m at d = {d}, cap {CAP} ({what})");
+                assert!(at.abs() <= 1.0e-3, "S7 ({kernel:?}, sdf {sdf}, {what}): the cube is {at} m off the face, over 1 mm");
+            }
+        }
     }
 }
 

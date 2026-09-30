@@ -142,6 +142,45 @@ old rule its relaxation pass would treat them as rigid "ghost" contacts (F0d NS2
 off the floor). It takes the same rule (its own Δ column, the tracked integrate, the shared scalar
 helper, the restitution guard), so it keeps running the engine's contact rule.
 
+### 2.6 The approach-velocity margin (VMARGIN, rulings 2026-09-30 item 9)
+
+A fixed margin only moves the boundary a landing crosses (F0f): a layer that closes more than `d`
+in one step still lands on whichever corner arrives first. So the margin grows with the approach:
+
+```
+d_eff = d + min(cap, max(0, approach) · h)       h = the step length, cap = 0.5 m, gravity not included
+```
+
+- **Per point** (the clip keep in `face_patch`, the reuse `refresh_face` keep, and the sphere and
+  SDF keeps): `approach = −(v_B(p) − v_A(p))·n`, `v(p) = v + ω × (p − c)`, both bodies' step-start
+  velocities at the incident point, `n` the A→B normal.
+- **Per axis** (the SAT early-out `separates`, which also drives L9a's carried axis, and
+  `refresh_edge`): the conservative bound `−(v_B − v_A)·n + |ω_A| R_A + |ω_B| R_B`, `R` the
+  circumradius — no point of the pair closes faster.
+- **Broadphase**: each body's `bp_margin = d / 2 + min(cap, (|v| + |ω| R) · h)`, written at
+  gather; the two per-body terms sum to at least the pair's `d_eff`.
+- **The call path, not a thread-local**: `narrowphase/speculative.rs` holds `SpecStep` (`d`, the
+  cap, `h`; it rides in `ReuseStep` to both narrowphase paths) and `SpecMargin` (one per pair,
+  built in `collide_pair` / the SDF stage from the two gathered rows, passed down by reference).
+  With the cap at `0` a margin is `d` alone and no site reads a velocity; `d = 0` and cap `0`
+  together are the overlap-only rule, every comparison bit for bit the pre-V2 engine.
+- **Knobs**: `PhysicsConfig::speculative_velocity_cap` (`DEFAULT_SPECULATIVE_VELOCITY_CAP = 0.5`
+  at the flip; `0` switches the term off), in L10's sleep epoch beside the distance's bits (a held
+  row keeps the velocity it froze with, which the margin reads). The solvers' speculative branch
+  is keyed on `PhysicsConfig::speculative_contacts()` (a positive distance or a positive cap),
+  not on `d > 0`: at `d = 0` with the term on, the kept points carry `s > 0` and must be solved
+  as speculative (S7). The parity runner takes `--speculative-velocity-cap C`; the overlap-only
+  spelling is `--speculative-distance 0 --speculative-velocity-cap 0`.
+- **SDF box corners** read their normal from a field sample, so a corner is first tested against
+  `reach` (the pair's `d` plus the n-independent bound on the velocity term, widened by 1/256
+  against rounding) and only a corner inside it samples its gradient; the exact per-point test
+  follows. Both box kernels run the same sequence (the O9 differential's moving arm).
+- **Evidence** (`jolt-gap/f0/f0g/`): K3 + S20 + VMARGIN holds 88 of 88 runs over the gap sweep
+  (11 gaps × reuse on/off × 4 seeds), against 35 of 88 without the term and 37 of 44 for Jolt 5.6;
+  +3.5–5.6 % rows in steady state, colours unchanged. The prototype covered box-box only and read
+  the velocities through a per-thread context; the production form covers every pair type and
+  passes them down the call path.
+
 ## 3. Commits and their gates
 
 Every commit: `cargo check` and `clippy -D warnings` over the workspace, `boyko-physics --tests`

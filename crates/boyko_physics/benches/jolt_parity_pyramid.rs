@@ -46,10 +46,10 @@
 //!
 //! # Configurations (`--cfg`, `--solver`)
 //!
-//! The runner sets every knob it depends on explicitly but two, so a change of a shipped default
+//! The runner sets every knob it depends on explicitly but three, so a change of a shipped default
 //! (the colored solver and `simd_solve` became the defaults in `56c1e9e7`, 2026-09-18) cannot
-//! change what a row measures; the two are `contact_reuse` and `speculative_distance` (below the
-//! list):
+//! change what a row measures; the three are `contact_reuse`, `speculative_distance` and
+//! `speculative_velocity_cap` (below the list):
 //!
 //! * `--cfg a` (cfg-A, H7): the colored solve; `parallel_solve = W > 1` (`--parallel-solve` could
 //!   force it on at W = 1 until L4 retired J-P1); `parallel_narrowphase` follows `parallel_solve`
@@ -98,9 +98,10 @@
 //! `--contact-reuse` sets it, and that default is a value knob: it is on since L9 C4, so a row
 //! without the flag runs contact reuse, and `--contact-reuse off` is the exact narrowphase — the
 //! spelling every cross-window bridge and every pre-C4 pose fixture needs from C4 on. So does
-//! `speculative_distance` unless `--speculative-distance` sets it: V2's contact rule, a value knob
-//! as well, and `--speculative-distance 0` is the overlap-only rule — the spelling every
-//! cross-window bridge and every pre-V2 pose fixture needs once V2 is the default.
+//! `speculative_distance` unless `--speculative-distance` sets it, and `speculative_velocity_cap`
+//! unless `--speculative-velocity-cap` sets it: V2's contact rule, value knobs as well, and
+//! `--speculative-distance 0 --speculative-velocity-cap 0` is the overlap-only rule — the spelling
+//! every cross-window bridge and every pre-V2 pose fixture needs once V2 is the default.
 //!
 //! # The profile (`--arm-profiler`)
 //!
@@ -264,7 +265,10 @@
 //!                              contact_reuse on without the flag
 //! --reuse-distance D           contact_reuse_distance τ in metres (with --contact-reuse on)
 //! --speculative-distance D     V2's speculative_distance d in metres (finite, >= 0), under any
-//!                              --cfg; 0 is the overlap-only rule of every pre-V2 fixture
+//!                              --cfg; 0 (with --speculative-velocity-cap 0) is the overlap-only
+//!                              rule of every pre-V2 fixture
+//! --speculative-velocity-cap C V2's speculative_velocity_cap in metres (finite, >= 0), under any
+//!                              --cfg; 0 switches the approach-velocity margin off
 //! --broadphase allpairs|tree|grid
 //!                              set broadphase (tree broadphase C3) under Manual selection, under
 //!                              any --cfg
@@ -624,6 +628,8 @@ struct Args {
     reuse_distance: Option<f32>,
     /// `--speculative-distance D` (V2); `None` leaves the tree's default.
     speculative_distance: Option<f32>,
+    /// `--speculative-velocity-cap C` (V2); `None` leaves the tree's default.
+    speculative_velocity_cap: Option<f32>,
     broadphase: Option<BroadphaseKind>,
     /// `--sleeping [on|off]`; `None` leaves the --cfg's own value.
     sleeping: Option<bool>,
@@ -663,7 +669,7 @@ fn usage_error(msg: &str) -> ExitCode {
         "usage: jolt_parity_pyramid --scene jolt|rest|s16 [--workers W] [--steps N] [--window A..B] \
          [--gap G] [--solver colored|reference] [--cfg a|as|b|default] [--parallel-solve] \
          [--parallel-np on|off] [--contact-reuse on|off] [--reuse-distance D] \
-         [--speculative-distance D] \
+         [--speculative-distance D] [--speculative-velocity-cap C] \
          [--broadphase allpairs|tree|grid] [--sleeping [on|off]] [--sleep-skip off|sets] \
          [--threshold T] \
          [--frozen-by K] [--arm-profiler] [--canary-frac F --canary-ref-ns T] \
@@ -704,6 +710,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     let mut contact_reuse = None;
     let mut reuse_distance = None;
     let mut speculative_distance = None;
+    let mut speculative_velocity_cap = None;
     let mut broadphase = None;
     let mut sleeping = None;
     let mut sleep_skip = None;
@@ -768,6 +775,10 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
             }
             "--speculative-distance" => {
                 speculative_distance = Some(parse_num::<f32>("--speculative-distance", it.next())?);
+            }
+            "--speculative-velocity-cap" => {
+                speculative_velocity_cap =
+                    Some(parse_num::<f32>("--speculative-velocity-cap", it.next())?);
             }
             "--broadphase" => {
                 broadphase = match it.next().as_deref() {
@@ -835,6 +846,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
         contact_reuse,
         reuse_distance,
         speculative_distance,
+        speculative_velocity_cap,
         broadphase,
         sleeping,
         sleep_skip,
@@ -931,6 +943,11 @@ fn validate(a: &Args) -> Result<(), String> {
         && !(d.is_finite() && d >= 0.0)
     {
         return Err(format!("--speculative-distance {d} must be finite and >= 0"));
+    }
+    if let Some(c) = a.speculative_velocity_cap
+        && !(c.is_finite() && c >= 0.0)
+    {
+        return Err(format!("--speculative-velocity-cap {c} must be finite and >= 0"));
     }
     if let Some(k) = a.frozen_by {
         if a.sleeping != Some(true) {
@@ -1164,6 +1181,9 @@ fn configure(cfg: &mut PhysicsConfig, args: &Args) {
     }
     if let Some(d) = args.speculative_distance {
         cfg.speculative_distance = d;
+    }
+    if let Some(c) = args.speculative_velocity_cap {
+        cfg.speculative_velocity_cap = c;
     }
     if let Some(kind) = args.broadphase {
         cfg.broadphase_select = BroadphaseSelectMode::Manual;
@@ -2051,6 +2071,7 @@ fn self_check() -> ExitCode {
         contact_reuse: None,
         reuse_distance: None,
         speculative_distance: None,
+        speculative_velocity_cap: None,
         broadphase: None,
         sleeping: None,
         sleep_skip: None,
@@ -2114,7 +2135,7 @@ fn run(args: &Args) -> ExitCode {
              \"tree_brute_max_rows\":{tree_brute_max_rows},\
              \"simd\":{},\"simd_solve\":{},\"parallel_solve\":{},\"parallel_broadphase\":{},\
              \"parallel_narrowphase\":{},\"contact_reuse\":{},\"contact_reuse_distance\":{},\
-             \"speculative_distance\":{},\
+             \"speculative_distance\":{},\"speculative_velocity_cap\":{},\
              \"sleeping\":{},\"sleep_skip\":{},\"sleep_threshold\":{},\"sleep_frames\":{},\
              \"colored\":{},\"contact_hertz\":{},\"contact_damping\":{}}}",
             cfg.substeps,
@@ -2129,6 +2150,7 @@ fn run(args: &Args) -> ExitCode {
             cfg.contact_reuse,
             json_f64(f64::from(cfg.contact_reuse_distance)),
             json_f64(f64::from(cfg.speculative_distance)),
+            json_f64(f64::from(cfg.speculative_velocity_cap)),
             cfg.sleeping,
             json_str(&format!("{:?}", cfg.sleep_skip)),
             json_f64(f64::from(cfg.sleep_threshold)),

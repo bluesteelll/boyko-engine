@@ -307,7 +307,9 @@ fn run_with_reuse(
     run_with(workers, parallel_solve, simd_solve, reuse, None)
 }
 
-/// [`run_with_reuse`], with `speculative_distance` set to `speculative` when it is `Some`.
+/// [`run_with_reuse`], with `speculative_distance` set to `speculative` and the approach-velocity
+/// margin off (`speculative_velocity_cap = 0`) when it is `Some`: `Some(0.0)` is the overlap-only
+/// rule.
 fn run_with(
     workers: usize,
     parallel_solve: bool,
@@ -334,6 +336,7 @@ fn run_with(
         }
         if let Some(d) = speculative {
             cfg.speculative_distance = d;
+            cfg.speculative_velocity_cap = 0.0;
         }
     }
 

@@ -2115,6 +2115,7 @@ fn run_pyramid_arm(
         }
         if speculative_zero {
             cfg.speculative_distance = 0.0;
+            cfg.speculative_velocity_cap = 0.0;
         }
     }
     let mut schedule = builder.build(&mut world);

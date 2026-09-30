@@ -256,8 +256,8 @@ pub fn position_integrate_scalar(
 /// (V2, the speculative current separation): the same loop, the same guard, the same two pose
 /// statements, then `dp += v·h` and `dq = dq.integrate(ω, h)` on the row's [`BodyDelta`]
 /// (Box2D v3's `deltaPosition` / `deltaRotation`). Both solvers call it in place of the untracked
-/// integrate on a step with `speculative_distance > 0` — no stage, loop or pass of its own. A row
-/// the guard skips keeps its delta. `deltas` holds one entry per row.
+/// integrate on a step whose speculative contacts are on — no stage, loop or pass of its own. A
+/// row the guard skips keeps its delta. `deltas` holds one entry per row.
 #[inline]
 pub(crate) fn position_integrate_tracked(
     bodies_eff: &[BodyEffective],
