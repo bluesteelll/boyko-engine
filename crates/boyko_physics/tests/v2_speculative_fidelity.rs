@@ -1,7 +1,8 @@
-//! **V2's fidelity gate: Jolt's pyramid must stand after its landing.** The J-T scene (Jolt's
-//! `PyramidScene`, height 15, 1240 boxes, 0.5 m layer gap, friction 0.2, restitution 0) run for 500
-//! steps through the real schedule at one worker, eight trajectories per cell, in four cells:
-//! contact reuse on and off, times sleeping off and on.
+//! **V2's fidelity gate: Jolt's pyramid must stand after its landing, at every drop height.** The
+//! J-T scene (Jolt's `PyramidScene`, height 15, 1240 boxes, friction 0.2, restitution 0) run for
+//! 500 steps through the real schedule at one worker, over the gap sweep of the owner's ruling
+//! (2026-09-30, item 9): the layer gap — the drop each layer lands from — at 0.5, 0.75, 0.9, 0.95,
+//! 1.0, 1.02, 1.05, 1.1, 1.25, 1.5 and 2.0 m, with contact reuse on and off.
 //!
 //! # Why this gate exists
 //!
@@ -9,36 +10,46 @@
 //! whether the pile holds. On the pre-V2 contact rule it does not: a contact existed only on
 //! overlap, the layers land at 3–12.5 m/s, most boxes of a layer land on one to three of their four
 //! supports, get kicked sideways, and the outer ring slides off (F0 verdict: 0 of 32 trajectories
-//! hold, the top box 475 mm off, 28.8°; Jolt 5.6 holds with 0 boxes past 0.5 m, 51 mm, 0.54°). V2
-//! (owner V2a, V2b = 20 mm, 2026-09-30) makes a contact point exist while its separation is at most
-//! `PhysicsConfig::speculative_distance`, and solves a positive separation as a speculative bias.
+//! hold at gap 0.5, the top box 475 mm off, 28.8°; Jolt 5.6 holds with 0 boxes past 0.5 m, 51 mm,
+//! 0.54°). V2 (owner V2a, V2b = 20 mm) keeps a contact point while its separation is at most
+//! `d + min(cap, approach · h)` — the speculative distance plus the approach-velocity margin — and
+//! solves a positive separation as a speculative bias. The fixed distance alone only moves the
+//! landing boundary (F0f); with the velocity term the pile holds at every gap (F0g: 88 of 88
+//! runs; 35 of 88 without the term; Jolt 5.6 37 of 44).
 //!
-//! # The trajectories
+//! # The runs
 //!
-//! The pile is chaotic, so one trajectory proves little. A trajectory is the scene with one box's
-//! spawn `x` nudged by one ulp (`f32::next_up`), the F0 ensemble's seeds: none, and boxes 0, 200,
-//! 400, 600, 800, 1000 and 1239 in spawn order.
+//! The pile is chaotic, so one trajectory proves little: at gaps 0.5 and 1.0 each arm also runs
+//! the scene with box 600's spawn `x` nudged by one ulp (`f32::next_up`), one of F0g's seeds. Every
+//! other gap runs the unperturbed scene. Sleeping is off in the sweep (the runner's J-T row); a
+//! third arm runs gap 0.5 with sleeping on, contact reuse on and off.
 //!
 //! # The rule
 //!
-//! Per trajectory, each box's horizontal drift from its spawn lattice point at step 500 (the F0
-//! `pile.py` metric). **A cell passes iff all eight trajectories have no box past 0.5 m and a max
-//! drift under 0.5 m.** The gate passes iff every cell does. Every trajectory's row is printed
-//! (boxes past 0.5 m and 0.1 m, max drift, the top box's offset, the max rotation, the pose hash)
-//! before the verdict, pass or fail.
+//! Per run, each box's horizontal drift from its spawn lattice point at step 500 (the F0 `pile.py`
+//! metric). **A run holds iff no box has drifted past 0.5 m and the max drift is under 0.5 m; an
+//! arm passes iff every run holds.** Every run's row is printed (boxes past 0.5 m and 0.1 m, max
+//! drift, the top box's offset, the max rotation, the pose hash) before the verdict, pass or fail.
+//!
+//! # The red control
+//!
+//! A gate that holds on the shipped rule could also be holding for a reason that is not the
+//! velocity term. So one run is required to FAIL: gap 1.5, contact reuse on, the velocity term
+//! capped at 1 mm (F0g: 19 boxes past 0.5 m, 9.4 m max drift). If it holds, the gate cannot see
+//! the term it certifies.
 //!
 //! # The anchors (the test builds J-T, not a look-alike)
 //!
-//! A cell's unperturbed trajectory ends in the pose hash of the parity runner's fixture for the
+//! At gap 0.5, the unperturbed runs end in the pose hash of the parity runner's fixture for the
 //! same configuration — FNV-1a 64 over every dynamic box's `RigidBody` as 13 little-endian `f32`,
 //! in spawn order, the runner's `pose_bytes`. A mismatch means this file no longer builds the scene
 //! the runner builds, which is a defect of the test, not a finding about the contact rule.
 //!
 //! # How to run it
 //!
-//! Release only in practice (32 runs of a 1240-box pile): the device-free `-- --ignored` leg,
+//! Release only in practice (29 runs of a 1240-box pile): the device-free `-- --ignored` leg,
 //! `cargo test -p boyko-physics --release --locked --test v2_speculative_fidelity -- --ignored
-//! --nocapture`. The four cells are four tests, so libtest runs them side by side.
+//! --nocapture`. The four arms are four tests, so libtest runs them side by side.
 
 #![cfg(not(miri))]
 
@@ -62,8 +73,17 @@ use boyko_physics::resources::{BroadphaseKind, BroadphaseSelectMode, PhysicsConf
 const BOX_SIZE: f32 = 2.0;
 /// Jolt's `cHalfBoxSize`.
 const HALF_BOX: f32 = 0.5 * BOX_SIZE;
-/// Jolt's `cBoxSeparation`, the J-T gap.
+/// Jolt's `cBoxSeparation`: J-T's gap, the one the runner's fixtures anchor.
 const GAP: f32 = 0.5;
+/// The owner's gap sweep (ruling 2026-09-30, item 9; F0g's gaps).
+const GAPS: [f32; 11] = [0.5, 0.75, 0.9, 0.95, 1.0, 1.02, 1.05, 1.1, 1.25, 1.5, 2.0];
+/// The gaps that also run the one-ulp seed.
+const SEEDED_GAPS: [f32; 2] = [0.5, 1.0];
+/// The one-ulp seed: box 600's spawn `x` nudged by one ulp (one of F0g's seeds).
+const SEED: usize = 600;
+/// The red control's gap and velocity-term cap (F0g's control: 19 boxes past 0.5 m).
+const CONTROL_GAP: f32 = 1.5;
+const CONTROL_CAP: f32 = 0.001;
 /// Jolt's pyramid height.
 const PYRAMID_HEIGHT: i32 = 15;
 /// Dynamic boxes in the pyramid.
@@ -82,11 +102,6 @@ const BOX_INV_INERTIA: f32 = 0.1875;
 const STEPS: usize = 500;
 /// The largest horizontal drift a standing pile may show, in metres.
 const DRIFT_LIMIT_M: f64 = 0.5;
-
-/// The F0 ensemble's seeds: `None` is the unperturbed scene; `Some(k)` nudges box `k`'s spawn `x`
-/// by one ulp.
-const SEEDS: [Option<usize>; 8] =
-    [None, Some(0), Some(200), Some(400), Some(600), Some(800), Some(1000), Some(1239)];
 
 /// The parity runner's J-T fixtures (`docs/measurements/2026-09-27-physics-window8/gate/fixtures/`
 /// and window 8b's), by the configuration they were recorded with: `JT500` (`--cfg default
@@ -108,23 +123,26 @@ const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 /// FNV-1a 64 prime.
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-/// One cell of the gate.
+/// One run of the gate.
 #[derive(Clone, Copy, Debug)]
-struct Cell {
-    /// Its name in the report.
-    name: &'static str,
+struct Run {
+    /// The layer gap, metres.
+    gap: f32,
     /// `PhysicsConfig::contact_reuse`.
     reuse: bool,
     /// `PhysicsConfig::sleeping`.
     sleeping: bool,
-    /// The runner fixture the unperturbed trajectory must end in, when one exists.
-    anchor: Option<u64>,
+    /// `None` is the unperturbed scene; `Some(k)` nudges box `k`'s spawn `x` by one ulp.
+    seed: Option<usize>,
+    /// `PhysicsConfig::speculative_velocity_cap` when `Some` (the red control); the default's
+    /// otherwise.
+    cap: Option<f32>,
 }
 
-/// What one trajectory ended in.
+/// What one run ended in.
 #[derive(Clone, Copy, Debug)]
 struct Trajectory {
-    seed: Option<usize>,
+    run: Run,
     pose_hash: u64,
     past_half_m: usize,
     past_tenth_m: usize,
@@ -141,10 +159,15 @@ impl Trajectory {
 
     /// The report row.
     fn row(&self) -> String {
-        let seed = self.seed.map_or_else(|| "none".to_owned(), |k| k.to_string());
+        let r = self.run;
+        let seed = r.seed.map_or_else(|| "none".to_owned(), |k| k.to_string());
+        let cap = r.cap.map_or_else(String::new, |c| format!(" cap {c}"));
         format!(
-            "seed {seed:>4}: >0.5m {:3}  >0.1m {:4}  max {:9.1} mm  top {:8.1} mm  rot {:7.2} deg  \
-             hash {:#018x}  {}",
+            "gap {:4} reuse {:3} sleep {:3} seed {seed:>4}{cap}: >0.5m {:3}  >0.1m {:4}  max {:9.1} mm  \
+             top {:8.1} mm  rot {:7.2} deg  hash {:#018x}  {}",
+            r.gap,
+            if r.reuse { "on" } else { "off" },
+            if r.sleeping { "on" } else { "off" },
             self.past_half_m,
             self.past_tenth_m,
             self.max_drift_m * 1e3,
@@ -211,8 +234,9 @@ fn spawn_box(world: &mut EcsMaster, position: Vec3, dynamic: bool) -> Entity {
     e
 }
 
-/// Every box's spawn lattice point, in spawn order: Jolt's placement loop, index for index.
-fn lattice() -> Vec<Vec3> {
+/// Every box's spawn lattice point at layer gap `gap`, in spawn order: Jolt's placement loop,
+/// index for index.
+fn lattice(gap: f32) -> Vec<Vec3> {
     let mut out = Vec::with_capacity(PYRAMID_BODIES);
     for i in 0..PYRAMID_HEIGHT {
         let lo = i / 2;
@@ -222,7 +246,7 @@ fn lattice() -> Vec<Vec3> {
                 let odd = if i & 1 != 0 { HALF_BOX } else { 0.0 };
                 out.push(Vec3::new(
                     -(PYRAMID_HEIGHT as f32) + BOX_SIZE * j as f32 + odd,
-                    1.0 + (BOX_SIZE + GAP) * i as f32,
+                    1.0 + (BOX_SIZE + gap) * i as f32,
                     -(PYRAMID_HEIGHT as f32) + BOX_SIZE * k as f32 + odd,
                 ));
             }
@@ -278,10 +302,12 @@ fn pose_hash(world: &EcsMaster, boxes: &[Entity]) -> u64 {
     h
 }
 
-/// Runs one trajectory of `cell` to step 500 at one worker and measures the pile.
-fn run(cell: Cell, lattice: &[Vec3], seed: Option<usize>) -> Trajectory {
+/// Runs `run` to step 500 at one worker and measures the pile.
+fn run(run: Run) -> Trajectory {
+    let lattice = lattice(run.gap);
+    assert_eq!(lattice.len(), PYRAMID_BODIES, "construction: Jolt's placement loop");
     let mut world = EcsMaster::new();
-    let boxes = spawn_scene(&mut world, lattice, seed);
+    let boxes = spawn_scene(&mut world, &lattice, run.seed);
     assert_eq!(boxes.len(), PYRAMID_BODIES, "construction: J-T has {PYRAMID_BODIES} dynamic boxes");
     let mut builder = ScheduleBuilder::new(ThreadPoolBuilder::new().num_threads(1).build());
     let keys = add_physics_colored_solve(&mut builder, &mut world);
@@ -289,14 +315,18 @@ fn run(cell: Cell, lattice: &[Vec3], seed: Option<usize>) -> Trajectory {
     world.insert_resource(FixedTime::new(Duration::from_secs_f32(DT)));
     {
         // The parity runner's `configure` for `--cfg default --broadphase tree --sleeping off|on`
-        // (plus `--contact-reuse off` for a reuse-off cell).
+        // (plus `--contact-reuse off` for a reuse-off run, `--gap G` for the gap, and
+        // `--speculative-velocity-cap C` for the red control).
         let cfg = world.resource_mut::<PhysicsConfig>();
         cfg.gravity = Vec3::new(0.0, -9.81, 0.0);
         cfg.dt = DT;
-        cfg.sleeping = cell.sleeping;
-        cfg.contact_reuse = cell.reuse;
+        cfg.sleeping = run.sleeping;
+        cfg.contact_reuse = run.reuse;
         cfg.broadphase_select = BroadphaseSelectMode::Manual;
         cfg.broadphase = BroadphaseKind::Tree;
+        if let Some(cap) = run.cap {
+            cfg.speculative_velocity_cap = cap;
+        }
     }
     let mut schedule = builder.build(&mut world);
     for _ in 0..STEPS {
@@ -309,7 +339,7 @@ fn run(cell: Cell, lattice: &[Vec3], seed: Option<usize>) -> Trajectory {
     let mut max_drift_m = 0.0f64;
     let mut max_rotation_deg = 0.0f64;
     let mut top_offset_m = 0.0f64;
-    for (k, (&e, p0)) in boxes.iter().zip(lattice).enumerate() {
+    for (k, (&e, p0)) in boxes.iter().zip(&lattice).enumerate() {
         let b = world.get_component::<RigidBody>(e).expect("invariant: a spawned box is live");
         let dx = f64::from(b.position.x) - f64::from(p0.x);
         let dz = f64::from(b.position.z) - f64::from(p0.z);
@@ -324,7 +354,7 @@ fn run(cell: Cell, lattice: &[Vec3], seed: Option<usize>) -> Trajectory {
         }
     }
     Trajectory {
-        seed,
+        run,
         pose_hash: hash,
         past_half_m,
         past_tenth_m,
@@ -334,82 +364,80 @@ fn run(cell: Cell, lattice: &[Vec3], seed: Option<usize>) -> Trajectory {
     }
 }
 
-/// Runs a cell's eight trajectories, prints every row, checks the anchor, then the rule.
-fn gate(cell: Cell) {
-    let lattice = lattice();
-    assert_eq!(lattice.len(), PYRAMID_BODIES, "construction: Jolt's placement loop");
-    let runs: Vec<Trajectory> = SEEDS.iter().map(|&seed| run(cell, &lattice, seed)).collect();
-    let rows: Vec<String> = runs.iter().map(Trajectory::row).collect();
-    let held = runs.iter().filter(|t| t.holds()).count();
-    println!(
-        "V2 fidelity cell {} (contact_reuse {}, sleeping {}): {held}/{} hold\n  {}",
-        cell.name,
-        cell.reuse,
-        cell.sleeping,
-        runs.len(),
-        rows.join("\n  ")
-    );
-    let unperturbed = runs[0];
-    assert!(unperturbed.seed.is_none(), "construction: the first seed is the unperturbed scene");
-    if let Some(anchor) = cell.anchor {
-        assert_eq!(
-            unperturbed.pose_hash, anchor,
-            "cell {}: the unperturbed trajectory ends in {:#018x}, not the parity runner's fixture \
-             {anchor:#018x} — this file no longer builds the scene the runner builds (a defect of \
-             the test, not a finding about the contact rule)",
-            cell.name, unperturbed.pose_hash
-        );
+/// Runs `runs`, prints every row, checks each anchored run's pose hash, then the rule: every run
+/// holds.
+fn gate(name: &str, runs: &[(Run, Option<u64>)]) {
+    let results: Vec<(Trajectory, Option<u64>)> = runs.iter().map(|&(r, anchor)| (run(r), anchor)).collect();
+    let rows: Vec<String> = results.iter().map(|(t, _)| t.row()).collect();
+    let held = results.iter().filter(|(t, _)| t.holds()).count();
+    println!("V2 fidelity {name}: {held}/{} runs hold\n  {}", results.len(), rows.join("\n  "));
+    for (t, anchor) in &results {
+        if let Some(anchor) = *anchor {
+            assert_eq!(
+                t.pose_hash, anchor,
+                "{name}: the run {:?} ends in {:#018x}, not the parity runner's fixture {anchor:#018x} \
+                 — this file no longer builds the scene the runner builds (a defect of the test, not a \
+                 finding about the contact rule)",
+                t.run, t.pose_hash
+            );
+        }
     }
     assert!(
-        held == runs.len(),
-        "cell {}: {held}/{} trajectories hold (no box past {DRIFT_LIMIT_M} m, max drift under \
-         {DRIFT_LIMIT_M} m); the pile does not stand:\n  {}",
-        cell.name,
-        runs.len(),
+        held == results.len(),
+        "{name}: {held}/{} runs hold (no box past {DRIFT_LIMIT_M} m, max drift under {DRIFT_LIMIT_M} \
+         m); the pile does not stand:\n  {}",
+        results.len(),
         rows.join("\n  ")
     );
 }
 
-#[test]
-#[ignore = "deferred: V2 C5 - red by design (0/8 on the pre-V2 contact rule) until the lane's C5 makes speculative contacts the default; then `slow:` (32 runs of Jolt's 1240-box pyramid)"]
-fn j_t_stands_contact_reuse_on_sleeping_off() {
-    gate(Cell {
-        name: "reuse-on/sleep-off",
-        reuse: true,
-        sleeping: false,
-        anchor: Some(ANCHOR_REUSE_ON_SLEEP_OFF),
-    });
+/// The sweep's runs with contact reuse `reuse`: every gap unperturbed, plus the seed at the seeded
+/// gaps; gap 0.5's unperturbed run anchored to `anchor`.
+fn sweep(reuse: bool, anchor: u64) -> Vec<(Run, Option<u64>)> {
+    let mut runs = Vec::with_capacity(GAPS.len() + SEEDED_GAPS.len());
+    for gap in GAPS {
+        let at = |seed| Run { gap, reuse, sleeping: false, seed, cap: None };
+        runs.push((at(None), (gap == GAP).then_some(anchor)));
+        if SEEDED_GAPS.contains(&gap) {
+            runs.push((at(Some(SEED)), None));
+        }
+    }
+    runs
 }
 
+#[ignore = "deferred: V2 flip - red by design on the pre-V2 contact rule until the lane's value-changing commit makes speculative contacts and the approach-velocity margin the default; then `slow:` (the J-T gap sweep, 13 runs of Jolt's 1240-box pyramid)"]
 #[test]
-#[ignore = "deferred: V2 C5 - red by design (0/8 on the pre-V2 contact rule) until the lane's C5 makes speculative contacts the default; then `slow:` (32 runs of Jolt's 1240-box pyramid)"]
-fn j_t_stands_contact_reuse_off_sleeping_off() {
-    gate(Cell {
-        name: "reuse-off/sleep-off",
-        reuse: false,
-        sleeping: false,
-        anchor: Some(ANCHOR_REUSE_OFF_SLEEP_OFF),
-    });
+fn j_t_stands_at_every_gap_contact_reuse_on() {
+    gate("gap sweep, contact reuse on", &sweep(true, ANCHOR_REUSE_ON_SLEEP_OFF));
 }
 
+#[ignore = "deferred: V2 flip - red by design on the pre-V2 contact rule until the lane's value-changing commit makes speculative contacts and the approach-velocity margin the default; then `slow:` (the J-T gap sweep, 13 runs of Jolt's 1240-box pyramid)"]
 #[test]
-#[ignore = "deferred: V2 C5 - red by design (0/8 on the pre-V2 contact rule) until the lane's C5 makes speculative contacts the default; then `slow:` (32 runs of Jolt's 1240-box pyramid)"]
-fn j_t_stands_contact_reuse_on_sleeping_on() {
-    gate(Cell {
-        name: "reuse-on/sleep-on",
-        reuse: true,
-        sleeping: true,
-        anchor: Some(ANCHOR_REUSE_ON_SLEEP_ON),
-    });
+fn j_t_stands_at_every_gap_contact_reuse_off() {
+    gate("gap sweep, contact reuse off", &sweep(false, ANCHOR_REUSE_OFF_SLEEP_OFF));
 }
 
+#[ignore = "deferred: V2 flip - red by design on the pre-V2 contact rule until the lane's value-changing commit; then `slow:` (2 runs of Jolt's 1240-box pyramid)"]
 #[test]
-#[ignore = "deferred: V2 C5 - red by design (0/8 on the pre-V2 contact rule) until the lane's C5 makes speculative contacts the default; then `slow:` (32 runs of Jolt's 1240-box pyramid)"]
-fn j_t_stands_contact_reuse_off_sleeping_on() {
-    gate(Cell {
-        name: "reuse-off/sleep-on",
-        reuse: false,
-        sleeping: true,
-        anchor: Some(ANCHOR_REUSE_OFF_SLEEP_ON),
-    });
+fn j_t_stands_with_sleeping_on() {
+    let at = |reuse| Run { gap: GAP, reuse, sleeping: true, seed: None, cap: None };
+    gate(
+        "gap 0.5, sleeping on",
+        &[(at(true), Some(ANCHOR_REUSE_ON_SLEEP_ON)), (at(false), Some(ANCHOR_REUSE_OFF_SLEEP_ON))],
+    );
+}
+
+/// The red control: gap 1.5, contact reuse on, the velocity term capped at 1 mm must NOT hold. A
+/// hold here means the sweep's gaps hold for a reason other than the velocity term, and the gate
+/// cannot see the term it certifies.
+#[ignore = "slow: the fidelity gate's red control - 1 run of Jolt's 1240-box pyramid for 500 steps; release, the device-free -- --ignored leg"]
+#[test]
+fn red_control_the_velocity_term_capped_at_1_mm_fails_at_gap_1_5() {
+    let t = run(Run { gap: CONTROL_GAP, reuse: true, sleeping: false, seed: None, cap: Some(CONTROL_CAP) });
+    println!("V2 fidelity red control: {}", t.row());
+    assert!(
+        !t.holds(),
+        "the red control holds: {} — the gate cannot tell the velocity term from its absence",
+        t.row()
+    );
 }
