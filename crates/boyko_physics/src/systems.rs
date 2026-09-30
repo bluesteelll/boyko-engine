@@ -321,13 +321,13 @@ pub fn physics_gather(
 /// Three interchangeable paths, selected by [`PhysicsConfig::broadphase`] (a
 /// single runtime branch — the one-branch floor):
 ///
-/// - [`BroadphaseKind::AllPairs`] (DEFAULT): the shipped O(n²) double loop,
-///   byte-identical to before O2 (the campaign 0%-gate).
+/// - [`BroadphaseKind::AllPairs`]: the shipped O(n²) double loop, byte-identical to
+///   before O2 (cfg-A and every AllPairs pin run it).
 /// - [`BroadphaseKind::Grid`] (opt-in, O2): a uniform-grid CSR counting-sort
 ///   ([`BroadphaseGrid::build`]) that emits candidates then applies the SAME
 ///   sphere-bound predicate and sorts by `(min, max)`. Its pair set is
 ///   bit-identical to all-pairs.
-/// - [`BroadphaseKind::Tree`] (opt-in): the packed-BVH broadphase with a
+/// - [`BroadphaseKind::Tree`] (DEFAULT since its C4): the packed-BVH broadphase with a
 ///   persistent static set ([`BroadphaseTree::step`]), serial, heap-free per step.
 ///   Its pair set is all-pairs' exact set by construction (the same predicate on
 ///   the same bits, one owner per pair, an integer-count assembly), so it is
@@ -582,8 +582,8 @@ fn broadphase_arms(
         tree.clear_sleepers(pairs);
     }
     match cfg.broadphase {
-        // The shipped all-pairs loop, kept VERBATIM so the default path's asm is
-        // byte-identical to before O2 (the 0%-gate). DO NOT refactor this arm.
+        // The shipped all-pairs loop, kept VERBATIM: cfg-A (J-A) and every AllPairs pin run
+        // it, byte-identical to before O2 (the 0%-gate). DO NOT refactor this arm.
         BroadphaseKind::AllPairs => {
             // The ONLY change to this arm is the receiver: `pairs` is the column's
             // refill view instead of a `&mut Vec`. The bound test, the emit order

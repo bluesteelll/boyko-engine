@@ -1,6 +1,6 @@
 //! P3 — the cold broadphase density-policy (`select_broadphase`) gates.
 //!
-//! Five property groups (mirroring the P1 lighting-policy + the existing
+//! Six property groups (mirroring the P1 lighting-policy + the existing
 //! `broadphase_grid.rs` AllPairs↔Grid equivalence methodology):
 //!
 //! 1. **Manual = 0%-gate**: in the default `Manual` select mode the policy only
@@ -18,6 +18,8 @@
 //!    Grid — the scene P0b §8 measured Grid 2.46× slower on; it selects the Tree.
 //! 5. **The coupling pin** (design 04 D7): the soft↔rigid coupling path forces Grid, its
 //!    prerequisite, and pins `Manual`, so Auto can never overwrite the Grid there.
+//! 6. **The default kind** (the tree broadphase's C4): `Tree`, under `Manual`, on the default
+//!    `LeafList` query kernel; asserted without a world, so it also runs under Miri.
 //!
 //! The Auto sizes are derived from `AUTO_TREE_LO` / `AUTO_TREE_HI` (about 130 spheres); the
 //! transparency and Manual sizes reach `GRID_HI` (3,000 spheres). A physics step through a
@@ -34,7 +36,7 @@ use boyko_ecs::ecs::core::time::FixedTime;
 use boyko_threadpool::ThreadPoolBuilder;
 
 use boyko_physics::broadphase_policy::{AUTO_TREE_HI, AUTO_TREE_LO};
-use boyko_physics::broadphase_tree::TREE_BRUTE_MAX_ROWS;
+use boyko_physics::broadphase_tree::{QueryKernel, TREE_BRUTE_MAX_ROWS};
 use boyko_physics::components::{
     Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
@@ -444,8 +446,8 @@ fn auto_never_selects_grid_on_the_jolt_pyramid() {
     world.resource_mut::<PhysicsConfig>().broadphase_select = BroadphaseSelectMode::Auto;
     assert_eq!(
         world.resource::<PhysicsConfig>().broadphase,
-        BroadphaseKind::AllPairs,
-        "construction: Auto cold-starts from the default AllPairs"
+        BroadphaseKind::Tree,
+        "construction: Auto cold-starts from the default Tree"
     );
 
     schedule.run(&mut world);
@@ -506,4 +508,20 @@ fn coupling_path_pins_manual_select_and_grid() {
         "the coupled world is still on Grid after a step (4 bodies would select AllPairs in Auto)"
     );
     assert_eq!(world.resource::<PhysicsStats>().active_body_count, 4, "non-vacuity: the policy ran");
+}
+
+// ── (6) The default kind (the tree broadphase's C4) ──────────────────────────
+
+/// The tree broadphase's C4: the Tree is the default kind, both in `PhysicsConfig::default()` and
+/// as the enum's own default, with the Manual select mode, the serial Grid emit untouched
+/// (`parallel_broadphase` off, design 04 D6) and the Morton leaf-list kernel (ruling 4 of
+/// 2026-09-29: the kd order stays opt-in). No world is built, so it runs under Miri.
+#[test]
+fn default_broadphase_is_the_tree() {
+    let cfg = PhysicsConfig::default();
+    assert_eq!(cfg.broadphase, BroadphaseKind::Tree, "the default broadphase kind");
+    assert_eq!(BroadphaseKind::default(), BroadphaseKind::Tree, "the enum's own default");
+    assert_eq!(cfg.broadphase_select, BroadphaseSelectMode::Manual, "the default select mode");
+    assert!(!cfg.parallel_broadphase, "parallel_broadphase stays off (design 04 D6)");
+    assert_eq!(QueryKernel::default(), QueryKernel::LeafList, "the default query kernel (ruling 4)");
 }
