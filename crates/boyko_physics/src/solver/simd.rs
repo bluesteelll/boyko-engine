@@ -1140,6 +1140,7 @@ mod tests {
             simulated,
             kinematic,
             is_sensor: false,
+            bp_margin: 0.0,
             shape: ColliderShape::Sphere { radius },
         };
         let eff = BodyEffective {
@@ -1296,6 +1297,7 @@ mod tests {
                 simulated: true,
                 kinematic: false,
                 is_sensor: false,
+                bp_margin: 0.0,
                 shape: ColliderShape::Sphere { radius: 1.0 },
             });
             eff.push(BodyEffective {
@@ -1332,6 +1334,7 @@ mod tests {
             simulated: true,
             kinematic: false,
             is_sensor: false,
+            bp_margin: 0.0,
             shape: ColliderShape::Sphere { radius: 0.5 },
         };
         let eff = BodyEffective {
@@ -1366,6 +1369,7 @@ mod tests {
             simulated: true,
             kinematic: false,
             is_sensor: false,
+            bp_margin: 0.0,
             shape: ColliderShape::Sphere { radius: 0.5 },
         };
         let eff = BodyEffective {

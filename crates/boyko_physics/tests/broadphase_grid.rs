@@ -120,6 +120,61 @@ proptest! {
     }
 }
 
+// ── V2 (C3): the speculative margin ──────────────────────────────────────────
+
+/// Every body's bounding sphere inflated by `margin` (V2's `bp_margin`, half the speculative
+/// distance), as the gather writes it.
+fn with_margin(mut b: BodyState, margin: f32) -> BodyState {
+    b.bp_margin = margin;
+    b
+}
+
+proptest! {
+    // V2 B2: the 0%-correctness scenes with every bounding sphere inflated by 10 mm (half of the
+    // owner's 20 mm speculative distance): the grid still emits all-pairs' exact set.
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn grid_equals_all_pairs_with_the_speculative_margin(
+        scene in proptest::collection::vec(
+            (
+                (-20.0_f32..20.0, -20.0_f32..20.0, -20.0_f32..20.0),
+                prop_oneof![
+                    (0.1_f32..3.0).prop_map(|r| ColliderShape::Sphere { radius: r }),
+                    ((0.1_f32..3.0), (0.1_f32..3.0), (0.1_f32..3.0))
+                        .prop_map(|(x, y, z)| ColliderShape::Box {
+                            half_extents: Vec3::new(x, y, z),
+                        }),
+                ],
+            ),
+            0..40usize,
+        )
+    ) {
+        let bodies: Vec<BodyState> = scene
+            .into_iter()
+            .map(|((px, py, pz), shape)| with_margin(body(Vec3::new(px, py, pz), shape), 0.01))
+            .collect();
+        let mut grid = BroadphaseGrid::with_capacity(bodies.len());
+        let g = grid_pairs(&mut grid, &bodies);
+        let a = all_pairs(&bodies);
+        prop_assert_eq!(g, a);
+    }
+}
+
+/// V2 B2's anti-vacuity: the margin is what pairs two spheres whose surfaces are 10 mm apart —
+/// no candidate without it, one with it, on the grid and on all-pairs alike.
+#[test]
+fn the_speculative_margin_pairs_surfaces_within_the_distance() {
+    let exact = [sphere(Vec3::ZERO, 0.5), sphere(Vec3::new(1.01, 0.0, 0.0), 0.5)];
+    let inflated = exact.map(|b| with_margin(b, 0.01));
+    let mut grid = BroadphaseGrid::with_capacity(2);
+    assert!(grid_pairs(&mut grid, &exact).is_empty() && all_pairs(&exact).is_empty(), "no margin, no pair");
+    let mut grid = BroadphaseGrid::with_capacity(2);
+    let g = grid_pairs(&mut grid, &inflated);
+    assert_eq!(g, all_pairs(&inflated), "the grid and all-pairs agree with the margin");
+    assert_eq!(g.len(), 1, "the margin pairs the two spheres");
+}
+
 // ── Multi-oversized size disparity (O2 W1: decoupled cell-size floor) ─────────
 
 proptest! {

@@ -4665,6 +4665,14 @@ pub struct BodyState {
     /// to today (the 0%-gate). Placed with the trailing scalars (it does not
     /// disturb the leading hot fields).
     pub is_sensor: bool,
+    /// The margin this row's broadphase bounding sphere is inflated by (V2): half of
+    /// `PhysicsConfig::speculative_distance`, written by
+    /// [`physics_gather`](crate::systems::physics_gather) into every row it gathers, so every
+    /// pair whose surfaces are within the speculative distance is a candidate of every
+    /// broadphase ([`body_bounding_radius`](crate::systems::body_bounding_radius) adds it).
+    /// `0` is the exact bounding sphere; a row built by [`from_columns`](Self::from_columns)
+    /// carries `0`. Placed beside `shape`, the other field the radius reads.
+    pub bp_margin: f32,
     /// The collider shape, projected at gather so broad/narrowphase have the
     /// body's real geometry (P2 W2). The broadphase reads its bounding radius
     /// and the sphere-sphere narrowphase reads its sphere radius — neither phase
@@ -4731,6 +4739,7 @@ impl BodyState {
             simulated,
             kinematic,
             is_sensor,
+            bp_margin: 0.0,
             shape: collider.shape,
         }
     }

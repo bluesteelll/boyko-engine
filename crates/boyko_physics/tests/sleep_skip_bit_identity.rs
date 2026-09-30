@@ -3682,6 +3682,7 @@ fn direct_drive_scene() -> Vec<BodyState> {
         simulated: true,
         kinematic: false,
         is_sensor: false,
+        bp_margin: 0.0,
         shape: ColliderShape::Sphere { radius: 0.5 },
     };
     let mut bodies: Vec<BodyState> = (0..6).map(|i| sphere(2.0 * i as f32)).collect();

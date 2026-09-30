@@ -94,6 +94,7 @@ fn dyn_sphere(position: Vec3, lin: Vec3) -> BodyState {
         simulated: true,
         kinematic: false,
         is_sensor: false,
+        bp_margin: 0.0,
         shape: ColliderShape::Sphere { radius: 1.0 },
     }
 }
@@ -112,6 +113,7 @@ fn static_body(position: Vec3) -> BodyState {
         simulated: false,
         kinematic: false,
         is_sensor: false,
+        bp_margin: 0.0,
         shape: ColliderShape::Sphere { radius: 1.0 },
     }
 }

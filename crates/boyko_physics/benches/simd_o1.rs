@@ -84,6 +84,7 @@ fn scene(n: usize) -> (Vec<BodyEffective>, Vec<BodyState>) {
             simulated: true,
             kinematic: false,
             is_sensor: false,
+            bp_margin: 0.0,
             shape: ColliderShape::Sphere { radius },
         });
         eff.push(BodyEffective {

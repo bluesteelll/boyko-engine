@@ -403,6 +403,7 @@ fn bit_equal(a: &BodyState, b: &BodyState) -> bool {
         simulated,
         kinematic,
         is_sensor,
+        bp_margin,
         shape,
     } = a;
     let v = |x: &crate::math::Vec3, y: &crate::math::Vec3| {
@@ -433,6 +434,7 @@ fn bit_equal(a: &BodyState, b: &BodyState) -> bool {
         && *simulated == b.simulated
         && *kinematic == b.kinematic
         && *is_sensor == b.is_sensor
+        && bp_margin.to_bits() == b.bp_margin.to_bits()
         && shapes
         && m(inv_inertia, &b.inv_inertia)
         && m(inv_inertia_local, &b.inv_inertia_local)

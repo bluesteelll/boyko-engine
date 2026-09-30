@@ -269,6 +269,12 @@ pub fn physics_gather(
     // set is unchanged), so `finish_gather` can tell where every body sat one gather ago.
     // `iter_entities` yields exactly the `iter()` sequence.
     scratch.rows.begin_gather();
+    // V2: every row's broadphase bounding sphere is inflated by half the speculative distance, so
+    // every pair within it is a candidate. Read from the live configuration one stage before the
+    // broadphase latches it; nothing writes the configuration between the two stages of a step
+    // (the same argument as `dt`, stamped above). `0.5 * 0.0` is `+0.0`, which leaves every radius
+    // bit as it was.
+    let bp_margin = 0.5 * cfg.speculative_distance;
     // L10 D3 (design 04): under an active sleep-skip mode the previous step's post-solve
     // snapshot is kept as the broadphase's resting baseline — the snapshot and the baseline
     // swap, O(1), stamped with this gather — before the refill below clears the snapshot. Never
@@ -292,14 +298,16 @@ pub fn physics_gather(
                 .get(entity)
                 .expect("invariant: a row the body query yields is a live entity");
             ids.push(RowKey::of(live));
-            bodies.push(BodyState::from_columns(
+            let mut row = BodyState::from_columns(
                 &body,
                 mass,
                 collider,
                 sensor.is_some(),
                 simulated,
                 kinematic,
-            ));
+            );
+            row.bp_margin = bp_margin;
+            bodies.push(row);
         }
         debug_assert_eq!(ids.len(), bodies.len(), "invariant: one entity id per gathered row");
         bodies.len()
@@ -2167,12 +2175,17 @@ pub fn physics_apply(mut query: BodyQuery<BodyApplyData>, scratch: Res<SolverScr
 /// CANDIDATE regardless of its rotation. The broadphase proxy is intentionally
 /// shape-agnostic here; the precise per-pair narrowphase lives in
 /// [`physics_narrowphase`]'s shape dispatch (P2 W4).
+///
+/// Plus the row's [`bp_margin`](BodyState::bp_margin) (V2: half the speculative distance, so two
+/// bodies within it overlap as spheres), which every broadphase reads through this one function.
+/// At `0` the radius is the shape's, bit for bit (`r + 0.0 == r`).
 #[inline]
 pub fn body_bounding_radius(body: &BodyState) -> f32 {
-    match body.shape {
+    let r = match body.shape {
         ColliderShape::Sphere { radius } => radius,
         ColliderShape::Box { half_extents } => half_extents.length(),
-    }
+    };
+    r + body.bp_margin
 }
 
 #[cfg(test)]
@@ -2371,6 +2384,7 @@ mod o9_manifold_tests {
             simulated: true,
             kinematic: false,
             is_sensor: false,
+            bp_margin: 0.0,
             shape: ColliderShape::Box { half_extents: half },
         }
     }
