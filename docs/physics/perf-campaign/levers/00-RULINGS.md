@@ -433,3 +433,40 @@ commit (4); an in-block ladder at W8/W16, the rung at W 1/2/4, the zone canary a
 the parent (J-T and J-T-a at W 1/8/16: B1, B2, N3, N6); ω_b v2 (both routes, participants 2/4/8, stages 36/72,
 spin-only and spin-then-park); ω(W, gap) with the N4 participation receipt; the F3 rows (R1–R4 and the G4 block);
 J-Son-T; the DM1 re-read. S7-AB joins it once the S7 lane lands.
+
+Amended on 2026-09-29 (the next section): S7's partial form (ruling 4) is rejected and frozen, and the owner answered the
+2026-09-26 owner-value question on spinning helpers.
+
+## After window 8b: S7's partial form rejected and frozen, S4 kept, F3 not the default, the tree thresholds not reproduced, helpers spin (2026-09-29)
+
+Window 8b ran on 2026-09-29 under ruling 1 of the previous section (K = 9 over three passes; a claim needs IQR AND SE,
+and a claim that also passes min–max is STRONG): 894 timed processes, 0 invalid, 0 voided passes, and 26 of 786 slots
+dropped because the desktop and agent sessions were busy. Its numbers are recorded in the window 8b measurement record
+(to be committed). 8b carried no Jolt row, so the standing against Jolt 5.6 is not re-measured.
+- **1. Owner value: helpers SPIN.** This answers the owner-value question of 2026-09-26. The S1 region, and any later
+  region-style scheduler, keeps its helpers in active waiting between stages; spin-then-park is not the default, and
+  laptop energy is accepted as the price. The park path of the ω_b v2 bench stays a measurement axis only.
+- **2. S7's partial form (`u/phys-s7` commit (2), `a3adc827`) is REJECTED and frozen.** Capping the colour waves at the
+  physical-core count leaves W8 unchanged and makes W16 slower, STRONG: +0.140 ms (+6.8 %) on J-T and +0.658 ms
+  (+12.6 %) on J-A. C1 (W16 not slower than W8) fails STRONG on both rows and C3 (the predicted W16 gain) is refuted
+  STRONG: the SMT lanes help inside the waves. The commit is not merged; it is kept under the annotated tag
+  `phys/s7-partial-frozen`, and it returns only on a W16 A/B that shows a capped wave cheaper, e.g. inside S1 with S1's
+  own W16 A/B. Commits (0) (the rulings) and (1) (ω_b v2) are merged on their own. PC-S7-7, the physical-core cap on
+  S1's participants, is struck until S1 has its own W16 A/B.
+- **3. S4: KEEP.** At W8 on J-T the trunk is 0.1705 ms (8.58 %) faster than its S4-off parent, STRONG, on the
+  pre-registered span route; no W is claimed slower.
+- **4. F3 (`LeafListKd`) is not the default.** R1 is STRONG (the kd order cuts the J query by 16.9 %), but the kd build
+  eats the gain (22.9 → 50.9 µs at W1, 22.3 → 54.4 µs at W8) and R3 is not claimed. It is held opt-in until the tree C4
+  decision; if C4 does not use it, it is frozen and removed.
+- **5. The tree thresholds 144/152 are not reproduced**: the crossover reads 128/136. G4 is re-read at sizes 96–128
+  before tree C4 wires `AUTO_TREE_LO/HI`, and the all-pairs slowdown against window 7 is checked first.
+- **6. C1b (sleeping on by default) is supported.** No awake cost resolves at W1 or W8, and the settled pile is cut by
+  96.5–99.1 %. C1b keeps its place in the queue (ruling 8 of the previous section).
+- **7. DM1 C6: KEEP.** Window 8's +22 µs on `VB_EARLY_CULL` did not reproduce.
+- **8. A pass-cell with K < 3 does not gate.** The letter stands: window 7's clause, imported by every later window.
+  The driver changes for window 9: a dropped slot is re-run until the cell has K = 3 or the pass ends.
+- **9. S1 stays undecided** until S2i and S3i are priced on 8b's inputs: a net stage barrier of 0.35–1.07 µs at P = 8, a
+  park price of about +6 µs a stage after a serial gap of 20 µs or more, and a wake latency of 3.4–3.7 µs.
+- **10. Owner (2026-09-29): "find out why we are slower than Jolt and solve it."** A diagnosis precedes any new lever:
+  equal work first (manifold counts 4467 against 8489, iteration budgets), then the stage map, ours against Jolt, at
+  W 1/8/16, then a ranked lever plan.
