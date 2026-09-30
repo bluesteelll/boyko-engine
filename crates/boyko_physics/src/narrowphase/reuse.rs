@@ -1838,6 +1838,8 @@ mod tests {
     /// the reference face keeps its four points, speculative, at `d = 20 mm`, and none at `d = 0`
     /// (D6). Red under the keep mutation (`separation <= 0.0`): the refresh keeps nothing at `d`,
     /// and a slow pair within `d` loses the manifold its full collision would give it.
+    /// Native only, as every test here that builds its record through `box_box_classify`.
+    #[cfg(not(miri))]
     #[test]
     fn v2_a_face_refresh_keeps_points_lifted_within_d() {
         let h = Vec3::new(0.5, 0.5, 0.5);
