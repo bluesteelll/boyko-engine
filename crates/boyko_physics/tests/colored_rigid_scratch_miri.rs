@@ -49,6 +49,13 @@
 //!     about a race; the padding lanes' read contract for the apply is witnessed by
 //!     a concurrent writer in the crate's unit tests
 //!     (`warm_apply_padding_lane_reads_no_body_row_under_concurrent_writer`).
+//!   * **(e) pool-free, speculative (V2)** — (a) and (d) at `speculative_distance = 20 mm` on a
+//!     scene whose points alternate speculative (`s0 = +10 mm`) and penetrating: the delta
+//!     column's reset at the build, the tracked integrate's writes through its build view, and
+//!     both kernels' `delta_copy` reads through the solve view, interleaved substep by substep.
+//!   * **(f) multi-worker, SIMD, speculative (V2)** — (c) at `20 mm`: the step's `SolveStep` is
+//!     shared by reference into every worker's chunk task, and each worker reads the delta rows
+//!     of its own cohorts' bodies (and none of a padding lane's) while no one writes the column.
 //!
 //! Run (the load-bearing command). `-Zmiri-ignore-leaks` is here for the reason
 //! `boyko_threadpool/tests/miri_scope.rs` documents: this file's tests pass clean,
@@ -116,6 +123,16 @@ fn static_body(position: Vec3) -> BodyState {
         bp_margin: 0.0,
         shape: ColliderShape::Sphere { radius: 1.0 },
     }
+}
+
+/// [`shared_floor_scene`] with every even contact speculative (`s0 = +10 mm`, inside V2's 20 mm)
+/// and every odd one penetrating by 10 mm (V2's cases (e) and (f)).
+fn speculative_floor_scene(n: u32) -> (Vec<BodyState>, Vec<Manifold>) {
+    let (bodies, mut manifolds) = shared_floor_scene(n);
+    for (i, m) in manifolds.iter_mut().enumerate() {
+        m.points[0].separation = if i % 2 == 0 { 0.01 } else { -0.01 };
+    }
+    (bodies, manifolds)
 }
 
 fn manifold(a: u32, b: u32, normal: Vec3, sep: f32, anchor: Vec3) -> Manifold {
@@ -352,4 +369,63 @@ fn miri_inline_simd_warm_apply_small_n() {
         "non-vacuity: the warm store must have seeded the apply (else it applied zeros)"
     );
     assert!(pos_sum(&scratch).is_finite(), "the inline SIMD colored solve produced finite state");
+}
+
+// ── (e) pool-free, speculative — the delta column's three accesses (V2) ───────────
+
+/// V2's pool-free case: at `speculative_distance = 20 mm` each step resets the delta column
+/// through its build view, every substep's tracked integrate writes it through a fresh build
+/// view, and both kernels (`simd_solve` off, then on) read it through `delta_copy`'s
+/// `row_ptr` between those writes — the pattern whose SAFETY argument is that the solve view is
+/// minted after each write and never outlives the next one. Two steps per kernel: the second
+/// resets a column the first advanced.
+#[test]
+fn miri_inline_speculative_delta_column_clean() {
+    let (bodies, manifolds) = speculative_floor_scene(6);
+    let graph = build_graph(&bodies, &manifolds);
+    for simd_solve in [false, true] {
+        let mut solver = ColoredSoftStepSolver::default();
+        let mut scratch = SolverScratch::with_capacity(bodies.len());
+        scratch.set_bodies(&bodies);
+        let cfg = PhysicsConfig { speculative_distance: 0.02, simd_solve, ..cfg(false) };
+        for _ in 0..2 {
+            scratch.touched.reset(scratch.bodies().len());
+            solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+        }
+        let floor = scratch.bodies()[6];
+        assert_eq!(floor.linear_velocity, Vec3::ZERO, "the static floor stays frozen (simd {simd_solve})");
+        assert_eq!(floor.position, Vec3::new(0.0, -1.0, 0.0), "the static floor stays put (simd {simd_solve})");
+        assert!(pos_sum(&scratch).is_finite(), "the speculative solve produced finite state (simd {simd_solve})");
+    }
+}
+
+// ── (f) multi-worker, SIMD, speculative — the shared step and the delta reads (V2) ─
+
+/// (c) at `speculative_distance = 20 mm`: the single colour crosses the parallel threshold, so
+/// the `SolveStep` — its delta view among its fields — is shared by reference into each
+/// worker's chunk task, and each worker reads the delta rows of its own cohorts' bodies while
+/// no one writes the column. The trailing partial cohort's padding lanes name row 0, which
+/// cohort 0's owner writes: a padding lane must read no delta row either.
+#[test]
+fn miri_multiworker_simd_speculative_step_clean() {
+    use boyko_threadpool::ThreadPoolBuilder;
+
+    let (bodies, manifolds) = speculative_floor_scene(300);
+    let graph = build_graph(&bodies, &manifolds);
+    let mut solver = ColoredSoftStepSolver::default();
+    let mut scratch = SolverScratch::with_capacity(bodies.len());
+    scratch.set_bodies(&bodies);
+    scratch.touched.reset(scratch.bodies().len());
+
+    let cfg = PhysicsConfig { speculative_distance: 0.02, simd_solve: true, ..cfg(true) };
+    let pool = ThreadPoolBuilder::new().num_threads(2).build();
+    pool.install(|_scope| {
+        scratch.touched.reset(scratch.bodies().len());
+        solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+    });
+
+    let floor = scratch.bodies()[300];
+    assert_eq!(floor.linear_velocity, Vec3::ZERO, "the static floor stays frozen across workers");
+    assert_eq!(floor.position, Vec3::new(0.0, -1.0, 0.0), "the static floor stays put");
+    assert!(pos_sum(&scratch).is_finite(), "the multi-worker speculative solve produced finite state");
 }

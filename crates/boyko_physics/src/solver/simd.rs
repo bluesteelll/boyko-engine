@@ -104,6 +104,7 @@ use crate::math::Quat;
 use crate::resources::BodyState;
 
 use super::contact::{BodyEffective, is_dynamic_row};
+use super::soft_step::BodyDelta;
 
 /// AVX2 batch width (8 `f32` lanes per `__m256`).
 #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
@@ -247,6 +248,33 @@ pub fn position_integrate_scalar(
         if snap.simulated && is_dynamic_row(eff.inv_mass) {
             snap.position = snap.position + eff.linear_velocity * h;
             snap.rotation = snap.rotation.integrate(eff.angular_velocity, h);
+        }
+    }
+}
+
+/// [`position_integrate_scalar`] that also accumulates each moved row's movement over the step
+/// (V2, the speculative current separation): the same loop, the same guard, the same two pose
+/// statements, then `dp += v·h` and `dq = dq.integrate(ω, h)` on the row's [`BodyDelta`]
+/// (Box2D v3's `deltaPosition` / `deltaRotation`). Both solvers call it in place of the untracked
+/// integrate on a step with `speculative_distance > 0` — no stage, loop or pass of its own. A row
+/// the guard skips keeps its delta. `deltas` holds one entry per row.
+#[inline]
+pub(crate) fn position_integrate_tracked(
+    bodies_eff: &[BodyEffective],
+    snapshot: &mut [BodyState],
+    deltas: &mut [BodyDelta],
+    h: f32,
+) {
+    debug_assert!(
+        deltas.len() >= snapshot.len().min(bodies_eff.len()),
+        "invariant: every integrated row has a delta"
+    );
+    for ((eff, snap), delta) in bodies_eff.iter().zip(snapshot.iter_mut()).zip(deltas.iter_mut()) {
+        if snap.simulated && is_dynamic_row(eff.inv_mass) {
+            snap.position = snap.position + eff.linear_velocity * h;
+            snap.rotation = snap.rotation.integrate(eff.angular_velocity, h);
+            delta.dp = delta.dp + eff.linear_velocity * h;
+            delta.dq = delta.dq.integrate(eff.angular_velocity, h);
         }
     }
 }
@@ -559,6 +587,28 @@ pub(super) fn cross8(
     let cy = _mm256_sub_ps(_mm256_mul_ps(az, bx), _mm256_mul_ps(ax, bz));
     let cz = _mm256_sub_ps(_mm256_mul_ps(ax, by), _mm256_mul_ps(ay, bx));
     [cx, cy, cz]
+}
+
+/// 8-wide `Quat::rotate` (V2's current separation), bit-identical to the scalar
+/// [`Quat::rotate`](crate::math::Quat::rotate): `t = (u × v)·2`, then `(v + t·w) + u × t` with
+/// `u = (q.x, q.y, q.z)` — the same two [`cross8`]s, the `·2` and `·w` as separate `mul`s, and
+/// the two `add`s left to right (NO FMA). `q` is `[x, y, z, w]`, `v` `[x, y, z]`.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[target_feature(enable = "avx2")]
+pub(super) fn rotate_x8(
+    q: [core::arch::x86_64::__m256; 4],
+    v: [core::arch::x86_64::__m256; 3],
+) -> [core::arch::x86_64::__m256; 3] {
+    use core::arch::x86_64::{_mm256_add_ps, _mm256_mul_ps, _mm256_set1_ps};
+    let two = _mm256_set1_ps(2.0);
+    let c = cross8(q[0], q[1], q[2], v[0], v[1], v[2]);
+    let t = [_mm256_mul_ps(c[0], two), _mm256_mul_ps(c[1], two), _mm256_mul_ps(c[2], two)];
+    let c2 = cross8(q[0], q[1], q[2], t[0], t[1], t[2]);
+    [
+        _mm256_add_ps(_mm256_add_ps(v[0], _mm256_mul_ps(t[0], q[3])), c2[0]),
+        _mm256_add_ps(_mm256_add_ps(v[1], _mm256_mul_ps(t[1], q[3])), c2[1]),
+        _mm256_add_ps(_mm256_add_ps(v[2], _mm256_mul_ps(t[2], q[3])), c2[2]),
+    ]
 }
 
 /// 8-wide `Vec3::dot`, bit-identical to the scalar
@@ -1267,6 +1317,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// V2: the tracked integrate moves every pose exactly as the untracked one does (the same
+    /// bits, substep after substep); a row its guard skips keeps [`BodyDelta::ZERO`]; and a moved
+    /// row's delta is its movement since the start: `dp` the sum of its `v·h` in the integrate's
+    /// order, and `dq` the rotation that carries every anchor from the start orientation to the
+    /// current one (`q_now·r = dq·(q0·r)`, to rounding — `Quat::integrate` left-multiplies the
+    /// world-frame `ω`, so the two compose). Red under a delta advanced outside the guard, or a
+    /// rotation delta that is not accumulated.
+    #[test]
+    fn v2_tracked_integrate_moves_poses_as_the_untracked_one() {
+        let mut rng = Rng::new(0x5bec_0da7_0000_0003);
+        let (mut moved_rows, mut skipped_rows) = (0usize, 0usize);
+        for count in 1..=16usize {
+            let mut eff = Vec::with_capacity(count);
+            let mut start = Vec::with_capacity(count);
+            for _ in 0..count {
+                let (e, s) = random_body(&mut rng);
+                eff.push(e);
+                start.push(s);
+            }
+            let h = 0.001 + rng.f32_in(1.0).abs() * 0.01;
+            let mut plain = start.clone();
+            let mut tracked = start.clone();
+            let mut deltas = vec![BodyDelta::ZERO; count];
+            let mut dp_sum = vec![Vec3::ZERO; count];
+            for _ in 0..4 {
+                position_integrate_scalar(&eff, &mut plain, h);
+                position_integrate_tracked(&eff, &mut tracked, &mut deltas, h);
+                for i in 0..count {
+                    dp_sum[i] = dp_sum[i] + eff[i].linear_velocity * h;
+                }
+            }
+            for i in 0..count {
+                assert_eq!(bits3(plain[i].position), bits3(tracked[i].position), "position, body {i}");
+                assert_eq!(bits4(plain[i].rotation), bits4(tracked[i].rotation), "rotation, body {i}");
+                if !(start[i].simulated && is_dynamic_row(eff[i].inv_mass)) {
+                    skipped_rows += 1;
+                    assert_eq!(deltas[i], BodyDelta::ZERO, "a row the guard skips keeps a zero delta, body {i}");
+                    continue;
+                }
+                moved_rows += 1;
+                assert_eq!(bits3(deltas[i].dp), bits3(dp_sum[i]), "dp is the sum of v·h, body {i}");
+                let r_local = Vec3::new(0.3, -0.7, 0.5);
+                let r0 = start[i].rotation.rotate(r_local);
+                let r_now = tracked[i].rotation.rotate(r_local);
+                let err = (deltas[i].dq.rotate(r0) - r_now).length();
+                assert!(err < 1.0e-5, "dq carries the anchor to its current place, body {i}: error {err}");
+            }
+        }
+        assert!(moved_rows > 0 && skipped_rows > 0, "anti-vacuity: moved {moved_rows}, skipped {skipped_rows}");
     }
 
     /// A degenerate (near-zero) quaternion lane normalizes to IDENTITY under BOTH
