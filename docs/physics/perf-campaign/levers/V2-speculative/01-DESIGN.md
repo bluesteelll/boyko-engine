@@ -45,16 +45,21 @@ The step's `d` rides in `ReuseStep` (already carried to both narrowphase paths);
 sensor on either side uses `d_eff = 0` (Box2D's sensors use no margin; otherwise every sensor would
 report overlaps 20 mm early), and so does a sensor's SDF test.
 
-- **Box-box**, five sites and the hysteresis sign (`narrowphase/box_box.rs`, `reuse.rs`):
+- **Box-box**, five sites (`narrowphase/box_box.rs`, `reuse.rs`):
   `separates` (`depth < -d`, which also drives `sep_still_holds`, L9a's carried axis);
   `refresh_edge` (`depth < -d`); the clip keep (`separation <= d`); reuse `refresh_face`
   (`separation <= d` — the same `d` as the clip keep, or a record would not refresh to its own
   contact); `patch_depth`'s fold starts at `-d` (not `NEG_INFINITY`: at `d = 0` only the sign of a
-  zero differs, which its one consumer cannot see, and a NaN point keeps today's answer); the
-  axis hysteresis compares against `hysteresis_floor(last) = last * 1.05` for a negative depth and
-  `last / 1.05` otherwise (today's test inverts for negative depths; at `d = 0` a hint depth is never
-  negative, so the `else` arm is today's bits, NaN included). `x < -0.0 == x < 0.0` and
-  `x <= 0.0 == x <= -0.0` for every `x`, so each comparison is today's at `d = 0`. The public
+  zero differs, which its one consumer cannot see, and a NaN point keeps today's answer).
+  `x < -0.0 == x < 0.0` and `x <= 0.0 == x <= -0.0` for every `x`, so each comparison is today's
+  at `d = 0`.
+- **The axis hysteresis is unchanged: `best.depth >= last.depth / 1.05` for every depth**
+  (rulings 2026-09-30 item 10a). The spec's sign fix (`last · 1.05` for a negative depth, so a
+  separated hint could hold) was built and dropped: with K3 on it crept A7-R1's reuse-off pile to
+  13.294 mm against its 10 mm bound (0.53 mm without it), the gap sweep held 13/13 either way, and
+  every F0 prototype that held ran without it. Under the kept floor a separated hint never holds
+  (the floor lies above it; the best axis is never less separated than the hint), which N2's
+  hysteresis test pins (red under the sign fix). Which form is right is follow-up PC-V2-HYST. The public
   `box_box_contact` keeps its signature as the `d = 0` wrapper, so every narrowphase unit oracle
   (`box_box_fallback_depth.rs`, `narrowphase_census.rs`, A7-N11 against `pre_l9`) is unedited.
 - **Sphere-sphere**: `separation >= d` drops the pair (keeping the site's strict operator).

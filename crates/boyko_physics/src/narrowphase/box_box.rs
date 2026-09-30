@@ -360,17 +360,6 @@ fn separates(cand: Option<AxisCandidate>, sm: &SpecMargin) -> bool {
     matches!(cand, Some(c) if sm.separates(c.depth, c.axis))
 }
 
-/// The depth a hysteresis hint must beat, V2's sign fix: a candidate is "no better" than the hint
-/// `last` while its depth is at least `last / 1.05` for a penetrating hint and `last · 1.05` for a
-/// separated one (a negative depth under `d > 0`; dividing it would demand a candidate MORE
-/// separated than the hint, which the shallowest axis never is, so the hint could never hold).
-/// A `d = 0` step never has a negative hint depth (the SAT returned on any negative axis), so the
-/// `else` arm is today's bits, a NaN included.
-#[inline]
-fn hysteresis_floor(last_depth: f32) -> f32 {
-    if last_depth < 0.0 { last_depth * HYSTERESIS_RATIO } else { last_depth / HYSTERESIS_RATIO }
-}
-
 /// Whether canonical SAT axis `axis` (`0..15`) still separates the boxes (L9a (ii)): the pair's
 /// separating axis of the previous step, evaluated first on this step's boxes.
 ///
@@ -1011,15 +1000,20 @@ pub(crate) fn box_box_classify(
         _ => sat.face,
     };
 
-    // Reference-axis hysteresis: if last frame's axis is still overlapping (or within `d`) and
-    // the best axis is no deeper than HYSTERESIS_RATIO × its depth, KEEP it, so the reference
-    // face — hence the feature ids — does not flip on FP noise across a resting near-parallel
+    // Reference-axis hysteresis: if last frame's axis is still overlapping and the best
+    // axis is no deeper than HYSTERESIS_RATIO × its depth, KEEP it, so the reference face —
+    // hence the feature ids — does not flip on FP noise across a resting near-parallel
     // pair. Except that an edge hint never holds a pair whose best axis is a face: that is
     // how an edge chosen once on jitter kept a resting face pair on one point (A7b).
+    // V2 keeps the floor `last / 1.05` for every depth (rulings 2026-09-30 item 10a), so a
+    // separated hint (a negative depth, only under a speculative margin) never holds: the floor
+    // lies above it and the best axis is never less separated than the hint. The sign-corrected
+    // floor (`last · 1.05` below zero) crept A7-R1's reuse-off pile past its bound with K3 on;
+    // which form is right is follow-up PC-V2-HYST.
     let chosen = match sat.hint {
         Some(last)
             if last.index != best.index
-                && best.depth >= hysteresis_floor(last.depth)
+                && best.depth >= last.depth / HYSTERESIS_RATIO
                 && !(last.is_edge() && !best.is_edge()) =>
         {
             last
@@ -1274,7 +1268,7 @@ fn edge_fallback(
         Some(last)
             if last.is_edge()
                 && last.index != best.index
-                && best.depth >= hysteresis_floor(last.depth) =>
+                && best.depth >= last.depth / HYSTERESIS_RATIO =>
         {
             // The hint picks among bounded candidates only: which contact, never how deep.
             if last.depth <= bound {
@@ -4545,25 +4539,25 @@ mod v2_speculative_tests {
         assert!((patch_depth(&c.manifold, &SpecMargin::OVERLAP) - 0.001).abs() < 1e-6, "N2 patch: 1 mm deep at d = 0");
     }
 
-    /// N2 (hysteresis sign): two stacked boxes 10 mm apart, the hint on B's `y` face (4) where the
-    /// best is A's (1) at the same depth. The hint is held — the reference face, hence every
-    /// feature id, does not flip. Red under the pre-V2 floor (`last / 1.05` on a negative depth
-    /// asks for a candidate more separated than the hint, which the best never is): the pair takes
-    /// axis 1.
+    /// N2 (hysteresis, rulings 2026-09-30 item 10a): two stacked boxes 10 mm apart, the hint on
+    /// B's `y` face (4) where the best is A's (1) at the same depth. V2 keeps the pre-V2 floor
+    /// `last / 1.05` for every depth, so a separated hint never holds and the pair takes the best
+    /// axis. The spec's sign fix (`last · 1.05` below zero, which held this hint) was dropped: with
+    /// K3 on it crept A7-R1's reuse-off pile to 13.294 mm against a 10 mm bound. Which form is right
+    /// is follow-up PC-V2-HYST; until then this pins the ruled form. Red under the sign fix: the
+    /// pair keeps axis 4. The penetrating side (`d = 0`) holds its hint, as before V2.
     #[test]
-    fn n2_a_separated_hint_holds_under_the_hysteresis() {
+    fn n2_a_separated_hint_yields_to_the_best_axis() {
         let (a, b) = stacked(0.01);
+        let c = contact(box_box_classify(&a, &b, A, B, None, &SpecMargin::fixed(D))).expect("N2 hysteresis: a contact at d");
+        assert_eq!(c.reference_axis, 1, "N2 hysteresis: the best axis is A's face");
         let c = contact(box_box_classify(&a, &b, A, B, Some(4), &SpecMargin::fixed(D))).expect("N2 hysteresis: a contact at d");
-        assert_eq!(c.reference_axis, 4, "N2 hysteresis: the held hint is B's face");
+        assert_eq!(c.reference_axis, 1, "N2 hysteresis: a separated hint on B's face does not hold (ruling 10a)");
         let c = contact(box_box_classify(&a, &b, A, B, Some(1), &SpecMargin::fixed(D))).expect("N2 hysteresis: a contact at d");
         assert_eq!(c.reference_axis, 1, "N2 hysteresis: and A's when that is the hint");
-        // The penetrating side of the floor is today's (d = 0).
         let (a, b) = stacked(-0.001);
         let c = contact(box_box_classify(&a, &b, A, B, Some(4), &SpecMargin::OVERLAP)).expect("N2 hysteresis: an overlap");
         assert_eq!(c.reference_axis, 4, "N2 hysteresis: d = 0 holds a penetrating hint, as before V2");
-        assert_eq!(hysteresis_floor(-0.01).to_bits(), (-0.01f32 * HYSTERESIS_RATIO).to_bits());
-        assert_eq!(hysteresis_floor(0.01).to_bits(), (0.01f32 / HYSTERESIS_RATIO).to_bits());
-        assert!(hysteresis_floor(f32::NAN).is_nan());
     }
 
     /// Two boxes crossed edge over edge: A turned 45° about `z` (its top edge along `z`), B 45°
