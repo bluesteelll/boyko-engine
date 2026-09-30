@@ -3030,6 +3030,7 @@ fn da9_rows(shape: Shape) -> Vec<Row> {
         parallel_narrowphase: _,
         contact_reuse: _,
         contact_reuse_distance: _,
+        speculative_distance: _,
         sleeping: _,
         sleep_skip: _,
         sleep_threshold: _,
@@ -3072,6 +3073,8 @@ fn da9_rows(shape: Shape) -> Vec<Row> {
         Row { name: "parallel_narrowphase", write: |c| c.parallel_narrowphase = !c.parallel_narrowphase, class: U },
         Row { name: "contact_reuse", write: |c| c.contact_reuse = !c.contact_reuse, class: O },
         Row { name: "contact_reuse_distance", write: |c| c.contact_reuse_distance = 0.0, class: O },
+        // V2: relative, so it perturbs on both sides of the lane's flip of the default (0 -> 0.02).
+        Row { name: "speculative_distance", write: |c| c.speculative_distance += 0.01, class: O },
         Row { name: "sleeping", write: |c| c.sleeping = !c.sleeping, class: O },
         // Off ≡ Sets (L10's invariant), and inert with sleeping off.
         Row { name: "sleep_skip", write: |c| c.sleep_skip = SleepSkip::Off, class: U },
@@ -3277,6 +3280,33 @@ fn s3_mid_step_reuse_toggle_lands_next_step() {
 #[test]
 fn s3_mid_step_reuse_distance_lands_next_step() {
     mid_step_reuse_write("LB4 tau", |c| c.contact_reuse_distance = 0.0);
+}
+
+/// LB6 (V2): `speculative_distance` raised by 1 cm Early while two cubes resting 5 mm apart are
+/// held, on the Tree and the Grid at W 1 and 8. The next step flushes on the epoch and `Off`
+/// finds the pair within the new distance — a manifold that was not there. Red before the sleep
+/// epoch carried `speculative_distance`: `Sets` kept the held islands, and with them the pair
+/// `Off` now collides.
+#[test]
+fn s3_mid_step_speculative_distance_lands_next_step() {
+    let specs = vec![
+        Spec::floor(),
+        Spec::cube(Vec3::new(0.0, 0.5, 0.0), 0.5),
+        Spec::cube(Vec3::new(1.005, 0.5, 0.0), 0.5),
+    ];
+    for variant in [BroadphaseKind::Tree, BroadphaseKind::Grid].into_iter().flat_map(|k| [1, 8].map(|w| Variant::cell(k, true, w))) {
+        let label = format!("LB6 speculative_distance [{:?} W{}]", variant.kind, variant.workers);
+        let mut script = |step: usize, rig: &mut Rig| {
+            if step == HELD_BY {
+                queue_cfg(rig, Place::Early, |c| c.speculative_distance += 0.01);
+            }
+        };
+        let ev = lockstep(&label, Pipeline::Default, variant, &specs, HELD_BY + 11, &mut script);
+        let k = HELD_BY;
+        assert_eq!(ev.stats[k].held_rows, 2, "{label}: void: the two cubes were not held at the write's step");
+        assert_eq!(ev.stats[k + 1].flushes, 1, "{label}: void: the next step did not flush: {:?}", ev.stats[k + 1]);
+        assert_ne!(ev.off_manifolds[k + 1], ev.off_manifolds[k - 1], "{label}: void: Off's manifolds did not change");
+    }
 }
 
 /// LB5's written step: long enough that L9's `is_fast` classes the held towers' box pairs as fast

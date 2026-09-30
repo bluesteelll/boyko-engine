@@ -80,7 +80,7 @@ use crate::narrowphase::reuse::{
     PairGeom, Prev, Refreshed, ReuseRecord, ReuseStep, RowFrame, build, criterion,
     fill_row_frames, is_fast, refresh,
 };
-use crate::narrowphase::sphere_box::sphere_box_contact;
+use crate::narrowphase::sphere_box::sphere_box_contact_within;
 use crate::profiling::{
     PHYS_BP_PAIRS, PHYS_NP_CHUNKS, PHYS_NP_FULL, PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS,
     PHYS_NP_REUSED, PHYS_NP_SEP_HITS, counter,
@@ -647,7 +647,8 @@ fn broadphase_arms(
 ///
 /// - **sphere-sphere**: inline single-point center-to-center contact (the W2
 ///   path).
-/// - **sphere-box** / **box-sphere**: [`sphere_box_contact`] — a single
+/// - **sphere-box** / **box-sphere**:
+///   [`sphere_box_contact`](crate::narrowphase::sphere_box::sphere_box_contact) — a single
 ///   closest-point contact (the box is an OBB: position + body rotation +
 ///   half-extents).
 /// - **box-box**: [`box_box_contact`](crate::narrowphase::box_box::box_box_contact)'s
@@ -786,7 +787,8 @@ fn narrowphase_step<const SETS: bool>(
         cfg.contact_reuse_distance,
         cfg.dt,
         manifolds.box_axis_cache.keys_changed(),
-    );
+    )
+    .with_speculative(cfg.speculative_distance);
     // L9 D9: how this step's pairs join the previous step's tags — classified here, before
     // either path opens the carry, and stamped below, after the pair loop.
     let carry = manifolds.pair_carry.source(contact_pairs, &scratch.rows).with_reuse(reuse);
@@ -1043,8 +1045,11 @@ impl PairOut {
 /// whose fill declined; a box pair then builds its two frames with the same
 /// [`RowFrame::axes_of`], so the result does not depend on which (`narrowphase/reuse.rs`).
 ///
+/// Every pair type keeps a point while its separation is at most `reuse.speculative` (V2's `d`);
+/// a pair with a sensor on either side uses `0`, so an overlap report is exact.
+///
 /// - **sphere-sphere**: inline single-point center-to-center contact (the W2 path).
-/// - **sphere-box**: [`sphere_box_contact`], which emits normal A→B with
+/// - **sphere-box**: [`sphere_box_contact_within`], which emits normal A→B with
 ///   body_a = sphere, body_b = box.
 /// - **box-sphere**: the same generator with the sphere as A and the box as B (keyed
 ///   `b, a`), remapped to `(a, b)` order so the dense rows match and the normal runs
@@ -1063,17 +1068,40 @@ pub(crate) fn collide_pair<'r>(
     prev: impl FnOnce() -> Prev<'r>,
     hint: impl FnOnce() -> Option<usize>,
 ) -> PairOut {
+    // V2: a sensor pair keeps the overlap-only rule.
+    let reuse = if ba.is_sensor || bb.is_sensor { reuse.for_sensor_pair() } else { reuse };
+    let d = reuse.speculative;
     match (ba.shape, bb.shape) {
         (ColliderShape::Sphere { radius: ra }, ColliderShape::Sphere { radius: rb }) => {
-            PairOut::non_box(sphere_sphere_manifold(a, b, ba, bb, ra, rb))
+            PairOut::non_box(sphere_sphere_manifold(a, b, ba, bb, ra, rb, d))
         }
-        (ColliderShape::Sphere { radius }, ColliderShape::Box { half_extents }) => PairOut::non_box(
-            sphere_box_contact(a, b, ba.position, radius, bb.position, bb.rotation, half_extents),
-        ),
-        (ColliderShape::Box { half_extents }, ColliderShape::Sphere { radius }) => PairOut::non_box(
-            sphere_box_contact(b, a, bb.position, radius, ba.position, ba.rotation, half_extents)
+        (ColliderShape::Sphere { radius }, ColliderShape::Box { half_extents }) => {
+            PairOut::non_box(sphere_box_contact_within(
+                a,
+                b,
+                ba.position,
+                radius,
+                bb.position,
+                bb.rotation,
+                half_extents,
+                d,
+            ))
+        }
+        (ColliderShape::Box { half_extents }, ColliderShape::Sphere { radius }) => {
+            PairOut::non_box(
+                sphere_box_contact_within(
+                    b,
+                    a,
+                    bb.position,
+                    radius,
+                    ba.position,
+                    ba.rotation,
+                    half_extents,
+                    d,
+                )
                 .map(flip_manifold),
-        ),
+            )
+        }
         (ColliderShape::Box { half_extents: ha }, ColliderShape::Box { half_extents: hb }) => {
             let (oa, ob) = match frames {
                 Some(frames) => (
@@ -1156,7 +1184,7 @@ fn collide_box_pair(
             }
         }
     }
-    match box_box_classify_carried(oa, ob, a, b, prev.tag.sep_axis(), hint) {
+    match box_box_classify_carried(oa, ob, a, b, prev.tag.sep_axis(), reuse.speculative, hint) {
         BoxBoxOutcome::Contact(c) => {
             let slow = geom.unwrap_or_else(|| slow_geom(ba, bb, oa, ob, &radii, reuse));
             match slow {
@@ -1231,7 +1259,7 @@ fn reuse_record(
     if !criterion(record, oa, ob, ba.rotation, bb.rotation, g) {
         return None;
     }
-    match refresh(record, oa, ob, a, b) {
+    match refresh(record, oa, ob, a, b, reuse.speculative) {
         Refreshed::Contact(m) => {
             let pushed = m.count > 0;
             Some(PairOut {
@@ -1267,7 +1295,7 @@ fn record_contact(
 ) -> PairOut {
     let axis = c.reference_axis;
     let record = build(&c, oa, ob, ba.rotation, bb.rotation, g, reuse.parity);
-    match refresh(&record, oa, ob, a, b) {
+    match refresh(&record, oa, ob, a, b, reuse.speculative) {
         Refreshed::Contact(m) => {
             let pushed = m.count > 0;
             PairOut {
@@ -1295,7 +1323,8 @@ fn pushes(m: Option<&Manifold>) -> bool {
 }
 
 /// Builds the single-point sphere-sphere manifold for the dense pair `(a, b)`, or
-/// `None` when the spheres do not overlap (the W2 path, kept inline).
+/// `None` when the spheres' surfaces are `d` apart or more (the W2 path, kept inline; V2's `d`,
+/// `0` = the overlap-only rule, whose strict `>=` drops an exact touch).
 ///
 /// The normal runs A→B along the center-to-center direction; the lone contact
 /// point sits on A's surface. `feature_id` is `0` (a sphere has no distinguishing
@@ -1309,12 +1338,13 @@ fn sphere_sphere_manifold(
     bb: &BodyState,
     ra: f32,
     rb: f32,
+    d: f32,
 ) -> Option<Manifold> {
     let delta = bb.position - ba.position;
     let dist = delta.length();
     let separation = dist - (ra + rb);
-    if separation >= 0.0 {
-        // Bounding-circle overlap without an actual shape contact.
+    if separation >= d {
+        // Bounding-circle overlap without an actual shape contact within `d`.
         return None;
     }
     let normal = if dist > f32::MIN_POSITIVE {
@@ -1340,7 +1370,7 @@ fn sphere_sphere_manifold(
 /// `anchor_a`/`anchor_b`, and negates the normal so it still runs from the (new)
 /// A toward the (new) B (P2 W4).
 ///
-/// Used to remap a box-sphere pair: [`sphere_box_contact`] always keys the sphere
+/// Used to remap a box-sphere pair: [`sphere_box_contact_within`] always keys the sphere
 /// as A and the box as B, but the dense pair order is `(min, max)` by row, so when
 /// the box is the lower row the generated manifold must be flipped back to `(box,
 /// sphere)` = `(a, b)` order. `feature_id` / `separation` / `count` are unchanged
@@ -1423,6 +1453,8 @@ pub fn physics_narrowphase_sdf(
     // O9: which box kernel folds the field. Hoisted out of the body loop — one
     // record read per step, not per body.
     let kernel = inputs.config().sdf_narrowphase;
+    // V2's speculative distance, read once like the kernel; a sensor body uses `0` (below).
+    let speculative = inputs.config().speculative_distance;
     let bodies = scratch.bodies();
     // L10 A4 (design 04 D10): a held row's SDF manifold is kept in the held store, so the
     // stage skips the row. Empty on a step the sleep-skip did not classify, and on a pipeline
@@ -1451,14 +1483,16 @@ pub fn physics_narrowphase_sdf(
         // (the 0%-gate: `is_sensor` is `false` for every body in a sensor-free
         // world, so this always takes the `out` arm — byte-identical to pre-S5).
         let dst = if body.is_sensor { &mut sensor_out } else { &mut out };
+        // V2: a sensor's overlap report stays exact.
+        let d = if body.is_sensor { 0.0 } else { speculative };
         match body.shape {
             ColliderShape::Sphere { radius } => {
-                if let Some(m) = sphere_sdf_manifold(a, body, radius, field) {
+                if let Some(m) = sphere_sdf_manifold(a, body, radius, field, d) {
                     dst.push(m);
                 }
             }
             ColliderShape::Box { half_extents } => {
-                if let Some(m) = box_sdf_manifold(a, body, half_extents, field, kernel) {
+                if let Some(m) = box_sdf_manifold(a, body, half_extents, field, kernel, d) {
                     dst.push(m);
                 }
             }
@@ -1467,8 +1501,8 @@ pub fn physics_narrowphase_sdf(
 }
 
 /// Builds the single-point sphere-vs-SDF manifold for the dense row `a`, or `None`
-/// when the sphere does not penetrate the field / the contact normal is degenerate
-/// (P2 W5).
+/// when the sphere's surface is `d` or more from the field / the contact normal is degenerate
+/// (P2 W5; V2's `d`, `0` = the overlap-only rule).
 ///
 /// Samples the field at the sphere center: the sphere penetrates when the center's
 /// signed distance minus the radius is negative. The manifold normal is the field
@@ -1492,12 +1526,13 @@ fn sphere_sdf_manifold(
     body: &BodyState,
     radius: f32,
     field: &SdfField,
+    speculative: f32,
 ) -> Option<Manifold> {
     let center = body.position;
     let (d, gradient) = sample_sdf(field, center);
     let separation = d - radius;
-    if separation >= 0.0 {
-        // The sphere's surface clears the field — no contact.
+    if separation >= speculative {
+        // The sphere's surface clears the field by `speculative` or more — no contact.
         return None;
     }
     // O3: a degenerate (zero-length) gradient — the leaf normalizes a CSG-seam
@@ -1532,7 +1567,8 @@ fn sphere_sdf_manifold(
 /// corners, keeping the deepest ≤4 penetrating corners (P2 W5).
 ///
 /// Each corner is the body position plus the rotated local half-extent sign vector;
-/// a corner penetrates when its signed distance is negative. Penetrating corners
+/// a corner penetrates when its signed distance is negative, and is kept while its distance is
+/// below `speculative` (V2's `d`; `0` = the penetrating corners only). Kept corners
 /// with a usable (non-degenerate) gradient become contacts (`separation = d`,
 /// `normal = −gradient` — A → surface, matching the sphere path + the code so the
 /// one-sided push ejects A, anchor = the corner, a per-corner `feature_id`). The
@@ -1574,6 +1610,7 @@ fn box_sdf_manifold(
     half_extents: Vec3,
     field: &SdfField,
     kernel: SdfNarrowphaseKernel,
+    speculative: f32,
 ) -> Option<Manifold> {
     let max_points = crate::math::MAX_CONTACT_POINTS;
     // The kept contacts, deepest-first (most negative separation). Fixed capacity,
@@ -1584,16 +1621,40 @@ fn box_sdf_manifold(
 
     match kernel {
         SdfNarrowphaseKernel::Scalar => {
-            box_sdf_manifold_scalar(body, half_extents, field, &mut kept, &mut kept_len, max_points);
+            box_sdf_manifold_scalar(
+                body,
+                half_extents,
+                field,
+                speculative,
+                &mut kept,
+                &mut kept_len,
+                max_points,
+            );
         }
         SdfNarrowphaseKernel::Avx2 => {
             // The kernel is x86-64 + AVX2 only and is never taken under Miri (no
             // intrinsic support), so the variant degrades to the scalar fold rather
             // than failing to build — selecting it is legal on every target.
             #[cfg(all(target_arch = "x86_64", target_feature = "avx2", not(miri)))]
-            box_sdf_manifold_avx2(body, half_extents, field, &mut kept, &mut kept_len, max_points);
+            box_sdf_manifold_avx2(
+                body,
+                half_extents,
+                field,
+                speculative,
+                &mut kept,
+                &mut kept_len,
+                max_points,
+            );
             #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", not(miri))))]
-            box_sdf_manifold_scalar(body, half_extents, field, &mut kept, &mut kept_len, max_points);
+            box_sdf_manifold_scalar(
+                body,
+                half_extents,
+                field,
+                speculative,
+                &mut kept,
+                &mut kept_len,
+                max_points,
+            );
         }
     }
 
@@ -1630,6 +1691,7 @@ fn box_sdf_manifold_scalar(
     body: &BodyState,
     half_extents: Vec3,
     field: &SdfField,
+    speculative: f32,
     kept: &mut [(ContactPoint, Vec3); crate::math::MAX_CONTACT_POINTS],
     kept_len: &mut usize,
     max_points: usize,
@@ -1644,7 +1706,7 @@ fn box_sdf_manifold_scalar(
         let world = body.position + body.rotation.rotate(local);
 
         let (d, gradient) = sample_sdf(field, world);
-        if d >= 0.0 {
+        if d >= speculative {
             continue;
         }
         // O3: skip a degenerate (zero-length) seam gradient — no usable normal.
@@ -1705,7 +1767,7 @@ fn box_sdf_manifold_scalar(
 ///    order of `sdf_edit_list_normal`), then the FROZEN scalar `v_normalize` (the
 ///    bit-identical zero-length guard is REUSED, not re-emulated).
 ///
-/// Everything downstream — the `d >= 0` skip, the `length_squared < eps² ||
+/// Everything downstream — the `d >= speculative` skip, the `length_squared < eps² ||
 /// !is_finite` seam-skip, the `−gradient` normal, the [`ContactPoint`] /
 /// [`feature_vertex_face`] / [`insert_deepest`] build — is byte-identical to the
 /// scalar arm.
@@ -1714,6 +1776,7 @@ fn box_sdf_manifold_avx2(
     body: &BodyState,
     half_extents: Vec3,
     field: &SdfField,
+    speculative: f32,
     kept: &mut [(ContactPoint, Vec3); crate::math::MAX_CONTACT_POINTS],
     kept_len: &mut usize,
     max_points: usize,
@@ -1762,7 +1825,7 @@ fn box_sdf_manifold_avx2(
     let h = SDF_GRAD_H;
     for corner in 0usize..8 {
         let d = dist[corner];
-        if d >= 0.0 {
+        if d >= speculative {
             continue;
         }
         let w = world[corner];
@@ -2188,6 +2251,7 @@ mod o9_manifold_tests {
         body: &BodyState,
         half_extents: Vec3,
         field: &SdfField,
+        speculative: f32,
     ) -> Option<Manifold> {
         let max_points = crate::math::MAX_CONTACT_POINTS;
         let mut kept: [(ContactPoint, Vec3); crate::math::MAX_CONTACT_POINTS] =
@@ -2205,7 +2269,7 @@ mod o9_manifold_tests {
             let w = [world.x, world.y, world.z];
 
             let d = boyko_sdf_math::sdf_edit_list(edits, w);
-            if d >= 0.0 {
+            if d >= speculative {
                 continue;
             }
             // Central difference in the leaf's EXACT read order, then the frozen
@@ -2359,6 +2423,7 @@ mod o9_manifold_tests {
         let mut scenes = 0usize;
         let mut produced_some = 0usize;
         let mut produced_mixed = 0usize;
+        let mut produced_speculative = 0usize;
 
         for _ in 0..2000 {
             let count = 1 + (rng.below(6)) as usize; // 1..=6 edits
@@ -2376,11 +2441,19 @@ mod o9_manifold_tests {
             );
             let body = box_state(pos, rot, half);
 
-            let got = box_sdf_manifold(a, &body, half, &field, SdfNarrowphaseKernel::Avx2);
-            let want = scalar_box_sdf_manifold(a, &body, half, &field);
+            let got = box_sdf_manifold(a, &body, half, &field, SdfNarrowphaseKernel::Avx2, 0.0);
+            let want = scalar_box_sdf_manifold(a, &body, half, &field, 0.0);
 
             let scene = format!("pos={pos:?} half={half:?} edits={edits:?}");
             assert_manifold_bit_eq(&got, &want, &scene);
+            // V2 N4: the same scene at the owner's speculative distance; the AVX2 fold must keep
+            // the scalar's corners, speculative ones included.
+            let got_d = box_sdf_manifold(a, &body, half, &field, SdfNarrowphaseKernel::Avx2, 0.02);
+            let want_d = scalar_box_sdf_manifold(a, &body, half, &field, 0.02);
+            assert_manifold_bit_eq(&got_d, &want_d, &format!("{scene} speculative 0.02"));
+            if got_d.is_some_and(|m| m.points[..usize::from(m.count)].iter().any(|p| p.separation > 0.0)) {
+                produced_speculative += 1;
+            }
 
             scenes += 1;
             if let Some(m) = got {
@@ -2407,6 +2480,10 @@ mod o9_manifold_tests {
         // and the mixed (some-penetrate) path, not just the all-clear `None` case.
         assert!(scenes >= 1000, "differential must run >= 1000 scenes (ran {scenes})");
         assert!(
+            produced_speculative >= 20,
+            "V2 N4 anti-vacuity: too few scenes kept a speculative corner ({produced_speculative})"
+        );
+        assert!(
             produced_some >= 50,
             "anti-vacuity: too few contact-producing scenes ({produced_some}); the generator \
              never penetrates the field"
@@ -2425,8 +2502,8 @@ mod o9_manifold_tests {
         let field = SdfField::default();
         let body = box_state(Vec3::ZERO, Quat::IDENTITY, Vec3::new(1.0, 1.0, 1.0));
         let got =
-            box_sdf_manifold(BodyIndex(0), &body, Vec3::new(1.0, 1.0, 1.0), &field, SdfNarrowphaseKernel::Avx2);
-        let want = scalar_box_sdf_manifold(BodyIndex(0), &body, Vec3::new(1.0, 1.0, 1.0), &field);
+            box_sdf_manifold(BodyIndex(0), &body, Vec3::new(1.0, 1.0, 1.0), &field, SdfNarrowphaseKernel::Avx2, 0.0);
+        let want = scalar_box_sdf_manifold(BodyIndex(0), &body, Vec3::new(1.0, 1.0, 1.0), &field, 0.0);
         assert_manifold_bit_eq(&got, &want, "empty field");
         assert!(got.is_none(), "empty field must produce no manifold");
     }
@@ -2445,8 +2522,8 @@ mod o9_manifold_tests {
         )]);
         let half = Vec3::new(1.0, 1.0, 1.0);
         let body = box_state(Vec3::new(0.1, -0.2, 0.3), Quat::IDENTITY, half);
-        let got = box_sdf_manifold(BodyIndex(0), &body, half, &field, SdfNarrowphaseKernel::Avx2);
-        let want = scalar_box_sdf_manifold(BodyIndex(0), &body, half, &field);
+        let got = box_sdf_manifold(BodyIndex(0), &body, half, &field, SdfNarrowphaseKernel::Avx2, 0.0);
+        let want = scalar_box_sdf_manifold(BodyIndex(0), &body, half, &field, 0.0);
         assert_manifold_bit_eq(&got, &want, "all-corners-penetrate");
         // It must produce a manifold capped at MAX_CONTACT_POINTS.
         let m = got.expect("a fully-submerged box must produce a manifold");
@@ -2662,7 +2739,14 @@ mod pair_tag_rekeys_tests {
             let n = bodies.len() as u32;
             for reuse_on in [false, true] {
                 for rekey in [false, true] {
-                    let step = |parity| ReuseStep { on: reuse_on, tau: 1.0e-3, dt2: 1.0 / 3600.0, rekey, parity };
+                    let step = |parity| ReuseStep {
+                        on: reuse_on,
+                        tau: 1.0e-3,
+                        dt2: 1.0 / 3600.0,
+                        rekey,
+                        parity,
+                        speculative: 0.0,
+                    };
                     for a in 0..n {
                         for b in a + 1..n {
                             let (ia, ib) = (BodyIndex(a), BodyIndex(b));
@@ -2696,5 +2780,106 @@ mod pair_tag_rekeys_tests {
                 && seen.non_box > 0,
             "anti-vacuity: every outcome class must be reached: {seen:?}"
         );
+    }
+}
+
+/// V2's narrowphase gates on the non-box pair types (`levers/V2-speculative/01-DESIGN.md`, C2, N3):
+/// sphere-sphere, sphere-box in both row orders, sphere-SDF and box-SDF keep one speculative point
+/// per contact feature while the surfaces are at most `d` apart, and none past it or at `d = 0`; a
+/// pair with a sensor on either side keeps the overlap-only rule.
+#[cfg(test)]
+mod v2_speculative_pair_tests {
+    use super::*;
+    use boyko_sdf_math::{SdfEdit, sdf_op};
+
+    use crate::components::{Collider, RigidBody, RigidBodyMass};
+    use crate::math::Quat;
+    use crate::narrowphase::reuse::Prev;
+
+    /// The owner's distance (V2b).
+    const D: f32 = 0.02;
+
+    fn body(position: Vec3, shape: ColliderShape, sensor: bool) -> BodyState {
+        let b = RigidBody { position, linear_velocity: Vec3::ZERO, rotation: Quat::IDENTITY, angular_velocity: Vec3::ZERO };
+        let m = RigidBodyMass { inv_inertia: crate::math::Mat3::ZERO, inv_mass: 1.0, restitution: 0.0, friction: 0.5 };
+        let c = Collider { shape, layer: 1, mask: 1 };
+        BodyState::from_columns(&b, &m, &c, sensor, true, false)
+    }
+
+    fn sphere(position: Vec3, sensor: bool) -> BodyState {
+        body(position, ColliderShape::Sphere { radius: 0.5 }, sensor)
+    }
+
+    fn cube(position: Vec3, sensor: bool) -> BodyState {
+        body(position, ColliderShape::Box { half_extents: Vec3::new(0.5, 0.5, 0.5) }, sensor)
+    }
+
+    /// The pair `(a, b)` collided at `d` with no carry.
+    fn collide(a: &BodyState, b: &BodyState, d: f32) -> Option<Manifold> {
+        let reuse = ReuseStep::OFF.with_speculative(d);
+        collide_pair(BodyIndex(0), BodyIndex(1), a, b, None, reuse, || Prev::NONE, || None).manifold
+    }
+
+    /// One speculative point at separation `s` (within 1e-5).
+    fn one_point_at(m: Option<Manifold>, s: f32, what: &str) {
+        let m = m.unwrap_or_else(|| panic!("{what}: a contact within d"));
+        assert_eq!(m.count, 1, "{what}: one point: {m:?}");
+        let got = m.points[0].separation;
+        assert!(got > 0.0 && (got - s).abs() < 1e-5, "{what}: s = {s}, got {got}");
+    }
+
+    #[test]
+    fn n3_every_body_pair_type_keeps_a_speculative_point_within_d() {
+        // Surfaces 10 mm apart (within d), then 30 mm (past it).
+        for (gap, within) in [(0.01f32, true), (0.03, false)] {
+            let pairs = [
+                ("sphere-sphere", sphere(Vec3::ZERO, false), sphere(Vec3::new(0.0, 1.0 + gap, 0.0), false)),
+                ("sphere-box", sphere(Vec3::new(0.0, 1.0 + gap, 0.0), false), cube(Vec3::ZERO, false)),
+                ("box-sphere", cube(Vec3::ZERO, false), sphere(Vec3::new(0.0, 1.0 + gap, 0.0), false)),
+            ];
+            for (what, a, b) in &pairs {
+                if within {
+                    one_point_at(collide(a, b, D), gap, what);
+                } else {
+                    assert!(collide(a, b, D).is_none(), "{what}: {gap} m is past d");
+                }
+                assert!(collide(a, b, 0.0).is_none(), "{what}: d = 0 keeps no gap");
+            }
+        }
+        // A sensor on either side: the overlap-only rule, so no report 10 mm early.
+        for (what, a, b) in [
+            ("sensor sphere-sphere", sphere(Vec3::ZERO, true), sphere(Vec3::new(0.0, 1.01, 0.0), false)),
+            ("sphere-sensor box", sphere(Vec3::new(0.0, 1.01, 0.0), false), cube(Vec3::ZERO, true)),
+            ("sensor box-box", cube(Vec3::ZERO, false), cube(Vec3::new(0.0, 1.01, 0.0), true)),
+        ] {
+            assert!(collide(&a, &b, D).is_none(), "{what}: a sensor pair keeps the overlap-only rule");
+        }
+        // And the same box pair without the sensor is a speculative patch: the sensor rule is what
+        // removed it.
+        let m = collide(&cube(Vec3::ZERO, false), &cube(Vec3::new(0.0, 1.01, 0.0), false), D).expect("box-box within d");
+        assert_eq!(m.count, 4, "box-box within d: a four-point speculative patch: {m:?}");
+    }
+
+    #[test]
+    fn n3_the_sdf_keeps_a_speculative_point_within_d() {
+        // A floor whose top face is y = 0.
+        let field = SdfField::from_edits(&[SdfEdit::box_shape([0.0, -20.0, 0.0], [20.0, 20.0, 20.0], sdf_op::UNION, 0.0)]);
+        let s = sphere(Vec3::new(0.0, 0.51, 0.0), false);
+        let m = sphere_sdf_manifold(BodyIndex(0), &s, 0.5, &field, D);
+        let got = m.map(|m| (m.count, m.points[0].separation));
+        assert!(matches!(got, Some((1, sep)) if sep > 0.0 && (sep - 0.01).abs() < 1e-4), "sphere-SDF within d: {got:?}");
+        assert!(sphere_sdf_manifold(BodyIndex(0), &s, 0.5, &field, 0.0).is_none(), "sphere-SDF at d = 0");
+        let far = sphere(Vec3::new(0.0, 0.53, 0.0), false);
+        assert!(sphere_sdf_manifold(BodyIndex(0), &far, 0.5, &field, D).is_none(), "sphere-SDF past d");
+        let c = cube(Vec3::new(0.0, 0.51, 0.0), false);
+        let half = Vec3::new(0.5, 0.5, 0.5);
+        for kernel in [SdfNarrowphaseKernel::Scalar, SdfNarrowphaseKernel::Avx2] {
+            let m = box_sdf_manifold(BodyIndex(0), &c, half, &field, kernel, D).expect("box-SDF within d");
+            assert_eq!(m.count, 4, "box-SDF within d ({kernel:?}): the four bottom corners: {m:?}");
+            for p in &m.points[..4] {
+                assert!(p.separation > 0.0 && (p.separation - 0.01).abs() < 1e-4, "box-SDF ({kernel:?}): {m:?}");
+            }
+            assert!(box_sdf_manifold(BodyIndex(0), &c, half, &field, kernel, 0.0).is_none(), "box-SDF at d = 0 ({kernel:?})");
+        }
     }
 }

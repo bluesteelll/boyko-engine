@@ -15,7 +15,8 @@
 //! 2. **Reference-face clip** (the contact axis is a face axis): the reference face is the
 //!    one on that axis; the incident face is the other box's most anti-parallel
 //!    face; the incident polygon is Sutherland-Hodgman-clipped against the
-//!    reference face's 4 side planes, and points below the reference face are kept.
+//!    reference face's 4 side planes, and points below the reference face — or above it by at
+//!    most V2's speculative distance `d` — are kept.
 //!    Every emitted vertex carries a feature id built from the features that
 //!    created it, so no two points of one manifold share a warm-start key (A7a —
 //!    see [`clip_against_plane`] and
@@ -38,10 +39,20 @@
 //!    whose every edge axis claims more than its best face allows gets that face's own
 //!    contact ([`edge_fallback`]).
 //!
-//! Whether a pair has a manifold is a function of the two poses alone: past an
+//! Whether a pair has a manifold is a function of the two poses and `d` alone: past an
 //! overlapping SAT, every path ends in a face patch, a speculative face point, or an edge
 //! contact, except a reference face with a zero in-plane extent (no contact). The hint
 //! picks which contact, never whether there is one.
+//!
+//! # Speculative contacts (V2, `levers/V2-speculative/01-DESIGN.md`)
+//!
+//! `d` is `PhysicsConfig::speculative_distance`: an axis separates the pair only when it
+//! separates it by more than `d`, and the clip keeps a point while its separation is at most
+//! `d`, so a pair within `d` of touching has a manifold whose points carry `s > 0` (Box3D's and
+//! Jolt's speculative points; the solver closes them at `s / h`). Every comparison is today's at
+//! `d = 0` (`x < -0.0 == x < 0.0`, `x <= 0.0` unchanged), and so is the hysteresis, whose floor
+//! differs from today's only for a negative hint depth, which no `d = 0` step can produce. The
+//! public [`box_box_contact`] is the `d = 0` kernel.
 //!
 //! # The exact fast path (L9a, `levers/L9-contact-reuse/02-DESIGN-REV1.md`)
 //!
@@ -103,13 +114,15 @@ const SAT_EPS: f32 = 1.0e-5;
 /// separation over the clipped face points; it switches to the edge contact only if
 /// `edgeSeparation > clipSeparation + linearSlop`, or if the face contact has no points.
 /// Here that reads `edge.depth < patch_depth − FACE_AXIS_PREFERENCE`, with `patch_depth`
-/// the deepest kept point's penetration (the reduction always keeps the deepest point).
+/// the deepest kept point's penetration (the reduction always keeps the deepest point),
+/// negative for a wholly speculative patch (V2).
 ///
 /// Two differences from Box3D predate S5 and remain, both in what counts as a face patch.
 /// Box3D treats a clip left with fewer than 3 vertices as no face contact
 /// (`convex_manifold.c:1092-1096`); here only an EMPTY clip does. Box3D keeps speculative
 /// points, clipped points above the reference face up to its speculative distance (:1128);
-/// here only points with `separation <= 0` are kept. So a clip that degenerates to a
+/// here the points with `separation <= d` are kept, `d` V2's speculative distance (`0` before
+/// V2, and still the value the text below describes). So a clip that degenerates to a
 /// segment — diagonal neighbours touching along an edge — is a 1-2 point face patch here
 /// and an edge contact in Box3D; and a touch whose clipped points all lie just above the
 /// reference face is an empty patch here; the fallback keeps Box3D's speculative point when
@@ -333,11 +346,23 @@ enum SatMiss {
     NoFaceAxis,
 }
 
-/// Whether an evaluated axis separates the boxes. A NaN depth compares false, as it did when
-/// every axis was evaluated before the check.
+/// Whether an evaluated axis separates the boxes by more than V2's speculative distance `d`
+/// (`0` = the overlap-only rule: `depth < -0.0` is `depth < 0.0` for every depth). A NaN depth
+/// compares false, as it did when every axis was evaluated before the check.
 #[inline]
-fn separates(cand: Option<AxisCandidate>) -> bool {
-    matches!(cand, Some(c) if c.depth < 0.0)
+fn separates(cand: Option<AxisCandidate>, d: f32) -> bool {
+    matches!(cand, Some(c) if c.depth < -d)
+}
+
+/// The depth a hysteresis hint must beat, V2's sign fix: a candidate is "no better" than the hint
+/// `last` while its depth is at least `last / 1.05` for a penetrating hint and `last · 1.05` for a
+/// separated one (a negative depth under `d > 0`; dividing it would demand a candidate MORE
+/// separated than the hint, which the shallowest axis never is, so the hint could never hold).
+/// A `d = 0` step never has a negative hint depth (the SAT returned on any negative axis), so the
+/// `else` arm is today's bits, a NaN included.
+#[inline]
+fn hysteresis_floor(last_depth: f32) -> f32 {
+    if last_depth < 0.0 { last_depth * HYSTERESIS_RATIO } else { last_depth / HYSTERESIS_RATIO }
 }
 
 /// Whether canonical SAT axis `axis` (`0..15`) still separates the boxes (L9a (ii)): the pair's
@@ -345,11 +370,11 @@ fn separates(cand: Option<AxisCandidate>) -> bool {
 ///
 /// The axis is built and evaluated exactly as [`sat`] builds and evaluates its candidate of the
 /// same index — the same raw axis (a face column, or `a.axes[ea].cross(b.axes[eb])` for
-/// `axis = 6 + 3·ea + eb`) through the same [`eval_axis`], judged by the same [`separates`] — so
-/// `true` means the SAT has a negative candidate and reports the pair separated. `false` (the axis
-/// overlaps now, or is degenerate) says nothing, and the SAT runs.
+/// `axis = 6 + 3·ea + eb`) through the same [`eval_axis`], judged by the same [`separates`] at the
+/// same `d` — so `true` means the SAT has a separating candidate and reports the pair separated.
+/// `false` (the axis overlaps now, or is degenerate) says nothing, and the SAT runs.
 #[inline]
-pub(crate) fn sep_still_holds(a: &Obb, b: &Obb, axis: u8) -> bool {
+pub(crate) fn sep_still_holds(a: &Obb, b: &Obb, axis: u8, d: f32) -> bool {
     let i = usize::from(axis);
     debug_assert!(i < SAT_AXES, "invariant: a carried separating axis is 0..15");
     let cand = if i < 3 {
@@ -360,7 +385,7 @@ pub(crate) fn sep_still_holds(a: &Obb, b: &Obb, axis: u8) -> bool {
         let (ea, eb) = ((i - 6) / 3, (i - 6) % 3);
         eval_axis(a, b, a.axes[ea].cross(b.axes[eb]), SatClass::Edge { a: ea, b: eb }, i)
     };
-    separates(cand)
+    separates(cand, d)
 }
 
 /// Runs the 15-axis SAT and returns the shallowest face axis, the shallowest edge
@@ -368,7 +393,8 @@ pub(crate) fn sep_still_holds(a: &Obb, b: &Obb, axis: u8) -> bool {
 /// separating axis in canonical order, or no face axis at all.
 ///
 /// `last_axis` is last frame's chosen SAT-axis index (for the same body pair), or
-/// `None` on a cold contact; [`box_box_classify`] applies the hysteresis to it.
+/// `None` on a cold contact; [`box_box_classify`] applies the hysteresis to it. An axis separates
+/// the pair when its depth is below `-d` ([`separates`]).
 ///
 /// **The early exit (L9a (i)).** The axes are evaluated in canonical order and the SAT returns
 /// at the first one with `depth < 0`. It used to evaluate all fifteen and then reject on any
@@ -387,19 +413,19 @@ pub(crate) fn sep_still_holds(a: &Obb, b: &Obb, axis: u8) -> bool {
 // selector, and the `SatClass` payload — three roles a bare `enumerate()` over one
 // array cannot carry, so the explicit index is the correct, readable form.
 #[allow(clippy::needless_range_loop)]
-fn sat(a: &Obb, b: &Obb, last_axis: Option<usize>) -> Result<SatResult, SatMiss> {
+fn sat(a: &Obb, b: &Obb, last_axis: Option<usize>, d: f32) -> Result<SatResult, SatMiss> {
     // All 15 candidate axes in canonical order: A-face 0..3, B-face 3..6,
     // edge-edge 6..15 (a-major: (a0×b0, a0×b1, a0×b2, a1×b0, …)).
     let mut candidates: [Option<AxisCandidate>; SAT_AXES] = [None; SAT_AXES];
     for i in 0..3 {
         candidates[i] = eval_axis(a, b, a.axes[i], SatClass::FaceA(i), i);
-        if separates(candidates[i]) {
+        if separates(candidates[i], d) {
             return Err(SatMiss::Separated(i as u8));
         }
     }
     for i in 0..3 {
         candidates[3 + i] = eval_axis(a, b, b.axes[i], SatClass::FaceB(i), 3 + i);
-        if separates(candidates[3 + i]) {
+        if separates(candidates[3 + i], d) {
             return Err(SatMiss::Separated((3 + i) as u8));
         }
     }
@@ -408,7 +434,7 @@ fn sat(a: &Obb, b: &Obb, last_axis: Option<usize>) -> Result<SatResult, SatMiss>
         for eb in 0..3 {
             let axis = a.axes[ea].cross(b.axes[eb]);
             candidates[k] = eval_axis(a, b, axis, SatClass::Edge { a: ea, b: eb }, k);
-            if separates(candidates[k]) {
+            if separates(candidates[k], d) {
                 return Err(SatMiss::Separated(k as u8));
             }
             k += 1;
@@ -858,8 +884,9 @@ fn reduce_points(points: &[ScoredPoint], normal: Vec3, out: &mut [ScoredPoint; 4
 /// index for this body pair (hysteresis); the returned manifold carries the new
 /// axis index out-of-band via [`BoxBoxContact::reference_axis`].
 ///
-/// A wrapper over [`box_box_classify`] on two [`Obb::new`] boxes: the crate's narrowphase
-/// calls the classifier directly with the step's frames (L9 D2), and both give the same bits.
+/// A wrapper over [`box_box_classify`] on two [`Obb::new`] boxes at the overlap-only rule
+/// (V2's `d = 0`): the crate's narrowphase calls the classifier directly with the step's frames
+/// (L9 D2) and distance, and at `d = 0` both give the same bits.
 //
 // `clippy::too_many_arguments`: a convex-convex generator genuinely needs both
 // bodies' (center, rotation, half-extents) plus the two row indices and the
@@ -880,7 +907,7 @@ pub fn box_box_contact(
 ) -> Option<BoxBoxContact> {
     let a = Obb::new(a_center, a_rotation, a_half);
     let b = Obb::new(b_center, b_rotation, b_half);
-    match box_box_classify(&a, &b, body_a, body_b, last_axis) {
+    match box_box_classify(&a, &b, body_a, body_b, last_axis, 0.0) {
         BoxBoxOutcome::Contact(c) | BoxBoxOutcome::BestFace(c) => Some(c),
         BoxBoxOutcome::Separated(_)
         | BoxBoxOutcome::StillSeparated(_)
@@ -895,7 +922,7 @@ pub(crate) enum BoxBoxOutcome {
     /// The boxes touch, and every edge axis claims more than the best face allows: the best face's
     /// own contact ([`edge_fallback`]), often one speculative point. A contact like any other to
     /// the solver, but a reuse record is never built from it: a record refreshes a face point
-    /// only while it lies at or below the reference face, so a record of a speculative point would
+    /// only while its separation is at most `d`, so a record of a speculative point past `d` would
     /// refresh to no manifold on its own poses (`narrowphase/reuse.rs`).
     BestFace(BoxBoxContact),
     /// The SAT separated the boxes on this canonical axis (`0..15`), the first negative one in
@@ -912,8 +939,9 @@ pub(crate) enum BoxBoxOutcome {
 /// [`box_box_classify`] behind the pair's carried separating axis (L9a (ii), D1): when `sep_axis`
 /// names an axis that still separates the boxes ([`sep_still_holds`]), the pair is separated and
 /// neither the hint nor the SAT is consulted; otherwise the classifier runs on the hint `hint`
-/// returns. Contact or no contact is the classifier's answer either way (lemma L9-L2), and the
-/// narrowphase collides every box pair through this one function.
+/// returns. Contact or no contact is the classifier's answer either way (lemma L9-L2, which holds
+/// at every `d`: both sides judge the axis by the one [`separates`]), and the narrowphase collides
+/// every box pair through this one function.
 #[inline]
 pub(crate) fn box_box_classify_carried(
     a: &Obb,
@@ -921,27 +949,30 @@ pub(crate) fn box_box_classify_carried(
     body_a: BodyIndex,
     body_b: BodyIndex,
     sep_axis: Option<u8>,
+    d: f32,
     hint: impl FnOnce() -> Option<usize>,
 ) -> BoxBoxOutcome {
     if let Some(axis) = sep_axis
-        && sep_still_holds(a, b, axis)
+        && sep_still_holds(a, b, axis, d)
     {
         return BoxBoxOutcome::StillSeparated(axis);
     }
-    box_box_classify(a, b, body_a, body_b, hint())
+    box_box_classify(a, b, body_a, body_b, hint(), d)
 }
 
 /// Classifies the box pair `(a, b)` and, when they touch, generates its contact (P2 W4; L9a):
 /// [`box_box_contact`]'s answer on the two given boxes, plus the separating axis when the SAT
-/// rejects the pair. `last_axis` is the previous frame's chosen SAT-axis index for this body pair.
+/// rejects the pair. `last_axis` is the previous frame's chosen SAT-axis index for this body pair;
+/// `d` is V2's speculative distance (`0` = the overlap-only rule).
 pub(crate) fn box_box_classify(
     a: &Obb,
     b: &Obb,
     body_a: BodyIndex,
     body_b: BodyIndex,
     last_axis: Option<usize>,
+    d: f32,
 ) -> BoxBoxOutcome {
-    let sat = match sat(a, b, last_axis) {
+    let sat = match sat(a, b, last_axis, d) {
         Ok(sat) => sat,
         Err(SatMiss::Separated(axis)) => return BoxBoxOutcome::Separated(axis),
         Err(SatMiss::NoFaceAxis) => return BoxBoxOutcome::NoContact,
@@ -954,8 +985,8 @@ pub(crate) fn box_box_classify(
     let mut face_built: Option<Manifold> = None;
     let best = match sat.edge {
         Some(edge) if edge.depth < sat.face.depth - SAT_EPS => {
-            match face_contact(a, b, &sat.face, body_a, body_b) {
-                Ok(m) if edge.depth >= patch_depth(&m) - FACE_AXIS_PREFERENCE => {
+            match face_contact(a, b, &sat.face, body_a, body_b, d) {
+                Ok(m) if edge.depth >= patch_depth(&m, d) - FACE_AXIS_PREFERENCE => {
                     face_built = Some(m);
                     sat.face
                 }
@@ -968,15 +999,15 @@ pub(crate) fn box_box_classify(
         _ => sat.face,
     };
 
-    // Reference-axis hysteresis: if last frame's axis is still overlapping and the best
-    // axis is no deeper than HYSTERESIS_RATIO × its depth, KEEP it, so the reference face —
-    // hence the feature ids — does not flip on FP noise across a resting near-parallel
+    // Reference-axis hysteresis: if last frame's axis is still overlapping (or within `d`) and
+    // the best axis is no deeper than HYSTERESIS_RATIO × its depth, KEEP it, so the reference
+    // face — hence the feature ids — does not flip on FP noise across a resting near-parallel
     // pair. Except that an edge hint never holds a pair whose best axis is a face: that is
     // how an edge chosen once on jitter kept a resting face pair on one point (A7b).
     let chosen = match sat.hint {
         Some(last)
             if last.index != best.index
-                && best.depth >= last.depth / HYSTERESIS_RATIO
+                && best.depth >= hysteresis_floor(last.depth)
                 && !(last.is_edge() && !best.is_edge()) =>
         {
             last
@@ -993,7 +1024,7 @@ pub(crate) fn box_box_classify(
         }
         SatClass::FaceA(_) | SatClass::FaceB(_) => match face_built {
             Some(m) if chosen.index == sat.face.index => (m, chosen.index),
-            built => match face_contact(a, b, &chosen, body_a, body_b) {
+            built => match face_contact(a, b, &chosen, body_a, body_b, d) {
                 Ok(m) => (m, chosen.index),
                 // A held face hint that realizes no patch yields to the best face's patch when
                 // the choice above already built it: the answer the pair gets with no hint, as
@@ -1005,7 +1036,7 @@ pub(crate) fn box_box_classify(
                         (m, sat.face.index)
                     }
                     None => {
-                        return match edge_fallback(a, b, &sat, body_a, body_b) {
+                        return match edge_fallback(a, b, &sat, body_a, body_b, d) {
                             Fallback::Edge(c) => BoxBoxOutcome::Contact(c),
                             Fallback::BestFace(c) => BoxBoxOutcome::BestFace(c),
                         };
@@ -1025,11 +1056,17 @@ pub(crate) fn box_box_classify(
 /// The deepest penetration over a face manifold's points, `−min(separation)` — Box3D's
 /// `clipSeparation`, negated. The reduction always keeps the deepest clipped point, so the
 /// minimum over the kept points is the minimum over the whole clipped patch.
+///
+/// The fold starts at `-d` (V2): a kept point's separation is at most `d`, so no point is below
+/// the start, and a wholly speculative patch reads its true negative depth (a start at `0` would
+/// make it look deeper than it is and hand the pair to the edge). At `d = 0` the start differs
+/// from the old `0.0` only in the sign of a zero, which the one comparison it feeds cannot see;
+/// a NaN separation keeps its old answer (a `NEG_INFINITY` start would not).
 #[inline]
-fn patch_depth(m: &Manifold) -> f32 {
+fn patch_depth(m: &Manifold, d: f32) -> f32 {
     m.points[..usize::from(m.count)]
         .iter()
-        .fold(0.0f32, |deepest, p| deepest.max(-p.separation))
+        .fold(-d, |deepest, p| deepest.max(-p.separation))
 }
 
 /// The contact feature a box-box contact was built on (L9b D5): what a reuse record stores to
@@ -1090,12 +1127,13 @@ pub(crate) enum EdgeRefresh {
 }
 
 /// Re-evaluates the edge axis `A.axes[ea] × B.axes[eb]` of the boxes `(a, b)` and, when it
-/// overlaps, builds today's edge contact on it (L9b D5, the refresh of an edge record) — unless
-/// the edge claims more than the face allows, which is [`EdgeRefresh::Stale`].
+/// overlaps (or is within V2's speculative distance `d`), builds today's edge contact on it (L9b
+/// D5, the refresh of an edge record) — unless the edge claims more than the face allows, which is
+/// [`EdgeRefresh::Stale`].
 ///
 /// The axis is built and evaluated exactly as [`sat`] builds and evaluates its candidate of the same
-/// index, so a negative depth is a negative SAT candidate — the pair is separated exactly — and on
-/// the poses the record was built on the contact is the full collision's, bit for bit.
+/// index, so a depth below `-d` is a separating SAT candidate — the pair is separated exactly — and
+/// on the poses the record was built on the contact is the full collision's, bit for bit.
 ///
 /// **The face bound (R1, `design_rev2.md` §7.2).** A near-parallel edge axis swings by the
 /// rotation over the edges' cross-product length, so a record reused through a rotation L9's
@@ -1115,6 +1153,7 @@ pub(crate) fn refresh_edge(
     eb: usize,
     body_a: BodyIndex,
     body_b: BodyIndex,
+    d: f32,
 ) -> EdgeRefresh {
     debug_assert!(ea < 3 && eb < 3, "invariant: edge axes are 0..3");
     let index = 6 + 3 * ea + eb;
@@ -1123,7 +1162,7 @@ pub(crate) fn refresh_edge(
     else {
         return EdgeRefresh::Degenerate;
     };
-    if cand.depth < 0.0 {
+    if cand.depth < -d {
         return EdgeRefresh::Separated(index as u8);
     }
     let faces: [Option<AxisCandidate>; 6] = core::array::from_fn(|i| {
@@ -1202,6 +1241,7 @@ fn edge_fallback(
     sat: &SatResult,
     body_a: BodyIndex,
     body_b: BodyIndex,
+    d: f32,
 ) -> Fallback {
     #[cfg(test)]
     FALLBACKS.with(|n| n.set(n.get() + 1));
@@ -1213,13 +1253,13 @@ fn edge_fallback(
     let Some(best) = sat.edge.filter(|e| e.depth <= bound) else {
         #[cfg(feature = "narrowphase-counts")]
         fallback_census::PHANTOM.fetch_add(1, Relaxed);
-        return Fallback::BestFace(best_face_contact(a, b, &sat.face, body_a, body_b));
+        return Fallback::BestFace(best_face_contact(a, b, &sat.face, body_a, body_b, d));
     };
     let chosen = match sat.hint {
         Some(last)
             if last.is_edge()
                 && last.index != best.index
-                && best.depth >= last.depth / HYSTERESIS_RATIO =>
+                && best.depth >= hysteresis_floor(last.depth) =>
         {
             // The hint picks among bounded candidates only: which contact, never how deep.
             if last.depth <= bound {
@@ -1282,8 +1322,9 @@ fn best_face_contact(
     face: &AxisCandidate,
     body_a: BodyIndex,
     body_b: BodyIndex,
+    d: f32,
 ) -> BoxBoxContact {
-    let manifold = match face_patch::<true>(a, b, face, body_a, body_b) {
+    let manifold = match face_patch::<true>(a, b, face, body_a, body_b, d) {
         Ok(m) => m,
         Err(_) => {
             #[cfg(feature = "narrowphase-counts")]
@@ -1436,16 +1477,17 @@ pub struct BoxBoxContact {
 /// (A7b); a degenerate face stays no contact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FaceMiss {
-    /// The clip left nothing, or no clipped point lies below the reference face: the face
-    /// does not realize the contact.
+    /// The clip left nothing, or no clipped point lies below the reference face (or above it by
+    /// at most `d`): the face does not realize the contact.
     Empty,
     /// The reference face has a zero in-plane extent (a zero-volume collider face).
     Degenerate,
 }
 
 /// Builds a face-contact manifold via reference-face clip + reduction (P2 W4), on the
-/// face axis `sat` (class `FaceA` / `FaceB`). Only points at or below the reference face are
-/// kept; a clip that keeps none is [`FaceMiss::Empty`].
+/// face axis `sat` (class `FaceA` / `FaceB`). Only points whose separation from the reference
+/// face is at most `d` (V2's speculative distance; `0` = at or below the face) are kept; a clip
+/// that keeps none is [`FaceMiss::Empty`].
 #[inline]
 fn face_contact(
     a: &Obb,
@@ -1453,14 +1495,15 @@ fn face_contact(
     sat: &AxisCandidate,
     body_a: BodyIndex,
     body_b: BodyIndex,
+    d: f32,
 ) -> Result<Manifold, FaceMiss> {
-    face_patch::<false>(a, b, sat, body_a, body_b)
+    face_patch::<false>(a, b, sat, body_a, body_b, d)
 }
 
 /// The body of [`face_contact`] (`SPECULATIVE = false`, the same instruction stream: the one added
 /// statement is behind a constant-false branch) and of [`best_face_contact`]'s first two tiers
-/// (`SPECULATIVE = true`): when no clipped vertex lies at or below the reference face, the one
-/// clipped vertex lowest along its normal is kept as a single point with a positive separation —
+/// (`SPECULATIVE = true`): when no clipped vertex's separation is at most `d`, the one clipped
+/// vertex lowest along its normal is kept as a single point with a positive separation —
 /// Box3D's speculative point, the answer to an empty clip. An empty clip polygon is still
 /// [`FaceMiss::Empty`] either way.
 fn face_patch<const SPECULATIVE: bool>(
@@ -1469,6 +1512,7 @@ fn face_patch<const SPECULATIVE: bool>(
     sat: &AxisCandidate,
     body_a: BodyIndex,
     body_b: BodyIndex,
+    d: f32,
 ) -> Result<Manifold, FaceMiss> {
     // The SAT normal runs A→B. The reference box is the one OWNING the face
     // axis; the incident box is the other.
@@ -1560,10 +1604,10 @@ fn face_patch<const SPECULATIVE: bool>(
         }
     }
 
-    // Keep only vertices BELOW the reference face (penetrating), projecting each
-    // onto the reference face for the contact anchor and computing its separation.
-    // They are a subset of the clipped polygon, so the clip's own bound sizes this
-    // buffer: `scored_len ≤ poly_len ≤ CLIP_CAPACITY`.
+    // Keep only vertices BELOW the reference face (penetrating) or above it by at most `d` (V2's
+    // speculative points), projecting each onto the reference face for the contact anchor and
+    // computing its separation. They are a subset of the clipped polygon, so the clip's own
+    // bound sizes this buffer: `scored_len ≤ poly_len ≤ CLIP_CAPACITY`.
     let mut scored: [ScoredPoint; CLIP_CAPACITY] = [ScoredPoint {
         pos: Vec3::ZERO,
         separation: 0.0,
@@ -1573,7 +1617,7 @@ fn face_patch<const SPECULATIVE: bool>(
     let mut scored_len = 0usize;
     for &cv in &src[..poly_len] {
         let separation = (cv.pos - ref_face_center).dot(ref_normal);
-        if separation <= 0.0 {
+        if separation <= d {
             scored[scored_len] = ScoredPoint {
                 pos: cv.pos,
                 separation,
@@ -1819,8 +1863,8 @@ mod pre_l9 {
         let mut face_built: Option<Manifold> = None;
         let best = match sat.edge {
             Some(edge) if edge.depth < sat.face.depth - SAT_EPS => {
-                match face_contact(&a, &b, &sat.face, body_a, body_b) {
-                    Ok(m) if edge.depth >= patch_depth(&m) - FACE_AXIS_PREFERENCE => {
+                match face_contact(&a, &b, &sat.face, body_a, body_b, 0.0) {
+                    Ok(m) if edge.depth >= patch_depth(&m, 0.0) - FACE_AXIS_PREFERENCE => {
                         face_built = Some(m);
                         sat.face
                     }
@@ -1847,13 +1891,13 @@ mod pre_l9 {
             }
             SatClass::FaceA(_) | SatClass::FaceB(_) => match face_built {
                 Some(m) if chosen.index == sat.face.index => (m, chosen.index),
-                built => match face_contact(&a, &b, &chosen, body_a, body_b) {
+                built => match face_contact(&a, &b, &chosen, body_a, body_b, 0.0) {
                     Ok(m) => (m, chosen.index),
                     Err(FaceMiss::Empty) => match built {
                         Some(m) => (m, sat.face.index),
                         None => {
                             return Some(
-                                edge_fallback(&a, &b, &sat, body_a, body_b).into_contact(),
+                                edge_fallback(&a, &b, &sat, body_a, body_b, 0.0).into_contact(),
                             );
                         }
                     },
@@ -1917,7 +1961,7 @@ mod tests {
         let a = Obb::new(Vec3::ZERO, Quat::IDENTITY, Vec3::new(1.0, 1.0, 1.0));
         // B overlaps A by 0.1 in y, fully in x and z.
         let b = Obb::new(Vec3::new(0.0, 1.9, 0.0), Quat::IDENTITY, Vec3::new(1.0, 1.0, 1.0));
-        let s = sat(&a, &b, None).expect("overlap").face;
+        let s = sat(&a, &b, None, 0.0).expect("overlap").face;
         // The shallow axis (depth 0.1) is a y-face axis.
         assert!(matches!(s.class, SatClass::FaceA(1) | SatClass::FaceB(1)), "class {:?}", s.class);
         assert!((s.depth - 0.1).abs() < 1e-4, "min depth {}", s.depth);
@@ -2682,7 +2726,7 @@ mod tests {
         let SatClass::Edge { a: ea, b: eb } = edge.class else {
             unreachable!("invariant: indices 6..15 are edge axes")
         };
-        let patch = face_contact(&a, &b, &face, A, B).unwrap_or_else(|miss| {
+        let patch = face_contact(&a, &b, &face, A, B, 0.0).unwrap_or_else(|miss| {
             panic!(
                 "construction: the best face {:?} must realize a patch here, or the cold fallback \
                  is what builds the edge and this test cannot tell a face-always rule apart; \
@@ -2790,7 +2834,7 @@ mod tests {
         };
 
         let manifold = match chosen.class {
-            SatClass::FaceA(_) | SatClass::FaceB(_) => face_contact(a, b, &chosen, A, B).ok(),
+            SatClass::FaceA(_) | SatClass::FaceB(_) => face_contact(a, b, &chosen, A, B, 0.0).ok(),
             SatClass::Edge { a: ea, b: eb } => edge_contact(a, b, &chosen, ea, eb, A, B),
         };
         manifold.map(|m| (m, chosen.index))
@@ -3502,7 +3546,7 @@ mod tests {
         let kernel = std::panic::catch_unwind(|| {
             let a = Obb::from_frame(p.ca, &frame_of(p.qa), p.ha);
             let b = Obb::from_frame(p.cb, &frame_of(p.qb), p.hb);
-            match box_box_classify(&a, &b, A, B, p.hint) {
+            match box_box_classify(&a, &b, A, B, p.hint, 0.0) {
                 BoxBoxOutcome::Contact(c) | BoxBoxOutcome::BestFace(c) => {
                     (Some(contact_words(&c)), None)
                 }
@@ -3716,7 +3760,7 @@ mod tests {
         let kernel = std::panic::catch_unwind(|| {
             let a = Obb::from_frame(p.ca, &frame_of(p.qa), p.ha);
             let b = Obb::from_frame(p.cb, &frame_of(p.qb), p.hb);
-            match box_box_classify_carried(&a, &b, A, B, sep, || p.hint) {
+            match box_box_classify_carried(&a, &b, A, B, sep, 0.0, || p.hint) {
                 BoxBoxOutcome::Contact(c) | BoxBoxOutcome::BestFace(c) => {
                     (Some(contact_words(&c)), None, false)
                 }
@@ -4042,12 +4086,12 @@ mod tests {
     /// its answer against the bound: an edge is within [`edge_depth_bound`] of `sat.face`, and a
     /// best-face answer is on `sat.face` and only when no edge axis is within it.
     fn t8_cell(a: &Obb, b: &Obb, hint: Option<usize>, n: &mut BoundCounts) -> Result<(), String> {
-        let Ok(s) = sat(a, b, hint) else {
+        let Ok(s) = sat(a, b, hint, 0.0) else {
             return Ok(());
         };
         n.cells += 1;
         let bound = edge_depth_bound(s.face.depth, a, b);
-        match edge_fallback(a, b, &s, A, B) {
+        match edge_fallback(a, b, &s, A, B, 0.0) {
             Fallback::Edge(c) => {
                 n.edges += 1;
                 let i = c.reference_axis;
@@ -4238,7 +4282,7 @@ mod tests {
         // About ten ulp at this scale: the rounding copies of a corner sit 1–2 ulp off it, while
         // the nearest point of the clip that is not a corner is 0.4 m away.
         const TOL: f32 = 1.0e-6;
-        let c = match box_box_classify(&a, &b, A, B, None) {
+        let c = match box_box_classify(&a, &b, A, B, None, 0.0) {
             BoxBoxOutcome::Contact(c) => c,
             _ => panic!("two boxes at one pose must be a face contact"),
         };
@@ -4305,7 +4349,7 @@ mod tests {
         const TOL: f32 = 1.0e-5;
         // (first box, its facing face's sign, second box, its facing face's sign)
         for (x, x_pos, y, y_pos, order) in [(&a, true, &b, false, "A/B"), (&b, false, &a, true, "B/A")] {
-            let c = match box_box_classify(x, y, A, B, None) {
+            let c = match box_box_classify(x, y, A, B, None, 0.0) {
                 BoxBoxOutcome::Contact(c) => c,
                 _ => panic!("{order}: two touching neighbours must be a face contact"),
             };
@@ -4375,5 +4419,200 @@ mod tests {
                 self.anchor_b.z.to_bits(),
             )
         }
+    }
+}
+
+/// V2's narrowphase gates on the box-box kernel (`levers/V2-speculative/01-DESIGN.md`, C2):
+/// N1 (a face gap within `d` is a speculative patch), the per-site cases of N2 (each red under its
+/// named mutation — the site's pre-V2 comparison), and N5 (L9a's carried separating axis agrees
+/// with the SAT at every `d`).
+#[cfg(test)]
+mod v2_speculative_tests {
+    use super::*;
+
+    const A: BodyIndex = BodyIndex(0);
+    const B: BodyIndex = BodyIndex(1);
+    /// The owner's distance (V2b).
+    const D: f32 = 0.02;
+
+    /// A rotation by `angle` radians about the unit `axis`.
+    fn about(axis: Vec3, angle: f32) -> Quat {
+        let (s, c) = (angle * 0.5).sin_cos();
+        Quat::new(axis.x * s, axis.y * s, axis.z * s, c)
+    }
+
+    /// Two unit boxes (half-extent 0.5), B `gap` above A along `y`.
+    fn stacked(gap: f32) -> (Obb, Obb) {
+        let h = Vec3::new(0.5, 0.5, 0.5);
+        (
+            Obb::new(Vec3::ZERO, Quat::IDENTITY, h),
+            Obb::new(Vec3::new(0.0, 1.0 + gap, 0.0), Quat::IDENTITY, h),
+        )
+    }
+
+    fn contact(o: BoxBoxOutcome) -> Option<BoxBoxContact> {
+        match o {
+            BoxBoxOutcome::Contact(c) | BoxBoxOutcome::BestFace(c) => Some(c),
+            BoxBoxOutcome::Separated(_) | BoxBoxOutcome::StillSeparated(_) | BoxBoxOutcome::NoContact => None,
+        }
+    }
+
+    /// N1: a face gap `g < d` is a four-point patch with `s = g` on the face normal; `g > d`, or
+    /// `d = 0`, is no contact. Red under the `separates` mutation (`depth < 0.0`): the SAT then
+    /// rejects the `g < d` pair, so a field that never reaches the SAT cannot pass.
+    #[test]
+    fn n1_a_face_gap_within_d_is_a_four_point_speculative_patch() {
+        let (a, b) = stacked(0.01);
+        let c = contact(box_box_classify(&a, &b, A, B, None, D)).expect("N1: a 10 mm gap within 20 mm is a contact");
+        let m = &c.manifold;
+        assert_eq!(m.count, 4, "N1: the whole incident face is kept: {m:?}");
+        assert!((m.normal - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-6, "N1: the face normal: {m:?}");
+        for p in &m.points[..4] {
+            assert!((p.separation - 0.01).abs() < 1e-5 && p.separation > 0.0, "N1: s = +10 mm: {m:?}");
+        }
+        let (a, b) = stacked(0.03);
+        assert!(contact(box_box_classify(&a, &b, A, B, None, D)).is_none(), "N1: a 30 mm gap is past 20 mm");
+        let (a, b) = stacked(0.01);
+        assert!(contact(box_box_classify(&a, &b, A, B, None, 0.0)).is_none(), "N1: d = 0 keeps no gap");
+    }
+
+    /// N2 (clip keep): B tilted about `z` over a slab, its low bottom corners 2 mm deep and its
+    /// high ones 18 mm above the face. At `d` the patch keeps all four corners, two of them
+    /// speculative; at `d = 0` the two penetrating ones. Red under the keep mutation
+    /// (`separation <= 0.0`): two points at `d`.
+    #[test]
+    fn n2_the_clip_keeps_corners_within_d() {
+        let theta = 0.02f32;
+        let q = about(Vec3::new(0.0, 0.0, 1.0), theta);
+        let slab = Obb::new(Vec3::ZERO, Quat::IDENTITY, Vec3::new(2.0, 0.5, 2.0));
+        let probe = Obb::new(Vec3::ZERO, q, Vec3::new(0.5, 0.5, 0.5));
+        // The rotated box's lowest corner below its centre: place it 2 mm into the slab's top.
+        let low = (0..8)
+            .map(|i| {
+                let s = |k: u32| if (i >> k) & 1 == 1 { 0.5 } else { -0.5 };
+                (probe.axes[0] * s(0) + probe.axes[1] * s(1) + probe.axes[2] * s(2)).y
+            })
+            .fold(f32::INFINITY, f32::min);
+        let b = Obb::new(Vec3::new(0.0, 0.5 - 0.002 - low, 0.0), q, Vec3::new(0.5, 0.5, 0.5));
+        let at_d = contact(box_box_classify(&slab, &b, A, B, None, D)).expect("N2 clip: a contact at d");
+        let at_0 = contact(box_box_classify(&slab, &b, A, B, None, 0.0)).expect("N2 clip: a contact at 0");
+        let sep = |c: &BoxBoxContact| c.manifold.points[..usize::from(c.manifold.count)].iter().map(|p| p.separation).collect::<Vec<_>>();
+        assert_eq!(at_0.manifold.count, 2, "N2 clip: d = 0 keeps the two penetrating corners: {:?}", sep(&at_0));
+        assert_eq!(at_d.manifold.count, 4, "N2 clip: d keeps the two within 18 mm too: {:?}", sep(&at_d));
+        assert_eq!(sep(&at_d).iter().filter(|&&s| s > 0.0).count(), 2, "N2 clip: two speculative points: {:?}", sep(&at_d));
+    }
+
+    /// N2 (`patch_depth`): a wholly speculative patch reads its true negative depth, `-min(s)`.
+    /// Red under the fold mutation (a start at `0.0`): it reads `0`, the patch looks deeper than it
+    /// is, and a pair whose SAT answered the edge would be handed to it.
+    #[test]
+    fn n2_a_wholly_speculative_patch_reads_its_negative_depth() {
+        let (a, b) = stacked(0.012);
+        let c = contact(box_box_classify(&a, &b, A, B, None, D)).expect("N2 patch: a contact at d");
+        let depth = patch_depth(&c.manifold, D);
+        let min_sep = c.manifold.points[..4].iter().map(|p| p.separation).fold(f32::INFINITY, f32::min);
+        assert_eq!(depth.to_bits(), (-min_sep).to_bits(), "N2 patch: -min(s) = {}, read {depth}", -min_sep);
+        assert!(depth < 0.0, "N2 patch: a wholly speculative patch is shallower than a touch");
+        // d = 0: the old fold's value on a touching patch, NaN-free, sign of zero aside.
+        let (a, b) = stacked(-0.001);
+        let c = contact(box_box_classify(&a, &b, A, B, None, 0.0)).expect("N2 patch: an overlap");
+        assert!((patch_depth(&c.manifold, 0.0) - 0.001).abs() < 1e-6, "N2 patch: 1 mm deep at d = 0");
+    }
+
+    /// N2 (hysteresis sign): two stacked boxes 10 mm apart, the hint on B's `y` face (4) where the
+    /// best is A's (1) at the same depth. The hint is held — the reference face, hence every
+    /// feature id, does not flip. Red under the pre-V2 floor (`last / 1.05` on a negative depth
+    /// asks for a candidate more separated than the hint, which the best never is): the pair takes
+    /// axis 1.
+    #[test]
+    fn n2_a_separated_hint_holds_under_the_hysteresis() {
+        let (a, b) = stacked(0.01);
+        let c = contact(box_box_classify(&a, &b, A, B, Some(4), D)).expect("N2 hysteresis: a contact at d");
+        assert_eq!(c.reference_axis, 4, "N2 hysteresis: the held hint is B's face");
+        let c = contact(box_box_classify(&a, &b, A, B, Some(1), D)).expect("N2 hysteresis: a contact at d");
+        assert_eq!(c.reference_axis, 1, "N2 hysteresis: and A's when that is the hint");
+        // The penetrating side of the floor is today's (d = 0).
+        let (a, b) = stacked(-0.001);
+        let c = contact(box_box_classify(&a, &b, A, B, Some(4), 0.0)).expect("N2 hysteresis: an overlap");
+        assert_eq!(c.reference_axis, 4, "N2 hysteresis: d = 0 holds a penetrating hint, as before V2");
+        assert_eq!(hysteresis_floor(-0.01).to_bits(), (-0.01f32 * HYSTERESIS_RATIO).to_bits());
+        assert_eq!(hysteresis_floor(0.01).to_bits(), (0.01f32 / HYSTERESIS_RATIO).to_bits());
+        assert!(hysteresis_floor(f32::NAN).is_nan());
+    }
+
+    /// Two boxes crossed edge over edge: A turned 45° about `z` (its top edge along `z`), B 45°
+    /// about `x` (its bottom edge along `x`), `gap` apart along `y`.
+    fn crossed(gap: f32) -> (Obb, Obb) {
+        let h = Vec3::new(0.5, 0.5, 0.5);
+        let r = 0.5 * core::f32::consts::SQRT_2;
+        (
+            Obb::new(Vec3::ZERO, about(Vec3::new(0.0, 0.0, 1.0), core::f32::consts::FRAC_PI_4), h),
+            Obb::new(Vec3::new(0.0, 2.0 * r + gap, 0.0), about(Vec3::new(1.0, 0.0, 0.0), core::f32::consts::FRAC_PI_4), h),
+        )
+    }
+
+    /// N2 (`refresh_edge`): an edge record re-evaluated on edges `d / 2` apart is a speculative
+    /// edge point at `d`, and separated at `d = 0`. Red under the refresh mutation (`depth < 0.0`):
+    /// `Separated` at `d`.
+    #[test]
+    fn n2_an_edge_refresh_within_d_is_a_speculative_point() {
+        let (a, b) = crossed(0.5 * D);
+        // The pair's own answer at d is that edge (A's axis 2 x B's axis 0 = canonical 12).
+        let c = contact(box_box_classify(&a, &b, A, B, None, D)).expect("N2 edge: a contact at d");
+        assert_eq!(c.reference_axis, 12, "N2 edge: the crossed edges are the contact axis");
+        match refresh_edge(&a, &b, 2, 0, A, B, D) {
+            EdgeRefresh::Contact(m) => {
+                assert_eq!(m.count, 1, "N2 edge: one point");
+                assert!((m.points[0].separation - 0.5 * D).abs() < 1e-5, "N2 edge: s = d / 2: {m:?}");
+            }
+            EdgeRefresh::Separated(_) | EdgeRefresh::Degenerate | EdgeRefresh::Stale => {
+                panic!("N2 edge: a refresh within d must stay a contact")
+            }
+        }
+        assert!(matches!(refresh_edge(&a, &b, 2, 0, A, B, 0.0), EdgeRefresh::Separated(12)), "N2 edge: d = 0 separates");
+    }
+
+    /// N5: L9a's lemma at every `d` — a pair the SAT separates on axis `k` is still separated by
+    /// the carried `k` (so `classify_carried` answers `StillSeparated(k)`), and any axis the carried
+    /// test says still separates makes the SAT separate too. Over boxes a few centimetres either
+    /// side of touching, at `d` in {0, 20 mm}.
+    #[test]
+    fn n5_the_carried_axis_agrees_with_the_sat_at_every_d() {
+        let mut state = 0x5eed_0f02_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let mut separated = 0u32;
+        for _ in 0..4000 {
+            let axis = Vec3::new(next() - 0.5, next() - 0.5, next() - 0.5).normalize();
+            let q = about(axis, 3.0 * next());
+            let dir = Vec3::new(next() - 0.5, next() - 0.5, next() - 0.5).normalize();
+            let a = Obb::new(Vec3::ZERO, Quat::IDENTITY, Vec3::new(0.5, 0.4, 0.6));
+            let b = Obb::new(dir * (0.8 + 0.8 * next()), q, Vec3::new(0.3, 0.5, 0.4));
+            for d in [0.0, D] {
+                match box_box_classify(&a, &b, A, B, None, d) {
+                    BoxBoxOutcome::Separated(k) => {
+                        separated += 1;
+                        assert!(sep_still_holds(&a, &b, k, d), "N5: the SAT's own separating axis {k} must still hold at d = {d}");
+                        assert!(
+                            matches!(box_box_classify_carried(&a, &b, A, B, Some(k), d, || None), BoxBoxOutcome::StillSeparated(j) if j == k),
+                            "N5: the carried axis {k} answers the pair at d = {d}"
+                        );
+                    }
+                    _ => {
+                        for k in 0..SAT_AXES as u8 {
+                            assert!(
+                                !sep_still_holds(&a, &b, k, d),
+                                "N5: axis {k} still separates at d = {d}, yet the SAT touched the pair"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(separated > 500, "N5: anti-vacuity: {separated} separated pairs");
     }
 }

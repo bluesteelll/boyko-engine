@@ -32,6 +32,11 @@
 //! `contact_reuse = false`, must end in [`PINNED_FINAL_HASH_REUSE_OFF`]: the pre-C4 trajectory,
 //! which every later lane's reuse-off mode has to reproduce bit for bit.
 //!
+//! **The overlap-only arms (V2).** Two more runs set `speculative_distance = 0`, with contact
+//! reuse on and off, and must end in [`PINNED_FINAL_HASH_D0`] and
+//! [`PINNED_FINAL_HASH_REUSE_OFF_D0`]: the trajectories from before V2's speculative contacts,
+//! which `speculative_distance = 0` has to reproduce bit for bit whatever the default is.
+//!
 //! # Scene size per profile
 //!
 //! Release runs Jolt's full pyramid (height 15, 1240 dynamic boxes) for 120 frames —
@@ -115,6 +120,28 @@ const PINNED_FINAL_HASH: u64 = if cfg!(debug_assertions) {
 /// **Re-pin rule.** [`PINNED_FINAL_HASH`]'s, read from the `reuse off` line, except that no
 /// contact-reuse change may move it: with reuse off no reuse code runs.
 const PINNED_FINAL_HASH_REUSE_OFF: u64 = if cfg!(debug_assertions) {
+    0xc7eb_531b_1e1a_c19b
+} else {
+    0xa386_20b3_8cbc_a8d3
+};
+
+/// The reference configuration's final hash with `speculative_distance = 0` (V2's overlap-only
+/// rule) and contact reuse on, per profile: release `0xb583_189f_a681_f3a6`, debug
+/// `0x839d_9426_8d67_b09f` — [`PINNED_FINAL_HASH`]'s values on the tree before V2 (`16191fda`).
+///
+/// **Never re-pinned by a value change of V2's.** `speculative_distance = 0` is the pre-V2 contact
+/// rule bit for bit; a lever outside V2 that changes values re-pins it under
+/// [`PINNED_FINAL_HASH`]'s rule, from the `d = 0` line.
+const PINNED_FINAL_HASH_D0: u64 = if cfg!(debug_assertions) {
+    0x839d_9426_8d67_b09f
+} else {
+    0xb583_189f_a681_f3a6
+};
+
+/// [`PINNED_FINAL_HASH_D0`] with contact reuse off: release `0xa386_20b3_8cbc_a8d3`, debug
+/// `0xc7eb_531b_1e1a_c19b` — [`PINNED_FINAL_HASH_REUSE_OFF`]'s values before V2. Its rule is
+/// [`PINNED_FINAL_HASH_D0`]'s.
+const PINNED_FINAL_HASH_REUSE_OFF_D0: u64 = if cfg!(debug_assertions) {
     0xc7eb_531b_1e1a_c19b
 } else {
     0xa386_20b3_8cbc_a8d3
@@ -277,6 +304,17 @@ fn run_with_reuse(
     simd_solve: bool,
     reuse: Option<bool>,
 ) -> Run {
+    run_with(workers, parallel_solve, simd_solve, reuse, None)
+}
+
+/// [`run_with_reuse`], with `speculative_distance` set to `speculative` when it is `Some`.
+fn run_with(
+    workers: usize,
+    parallel_solve: bool,
+    simd_solve: bool,
+    reuse: Option<bool>,
+    speculative: Option<f32>,
+) -> Run {
     let mut world = EcsMaster::new();
     let n = spawn_pyramid(&mut world);
     assert!(n > 0, "construction: the pyramid has dynamic boxes");
@@ -293,6 +331,9 @@ fn run_with_reuse(
         cfg.simd_solve = simd_solve;
         if let Some(reuse) = reuse {
             cfg.contact_reuse = reuse;
+        }
+        if let Some(d) = speculative {
+            cfg.speculative_distance = d;
         }
     }
 
@@ -374,6 +415,12 @@ fn default_world_pyramid_is_run_to_run_worker_count_and_scalar_identical() {
     let reuse_off = run_with_reuse(1, false, true, Some(false));
     let reuse_off_final = reuse_off.hashes.last().copied().unwrap_or(0);
     println!("  reuse off (1w parallel_solve=false): final hash {reuse_off_final:#018x}");
+    // The overlap-only rule (V2's d = 0), reuse on and off: pinned on their own.
+    let d0_final = run_with(1, false, true, None, Some(0.0)).hashes.last().copied().unwrap_or(0);
+    let d0_reuse_off_final =
+        run_with(1, false, true, Some(false), Some(0.0)).hashes.last().copied().unwrap_or(0);
+    println!("  d = 0 (1w parallel_solve=false): final hash {d0_final:#018x}");
+    println!("  d = 0, reuse off (1w parallel_solve=false): final hash {d0_reuse_off_final:#018x}");
     // Before the value gates, so a moved pin is read beside the census that names or clears the
     // face bound as its cause.
     #[cfg(feature = "narrowphase-counts")]
@@ -414,6 +461,17 @@ fn default_world_pyramid_is_run_to_run_worker_count_and_scalar_identical() {
          contact-reuse change may move; only a value-changing lever outside contact reuse re-pins, \
          under `PINNED_FINAL_HASH_REUSE_OFF`'s rule"
     );
+    for (label, got, pinned) in [
+        ("d = 0", d0_final, PINNED_FINAL_HASH_D0),
+        ("d = 0, reuse off", d0_reuse_off_final, PINNED_FINAL_HASH_REUSE_OFF_D0),
+    ] {
+        assert_eq!(
+            got, pinned,
+            "the default world's pyramid at speculative_distance = 0 ({label}) moved: final hash \
+             {got:#018x}, pinned {pinned:#018x} (height {PYRAMID_HEIGHT}, {FRAMES} frames). d = 0 is \
+             the overlap-only rule from before V2, bit for bit: a V2 leak, never a re-pin"
+        );
+    }
 }
 
 /// The box-box fallback census of every run above (`narrowphase-counts` only; the `thinbox`

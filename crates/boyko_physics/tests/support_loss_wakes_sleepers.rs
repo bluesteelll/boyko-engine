@@ -723,6 +723,11 @@ struct BoxPileOutcome {
 
 /// Floor + cube S under cube U, contact reuse forced on, L10's sleep-skip `mode`; settle until
 /// both are latched; lower S by [`BOX_SUPPORT_DROP`]; run `POST_STEPS` steps.
+///
+/// `speculative_distance = 0` (V2's overlap-only rule): the premise "a drop below τ_eff lifts
+/// every point of U's contact off" holds only while the drop exceeds the speculative distance,
+/// and this scene's drop is half a millimetre. The speculative rule gets its own case at the
+/// V2 commit that makes it the default.
 #[cfg(not(miri))]
 fn box_pile_scene(mode: SleepSkip) -> BoxPileOutcome {
     let mut h = Harness::new();
@@ -731,6 +736,7 @@ fn box_pile_scene(mode: SleepSkip) -> BoxPileOutcome {
         cfg.contact_reuse = true;
         cfg.contact_reuse_distance = BOX_PILE_REUSE_DISTANCE;
         cfg.sleep_skip = mode;
+        cfg.speculative_distance = 0.0;
     }
     h.spawn(floor());
     let support = h.spawn(cube(SUPPORT, Vec3::new(0.0, CUBE_HALF, 0.0)));

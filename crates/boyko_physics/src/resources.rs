@@ -163,9 +163,10 @@ pub enum SleepSkip {
     /// A frozen, clean island is HELD: its pairs skip the narrowphase, the SDF stage, the
     /// colouring and the solve, and its contacts are kept for the views (DEFAULT). A held
     /// island is restored — collided again from what it kept — the step its inputs change
-    /// (`sleep_sets.rs`), and a change of `contact_reuse`, `contact_reuse_distance`, `dt`, the
-    /// effective warm start (the solver's setup flag AND [`PhysicsConfig::warm_start`], L10 D5b),
-    /// the SDF field or its kernel restores every held island.
+    /// (`sleep_sets.rs`), and a change of `contact_reuse`, `contact_reuse_distance`,
+    /// `speculative_distance`, `dt`, the effective warm start (the solver's setup flag AND
+    /// [`PhysicsConfig::warm_start`], L10 D5b), the SDF field or its kernel restores every held
+    /// island.
     #[default]
     Sets,
 }
@@ -412,7 +413,8 @@ pub struct PhysicsConfig {
     /// narrowphase produce the same bits for any worker count.
     ///
     /// **Default ON** since L9 C4 (window 6's decision). `false` is the exact narrowphase:
-    /// the trajectories from before contact reuse, and the arm cross-window bridges run.
+    /// with [`speculative_distance`](Self::speculative_distance) `= 0`, the trajectories from
+    /// before contact reuse, and the arm cross-window bridges run.
     /// Toggling it at runtime needs no epoch: off, the records are ignored and not written;
     /// on, the next full collision of a slow pair builds one.
     pub contact_reuse: bool,
@@ -424,6 +426,18 @@ pub struct PhysicsConfig {
     /// radius and by 5 % of the thinnest half-extent of either box, so small and thin boxes
     /// get a proportionally tighter bound. A change takes effect at the next check.
     pub contact_reuse_distance: f32,
+    /// V2's speculative contact distance `d`, in metres (default `0.0`;
+    /// [`DEFAULT_SPECULATIVE_DISTANCE`] is the owner's value, 2026-09-30). **It changes values**: a
+    /// contact point is kept while its separation is at most `d`, on every pair type (box-box,
+    /// sphere-sphere, sphere-box, SDF), a body's broadphase bounding sphere is inflated by `d / 2`
+    /// so every pair within `d` is a candidate, and the solvers solve a point whose current
+    /// separation is positive as a speculative contact (`bias = s / h`, no push) — Box2D v3's and
+    /// Jolt's rule. A pair with a sensor on either side uses `0`, so overlap reports stay exact.
+    ///
+    /// **`0` is the overlap-only rule, bit for bit the engine before V2**: the value every
+    /// cross-window bridge runs. Must be finite and `>= 0`. A change takes effect at the next
+    /// broadphase, and restores every held island (L10's sleep epoch).
+    pub speculative_distance: f32,
     /// Opt into the O8 per-island SLEEPING / deactivation (default `false`).
     ///
     /// Effective only on the colored-solve path (the
@@ -590,6 +604,12 @@ pub const DEFAULT_SLEEP_FRAMES: u16 = 60;
 /// creep bound.
 pub const DEFAULT_CONTACT_REUSE_DISTANCE: f32 = 0.001;
 
+/// The owner's speculative contact distance (V2b, 2026-09-30), in metres: 20 mm, Jolt's
+/// `mSpeculativeContactDistance` and Box2D v3.1's `B2_SPECULATIVE_DISTANCE`, four times the support
+/// unevenness measured on the J-T pile (F0). A NUMERICS-CHANGING value: see
+/// [`PhysicsConfig::speculative_distance`].
+pub const DEFAULT_SPECULATIVE_DISTANCE: f32 = 0.02;
+
 impl Default for PhysicsConfig {
     fn default() -> Self {
         Self {
@@ -666,6 +686,9 @@ impl Default for PhysicsConfig {
             // every trajectory the engine produced before contact reuse existed.
             contact_reuse: true,
             contact_reuse_distance: DEFAULT_CONTACT_REUSE_DISTANCE,
+            // V2: `0` (the overlap-only rule, the engine before V2) until the lane's value-changing
+            // commit makes `DEFAULT_SPECULATIVE_DISTANCE` the default.
+            speculative_distance: 0.0,
             // Default OFF so an un-opted colored world is BYTE-IDENTICAL to the O6/O7
             // colored solve (the campaign 0%-gate); sleeping is a pure opt-in.
             sleeping: false,

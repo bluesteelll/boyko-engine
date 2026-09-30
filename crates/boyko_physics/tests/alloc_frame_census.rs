@@ -2074,7 +2074,10 @@ fn spawn_jolt_pyramid(world: &mut EcsMaster) -> Vec<Entity> {
 /// One arm of S1. `sleeping` sets `PhysicsConfig::sleeping` (the colored solve's island
 /// sleep, `IslandSleep`); a sleeping arm must also see a frozen row on some steady frame.
 /// `reuse_off` overrides `PhysicsConfig::contact_reuse` to `false`; every other arm
-/// inherits the default (on since L9 C4).
+/// inherits the default (on since L9 C4). `speculative_zero` overrides
+/// `PhysicsConfig::speculative_distance` to `0` (V2's overlap-only rule); every other arm
+/// inherits the default.
+#[allow(clippy::too_many_arguments)]
 fn run_pyramid_arm(
     rows: &mut Vec<Row>,
     label: &str,
@@ -2083,6 +2086,7 @@ fn run_pyramid_arm(
     parallel: bool,
     sleeping: bool,
     reuse_off: bool,
+    speculative_zero: bool,
 ) {
     let mut samples: Vec<Snap> = Vec::with_capacity(TOTAL_FRAMES);
 
@@ -2108,6 +2112,9 @@ fn run_pyramid_arm(
         cfg.sleeping = sleeping;
         if reuse_off {
             cfg.contact_reuse = false;
+        }
+        if speculative_zero {
+            cfg.speculative_distance = 0.0;
         }
     }
     let mut schedule = builder.build(&mut world);
@@ -2307,6 +2314,7 @@ fn s1a_rigid_pile_reference_pipeline_serial(rows: &mut Vec<Row>) {
         false,
         false,
         false,
+        false,
     );
 }
 
@@ -2321,6 +2329,7 @@ fn s1b_rigid_pile_colored_serial(rows: &mut Vec<Row>) {
         "S1b — rigid pile, DEFAULT pipeline (colored + simd_solve), parallel OFF (control for S1c)",
         true,
         4,
+        false,
         false,
         false,
         false,
@@ -2340,6 +2349,7 @@ fn s1d_rigid_pile_colored_serial_sleeping(rows: &mut Vec<Row>) {
         false,
         true,
         false,
+        false,
     );
 }
 
@@ -2353,6 +2363,7 @@ fn s1c_rigid_pile_colored_parallel(rows: &mut Vec<Row>) {
         true,
         4,
         true,
+        false,
         false,
         false,
     );
@@ -2375,6 +2386,24 @@ fn s1e_rigid_pile_colored_parallel_reuse_off(rows: &mut Vec<Row>) {
         true,
         4,
         true,
+        false,
+        true,
+        false,
+    );
+}
+
+/// S1c's scene and switches with `speculative_distance` overridden to `0`, V2's overlap-only
+/// rule: the pile S1c ran before V2, whose envelope it keeps when the default moves, so the
+/// fan-out regression still reds against a pin no value change of V2's can move (the S1e
+/// precedent for L9 C4). Identical to S1c while the default is `0`.
+fn s1f_rigid_pile_colored_parallel_d0(rows: &mut Vec<Row>) {
+    run_pyramid_arm(
+        rows,
+        "S1f — rigid pile, COLORED solve + parallel ON, speculative_distance 0 (S1c's pre-V2 twin)",
+        true,
+        4,
+        true,
+        false,
         false,
         true,
     );
@@ -3155,7 +3184,7 @@ impl Pin {
 /// (header, "S1c after L9 C4"). S1e (2026-09-25) is S1c's pile with contact reuse off,
 /// pinned at S1c's L11 C2 envelope in both profiles, which its window reproduces: the arm
 /// on which the fan-out regression reds on every release frame (same header section).
-fn pins() -> [Pin; 18] {
+fn pins() -> [Pin; 19] {
     // An App frame: one install frame (a `ScopeShared` + one chunk) and at most
     // one injector block — the block arrives once per 63 dispatcher-side pushes,
     // so its per-frame max is 1 and it is already inside the measured 3.
@@ -3386,6 +3415,29 @@ fn pins() -> [Pin; 18] {
                 realloc_sum: 0,
             }
         },
+        // V2: S1c at `speculative_distance = 0`, which carries S1c's pins from before V2 (the
+        // S4 re-pin, both profiles) and never moves with a value change of V2's.
+        if RELEASE {
+            Pin {
+                scene: "S1f",
+                workers: 4,
+                scope: (123, 135),
+                chunk: (123, 135),
+                dispatch_max: 271,
+                other_per_frame: 0,
+                realloc_sum: 0,
+            }
+        } else {
+            Pin {
+                scene: "S1f",
+                workers: 4,
+                scope: (99, 111),
+                chunk: (99, 111),
+                dispatch_max: 223,
+                other_per_frame: 1,
+                realloc_sum: 0,
+            }
+        },
     ]
 }
 
@@ -3553,6 +3605,7 @@ fn frame_allocation_census() {
     s1b_rigid_pile_colored_serial(&mut rows);
     s1c_rigid_pile_colored_parallel(&mut rows);
     s1e_rigid_pile_colored_parallel_reuse_off(&mut rows);
+    s1f_rigid_pile_colored_parallel_d0(&mut rows);
     s1d_rigid_pile_colored_serial_sleeping(&mut rows);
     s8_sleep_skip_transitions(&mut rows, false);
     s8_sleep_skip_transitions(&mut rows, true);

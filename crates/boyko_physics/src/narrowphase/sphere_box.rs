@@ -28,6 +28,8 @@ use super::feature_vertex_face;
 /// Exactly one contact point with `feature_id = feature_vertex_face(0)` (a single
 /// point has no incident vertex to disambiguate; the class tag still keeps it
 /// disjoint from face-face / edge-edge ids).
+///
+/// The overlap-only rule (V2's `d = 0`); the narrowphase calls [`sphere_box_contact_within`].
 #[allow(clippy::too_many_arguments)]
 pub fn sphere_box_contact(
     body_a: BodyIndex,
@@ -37,6 +39,32 @@ pub fn sphere_box_contact(
     box_center: Vec3,
     box_rotation: Quat,
     box_half: Vec3,
+) -> Option<Manifold> {
+    sphere_box_contact_within(
+        body_a,
+        body_b,
+        sphere_center,
+        sphere_radius,
+        box_center,
+        box_rotation,
+        box_half,
+        0.0,
+    )
+}
+
+/// [`sphere_box_contact`] with V2's speculative distance `d`: an outside sphere whose surface is
+/// at most `d` from the box keeps its one point, with the positive separation `dist − r`.
+/// `r + 0.0 == r`, so `d = 0` is [`sphere_box_contact`] bit for bit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sphere_box_contact_within(
+    body_a: BodyIndex,
+    body_b: BodyIndex,
+    sphere_center: Vec3,
+    sphere_radius: f32,
+    box_center: Vec3,
+    box_rotation: Quat,
+    box_half: Vec3,
+    d: f32,
 ) -> Option<Manifold> {
     // Sphere center expressed in the box's LOCAL frame (axis-aligned there).
     let local = box_rotation.inverse_rotate(sphere_center - box_center);
@@ -67,8 +95,8 @@ pub fn sphere_box_contact(
         // Sphere center is OUTSIDE the box: the closest point is on the surface.
         let offset = local - clamped;
         let dist = offset.length();
-        if dist >= sphere_radius {
-            // No overlap.
+        if dist >= sphere_radius + d {
+            // No overlap, and farther than `d`.
             return None;
         }
         let n = if dist > f32::MIN_POSITIVE {

@@ -308,6 +308,9 @@ pub(crate) struct SleepEpoch {
     tau_bits: u32,
     /// `PhysicsConfig::dt`'s bits (design 08 D-E′: L9's `is_fast` reads it).
     dt_bits: u32,
+    /// `PhysicsConfig::speculative_distance`'s bits (V2): the narrowphase keeps a point while its
+    /// separation is at most it, so `Off` would recompute a held island's manifolds differently.
+    spec_bits: u32,
     /// The live SDF edits by bits; the entries past `sdf_len` are zero.
     sdf_edits: [[u32; SDF_EDIT_WORDS]; MAX_SDF_EDITS],
 }
@@ -322,6 +325,7 @@ impl SleepEpoch {
         sdf_len: u32::MAX,
         tau_bits: u32::MAX,
         dt_bits: u32::MAX,
+        spec_bits: u32::MAX,
         sdf_edits: [[0; SDF_EDIT_WORDS]; MAX_SDF_EDITS],
     };
 
@@ -355,6 +359,7 @@ impl SleepEpoch {
             sdf_len,
             tau_bits: cfg.contact_reuse_distance.to_bits(),
             dt_bits: cfg.dt.to_bits(),
+            spec_bits: cfg.speculative_distance.to_bits(),
             sdf_edits,
         }
     }

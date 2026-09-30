@@ -355,6 +355,13 @@ const A7_R1_D_MAX_BITS: u32 = 0x3a2e_dc99;
 /// **Re-pin rule.** [`A7_R1_D_MAX_BITS`]'s, except that no contact-reuse change may move it:
 /// with reuse off no reuse code runs.
 const A7_R1_D_MAX_BITS_REUSE_OFF: u32 = 0x3a3c_3896;
+/// A7-R1's exact reading with `speculative_distance = 0` (V2's overlap-only rule) and contact
+/// reuse on: D_max = 0.0006670445 m (`0x3a2e_dc99`), [`A7_R1_D_MAX_BITS`]'s value on the tree
+/// before V2 (`16191fda`).
+///
+/// **Re-pin rule.** [`A7_R1_D_MAX_BITS`]'s, except that no V2 change may move it:
+/// `speculative_distance = 0` is the contact rule from before V2, bit for bit.
+const A7_R1_D_MAX_BITS_D0: u32 = 0x3a2e_dc99;
 /// A7-R1's standing guard: the largest vertical drop any pile box may have taken by
 /// [`CREEP_FROM`]. Half a box edge — losing one layer costs a full [`BOX_SIZE`], while the
 /// vertical settle's penetration slop is millimetres per layer. Without it a pile that had
@@ -1769,6 +1776,10 @@ fn a_resting_jolt_pyramid_does_not_creep_with_sleeping_off() {
     let reuse_off_arm = under_watchdog("A7-R1, contact reuse off", JOLT_TIMEOUT, || {
         a7_r1_arm("contact reuse off", Some(false))
     });
+    // V2: the overlap-only rule, with the default's contact reuse.
+    let d0_arm = under_watchdog("A7-R1, speculative_distance 0", JOLT_TIMEOUT, || {
+        a7_r1_arm_with("speculative_distance 0", None, Some(0.0))
+    });
     for (arm, reading, pinned, pin) in [
         ("contact reuse on (the default)", default_arm, A7_R1_D_MAX_BITS, "A7_R1_D_MAX_BITS"),
         (
@@ -1777,6 +1788,7 @@ fn a_resting_jolt_pyramid_does_not_creep_with_sleeping_off() {
             A7_R1_D_MAX_BITS_REUSE_OFF,
             "A7_R1_D_MAX_BITS_REUSE_OFF",
         ),
+        ("speculative_distance 0", d0_arm, A7_R1_D_MAX_BITS_D0, "A7_R1_D_MAX_BITS_D0"),
     ] {
         assert_eq!(
             reading.d_max.to_bits(),
@@ -1808,12 +1820,24 @@ struct CreepReading {
 /// and [`CREEP_BOUND_M`], prints D_max and the step-[`CREEP_FROM`] contact counts, and returns
 /// the reading its caller compares with the arm's pin.
 fn a7_r1_arm(arm: &'static str, contact_reuse: Option<bool>) -> CreepReading {
+    a7_r1_arm_with(arm, contact_reuse, None)
+}
+
+/// [`a7_r1_arm`], with `speculative_distance` set to `speculative` when it is `Some` (V2).
+fn a7_r1_arm_with(
+    arm: &'static str,
+    contact_reuse: Option<bool>,
+    speculative: Option<f32>,
+) -> CreepReading {
     let mut h = Harness::new();
     {
         let cfg = h.world.resource_mut::<PhysicsConfig>();
         cfg.sleeping = false;
         if let Some(reuse) = contact_reuse {
             cfg.contact_reuse = reuse;
+        }
+        if let Some(d) = speculative {
+            cfg.speculative_distance = d;
         }
     }
     let reuse = h.world.resource::<PhysicsConfig>().contact_reuse;
