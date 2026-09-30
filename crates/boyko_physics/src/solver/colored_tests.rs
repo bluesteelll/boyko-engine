@@ -5110,10 +5110,15 @@
         impl G1 {
             /// A drive over `bodies` on `arm`; `sleeping` selects the O8 entry.
             fn new(bodies: &[BodyState], arm: Arm, sleeping: bool) -> Self {
+                // `speculative_distance = 0` (V2, critique W2a): the drive's narrowphase is the
+                // serial `ReuseStep::OFF` one, i.e. `d = 0`, and the pins were read under the
+                // pre-V2 rule, so the solver runs the same `d` — never a `d = 0` narrowphase
+                // beside a `d > 0` solver.
                 let cfg = PhysicsConfig {
                     dt: 1.0 / 60.0,
                     simd_solve: arm.simd_solve,
                     sleeping,
+                    speculative_distance: 0.0,
                     ..PhysicsConfig::default()
                 };
                 let mut scratch = SolverScratch::with_capacity(bodies.len());

@@ -271,6 +271,9 @@ fn run(specs: &[Spec], pipe: Pipe, workers: usize) -> (u64, Seen) {
     {
         let cfg = world.resource_mut::<PhysicsConfig>();
         cfg.dt = DT;
+        // The rule this file pins: V2 at `d = 0`, set explicitly so the pins do not follow the
+        // default (20 mm from V2's value-changing commit on).
+        cfg.speculative_distance = 0.0;
         if let Pipe::ColoredSdf(kernel) = pipe {
             cfg.sdf_narrowphase = kernel;
         }

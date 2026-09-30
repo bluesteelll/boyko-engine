@@ -32,6 +32,7 @@
 //! | `b_*` | `Commands::remove::<RigidBody>()` on S (S leaves both the gather and the apply walk) | RED | GREEN |
 //! | `d_*` | S's `RigidBody::position` written 10 m away (a support loss with no removal) | RED | GREEN |
 //! | `e_*` (L9 ruling W2) | box pile, contact reuse on: S lowered by τ_eff / 2, so U's record refreshes with every point lifted (D6) and the pair has no manifold | not run | GREEN |
+//! | `e_v2_*` (V2) | the same pile at `DEFAULT_SPECULATIVE_DISTANCE` `d` = 20 mm (the owner's value): S lowered by 1.5 d, so no point of U's contact stays within `d` | not run | GREEN |
 //! | `c_*` | `disable::<Simulated>()` on S (S stays in the gather, parked) | GREEN guard | GREEN guard |
 //! | `control_deleting_a_body_*` | `delete_entity` of L (last row), which touches only the static floor: nobody may wake | GREEN | GREEN |
 //! | `control_deleting_a_lone_body_*` (I2) | `delete_entity` of L from row 1: S swap-moves and the island ids renumber; nobody may wake | not run | GREEN |
@@ -80,7 +81,8 @@ use boyko_physics::plugin::add_physics_colored_solve;
 #[cfg(not(miri))]
 use boyko_physics::resources::PairClasses;
 use boyko_physics::resources::{
-    ConstraintGraph, IslandSleep, Manifolds, PhysicsConfig, SleepSkip, SolverScratch,
+    ConstraintGraph, DEFAULT_SPECULATIVE_DISTANCE, IslandSleep, Manifolds, PhysicsConfig, SleepSkip,
+    SolverScratch,
 };
 
 // ── Scene constants ──────────────────────────────────────────────────────────
@@ -726,17 +728,23 @@ struct BoxPileOutcome {
 ///
 /// `speculative_distance = 0` (V2's overlap-only rule): the premise "a drop below τ_eff lifts
 /// every point of U's contact off" holds only while the drop exceeds the speculative distance,
-/// and this scene's drop is half a millimetre. The speculative rule gets its own case at the
-/// V2 commit that makes it the default.
+/// and this scene's drop is half a millimetre. The speculative rule has its own case,
+/// [`e_v2_lowering_a_box_support_by_more_than_d_wakes_the_box_it_carried`].
 #[cfg(not(miri))]
 fn box_pile_scene(mode: SleepSkip) -> BoxPileOutcome {
+    box_pile_scene_with(mode, 0.0, BOX_SUPPORT_DROP)
+}
+
+/// [`box_pile_scene`] at `speculative_distance`, with S lowered by `drop`.
+#[cfg(not(miri))]
+fn box_pile_scene_with(mode: SleepSkip, speculative_distance: f32, drop: f32) -> BoxPileOutcome {
     let mut h = Harness::new();
     {
         let cfg = h.world.resource_mut::<PhysicsConfig>();
         cfg.contact_reuse = true;
         cfg.contact_reuse_distance = BOX_PILE_REUSE_DISTANCE;
         cfg.sleep_skip = mode;
-        cfg.speculative_distance = 0.0;
+        cfg.speculative_distance = speculative_distance;
     }
     h.spawn(floor());
     let support = h.spawn(cube(SUPPORT, Vec3::new(0.0, CUBE_HALF, 0.0)));
@@ -777,7 +785,7 @@ fn box_pile_scene(mode: SleepSkip) -> BoxPileOutcome {
             .world
             .get_component_mut::<RigidBody>(support)
             .expect("construction: S is live");
-        body.position.y -= BOX_SUPPORT_DROP;
+        body.position.y -= drop;
     }
     assert_eq!(
         h.walk_ids(),
@@ -919,6 +927,63 @@ fn e_sets_twin_matches_off() {
     assert_eq!(sets.upper_awake_steps, off.upper_awake_steps, "U's awake steps");
     assert_eq!(sets.upper_y_after.to_bits(), off.upper_y_after.to_bits(), "U's height after");
     assert_eq!(sets.upper_contacts_after, off.upper_contacts_after, "U's contacts after");
+}
+
+/// The V2 twin's drop: one and a half speculative distances, so U's contact on S lifts past `d`
+/// (V2 keeps a point while its separation is at most `d`).
+#[cfg(not(miri))]
+const V2_SUPPORT_DROP: f32 = 1.5 * DEFAULT_SPECULATIVE_DISTANCE;
+
+/// (e, V2) the box pile at [`DEFAULT_SPECULATIVE_DISTANCE`], 20 mm (the owner's value, the
+/// default from V2's value-changing commit on): S lowered by more than `d` must wake U, under the
+/// sleep-skip `Off` and `Sets` alike. Under V2 a contact point is kept while its separation is at
+/// most `d`, so only a drop past `d` plus U's resting depth
+/// lifts every point of U's contact off; at 30 mm the S-U pair has no point on the step after
+/// the drop, the island's manifold count changes, and U wakes and lands back on S. A narrowphase
+/// that kept points further out than `d` leaves U latched above S with the count unchanged, and
+/// this test turns red.
+#[test]
+#[cfg(not(miri))]
+fn e_v2_lowering_a_box_support_by_more_than_d_wakes_the_box_it_carried() {
+    for mode in [SleepSkip::Off, SleepSkip::Sets] {
+        let o = under_watchdog("box pile at the default speculative distance, S lowered by 1.5 d", move || {
+            box_pile_scene_with(mode, DEFAULT_SPECULATIVE_DISTANCE, V2_SUPPORT_DROP)
+        });
+        println!(
+            "(e, V2, {mode:?}) box pile: latched after {} steps, U {} m deep on S, drop \
+             {V2_SUPPORT_DROP} m at d = {DEFAULT_SPECULATIVE_DISTANCE} m; U awake on {}/{POST_STEPS} \
+             steps, y {} -> {}",
+            o.settle_steps, o.upper_depth_latched, o.upper_awake_steps, o.upper_y_before, o.upper_y_after
+        );
+        assert!(
+            o.upper_depth_latched + DEFAULT_SPECULATIVE_DISTANCE < V2_SUPPORT_DROP,
+            "premise ({mode:?}): the {V2_SUPPORT_DROP} m drop must exceed d plus U's resting depth \
+             ({} m), or no point lifts past d and nothing is tested",
+            o.upper_depth_latched
+        );
+        assert!(
+            o.upper_awake_first_step,
+            "({mode:?}) S lowered by {V2_SUPPORT_DROP} m, more than d: U must be awake on the first \
+             step after it; U's contacts on that step: {:?} (S = {SUPPORT} must not be among them); \
+             awake on {}/{POST_STEPS} steps",
+            o.upper_contacts_after_first_step, o.upper_awake_steps
+        );
+        assert!(
+            !o.upper_contacts_after_first_step.contains(&SUPPORT),
+            "({mode:?}) every point of U's contact lifted past d, so U and S must have no manifold \
+             on the first step after the drop; U's contacts: {:?}",
+            o.upper_contacts_after_first_step
+        );
+        assert!(
+            o.upper_contacts_after == [SUPPORT]
+                && (o.upper_y_after - o.upper_y_before).abs() <= MAX_CARRIED_DRIFT,
+            "({mode:?}) after the wake U must land back on S within {POST_STEPS} steps: U's contacts \
+             {:?}, y before = {}, y after = {} (bound {MAX_CARRIED_DRIFT} m)",
+            o.upper_contacts_after,
+            o.upper_y_before,
+            o.upper_y_after
+        );
+    }
 }
 
 // ── (c) guard: a parked support is not a lost support ────────────────────────

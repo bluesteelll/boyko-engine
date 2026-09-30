@@ -3282,17 +3282,19 @@ fn s3_mid_step_reuse_distance_lands_next_step() {
     mid_step_reuse_write("LB4 tau", |c| c.contact_reuse_distance = 0.0);
 }
 
-/// LB6 (V2): `speculative_distance` raised by 1 cm Early while two cubes resting 5 mm apart are
-/// held, on the Tree and the Grid at W 1 and 8. The next step flushes on the epoch and `Off`
-/// finds the pair within the new distance — a manifold that was not there. Red before the sleep
-/// epoch carried `speculative_distance`: `Sets` kept the held islands, and with them the pair
-/// `Off` now collides.
+/// LB6 (V2): `speculative_distance` raised by 1 cm Early while two cubes resting 5 mm further
+/// apart than the default distance are held, on the Tree and the Grid at W 1 and 8. The next step
+/// flushes on the epoch and `Off` finds the pair within the new distance — a manifold that was not
+/// there. Red before the sleep epoch carried `speculative_distance`: `Sets` kept the held islands,
+/// and with them the pair `Off` now collides. The gap follows the default (5 mm while it was 0,
+/// 25 mm at 20 mm), so the raise crosses it on either side of V2's value change.
 #[test]
 fn s3_mid_step_speculative_distance_lands_next_step() {
+    let gap = PhysicsConfig::default().speculative_distance + 0.005;
     let specs = vec![
         Spec::floor(),
         Spec::cube(Vec3::new(0.0, 0.5, 0.0), 0.5),
-        Spec::cube(Vec3::new(1.005, 0.5, 0.0), 0.5),
+        Spec::cube(Vec3::new(1.0 + gap, 0.5, 0.0), 0.5),
     ];
     for variant in [BroadphaseKind::Tree, BroadphaseKind::Grid].into_iter().flat_map(|k| [1, 8].map(|w| Variant::cell(k, true, w))) {
         let label = format!("LB6 speculative_distance [{:?} W{}]", variant.kind, variant.workers);
