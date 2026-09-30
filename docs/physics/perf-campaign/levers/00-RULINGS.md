@@ -349,3 +349,124 @@ under all three readings; both sit inside the design's 0.82–1.59 band. Off′ 
 the Tree plus L9b, not L10. By arithmetic, L10's own gain ceiling on the J-Son tail is 1.155–1.195 ms at W=1 (3.3× its
 0.35 ms realized-gain gate) and 0.60–0.70 ms at W=8 (gate 0.14); the R-S gate is 0.806 / 0.429 ms at W = 1 / 8
 (0.6 × (Off′_RS − 0.25), Off′_RS 1.594 / 0.966 ms).
+
+## The W8+ scaling plan (`scaling/01-DESIGN.md`): eight rulings and the lane order (2026-09-26)
+
+The design (rev 1, which answers its own architecture review in place) explains our T1/T8 of 2.72 against Jolt's 3.83
+by two things at equal parallel efficiency (E(8) 0.62 against 0.60): our serial time is about twice Jolt's (1.20 ms
+against about 0.58 ms), and our parallel work is 0.54× Jolt's. It ranks seven bit-identical levers, S1–S7, whose core
+is a persistent solve region (S1) in place of about 109 colour scopes per step. The rulings are quoted as ruled in the
+design's §9; what each means for a lane:
+- **Tree C2 reopened on a W8 letter, as lever S5**, after F3's re-time. Its W1 letter (NOT BUILT, 2026-09-25) stands
+  for W1; the W8 decision is taken on W8S's numbers.
+- **The L6 fork letter is superseded.** The region primitive is decided on the S1 + S2 + S3 bundle, not on the colour
+  loss alone, and L7 is revived as S2 on S1.
+- **An armed-only `Relaxed` timestamp per task is admitted into the W8S instrument**, with its zero cost when disarmed
+  proven by a codegen or census check. It is never a zone inside a worker task.
+- **The headline metric is T(8) and T(16) per manifold, plus the identity terms.** T1/T8 is retired as an objective,
+  because it falls whenever W1 gets faster.
+- **The window-7 §5 re-read was queued for the W8S analysis**; ruling 10 of the next section closes it.
+- **(OWNER VALUE, open) Spinning helpers for the region's length** — about 0.6–1.3 ms a step at W8, on up to seven
+  cores — was put to the owner. Until it is answered, S1 carries both a spin-only and a spin-then-park variant.
+- **L5 OQ1's per-step scope exception (the L5 section above) is extended** to S4's interim setup scope, which S1
+  retires, and to S5's broadphase scope.
+- **W8S's canary ladder and span gates are adopted** as the resolution protocol at W ≥ 2.
+
+**The order of physics lanes** after L10b merges: (1) the W8S instrument commit (bit-identical, armed only), then the
+W8S quiet window with Jolt in the same window; (2) S4, the parallel solve setup — cut and built before W8S, sized by
+it, claimed only after the window; (3) tree F3 with `--bp-kernel` and the window-7 thresholds (`TREE_BRUTE_MAX_ROWS`
+144, `AUTO_TREE_LO/HI` 144/152), then tree C4, then S5; (4) S1 + S2 + S3 (+ S7) as one kernel lane — research, design
+review, loom models, the ω_b microbench; (5) S6 only if its hit-rate counter clears the build-if; (6) L10 C1b, with its
+own quiet-window timing, where S1 must keep freeze capture/restore and write-back serial; (7) L8 after its rev-2
+critique items are closed in the implementation, with its A/B in a quiet window; (8) L12, whose T1 shadow probe runs
+in a quiet window and which is built only if the build-if holds.
+
+Amended on 2026-09-27 (the next section): S6 is not built, and S7's partial form is promoted to right after S4.
+
+## After window 8 (`docs/measurements/2026-09-27-physics-window8/`): the claim rule from 8b, S4 first, S6 not built, S7's partial form promoted, S1–S3 deferred (2026-09-27)
+
+Window 8 ran on the instrument build `226bd99e`. Its standing, block A over [0, 500): ours/Jolt 5.6 is **0.449× at W1
+(claimed)**, 0.795× at W8 and 0.866× at W16 (not claimed under min–max). Per manifold it is 0.816× / 1.456× / 1.567×,
+the W16 reading claimed with Jolt cheaper. The W8 excess over T(1)/8 is 70 % serial: our serial chain is 1.31 ms
+against Jolt's 0.63 ms. The inputs were the window's `analysis.md`, the instrument's review
+(`review-instrument-226bd99e.md` in the same directory) and the rulings of 2026-09-26; the full text of the rulings is
+the window README's "Rulings" section.
+- **1. The claim rule from window 8b on**, registered before any 8b data. Two windows in a row lost a claim to single
+  processes that ran uniformly 4–13 % slow with clean receipts, while the other pass resolved 0.030 ms. From 8b a
+  cell has K = 9 over three passes (p0 reversed, p1, p2 reversed); a claim needs IQR AND SE in every clean block and
+  pooled; min–max is reported beside it, and a claim that also passes it is STRONG. The resolution ladders are judged
+  the same way. The driver records a per-process placement receipt (the main thread's share on its top logical CPU),
+  which is never used to drop a process. Window 8's own verdicts are not changed retroactively.
+- **2. S4 stays first.** Its bar stays the design's 0.060 ms (0.6 × 0.10); window 8 moved its expected gain to about
+  0.19–0.22 ms, because the P-c fill's share of the setup is f = 0.82. The claim is taken in 8b's S4-AB block, with its
+  own ladder, rung and zone canary.
+- **3. S6 is NOT BUILT.** Its build-if (≥ 5 % of T(8)) fails at 3.5–3.8 % on the lower hit rate (J-T's). The design is
+  frozen with this number, and reopens only if a later window's hit rate moves it over 5 %.
+- **4. S7's partial form is PROMOTED** to a small lane right after S4, which touches the same solver files: the lanes
+  capped at the physical cores on today's scope path (design §6.7). Its window claim is W16 not slower than W8 on
+  J-T and J-A, with W8 unchanged. The engine reads the physical-core count itself, per ruling Q6 of the W8S lane's
+  cut ("S7's lane owns an engine-side physical read").
+- **5. S1 + S2 + S3: the decision is DEFERRED to window 8b.** ω_b as benched in window 8 reads 2.8–3.0 µs a stage at
+  eight participants, against the design's 0.3–1.0; at that cost the bundle is about 5.5–6.8 % of T(8) (arith.). The
+  bench could not decide it: its zero-work blocks make every participant contend at once, and its bench-only shared
+  counter sits beside the publish word. Two inputs come first: B1 and B2 from the fixed instrument, and an ω_b v2
+  re-bench — about 0.7 µs of real work per block, no shared `runs` RMW, padded claim and done words, blocks at 1× / 2× /
+  4× P, P capped at 8, and the spin-then-park variant of the 2026-09-26 owner-value ruling. The ruling places ω_b v2 on
+  `u/phys-w8s` after its verify; the S7 lane's spec carries it instead, as commit (1) of `u/phys-s7`, bench only.
+- **6. Warm apply is the largest serial stage after setup** (0.304 ms at W8), and today reaches the parallel path only
+  through S2, on S1. The S1 lane's design review prices an interim "S2i" (warm apply on today's scope path, the S4
+  pattern) against S2-on-S1 with window-8 numbers, and the same for the integrate group (0.121 ms) and the graph
+  (0.121 ms).
+- **7. F3 → tree C4 → S5 is unchanged.** S5 is supported: the broadphase query is 10.5 % of T(8), 0.210 ms.
+- **8. L10 C1b shows no measurable awake cost.** The settled pile reads −36 % at W8 and −49 % at W1, at cfg a. The
+  product row, sleeping on the Tree broadphase, goes into 8b (J-Son-T at W 1/8 over [0, 100) / [100, 500) /
+  [274, 500)). C1b keeps its place after the lanes that move no pins, because it moves every pose pin.
+- **10. The Jolt re-read is closed.** Design §4.2 is CONFIRMED and window 7 §5's "Jolt overlaps serial with parallel"
+  is REFUTED; Jolt's lighter profile costs 0–1 %, which closes window 7 FOLLOW-UP 10. This also closes the 2026-09-26
+  ruling that queued the re-read.
+- **9 and 11 are not lever rulings:** DM1 C6 is kept by its gate's letter and re-read in 8b with more power (render),
+  and the orchestrator issues no tool call during a timed block beyond a progress read (window hygiene). Both are in
+  the window README.
+
+**Window 8b's contents**, assembled after the lanes merge and all under ruling 1: S4-AB (parent the w8s commit (3), tip
+commit (4); an in-block ladder at W8/W16, the rung at W 1/2/4, the zone canary at 30/60 µs); the per-wave split rows on
+the parent (J-T and J-T-a at W 1/8/16: B1, B2, N3, N6); ω_b v2 (both routes, participants 2/4/8, stages 36/72,
+spin-only and spin-then-park); ω(W, gap) with the N4 participation receipt; the F3 rows (R1–R4 and the G4 block);
+J-Son-T; the DM1 re-read. S7-AB joins it once the S7 lane lands.
+
+Amended on 2026-09-29 (the next section): S7's partial form (ruling 4) is rejected and frozen, and the owner answered the
+2026-09-26 owner-value question on spinning helpers.
+
+## After window 8b: S7's partial form rejected and frozen, S4 kept, F3 not the default, the tree thresholds not reproduced, helpers spin (2026-09-29)
+
+Window 8b ran on 2026-09-29 under ruling 1 of the previous section (K = 9 over three passes; a claim needs IQR AND SE,
+and a claim that also passes min–max is STRONG): 894 timed processes, 0 invalid, 0 voided passes, and 26 of 786 slots
+dropped because the desktop and agent sessions were busy. Its numbers are recorded in the window 8b measurement record
+(to be committed). 8b carried no Jolt row, so the standing against Jolt 5.6 is not re-measured.
+- **1. Owner value: helpers SPIN.** This answers the owner-value question of 2026-09-26. The S1 region, and any later
+  region-style scheduler, keeps its helpers in active waiting between stages; spin-then-park is not the default, and
+  laptop energy is accepted as the price. The park path of the ω_b v2 bench stays a measurement axis only.
+- **2. S7's partial form (`u/phys-s7` commit (2), `a3adc827`) is REJECTED and frozen.** Capping the colour waves at the
+  physical-core count leaves W8 unchanged and makes W16 slower, STRONG: +0.140 ms (+6.8 %) on J-T and +0.658 ms
+  (+12.6 %) on J-A. C1 (W16 not slower than W8) fails STRONG on both rows and C3 (the predicted W16 gain) is refuted
+  STRONG: the SMT lanes help inside the waves. The commit is not merged; it is kept under the annotated tag
+  `phys/s7-partial-frozen`, and it returns only on a W16 A/B that shows a capped wave cheaper, e.g. inside S1 with S1's
+  own W16 A/B. Commits (0) (the rulings) and (1) (ω_b v2) are merged on their own. PC-S7-7, the physical-core cap on
+  S1's participants, is struck until S1 has its own W16 A/B.
+- **3. S4: KEEP.** At W8 on J-T the trunk is 0.1705 ms (8.58 %) faster than its S4-off parent, STRONG, on the
+  pre-registered span route; no W is claimed slower.
+- **4. F3 (`LeafListKd`) is not the default.** R1 is STRONG (the kd order cuts the J query by 16.9 %), but the kd build
+  eats the gain (22.9 → 50.9 µs at W1, 22.3 → 54.4 µs at W8) and R3 is not claimed. It is held opt-in until the tree C4
+  decision; if C4 does not use it, it is frozen and removed.
+- **5. The tree thresholds 144/152 are not reproduced**: the crossover reads 128/136. G4 is re-read at sizes 96–128
+  before tree C4 wires `AUTO_TREE_LO/HI`, and the all-pairs slowdown against window 7 is checked first.
+- **6. C1b (sleeping on by default) is supported.** No awake cost resolves at W1 or W8, and the settled pile is cut by
+  96.5–99.1 %. C1b keeps its place in the queue (ruling 8 of the previous section).
+- **7. DM1 C6: KEEP.** Window 8's +22 µs on `VB_EARLY_CULL` did not reproduce.
+- **8. A pass-cell with K < 3 does not gate.** The letter stands: window 7's clause, imported by every later window.
+  The driver changes for window 9: a dropped slot is re-run until the cell has K = 3 or the pass ends.
+- **9. S1 stays undecided** until S2i and S3i are priced on 8b's inputs: a net stage barrier of 0.35–1.07 µs at P = 8, a
+  park price of about +6 µs a stage after a serial gap of 20 µs or more, and a wake latency of 3.4–3.7 µs.
+- **10. Owner (2026-09-29): "find out why we are slower than Jolt and solve it."** A diagnosis precedes any new lever:
+  equal work first (manifold counts 4467 against 8489, iteration budgets), then the stage map, ours against Jolt, at
+  W 1/8/16, then a ranked lever plan.

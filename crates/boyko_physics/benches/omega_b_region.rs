@@ -82,13 +82,71 @@
 //! execution run exactly once, each stage's writes visible to the next, the completion count's
 //! reset exercised by re-executing entries, and a bounded spin that panics rather than hangs; ω's
 //! scope at W 2 on both routes; and the participation receipt reading no helper on a one-worker
-//! pool.
+//! pool. Then v2's self-check (below).
+//!
+//! # ω_b v2 (`--mode omega-b2`; window 8's `analysis.md` §5 and §9 item 3)
+//!
+//! Window 8 read ω_b as 2.8–3.0 µs a stage at eight participants and could not decide S1 on it:
+//! v1's blocks do no work (16 relaxed stores), so every participant contends at once, and v1's
+//! bench-only `runs.fetch_add` per block sits in `Region` beside `publish` and the `Vec` headers.
+//! v2 is the same protocol (the stage table, one claim word per block claimed by
+//! `compare_exchange(exec − 1, exec)`, the publish word, the exact completion count, the inline
+//! one-block rule) with five changes, and v1's modes run unchanged beside it:
+//!
+//! * **Real work per block.** Each block owns one 64-byte line of eight `AtomicU64`s: it loads
+//!   them, runs `work_iters` rounds of a fixed xorshift64* mix per word and stores them back.
+//!   `work_iters` is calibrated once at start on the bench thread to `--work-ns` (default 700 ns;
+//!   the median of three probes) and printed as one `CALIBRATION {json}` line, and every v2
+//!   summary repeats it.
+//! * **No shared read-modify-write per block beyond the protocol's own.** The claim CAS and the
+//!   completion `fetch_add` ARE the protocol S1 would ship, and stay. The blocks a participant
+//!   ran are counted in a local and stored once, at END, into its own line; the counts are summed
+//!   after the join, and the exactly-once receipt is asserted on every timed region too (a failure
+//!   panics, so the process exits non-zero).
+//! * **Every claim word, completion word and the publish word on a line of its own**
+//!   ([`Line`]), apart from each other and from every `Box` header.
+//! * **Blocks per stage at 1×, 2× and 4× the participants** (`--blocks-per-participant`), and
+//!   the participants capped at 8 by default (`--participants 2,4,8`; 16 is still accepted).
+//! * **Both helper variants** (`--helper spin,park`), the 2026-09-26 ruling 6's owner-value
+//!   question. `spin` is v1's: `PAUSE` up to [`SPIN_PAUSES`] times, then `yield_now`, never park.
+//!   `park` spins `--park-spins` `PAUSE`s and `--park-yields` `yield_now`s (default 127 and 4,
+//!   the pool's own idle backoff), then parks on the pool's own primitive, `std::thread::park`
+//!   (bounded by [`PARK_TIMEOUT`]), and is woken by the publish: the helper registers its thread
+//!   handle, stores its sleeping flag and re-reads the publish word, both `SeqCst`; the
+//!   orchestrator stores each publish `SeqCst`, then reads every helper's flag `SeqCst` and
+//!   unparks the ones it claims. That store→load pair on each side is the Dekker shape of the
+//!   pool's own wake, so a publish is never missed: either the helper's re-read sees it, or the
+//!   orchestrator's read sees the flag.
+//!
+//! **The participation receipt, per region:** how many participants ran at least one block (the
+//! orchestrator included), and the ns from the region's opening to the first block a helper
+//! claimed. **`--gap-us`** (default 0) adds a serial busy-wait on the orchestrator before every
+//! publish — S1's serial stretches between stages (the inline narrow colours, warm apply,
+//! integrate) — which is where the park variant's helpers outwait their spin budget; with stages
+//! back to back they do not.
+//!
+//! ```text
+//! omega_b_region.exe --bench --mode omega-b2 --participants 2,4,8 --stages 36,72 \
+//!     --blocks-per-participant 1,2,4 --helper spin,park --route worker
+//! ```
+//!
+//! Optional: `--regions R` (default 1000), `--work-ns N` (700), `--park-spins N` (127),
+//! `--park-yields N` (4), `--gap-us G,..` (0). One `CALIBRATION` line, then one `SUMMARY {json}`
+//! line per (participants, stages, blocks per participant, helper, gap), in that nesting order,
+//! each naming `"bench":"omega_b2","version":2`.
+//!
+//! v2's self-check runs 1, 2 and 4 participants × both routes × both helpers × 1, 2 and 4 blocks
+//! per participant, the park variant FORCED onto its park path (no spin, no yield), plus the park
+//! variant on its default budget across a 2 ms gap, which must park; it asserts exactly-once, no lost wakeup,
+//! `1 ≤ active ≤ participants`, and that a participant ran a block exactly when it recorded a
+//! first claim. Every wait is bounded: a spin by [`SELF_CHECK_SPIN_BOUND`], a park by
+//! [`PARK_TIMEOUT`], so a broken protocol fails rather than hangs.
 
 use std::hint::spin_loop;
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, OnceLock, mpsc};
+use std::thread::Thread;
 use std::time::{Duration, Instant};
 
 use boyko_threadpool::{
@@ -430,6 +488,18 @@ fn main() -> ExitCode {
     if raw.iter().any(|a| a == "--list") {
         return ExitCode::SUCCESS;
     }
+    if is_v2(&raw) {
+        return match parse_args_v2(&raw) {
+            Err(msg) => {
+                eprintln!("omega_b_region: {msg}");
+                ExitCode::from(EXIT_USAGE)
+            }
+            Ok(args) => {
+                run_v2(&args);
+                ExitCode::SUCCESS
+            }
+        };
+    }
     match parse_args(&raw) {
         Err(msg) => {
             eprintln!("omega_b_region: {msg}");
@@ -437,6 +507,7 @@ fn main() -> ExitCode {
         }
         Ok(Mode::SelfCheck) => {
             self_check();
+            self_check_v2();
             ExitCode::SUCCESS
         }
         Ok(Mode::OmegaB { participants, route, regions, stages, blocks, slots }) => {
@@ -592,4 +663,731 @@ fn omega_row(workers: usize, gap_us: u64, route: Route, reps: u32) {
         route.name(),
         firsts.len()
     );
+}
+
+// ── ω_b v2 (module docs, "ω_b v2") ────────────────────────────────────────────
+
+/// A park's bound: a helper parked this long wakes and re-reads the publish word, so a lost
+/// wakeup costs a bounded stall and is counted rather than hanging the region.
+const PARK_TIMEOUT: Duration = Duration::from_millis(100);
+/// `PAUSE`s the park variant spins before its yields: the pool's own idle backoff (design §3).
+const PARK_SPINS: u32 = 127;
+/// `yield_now`s the park variant takes after its spins, before it parks.
+const PARK_YIELDS: u32 = 4;
+/// The self-check's work per block, in mix rounds: the protocol under test, not its timing.
+const SELF_CHECK_WORK_ITERS: u32 = 8;
+
+/// One 64-byte line around `T`: v2 gives the publish word, every claim word, every completion
+/// word, every block's payload and every participant's receipt a line of its own.
+#[repr(C, align(64))]
+struct Line<T>(T);
+
+const _: () = assert!(
+    size_of::<Line<AtomicU32>>() == 64 && align_of::<Line<AtomicU32>>() == 64,
+    "a claim, completion or publish word owns one cache line"
+);
+const _: () = assert!(size_of::<Line<[AtomicU64; 8]>>() == 64, "a block's payload is one cache line");
+
+/// How a v2 helper waits for the next publish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Helper {
+    /// v1's wait: `PAUSE` up to [`SPIN_PAUSES`] times, then `yield_now`, never parked.
+    Spin,
+    /// A bounded spin and yield, then a park the publish wakes (module docs, "ω_b v2").
+    Park,
+}
+
+impl Helper {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Spin => "spin",
+            Self::Park => "park",
+        }
+    }
+}
+
+/// One participant's receipt for one region, read after the join.
+#[derive(Clone, Copy, Debug)]
+struct Receipt {
+    /// Blocks it ran.
+    ran: u64,
+    /// ns from the region's opening to its first claimed block; `u64::MAX` when it ran none.
+    first_ns: u64,
+    /// Parks it took (helpers of the park variant only).
+    parks: u64,
+    /// Parks it woke from by timeout with its flag unclaimed and the publish word moved.
+    lost: u64,
+}
+
+/// A participant's running tallies, local to its thread until END.
+struct Tally2 {
+    ran: u64,
+    first_ns: u64,
+    parks: u64,
+    lost: u64,
+}
+
+impl Tally2 {
+    fn new() -> Self {
+        Self { ran: 0, first_ns: u64::MAX, parks: 0, lost: 0 }
+    }
+}
+
+/// A v2 region's shape and knobs.
+#[derive(Clone, Copy, Debug)]
+struct Shape2 {
+    participants: u32,
+    stages: u32,
+    blocks: u32,
+    /// Executions of the whole table in order: more than one re-runs every entry (the
+    /// self-check), which exercises the completion count's reset.
+    repeats: u32,
+    /// Entry 0 has one block (the inline rule).
+    one_block_first: bool,
+    work_iters: u32,
+    helper: Helper,
+    park_spins: u32,
+    park_yields: u32,
+    /// The orchestrator's serial busy-wait before every publish.
+    gap: Duration,
+    /// Bounded spins (the self-check) or unbounded (timed); a park is always bounded.
+    bounded: bool,
+}
+
+/// One v2 region: the table, the schedule with each entry's execution number, and the lines.
+/// Built before the first publish; only the atomics change while it is open.
+struct Region2 {
+    /// The publish word, `(exec << 16) | stage`; `0` is "nothing yet" and [`END`] is END.
+    publish: Line<AtomicU32>,
+    table: Vec<Stage>,
+    /// `(stage, exec)` in execution order: the execution number is fixed here, so the
+    /// orchestrator keeps no per-region scratch.
+    schedule: Vec<(u32, u32)>,
+    claims: Box<[Line<AtomicU32>]>,
+    done: Box<[Line<AtomicU32>]>,
+    payload: Box<[Line<[AtomicU64; 8]>]>,
+    /// Per participant, stored once at END.
+    ran: Box<[Line<AtomicU64>]>,
+    first_ns: Box<[Line<AtomicU64>]>,
+    parks: Box<[Line<AtomicU64>]>,
+    lost: Box<[Line<AtomicU64>]>,
+    /// Per participant: 1 while a park-variant helper is about to park or parked, unclaimed.
+    sleeping: Box<[Line<AtomicU32>]>,
+    shape: Shape2,
+}
+
+/// The fixed per-word mix one block runs `iters` times: xorshift64* (Vigna), a serial data
+/// dependency the compiler cannot fold.
+#[inline]
+fn mix(mut x: u64, iters: u32) -> u64 {
+    for _ in 0..iters {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        x = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
+    }
+    x
+}
+
+/// One block's work on its own payload line: load the eight words, mix each, store them back.
+#[inline]
+fn run_work(line: &Line<[AtomicU64; 8]>, iters: u32) {
+    for w in &line.0 {
+        let x = w.load(Ordering::Relaxed);
+        w.store(mix(std::hint::black_box(x) | 1, iters), Ordering::Relaxed);
+    }
+}
+
+/// `blocks` blocks of `iters` rounds on one line, timed on this thread: ns per block.
+fn time_blocks(iters: u32, blocks: u32) -> f64 {
+    let line = Line([const { AtomicU64::new(0) }; 8]);
+    let t0 = Instant::now();
+    for _ in 0..blocks {
+        run_work(&line, iters);
+    }
+    let ns = t0.elapsed().as_nanos() as f64;
+    std::hint::black_box(&line);
+    ns / f64::from(blocks)
+}
+
+/// The calibration (module docs, "ω_b v2"): three probes of the per-round cost, their median
+/// scaled to `work_ns`, then one check run at the result. Returns the rounds and the measured ns
+/// per block, and prints the `CALIBRATION` line.
+fn calibrate(work_ns: u64) -> (u32, f64) {
+    const PROBE_ITERS: u32 = 256;
+    const PROBE_BLOCKS: u32 = 4000;
+    // Warm the clock, the line and the core.
+    let _ = time_blocks(PROBE_ITERS, PROBE_BLOCKS);
+    let probes: [f64; 3] =
+        std::array::from_fn(|_| time_blocks(PROBE_ITERS, PROBE_BLOCKS) / f64::from(PROBE_ITERS));
+    let mut sorted = probes;
+    sorted.sort_by(f64::total_cmp);
+    let per_iter = sorted[1].max(f64::MIN_POSITIVE);
+    let iters = ((work_ns as f64 / per_iter).round() as u32).max(1);
+    let calibrated = time_blocks(iters, PROBE_BLOCKS);
+    println!(
+        "CALIBRATION {{\"bench\":\"omega_b2\",\"version\":2,\"work_ns_target\":{work_ns},\"work_iters\":{iters},\
+         \"work_ns_calibrated\":{calibrated:.1},\"probe_ns_per_iter\":[{:.4},{:.4},{:.4}]}}",
+        probes[0], probes[1], probes[2]
+    );
+    (iters, calibrated)
+}
+
+/// `n` fresh lines.
+fn lines<T>(n: usize, init: impl Fn() -> T) -> Box<[Line<T>]> {
+    (0..n).map(|_| Line(init())).collect()
+}
+
+impl Region2 {
+    /// A region of `s.stages` entries of `s.blocks` blocks each, executed `s.repeats` times.
+    fn new(s: Shape2) -> Self {
+        let mut table = Vec::with_capacity(s.stages as usize);
+        let mut first = 0u32;
+        for i in 0..s.stages {
+            let b = if i == 0 && s.one_block_first { 1 } else { s.blocks.max(1) };
+            table.push(Stage { blocks: b, first_block: first });
+            first += b;
+        }
+        let schedule = (1..=s.repeats).flat_map(|e| (0..s.stages).map(move |st| (st, e))).collect();
+        let p = s.participants as usize;
+        Self {
+            publish: Line(AtomicU32::new(0)),
+            table,
+            schedule,
+            claims: lines(first as usize, || AtomicU32::new(0)),
+            done: lines(s.stages as usize, || AtomicU32::new(0)),
+            payload: lines(first as usize, || [const { AtomicU64::new(0) }; 8]),
+            ran: lines(p, || AtomicU64::new(0)),
+            first_ns: lines(p, || AtomicU64::new(u64::MAX)),
+            parks: lines(p, || AtomicU64::new(0)),
+            lost: lines(p, || AtomicU64::new(0)),
+            sleeping: lines(p, || AtomicU32::new(0)),
+            shape: s,
+        }
+    }
+
+    /// Resets every atomic for a fresh region over the same table: only between regions, after
+    /// the previous region's scope has joined and its result was received (which orders every
+    /// helper's last access before these stores).
+    fn reset(&self) {
+        for w in self.claims.iter().chain(self.done.iter()).chain(self.sleeping.iter()) {
+            w.0.store(0, Ordering::Relaxed);
+        }
+        for w in self.ran.iter().chain(self.parks.iter()).chain(self.lost.iter()) {
+            w.0.store(0, Ordering::Relaxed);
+        }
+        for w in self.first_ns.iter() {
+            w.0.store(u64::MAX, Ordering::Relaxed);
+        }
+        self.publish.0.store(0, Ordering::Relaxed);
+    }
+
+    /// Runs block `b`, counted in `t` (the first one timed from `open`).
+    #[inline]
+    fn run_block(&self, b: u32, t: &mut Tally2, open: Instant) {
+        if t.ran == 0 {
+            t.first_ns = u64::try_from(open.elapsed().as_nanos()).unwrap_or(u64::MAX - 1);
+        }
+        run_work(&self.payload[b as usize], self.shape.work_iters);
+        t.ran += 1;
+    }
+
+    /// Claims and runs blocks of `stage` at `exec` from the staggered `start`, sweeping the ring
+    /// once (v1's `claim_and_run`, counted locally).
+    fn claim_and_run(&self, stage: u32, exec: u32, start: u32, t: &mut Tally2, open: Instant) {
+        let st = self.table[stage as usize];
+        for i in 0..st.blocks {
+            let b = st.first_block + (start + i) % st.blocks;
+            if self.claims[b as usize]
+                .0
+                .compare_exchange(exec - 1, exec, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                self.run_block(b, t, open);
+                // Release: the block's writes happen-before the orchestrator's Acquire of the
+                // count that includes this increment.
+                self.done[stage as usize].0.fetch_add(1, Ordering::Release);
+            }
+        }
+    }
+
+    /// The orchestrator's publish: a `SeqCst` store, then (park variant) a `SeqCst` read of every
+    /// helper's flag — the Dekker pair with the flag store and publish re-read in
+    /// [`wait`](Self::wait), so either that re-read sees `v` or this read sees the flag. A flag
+    /// read as set is claimed with a swap and its helper unparked.
+    fn publish(&self, v: u32, parkers: &[OnceLock<Thread>]) {
+        self.publish.0.store(v, Ordering::SeqCst);
+        if self.shape.helper == Helper::Park {
+            for (flag, parker) in self.sleeping.iter().zip(parkers).skip(1) {
+                if flag.0.load(Ordering::SeqCst) == 1 && flag.0.swap(0, Ordering::SeqCst) == 1 {
+                    // The helper registered its handle before it stored the flag (`wait`), and
+                    // the SeqCst load above synchronises with that store.
+                    parker.get().expect("invariant: a sleeping helper registered its thread").unpark();
+                }
+            }
+        }
+    }
+
+    /// The orchestrator: every scheduled execution, then END; its receipt last.
+    fn orchestrate(&self, parkers: &[OnceLock<Thread>], open: Instant) {
+        let mut t = Tally2::new();
+        for &(stage, exec) in &self.schedule {
+            if !self.shape.gap.is_zero() {
+                let g = Instant::now();
+                while g.elapsed() < self.shape.gap {
+                    spin_loop();
+                }
+            }
+            let st = self.table[stage as usize];
+            if st.blocks == 1 {
+                // Box2D's rule: a one-block stage runs here, published to no one. Its claim word
+                // still advances, so a later re-execution's CAS sees the right value.
+                let b = st.first_block;
+                let _ = self.claims[b as usize].0.compare_exchange(exec - 1, exec, Ordering::AcqRel, Ordering::Relaxed);
+                self.run_block(b, &mut t, open);
+                continue;
+            }
+            // SeqCst (a release): the reset of `done` below and every earlier stage's writes
+            // happen-before a helper's acquiring read of this value.
+            self.publish((exec << 16) | stage, parkers);
+            self.claim_and_run(stage, exec, 0, &mut t, open);
+            let mut spins = 0u64;
+            // Acquire: pairs with each block's Release increment. EXACT equality: a count that
+            // overshot (a missing reset) must not read as complete.
+            while self.done[stage as usize].0.load(Ordering::Acquire) != st.blocks {
+                spin_loop();
+                spins += 1;
+                assert!(
+                    !self.shape.bounded || spins < SELF_CHECK_SPIN_BOUND,
+                    "v2: the orchestrator's wait on stage {stage} exec {exec} never completed: {} of {} blocks \
+                     ({} participants, {} helper)",
+                    self.done[stage as usize].0.load(Ordering::Relaxed),
+                    st.blocks,
+                    self.shape.participants,
+                    self.shape.helper.name()
+                );
+            }
+            self.done[stage as usize].0.store(0, Ordering::Relaxed);
+        }
+        self.publish(END, parkers);
+        self.store_receipt(0, &t);
+    }
+
+    /// Participant `p`'s receipt, stored once. Relaxed: read only after the scope's join.
+    fn store_receipt(&self, p: usize, t: &Tally2) {
+        self.ran[p].0.store(t.ran, Ordering::Relaxed);
+        self.first_ns[p].0.store(t.first_ns, Ordering::Relaxed);
+        self.parks[p].0.store(t.parks, Ordering::Relaxed);
+        self.lost[p].0.store(t.lost, Ordering::Relaxed);
+    }
+
+    /// Helper `h`'s wait for a publish value other than `last`.
+    fn wait(&self, h: usize, last: u32, parkers: &[OnceLock<Thread>], t: &mut Tally2) -> u32 {
+        let (mut spins, mut yields, mut waited) = (0u32, 0u32, 0u64);
+        loop {
+            // Acquire: pairs with the orchestrator's publish.
+            let v = self.publish.0.load(Ordering::Acquire);
+            if v != last {
+                return v;
+            }
+            waited += 1;
+            match self.shape.helper {
+                Helper::Spin => {
+                    if spins < SPIN_PAUSES {
+                        spin_loop();
+                        spins += 1;
+                    } else {
+                        std::thread::yield_now();
+                    }
+                    assert!(
+                        !self.shape.bounded || waited < SELF_CHECK_SPIN_BOUND,
+                        "v2: helper {h} never saw a new publish value after {last:#x}"
+                    );
+                }
+                Helper::Park if spins < self.shape.park_spins => {
+                    spin_loop();
+                    spins += 1;
+                }
+                Helper::Park if yields < self.shape.park_yields => {
+                    std::thread::yield_now();
+                    yields += 1;
+                }
+                Helper::Park => {
+                    parkers[h].get_or_init(std::thread::current);
+                    // SeqCst store, then SeqCst load: the helper's half of the Dekker pair
+                    // (`publish`).
+                    self.sleeping[h].0.store(1, Ordering::SeqCst);
+                    let v = self.publish.0.load(Ordering::SeqCst);
+                    if v != last {
+                        // Cancelled. If the orchestrator claimed the flag first, its unpark leaves
+                        // a token that a later park consumes as a spurious wake.
+                        self.sleeping[h].0.swap(0, Ordering::SeqCst);
+                        return v;
+                    }
+                    let t0 = Instant::now();
+                    std::thread::park_timeout(PARK_TIMEOUT);
+                    t.parks += 1;
+                    // A flag still set was claimed by no publish. Woken by the timeout with the
+                    // publish moved, that is a lost wakeup; a spurious or token wake returns long
+                    // before the timeout, and a helper descheduled after a claimed unpark finds its
+                    // flag cleared (review O4).
+                    let unclaimed = self.sleeping[h].0.swap(0, Ordering::SeqCst) == 1;
+                    if unclaimed && t0.elapsed() >= PARK_TIMEOUT && self.publish.0.load(Ordering::SeqCst) != last {
+                        t.lost += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// A helper: waits for a new publish value, claims from its staggered start, until END.
+    fn help(&self, h: u32, parkers: &[OnceLock<Thread>], open: Instant) {
+        let mut t = Tally2::new();
+        let mut last = 0u32;
+        loop {
+            let v = self.wait(h as usize, last, parkers, &mut t);
+            if v == END {
+                break;
+            }
+            last = v;
+            let (stage, exec) = (v & 0xFFFF, v >> 16);
+            let blocks = self.table[stage as usize].blocks;
+            self.claim_and_run(stage, exec, h * blocks / self.shape.participants.max(1), &mut t, open);
+        }
+        self.store_receipt(h as usize, &t);
+    }
+
+    /// One region on `pool`, opened from the calling thread: `participants − 1` helpers in one
+    /// scope, the caller orchestrating. `open` is the region's opening, for the first-claim times.
+    fn run_on(&self, pool: &PoolInner, parkers: &[OnceLock<Thread>], open: Instant) {
+        pool.scope(|scope| {
+            for h in 1..self.shape.participants {
+                scope.spawn(move || self.help(h, parkers, open));
+            }
+            self.orchestrate(parkers, open);
+        });
+    }
+
+    /// The blocks every scheduled execution runs.
+    fn expected_runs(&self) -> u64 {
+        self.schedule.iter().map(|&(s, _)| u64::from(self.table[s as usize].blocks)).sum()
+    }
+
+    /// Every participant's receipt, after the join.
+    fn receipts(&self) -> Vec<Receipt> {
+        (0..self.shape.participants as usize)
+            .map(|p| Receipt {
+                ran: self.ran[p].0.load(Ordering::Relaxed),
+                first_ns: self.first_ns[p].0.load(Ordering::Relaxed),
+                parks: self.parks[p].0.load(Ordering::Relaxed),
+                lost: self.lost[p].0.load(Ordering::Relaxed),
+            })
+            .collect()
+    }
+}
+
+/// One region's reduced receipt.
+#[derive(Clone, Copy, Debug)]
+struct RegionReading {
+    /// Participants that ran at least one block, the orchestrator included.
+    active: u32,
+    /// The first block a helper claimed, ns from the opening; `None` when no helper ran one.
+    first_helper_ns: Option<u64>,
+    parks: u64,
+    lost: u64,
+}
+
+/// Checks one region's receipts — every block of every execution ran exactly once, then a
+/// participant ran a block exactly when it recorded a first claim — and reduces them. Panics on
+/// a violation, in the timed mode too, so a broken region cannot leave a number behind.
+fn check_region(region: &Region2, what: &str) -> RegionReading {
+    let rs = region.receipts();
+    let sum: u64 = rs.iter().map(|r| r.ran).sum();
+    assert_eq!(
+        sum,
+        region.expected_runs(),
+        "v2 exactly-once: {what}: the participants ran {sum} blocks, the schedule has {} ({rs:?})",
+        region.expected_runs()
+    );
+    for (p, r) in rs.iter().enumerate() {
+        assert_eq!(
+            r.ran >= 1,
+            r.first_ns != u64::MAX,
+            "v2 receipt: {what}: participant {p} ran {} block(s) and its first-claim time is {} ({rs:?})",
+            r.ran,
+            r.first_ns
+        );
+    }
+    RegionReading {
+        active: rs.iter().filter(|r| r.ran >= 1).count() as u32,
+        first_helper_ns: rs.iter().skip(1).filter(|r| r.ran >= 1).map(|r| r.first_ns).min(),
+        parks: rs.iter().map(|r| r.parks).sum(),
+        lost: rs.iter().map(|r| r.lost).sum(),
+    }
+}
+
+/// One region of `region` on `route` of `pool`: the wall timed on the orchestrating thread, and
+/// the checked receipt. The helpers' park handles are fresh per region, built here, outside the
+/// timed call.
+fn region_once(pool: &ThreadPool, route: Route, region: &Arc<Region2>, what: &str) -> (u64, RegionReading) {
+    region.reset();
+    let parkers: Arc<[OnceLock<Thread>]> = (0..region.shape.participants).map(|_| OnceLock::new()).collect();
+    let r = Arc::clone(region);
+    let (wall, id) = on_route(pool, route, move |inner| {
+        let open = Instant::now();
+        r.run_on(inner, &parkers, open);
+        open.elapsed().as_nanos() as u64
+    });
+    assert_route(route, id, region.shape.participants as usize);
+    (wall, check_region(region, what))
+}
+
+/// `--mode omega-b2`'s arguments.
+struct ArgsV2 {
+    participants: Vec<u32>,
+    route: Route,
+    regions: u32,
+    stages: Vec<u32>,
+    blocks_per_participant: Vec<u32>,
+    helpers: Vec<Helper>,
+    work_ns: u64,
+    park_spins: u32,
+    park_yields: u32,
+    gaps_us: Vec<u64>,
+}
+
+/// Whether the command line selects v2 (`--bench --mode omega-b2`).
+fn is_v2(raw: &[String]) -> bool {
+    raw.iter().any(|a| a == "--bench") && raw.windows(2).any(|w| w[0] == "--mode" && w[1] == "omega-b2")
+}
+
+fn parse_args_v2(raw: &[String]) -> Result<ArgsV2, String> {
+    let mut a = ArgsV2 {
+        participants: vec![2, 4, 8],
+        route: Route::Worker,
+        regions: 1000,
+        stages: vec![36, 72],
+        blocks_per_participant: vec![1, 2, 4],
+        helpers: vec![Helper::Spin, Helper::Park],
+        work_ns: 700,
+        park_spins: PARK_SPINS,
+        park_yields: PARK_YIELDS,
+        gaps_us: vec![0],
+    };
+    let mut it = raw.iter().cloned();
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--bench" => {}
+            "--mode" => {
+                let _ = it.next();
+            }
+            "--participants" => a.participants = parse_list("--participants", it.next())?,
+            "--route" => {
+                a.route = match it.next().as_deref() {
+                    Some("worker") => Route::Worker,
+                    Some("external") => Route::External,
+                    other => return Err(format!("--route: expected worker|external, got {other:?}")),
+                }
+            }
+            "--regions" => a.regions = parse_one("--regions", it.next())?,
+            "--stages" => a.stages = parse_list("--stages", it.next())?,
+            "--blocks-per-participant" => {
+                a.blocks_per_participant = parse_list("--blocks-per-participant", it.next())?;
+            }
+            "--helper" => {
+                let names: Vec<String> = parse_list("--helper", it.next())?;
+                a.helpers = names
+                    .iter()
+                    .map(|n| match n.as_str() {
+                        "spin" => Ok(Helper::Spin),
+                        "park" => Ok(Helper::Park),
+                        other => Err(format!("--helper: expected spin|park, got {other:?}")),
+                    })
+                    .collect::<Result<_, _>>()?;
+            }
+            "--work-ns" => a.work_ns = parse_one("--work-ns", it.next())?,
+            "--park-spins" => a.park_spins = parse_one("--park-spins", it.next())?,
+            "--park-yields" => a.park_yields = parse_one("--park-yields", it.next())?,
+            "--gap-us" => a.gaps_us = parse_list("--gap-us", it.next())?,
+            other => return Err(format!("omega-b2: unknown argument {other:?}")),
+        }
+    }
+    if a.participants.iter().any(|&p| p == 0 || p > 16) {
+        return Err("omega-b2: participants must be 1..=16 (8 is the default cap)".into());
+    }
+    if a.stages.contains(&0) || a.blocks_per_participant.contains(&0) || a.regions == 0 || a.work_ns == 0 {
+        return Err("omega-b2: stages, blocks per participant, regions and work ns must be at least 1".into());
+    }
+    if a.helpers.is_empty() {
+        return Err("omega-b2: --helper names no variant".into());
+    }
+    Ok(a)
+}
+
+/// The median of `v` (sorted in place); `None` when empty.
+fn median(v: &mut [u64]) -> Option<u64> {
+    v.sort_unstable();
+    v.get(v.len() / 2).copied()
+}
+
+/// `--mode omega-b2`: the calibration, then every row.
+fn run_v2(a: &ArgsV2) {
+    let (work_iters, work_ns_calibrated) = calibrate(a.work_ns);
+    for &p in &a.participants {
+        let pool = ThreadPoolBuilder::new().num_threads(p as usize).build();
+        for &stages in &a.stages {
+            for &bpp in &a.blocks_per_participant {
+                for &helper in &a.helpers {
+                    for &gap_us in &a.gaps_us {
+                        let shape = Shape2 {
+                            participants: p,
+                            stages,
+                            blocks: bpp * p,
+                            repeats: 1,
+                            one_block_first: false,
+                            work_iters,
+                            helper,
+                            park_spins: a.park_spins,
+                            park_yields: a.park_yields,
+                            gap: Duration::from_micros(gap_us),
+                            bounded: false,
+                        };
+                        omega_b2_row(&pool, a, shape, bpp, gap_us, work_ns_calibrated);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One v2 row: `regions` regions of one shape, each timed as a whole and its receipt checked.
+fn omega_b2_row(pool: &ThreadPool, a: &ArgsV2, s: Shape2, bpp: u32, gap_us: u64, work_ns_calibrated: f64) {
+    let region = Arc::new(Region2::new(s));
+    let n = a.regions as usize;
+    let (mut walls, mut actives, mut firsts, mut parks) =
+        (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+    let (mut all_active, mut lost) = (0u32, 0u64);
+    for _ in 0..a.regions {
+        let (wall, r) = region_once(pool, a.route, &region, "a timed row");
+        walls.push(wall);
+        actives.push(u64::from(r.active));
+        all_active += u32::from(r.active == s.participants);
+        firsts.extend(r.first_helper_ns);
+        parks.push(r.parks);
+        lost += r.lost;
+    }
+    let mean = walls.iter().sum::<u64>() as f64 / walls.len() as f64;
+    let wall_median = median(&mut walls).unwrap_or(0);
+    let helped = firsts.len();
+    let first_median = median(&mut firsts).map_or_else(|| "null".to_owned(), |v| v.to_string());
+    println!(
+        "SUMMARY {{\"bench\":\"omega_b2\",\"version\":2,\"route\":\"{}\",\"helper\":\"{}\",\
+         \"participants\":{},\"stages\":{},\"blocks\":{},\"blocks_per_participant\":{bpp},\"gap_us\":{gap_us},\
+         \"park_spins\":{},\"park_yields\":{},\"regions\":{},\"work_iters\":{},\
+         \"work_ns_calibrated\":{work_ns_calibrated:.1},\"region_ns_median\":{wall_median},\"region_ns_mean\":{mean},\
+         \"stage_ns_median\":{},\"exactly_once\":true,\"active_median\":{},\"all_active_reps\":{all_active},\
+         \"helped_reps\":{helped},\"first_helper_ns_median\":{first_median},\"parks_per_region_median\":{},\
+         \"lost_wakeups\":{lost}}}",
+        a.route.name(),
+        s.helper.name(),
+        s.participants,
+        s.stages,
+        s.blocks,
+        s.park_spins,
+        s.park_yields,
+        a.regions,
+        s.work_iters,
+        wall_median as f64 / f64::from(s.stages),
+        median(&mut actives).unwrap_or(0),
+        median(&mut parks).unwrap_or(0),
+    );
+}
+
+/// v2's untimed functional self-check (module docs, "ω_b v2").
+fn self_check_v2() {
+    println!("omega_b_region: v2 self-check");
+    let mut forced_parks = 0;
+    for route in [Route::External, Route::Worker] {
+        for participants in [1u32, 2, 4] {
+            let pool = ThreadPoolBuilder::new().num_threads(participants as usize).build();
+            for helper in [Helper::Spin, Helper::Park] {
+                for bpp in [1u32, 2, 4] {
+                    // The park variant is forced onto its park path: no spin, no yield.
+                    let shape = Shape2 {
+                        participants,
+                        stages: 4,
+                        blocks: bpp * participants,
+                        repeats: 3,
+                        one_block_first: true,
+                        work_iters: SELF_CHECK_WORK_ITERS,
+                        helper,
+                        park_spins: 0,
+                        park_yields: 0,
+                        gap: Duration::ZERO,
+                        bounded: true,
+                    };
+                    forced_parks += self_check_region(&pool, route, shape);
+                }
+            }
+            println!("  v2 region: {participants} participant(s), {} route, spin and forced park: ok", route.name());
+        }
+    }
+    // Anti-vacuity: the forced rows reached the park path, or "no lost wakeup" was never at risk.
+    assert!(forced_parks > 0, "v2: the forced park rows never parked");
+    println!("  v2 forced park rows: {forced_parks} parks in all");
+    // The park variant on its default budget across a gap longer than that budget, so the
+    // helpers park between stages the way S1's helpers would in its serial stretches.
+    let pool = ThreadPoolBuilder::new().num_threads(2).build();
+    let shape = Shape2 {
+        participants: 2,
+        stages: 4,
+        blocks: 4,
+        repeats: 2,
+        one_block_first: false,
+        work_iters: SELF_CHECK_WORK_ITERS,
+        helper: Helper::Park,
+        park_spins: PARK_SPINS,
+        park_yields: PARK_YIELDS,
+        gap: Duration::from_millis(2),
+        bounded: true,
+    };
+    let parks = self_check_region(&pool, Route::Worker, shape);
+    assert!(parks > 0, "v2: the default-budget park row never parked across a 2 ms gap");
+    println!("  v2 region: 2 participants, worker route, park on its default budget across a 2 ms gap ({parks} parks): ok");
+    println!("omega_b_region v2 self-check: ok");
+}
+
+/// Three regions of `shape`: the receipts checked, no lost wakeup, `1 <= active <= P`, every
+/// claim word at its entry's execution count. Returns the parks the three took.
+fn self_check_region(pool: &ThreadPool, route: Route, shape: Shape2) -> u64 {
+    let region = Arc::new(Region2::new(shape));
+    let what = format!(
+        "{} participant(s), {} route, {} helper, {} blocks",
+        shape.participants,
+        route.name(),
+        shape.helper.name(),
+        shape.blocks
+    );
+    let mut parks = 0;
+    for _ in 0..3 {
+        let (_, r) = region_once(pool, route, &region, &what);
+        assert_eq!(r.lost, 0, "v2: {what}: {} lost wakeup(s), a helper slept through a publish", r.lost);
+        assert!(
+            (1..=shape.participants).contains(&r.active),
+            "v2: {what}: {} participants active, of {}",
+            r.active,
+            shape.participants
+        );
+        for (b, w) in region.claims.iter().enumerate() {
+            let owner = region
+                .table
+                .iter()
+                .position(|s| (s.first_block..s.first_block + s.blocks).contains(&(b as u32)))
+                .expect("invariant: every claim word belongs to an entry") as u32;
+            let execs = region.schedule.iter().filter(|&&(s, _)| s == owner).count() as u32;
+            assert_eq!(w.0.load(Ordering::Relaxed), execs, "v2: {what}: block {b} ended at its entry's execution count");
+        }
+        parks += r.parks;
+    }
+    parks
 }
