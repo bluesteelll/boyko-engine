@@ -85,10 +85,15 @@ pub(crate) const MAX_BIAS_VELOCITY: f32 = 4.0;
 /// both solvers' speculative kernels: `true` solves every contact point on its CURRENT separation
 /// (its gather-time separation plus the two anchors' relative normal movement over the step so
 /// far — Box2D v3's full form), `false` only the points speculative at gather (`s0 > 0`), every
-/// other point keeping its gather-time separation. Read only on a step with
-/// `speculative_distance > 0`: at `0` both solvers run their pre-V2 kernels whatever it says.
-/// The unit gates instantiate both values.
-pub(crate) const CURRENT_SEPARATION_ALL_POINTS: bool = false;
+/// other point keeping its gather-time separation. Read only on a step whose speculative contacts
+/// are on: otherwise both solvers run their pre-V2 kernels whatever it says. The unit gates
+/// instantiate both values.
+///
+/// `true` by the owner-verified F0e verdict (rulings 2026-09-30, item 6): on J-T at `d = 20 mm`
+/// the current separation of the penetrating points is what tightens the pile (max drift
+/// 106–153 mm with it, 189–260 mm without), and at the harsher 1.0 m drop it is the difference
+/// between 0/8 and 8/8 holding with contact reuse on. `false` stays a documented switch.
+pub(crate) const CURRENT_SEPARATION_ALL_POINTS: bool = true;
 
 /// One body row's accumulated movement over the current step (V2): `dp` the displacement of its
 /// centre of mass, `dq` its rotation, both accumulated by the tracked position integrate
