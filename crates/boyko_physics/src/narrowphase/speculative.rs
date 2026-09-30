@@ -26,6 +26,10 @@
 //! with `d` alone). `cap = 0` switches the term off (`d_eff = d`); `d = 0` and `cap = 0` together
 //! are the overlap-only rule, every comparison bit for bit the engine before V2.
 //!
+//! The same margin inflates each body's broadphase bounding sphere by
+//! `d / 2 + min(cap, (|v| + |ω| R) · h)` ([`SpecStep::bp_margin`]): the two per-body terms sum to
+//! at least the pair's `d_eff`, so every pair a site could keep is a candidate.
+//!
 //! [`PhysicsConfig::speculative_distance`]: crate::resources::PhysicsConfig::speculative_distance
 //! [`PhysicsConfig::speculative_velocity_cap`]: crate::resources::PhysicsConfig::speculative_velocity_cap
 
@@ -109,6 +113,20 @@ impl SpecStep {
             return SpecMargin::fixed(self.d);
         }
         SpecMargin::with_motion(self, Motion::of(a), circumradius(&a.shape), Motion::REST, 0.0)
+    }
+
+    /// Body `body`'s broadphase margin, what its bounding sphere is inflated by:
+    /// `d / 2 + min(cap, (|v| + |ω| R) · h)`, or `d / 2` with the velocity term off (`0.5 · 0.0`
+    /// is `+0.0`, so the overlap-only rule leaves every radius bit as it was).
+    #[inline]
+    pub(crate) fn bp_margin(self, body: &BodyState) -> f32 {
+        let half = 0.5 * self.d;
+        if !self.moving() {
+            return half;
+        }
+        let sweep = body.linear_velocity.length()
+            + body.angular_velocity.length() * circumradius(&body.shape);
+        half + (sweep * self.h).min(self.vcap)
     }
 }
 
@@ -319,6 +337,27 @@ mod tests {
         }
         assert_eq!(m.bound().to_bits(), 0.0f32.to_bits());
         assert_eq!(m.reach().to_bits(), 0.0f32.to_bits());
+        let body = BodyState::default();
+        assert_eq!(SpecStep::OVERLAP.bp_margin(&body).to_bits(), 0.0f32.to_bits());
+        assert_eq!(SpecStep::fixed(D).bp_margin(&body).to_bits(), (0.5 * D).to_bits());
+    }
+
+    /// The broadphase margin: `d / 2 + min(cap, (|v| + |ω| R) · h)`, linear and angular, capped.
+    #[test]
+    fn the_broadphase_margin_is_half_d_plus_the_capped_sweep() {
+        let mut body = BodyState {
+            shape: ColliderShape::Box { half_extents: Vec3::new(0.3, 0.4, 1.2) },
+            ..BodyState::default()
+        };
+        let r = Vec3::new(0.3, 0.4, 1.2).length();
+        body.linear_velocity = Vec3::new(0.0, -3.0, 4.0);
+        body.angular_velocity = Vec3::new(0.0, 0.0, 2.0);
+        let want = 0.5 * D + (5.0 + 2.0 * r) * H;
+        assert_eq!(step().bp_margin(&body).to_bits(), want.to_bits(), "linear and angular");
+        let capped = SpecStep::new(D, 0.01, H);
+        assert_eq!(capped.bp_margin(&body).to_bits(), (0.5 * D + 0.01).to_bits(), "capped");
+        body.linear_velocity = Vec3::ZERO;
+        assert_eq!(step().bp_margin(&body).to_bits(), (0.5 * D + 2.0 * r * H).to_bits(), "spin alone");
     }
 
     /// A spinning, moving pair: at every point within both bodies' circumradii (where a contact

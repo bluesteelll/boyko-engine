@@ -6,6 +6,9 @@
 //!   at `d = 20 mm` (each body's bounding sphere is inflated by `d / 2` at gather), and the
 //!   narrowphase makes its one speculative point; at `d = 0` it is no candidate. Red before the
 //!   margin: no candidate, so no manifold.
+//! * **B1v (ruling 9)** — two spheres 50 mm apart, past `d`, closing at 3 m/s each: every
+//!   broadphase pairs them on the bodies' velocity terms and the narrowphase keeps one point; with
+//!   the term off, no candidate. Red under a gather that writes `d / 2` alone.
 //! * **S2-S6 (C4)** — the solver's speculative branch, on the colored solver's AVX2 and scalar
 //!   kernels and on the reference `SoftStepSolver`: a fast cube lands without sinking on a box
 //!   floor (S2/S3) and on an SDF floor, whose surface is a sentinel lane (S3-SDF, critique W3); a
@@ -123,6 +126,46 @@ fn b1_every_broadphase_pairs_two_spheres_within_d() {
             } else {
                 assert_eq!(pairs, 0, "B1 {kind:?}: no candidate at d = 0");
                 assert!(manifolds.is_empty(), "B1 {kind:?}: no manifold at d = 0");
+            }
+        }
+    }
+}
+
+/// B1v (ruling 9, the broadphase's velocity term): two spheres of radius 0.5 whose surfaces are
+/// 50 mm apart — past `d`, so `d / 2` per body pairs nothing — closing at 3 m/s each, no gravity,
+/// on AllPairs, Grid and Tree: with the velocity term on (the owner's cap) each body's margin is
+/// `d / 2 + 3 h = 60 mm`, every broadphase emits the pair, and the narrowphase keeps one point at
+/// `s = +50 mm` (`d_eff = d + 6 h = 120 mm`); with the term off, no candidate. Red under a gather
+/// that writes `d / 2` alone.
+#[test]
+fn b1v_every_broadphase_pairs_two_closing_spheres_on_their_velocity_term() {
+    for kind in [BroadphaseKind::AllPairs, BroadphaseKind::Grid, BroadphaseKind::Tree] {
+        for vcap in [CAP, 0.0] {
+            let (mut w, builder) = world(|cfg| {
+                cfg.gravity = Vec3::ZERO;
+                cfg.broadphase_select = BroadphaseSelectMode::Manual;
+                cfg.broadphase = kind;
+                cfg.speculative_distance = D;
+                cfg.speculative_velocity_cap = vcap;
+            });
+            let sphere = ColliderShape::Sphere { radius: 0.5 };
+            spawn(&mut w, sphere, Vec3::new(0.0, 5.0, 0.0), Vec3::new(3.0, 0.0, 0.0), 0.0, true);
+            spawn(&mut w, sphere, Vec3::new(1.05, 5.0, 0.0), Vec3::new(-3.0, 0.0, 0.0), 0.0, true);
+            let (mut w, mut schedule) = build(w, builder);
+            schedule.run(&mut w);
+            let pairs = w.resource::<ContactPairs>().pairs().len();
+            let manifolds = w.resource::<Manifolds>().solver_manifolds().to_vec();
+            if vcap > 0.0 {
+                assert_eq!(pairs, 1, "B1v {kind:?}: the closing pair 50 mm apart is a candidate");
+                assert_eq!(manifolds.len(), 1, "B1v {kind:?}: one manifold");
+                let m = &manifolds[0];
+                assert!(
+                    m.count == 1 && (m.points[0].separation - 0.05).abs() < 1e-4,
+                    "B1v {kind:?}: one speculative point, s = +50 mm: {m:?}"
+                );
+            } else {
+                assert_eq!(pairs, 0, "B1v {kind:?}: no candidate with the velocity term off");
+                assert!(manifolds.is_empty(), "B1v {kind:?}: no manifold with the velocity term off");
             }
         }
     }

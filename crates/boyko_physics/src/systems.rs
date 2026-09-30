@@ -270,12 +270,13 @@ pub fn physics_gather(
     // set is unchanged), so `finish_gather` can tell where every body sat one gather ago.
     // `iter_entities` yields exactly the `iter()` sequence.
     scratch.rows.begin_gather();
-    // V2: every row's broadphase bounding sphere is inflated by half the speculative distance, so
-    // every pair within it is a candidate. Read from the live configuration one stage before the
+    // V2: every row's broadphase bounding sphere is inflated by half the speculative distance plus
+    // the row's own approach-velocity term (`SpecStep::bp_margin`), so every pair a narrowphase
+    // site could keep is a candidate. Read from the live configuration one stage before the
     // broadphase latches it; nothing writes the configuration between the two stages of a step
-    // (the same argument as `dt`, stamped above). `0.5 * 0.0` is `+0.0`, which leaves every radius
-    // bit as it was.
-    let bp_margin = 0.5 * cfg.speculative_distance;
+    // (the same argument as `dt`, stamped above, which is the term's `h`). Under the overlap-only
+    // rule the margin is `0.5 * 0.0 = +0.0`, which leaves every radius bit as it was.
+    let spec = SpecStep::new(cfg.speculative_distance, cfg.speculative_velocity_cap, cfg.dt);
     // L10 D3 (design 04): under an active sleep-skip mode the previous step's post-solve
     // snapshot is kept as the broadphase's resting baseline — the snapshot and the baseline
     // swap, O(1), stamped with this gather — before the refill below clears the snapshot. Never
@@ -307,7 +308,7 @@ pub fn physics_gather(
                 simulated,
                 kinematic,
             );
-            row.bp_margin = bp_margin;
+            row.bp_margin = spec.bp_margin(&row);
             bodies.push(row);
         }
         debug_assert_eq!(ids.len(), bodies.len(), "invariant: one entity id per gathered row");

@@ -4705,10 +4705,11 @@ pub struct BodyState {
     /// disturb the leading hot fields).
     pub is_sensor: bool,
     /// The margin this row's broadphase bounding sphere is inflated by (V2): half of
-    /// `PhysicsConfig::speculative_distance`, written by
-    /// [`physics_gather`](crate::systems::physics_gather) into every row it gathers, so every
-    /// pair whose surfaces are within the speculative distance is a candidate of every
-    /// broadphase ([`body_bounding_radius`](crate::systems::body_bounding_radius) adds it).
+    /// `PhysicsConfig::speculative_distance` plus the row's approach-velocity term,
+    /// `min(cap, (|v| + |ω| R) · dt)` (`PhysicsConfig::speculative_velocity_cap`, ruling 9),
+    /// written by [`physics_gather`](crate::systems::physics_gather) into every row it gathers,
+    /// so every pair a narrowphase site could keep is a candidate of every broadphase
+    /// ([`body_bounding_radius`](crate::systems::body_bounding_radius) adds it).
     /// `0` is the exact bounding sphere; a row built by [`from_columns`](Self::from_columns)
     /// carries `0`. Placed beside `shape`, the other field the radius reads.
     pub bp_margin: f32,
