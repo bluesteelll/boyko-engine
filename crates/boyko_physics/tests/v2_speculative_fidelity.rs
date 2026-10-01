@@ -103,20 +103,23 @@ const STEPS: usize = 500;
 /// The largest horizontal drift a standing pile may show, in metres.
 const DRIFT_LIMIT_M: f64 = 0.5;
 
-/// The parity runner's J-T fixtures (`docs/measurements/2026-09-27-physics-window8/gate/fixtures/`
-/// and window 8b's), by the configuration they were recorded with: `JT500` (`--cfg default
-/// --broadphase tree --sleeping off`).
-const ANCHOR_REUSE_ON_SLEEP_OFF: u64 = 0x30c5_438b_c6ad_9ffa;
-/// `JToff500`: `JT500` with `--contact-reuse off`.
-const ANCHOR_REUSE_OFF_SLEEP_OFF: u64 = 0x32d5_e235_342b_4143;
+/// The parity runner's V2 J-T fixtures (`docs/measurements/2026-09-30-v2-speculative/w8/`,
+/// recorded at W1 by the flip's runner with `tools/record_v2_fixtures.sh`), by the configuration
+/// they were recorded with: `JT500` (`--cfg default --broadphase tree --sleeping off`). Re-pinned at
+/// V2's flip from the pre-V2 fixture `0x30c5_438b_c6ad_9ffa` (window 8's `JT500`, which the
+/// overlap-only rule still reproduces); the four anchors below equal this file's own runs on the
+/// flip's tree, so the two builders agree.
+const ANCHOR_REUSE_ON_SLEEP_OFF: u64 = 0x441a_568e_91a4_f9c9;
+/// `JToff500`: `JT500` with `--contact-reuse off` (pre-V2: `0x32d5_e235_342b_4143`).
+const ANCHOR_REUSE_OFF_SLEEP_OFF: u64 = 0xbc09_a1fa_f7b4_13a8;
 /// `JSonT500`: J-T with sleeping on (recorded as `--cfg a --broadphase tree --sleeping on`, which
 /// the engine's scalar/SIMD and worker-count identities make the default configuration's bits;
-/// this file's run on the parent `16191fda` is the measurement that they are).
-const ANCHOR_REUSE_ON_SLEEP_ON: u64 = 0x3db4_7fae_414b_655c;
-/// Window 6's `Son-J1000` (`--cfg a --sleeping --contact-reuse off`, 1000 steps; L10's pose gate
-/// `G4f_off_Son-J1000`): the pile is frozen before step 500, so the 500-step pose is the 1000-step
-/// one (read on the parent `16191fda` by this file's own run).
-const ANCHOR_REUSE_OFF_SLEEP_ON: u64 = 0xcc2a_5400_c66e_ecce;
+/// this file's run is the measurement that they are). Pre-V2: `0x3db4_7fae_414b_655c`.
+const ANCHOR_REUSE_ON_SLEEP_ON: u64 = 0x130c_76cb_6b46_3ab8;
+/// `JSonToff500`: `JSonT500` with `--contact-reuse off`, 500 steps (V2's recorder adds the row; the
+/// pre-V2 anchor was window 6's 1000-step `Son-J1000`, `0xcc2a_5400_c66e_ecce`, whose pile was frozen
+/// before step 500).
+const ANCHOR_REUSE_OFF_SLEEP_ON: u64 = 0xc671_8318_9439_4df6;
 
 /// FNV-1a 64 offset basis (the runner's).
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -405,19 +408,19 @@ fn sweep(reuse: bool, anchor: u64) -> Vec<(Run, Option<u64>)> {
     runs
 }
 
-#[ignore = "deferred: V2 flip - red by design on the pre-V2 contact rule until the lane's value-changing commit makes speculative contacts and the approach-velocity margin the default; then `slow:` (the J-T gap sweep, 13 runs of Jolt's 1240-box pyramid)"]
+#[ignore = "slow: the J-T gap sweep - 13 runs of Jolt's 1240-box pyramid for 500 steps; release, the device-free -- --ignored leg"]
 #[test]
 fn j_t_stands_at_every_gap_contact_reuse_on() {
     gate("gap sweep, contact reuse on", &sweep(true, ANCHOR_REUSE_ON_SLEEP_OFF));
 }
 
-#[ignore = "deferred: V2 flip - red by design on the pre-V2 contact rule until the lane's value-changing commit makes speculative contacts and the approach-velocity margin the default; then `slow:` (the J-T gap sweep, 13 runs of Jolt's 1240-box pyramid)"]
+#[ignore = "slow: the J-T gap sweep - 13 runs of Jolt's 1240-box pyramid for 500 steps; release, the device-free -- --ignored leg"]
 #[test]
 fn j_t_stands_at_every_gap_contact_reuse_off() {
     gate("gap sweep, contact reuse off", &sweep(false, ANCHOR_REUSE_OFF_SLEEP_OFF));
 }
 
-#[ignore = "deferred: V2 flip - red by design on the pre-V2 contact rule until the lane's value-changing commit; then `slow:` (2 runs of Jolt's 1240-box pyramid)"]
+#[ignore = "slow: J-T with sleeping on - 2 runs of Jolt's 1240-box pyramid for 500 steps; release, the device-free -- --ignored leg"]
 #[test]
 fn j_t_stands_with_sleeping_on() {
     let at = |reuse| Run { gap: GAP, reuse, sleeping: true, seed: None, cap: None };

@@ -273,12 +273,21 @@ fn count(label: &str, bodies: &[BodyState], oracle: bool, kernel: QueryKernel) -
 /// * `bp_g4_uniform/tree/1000` and `bp_g4_disparity/tree/1000`: re-derived and unchanged. Their
 ///   bodies are built directly, with no schedule, so contact reuse cannot reach them.
 ///
+/// **Re-pinned at V2's flip (2026-10-01); reason: V2, speculative contacts and the
+/// approach-velocity margin on by default (owner V2a/V2b, rulings 2026-09-30).** The default J
+/// snapshot's trajectory moved, and with it every row's broadphase radius (`d / 2` plus its velocity
+/// term): `bp_g4_scene/tree/j100` old `[1983, 5787, 155, 6368, 16120, 9549]` (now
+/// [`G_LL3_J_OVERLAP_ONLY`], which the overlap-only snapshot still reads), new
+/// `[1968, 5575, 155, 6160, 15950, 9570]`, the tree's reading; the uniform and disparity scenes
+/// re-read unchanged (their rows are built directly, with no margin). Command as above, msvc
+/// release and debug.
+///
 /// **Re-pin rule.** The figures move only with a commit that changes the J trajectory or the
 /// leaf-list kernel by design. That commit re-reads all three from the G-LL3 assert's `left`
 /// line and records old, new, the command and the reason here. In a commit that claims bit
 /// identity, a change is a defect, never a re-pin.
 const G_LL3_PINS: [(&str, [u64; 6]); 3] = [
-    ("bp_g4_scene/tree/j100", [1983, 5787, 155, 6368, 16120, 9549]),
+    ("bp_g4_scene/tree/j100", [1968, 5575, 155, 6160, 15950, 9570]),
     ("bp_g4_uniform/tree/1000", [1228, 3465, 0, 3848, 7200, 2400]),
     ("bp_g4_disparity/tree/1000", [1487, 4096, 0, 4560, 11252, 6706]),
 ];
@@ -329,8 +338,10 @@ const G_LL3_KD_PINS: [(&str, [u64; 6]); 3] = [
 /// pin). New: the figures below. Command: `cargo test -p boyko-physics --features bp-query-counts
 /// --test bp_query_counts`, the `left` line of the assert below, msvc debug and release. Reason:
 /// the kd kernel is new, and the reuse-on J snapshot has no model reading. Re-pin rule:
-/// [`G_LL3_PINS`]'s.
-const G_LL3_KD_J: (&str, [u64; 6]) = ("bp_g4_scene/tree_kd/j100", [1777, 3511, 155, 4048, 10671, 9549]);
+/// [`G_LL3_PINS`]'s. **Re-pinned at V2's flip (2026-10-01)** with [`G_LL3_PINS`], for its reason:
+/// old `[1777, 3511, 155, 4048, 10671, 9549]` (now [`G_LL3_KD_J_OVERLAP_ONLY`]), new
+/// `[1823, 3493, 155, 4024, 10663, 9570]`.
+const G_LL3_KD_J: (&str, [u64; 6]) = ("bp_g4_scene/tree_kd/j100", [1823, 3493, 155, 4024, 10663, 9570]);
 
 /// G-F3-9 on [`G_LL3_J_OVERLAP_ONLY`]'s snapshot: [`G_LL3_KD_J`]'s figures from before V2, kept as
 /// the kd order's `d = 0` identity witness. Recorded by V2 in [`G_LL3_J_OVERLAP_ONLY`]'s form; old:
@@ -539,6 +550,14 @@ fn query_counts_on_the_g4_scenes() {
         pins,
         "{label}: G-LL3 under the overlap-only rule, the pre-V2 default's figures; full counts {:?}",
         overlap_only.leaf_list
+    );
+    // Anti-vacuity: the overlap-only setting reaches the snapshot, so the default J snapshot (V2's
+    // rule) and the overlap-only one count different bodies.
+    assert_ne!(
+        g_ll3_figures(&counted[0].leaf_list),
+        pins,
+        "anti-vacuity: the default J snapshot (V2's speculative contacts) differs from the \
+         overlap-only one"
     );
 
     // G-LL3 on the reuse-off J snapshot: the pre-C4 figures, bit for bit.

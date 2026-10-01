@@ -427,9 +427,10 @@ pub struct PhysicsConfig {
     /// radius and by 5 % of the thinnest half-extent of either box, so small and thin boxes
     /// get a proportionally tighter bound. A change takes effect at the next check.
     pub contact_reuse_distance: f32,
-    /// V2's speculative contact distance `d`, in metres (default `0.0`;
-    /// [`DEFAULT_SPECULATIVE_DISTANCE`] is the owner's value, 2026-09-30). **It changes values**: a
-    /// contact point is kept while its separation is at most `d` plus the approach-velocity margin
+    /// V2's speculative contact distance `d`, in metres (default
+    /// [`DEFAULT_SPECULATIVE_DISTANCE`], 20 mm, the owner's value, 2026-09-30). **It changes
+    /// values**: a contact point is kept while its separation is at most `d` plus the
+    /// approach-velocity margin
     /// ([`speculative_velocity_cap`](Self::speculative_velocity_cap)), on every pair type (box-box,
     /// sphere-sphere, sphere-box, SDF), a body's broadphase bounding sphere is inflated by `d / 2`
     /// (plus its own velocity term) so every such pair is a candidate, and the solvers solve a
@@ -446,8 +447,8 @@ pub struct PhysicsConfig {
     /// [`speculative_distance`](Self::speculative_distance) — `d_eff = d + min(cap, max(0, approach)
     /// · dt)`, `approach` the rate at which the two bodies close the gap at the start of the step
     /// (per contact point, linear and angular; per SAT axis, the bound no point exceeds). Default
-    /// `0.0`, the term off; [`DEFAULT_SPECULATIVE_VELOCITY_CAP`] is the owner-ruled value. **It
-    /// changes values**: a pair that closes more than `d` in one step becomes a contact on the step
+    /// [`DEFAULT_SPECULATIVE_VELOCITY_CAP`], 0.5 m, the owner-ruled value. **It changes
+    /// values**: a pair that closes more than `d` in one step becomes a contact on the step
     /// before it touches, instead of landing on whichever corner arrives first (F0g: J-T holds at
     /// every drop height of the gap sweep with it, and at under half of them without it). Each
     /// body's broadphase radius grows by `min(cap, (|v| + |ω| R) · dt)` to match.
@@ -722,12 +723,11 @@ impl Default for PhysicsConfig {
             // every trajectory the engine produced before contact reuse existed.
             contact_reuse: true,
             contact_reuse_distance: DEFAULT_CONTACT_REUSE_DISTANCE,
-            // V2: `0` (the overlap-only rule, the engine before V2) until the lane's value-changing
-            // commit makes `DEFAULT_SPECULATIVE_DISTANCE` the default.
-            speculative_distance: 0.0,
-            // V2: the approach-velocity term off until the same commit makes
-            // `DEFAULT_SPECULATIVE_VELOCITY_CAP` the default.
-            speculative_velocity_cap: 0.0,
+            // V2 (owner V2a/V2b, 2026-09-30): speculative contacts are the contact rule. `0` for
+            // both is the overlap-only rule, the engine before V2 bit for bit.
+            speculative_distance: DEFAULT_SPECULATIVE_DISTANCE,
+            // V2 (rulings 2026-09-30, item 9): the approach-velocity margin.
+            speculative_velocity_cap: DEFAULT_SPECULATIVE_VELOCITY_CAP,
             // Default OFF so an un-opted colored world is BYTE-IDENTICAL to the O6/O7
             // colored solve (the campaign 0%-gate); sleeping is a pure opt-in.
             sleeping: false,

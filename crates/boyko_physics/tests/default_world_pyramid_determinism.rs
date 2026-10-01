@@ -95,11 +95,15 @@ const FRAMES: usize = if cfg!(debug_assertions) { 60 } else { 120 };
 const DT: f32 = 1.0 / 60.0;
 
 /// The reference run's final hash, per profile: release (height 15, 120 frames)
-/// `0xb583_189f_a681_f3a6`, debug (height 10, 60 frames) `0x839d_9426_8d67_b09f`. Both were
-/// read on msvc at L9 C4 (contact reuse on by default, 2026-09-24), which re-pinned them from
-/// release `0xa386_20b3_8cbc_a8d3` and debug `0xc7eb_531b_1e1a_c19b`, read at L9 C3
-/// (`aef7dda4`) when the default had reuse off; those are now
-/// [`PINNED_FINAL_HASH_REUSE_OFF`].
+/// `0xe5d8_a7d5_f469_4f08`, debug (height 10, 60 frames) `0x2112_97c3_d16c_603c`. Both were read
+/// on msvc at V2's flip (speculative contacts and the approach-velocity margin on by default,
+/// owner V2a/V2b and rulings 2026-09-30 items 9-10, 2026-10-01) from this test's `reference final
+/// hash` line (`cargo test [--release] -p boyko-physics --test default_world_pyramid_determinism
+/// -- --nocapture`), re-pinned from release `0xb583_189f_a681_f3a6` and debug
+/// `0x839d_9426_8d67_b09f`, read at L9 C4 (contact reuse on by default, 2026-09-24); those are now
+/// [`PINNED_FINAL_HASH_D0`], which the overlap-only rule still reads exactly. L9 C4 had re-pinned
+/// them from release `0xa386_20b3_8cbc_a8d3` and debug `0xc7eb_531b_1e1a_c19b`, read at L9 C3
+/// (`aef7dda4`) when the default had reuse off.
 ///
 /// **Re-pin rule.** The value moves only with a commit that changes values by design (a
 /// value-changing lever). That commit re-reads BOTH profiles from this test's own
@@ -107,27 +111,30 @@ const DT: f32 = 1.0 / 60.0;
 /// and the old values in this doc. In a commit that claims bit identity, a change is a
 /// defect, never a re-pin.
 const PINNED_FINAL_HASH: u64 = if cfg!(debug_assertions) {
-    0x839d_9426_8d67_b09f
+    0x2112_97c3_d16c_603c
 } else {
-    0xb583_189f_a681_f3a6
+    0xe5d8_a7d5_f469_4f08
 };
 
 /// The reference configuration's final hash with contact reuse OFF (the exact narrowphase),
-/// per profile: release `0xa386_20b3_8cbc_a8d3`, debug `0xc7eb_531b_1e1a_c19b`. Read on msvc
-/// at L9 C3 (`aef7dda4`) as the default's, and again at L9 C4 from this test's `reuse off`
-/// line.
+/// per profile: release `0x7812_1c47_f5c6_e8b2`, debug `0x0fc5_7194_33da_d377`. Read on msvc at V2's
+/// flip (2026-10-01) from this test's `reuse off` line, re-pinned from release
+/// `0xa386_20b3_8cbc_a8d3` and debug `0xc7eb_531b_1e1a_c19b` (read at L9 C3, `aef7dda4`, as the
+/// default's, and again at L9 C4), which are now [`PINNED_FINAL_HASH_REUSE_OFF_D0`]. V2 is not a
+/// contact-reuse change: its rule reaches the reuse-off narrowphase too.
 ///
 /// **Re-pin rule.** [`PINNED_FINAL_HASH`]'s, read from the `reuse off` line, except that no
 /// contact-reuse change may move it: with reuse off no reuse code runs.
 const PINNED_FINAL_HASH_REUSE_OFF: u64 = if cfg!(debug_assertions) {
-    0xc7eb_531b_1e1a_c19b
+    0x0fc5_7194_33da_d377
 } else {
-    0xa386_20b3_8cbc_a8d3
+    0x7812_1c47_f5c6_e8b2
 };
 
-/// The reference configuration's final hash with `speculative_distance = 0` (V2's overlap-only
-/// rule) and contact reuse on, per profile: release `0xb583_189f_a681_f3a6`, debug
-/// `0x839d_9426_8d67_b09f` — [`PINNED_FINAL_HASH`]'s values on the tree before V2 (`16191fda`).
+/// The reference configuration's final hash with `speculative_distance = 0` and
+/// `speculative_velocity_cap = 0` (V2's overlap-only rule) and contact reuse on, per profile:
+/// release `0xb583_189f_a681_f3a6`, debug `0x839d_9426_8d67_b09f` — [`PINNED_FINAL_HASH`]'s values on
+/// the tree before V2 (`16191fda`), read again unchanged at V2's flip.
 ///
 /// **Never re-pinned by a value change of V2's.** `speculative_distance = 0` is the pre-V2 contact
 /// rule bit for bit; a lever outside V2 that changes values re-pins it under

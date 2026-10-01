@@ -31,10 +31,12 @@
 //!    probability p for that height, and the negative-binomial tail P(>= budget+1 events | p, N
 //!    draws) — and does not block.
 //! 4. A budget is re-sized ONLY from a fresh run of the `flicker_redraw_distribution` generator.
-//!    The last run was on the A7b tree (msvc release, 2026-09-18): the pooled wake probability
-//!    fell from 160/216 to 20/76 at height 5 and from 48/78 to 2/32 at height 4, and the
-//!    budgets came down with it (G2 18 -> 3, G7 56 -> 6). Never raise a budget to turn a red
-//!    green.
+//!    The last run was on V2's flip (speculative contacts and the approach-velocity margin on
+//!    by default; msvc release, 2026-10-01): 0 events in all 86 draws, every one frozen at step
+//!    61, so the pooled wake probability fell to 0/56 at height 5 and 0/30 at height 4 and the
+//!    budgets to 0 (G2 4 -> 0, G7 6 -> 0). The run before it, on the A7b tree (2026-09-18), had
+//!    taken them from 160/216 and 48/78 to 20/76 and 2/32 (G2 18 -> 4, G7 56 -> 6). Never raise a
+//!    budget to turn a red green.
 //! * **Row moves** (design Decision 1 case 5). A row move can change the axis hint a box pair
 //!   reads from the box-axis cache while the poses stay put. Before A7b that could change
 //!   whether a knife-edge pair had a manifold at all (A4's Known behaviour 2). Since A7b it
@@ -79,8 +81,9 @@
 //! were on the edge path (A7a alone: 33.3 %), so the mechanism A7b removed is not acting on
 //! the supports. It is an open question in `docs/OPEN-QUESTIONS.md`. Every figure in this
 //! paragraph was read with contact reuse off, the default until L9 C4; with reuse on (the
-//! default since) A7-R1 reads 0.6670 mm over steps 600-3000, and the 5400-step extension has
-//! not been re-run.
+//! default since) A7-R1 reads 0.6670 mm over steps 600-3000, and with V2's speculative contacts
+//! (the default since 2026-10-01) 0.7245 mm with reuse on and 0.5266 mm with reuse off. The
+//! 5400-step extension has not been re-run.
 //!
 //! ## S5's rung, pre-registered before any pile run of it (2026-09-18)
 //!
@@ -260,49 +263,58 @@ const JOLT: usize = 15;
 const SMALL_SETTLE_LIMIT: usize = 1500;
 /// Settle budget (steps) for G8 and A7-R2.
 const LONG_SETTLE_LIMIT: usize = 6000;
-/// Settle budget (steps) for G2 and G6: twice the latest freeze of the 56 height-5 draws
-/// `flicker_redraw_distribution` measured on the A7b tree (step 243, msvc release,
-/// 2026-09-18), so that G2's event budget, not the step limit, is what a flicker overrun
-/// reaches first: the most-woken draw took its four events by step 183. G2's own draw froze
-/// at step 67 (step 65 at L9 C4, contact reuse on by default, 2026-09-24). Before A7b the
-/// latest freeze was step 9987 and this limit 20 000.
-const MEDIUM_SETTLE_LIMIT: usize = 2 * 243;
+/// Settle budget (steps) for G2 and G6-V2: twice the latest freeze of the 56 height-5 draws
+/// `flicker_redraw_distribution` measured on V2's flip (step 61, msvc release, 2026-10-01), so
+/// that G2's event budget, not the step limit, is what a flicker overrun reaches first. G2's own
+/// draw froze at step 61 there (step 67 on the A7b tree, 65 at L9 C4). Re-derived at V2's flip
+/// from 2 x 243 (the A7b tree's latest freeze); before A7b the latest freeze was step 9987 and
+/// this limit 20 000.
+const MEDIUM_SETTLE_LIMIT: usize = 2 * 61;
+/// Settle budget (steps) for G6, which runs the overlap-only rule: [`MEDIUM_SETTLE_LIMIT`]'s
+/// value before V2, twice the latest freeze of the 56 height-5 draws the generator measured on
+/// the A7b tree (step 243, 2026-09-18) — the last distribution read under the overlap-only rule.
+/// G6 froze at step 65 at V2's flip.
+const OVERLAP_ONLY_MEDIUM_SETTLE_LIMIT: usize = 2 * 243;
 /// Settle budget (steps) for each of G7's draws: eight times the latest freeze of the 30
-/// height-4 draws measured on the A7b tree (step 127, the same run). Eight, not two, because
-/// one draw may spend all of [`G7_MAX_EVENTS`]: seven latch attempts, the last near step
-/// 63 + 6 × 60 = 423, and the budget must fire before the step limit. Before A7b this was
-/// eight times step 750, [`LONG_SETTLE_LIMIT`].
-const G7_SETTLE_LIMIT: usize = 8 * 127;
+/// height-4 draws measured on V2's flip (step 61, the same run). Eight, not two, was sized on
+/// the A7b tree so one draw could spend a whole budget of 6 (seven latch attempts) before the
+/// step limit; the factor is kept, so the rule stays one rule. Re-derived at V2's flip from
+/// 8 x 127 (the A7b tree's latest height-4 freeze); before A7b it was eight times step 750,
+/// [`LONG_SETTLE_LIMIT`].
+const G7_SETTLE_LIMIT: usize = 8 * 61;
 /// G2's cap on contact-change wake events (steps on which `contact_wakes` rose), re-derived
-/// from the generator's run on the A7b tree (msvc release, 2026-09-18). This file's rule is
-/// the smallest budget whose tail `P(>= budget + 1 events)` ([`tail_probability`]) is below
-/// 1 % at the measured wake probability plus one standard error, and it alone gives 3: with
-/// one draw the tail is `p^4`, 0.48 % at the measured [`MEASURED_P_HEIGHT_5`] = 20/76 and
-/// 0.97 % at p = 0.314 (one standard error above it).
+/// from the generator's run on V2's flip (msvc release, 2026-10-01; rulings 2026-09-30, item
+/// 10e). This file's rule is the smallest budget whose tail `P(>= budget + 1 events)`
+/// ([`tail_probability`]) is below 1 % at the measured wake probability plus one standard error,
+/// never below the largest count its own generator sample produced. Under V2 no height-5 draw
+/// woke (0 events in 56 attempts, every draw frozen at step 61), so [`MEASURED_P_HEIGHT_5`] = 0,
+/// its standard error is 0, the tail of one event is 0, and the rule gives 0. The rule is
+/// applied as written. It is degenerate at a measured 0 — the standard error of a proportion
+/// vanishes there — and the rule-of-three bound p = 3/56 would give 1 (`P(>= 2)` = 0.29 %):
+/// recorded so that a red at this budget is triaged knowing it.
 ///
-/// The budget is 4 because the SAMPLE refutes 3. One of the 56 measured draws took 4 events,
-/// so a budget of 3 reds about 1 re-drawn trajectory in 56, where the pooled geometric
-/// model says 0.48 %: wake events cluster within a draw (that draw woke at steps 62, 63, 123
-/// and 183), and a model that treats them as independent understates the tail. A budget is
-/// therefore never set below the largest count its own generator sample produced. At 4 the
-/// model's tail is `p^5`: 0.13 % at p and 0.30 % at one standard error above it. G2's own draw
-/// takes 0, at L9 C4 too. Before A7b this was 18, sized for p = 160/216; a budget sized for the
-/// pre-fix flicker is one the pre-fix flicker passes.
-const G2_MAX_EVENTS: usize = 4;
+/// History: 4 on the A7b tree (p = 20/76; the rule alone gave 3, but one of the 56 draws took 4
+/// events — they cluster within a draw — so the sample refuted 3), 18 before A7b (p = 160/216):
+/// a budget sized for a flicker is one that flicker passes. G2's own draw takes 0, as on the A7b
+/// tree and at L9 C4.
+const G2_MAX_EVENTS: usize = 0;
 /// G7's cap on the contact-change wake events summed over its sixteen draws, re-derived by
-/// the same rule from the same run: `P(>= 7 events)` over sixteen draws is 0.03 % at the
-/// measured [`MEASURED_P_HEIGHT_4`] = 2/32 and 0.59 % at p = 0.105 (one standard error above
-/// it); a budget of 5 would be 1.8 % there. G7's own draws take 2 (movers 2 and 9, one
-/// each); at L9 C4 (contact reuse on by default, 2026-09-24) they take 1 (mover 12). Before A7b
-/// this was 56, sized for p = 48/78.
-const G7_MAX_EVENTS: usize = 6;
+/// the same rule from the same run: no height-4 draw woke (0 events in 30 attempts), so
+/// [`MEASURED_P_HEIGHT_4`] = 0 and the rule gives 0, degenerate as [`G2_MAX_EVENTS`]'s is (the
+/// rule-of-three bound p = 3/30 would give 6, `P(>= 7)` over sixteen draws = 0.44 %). G7's own
+/// draws take 0 at V2's flip (all sixteen frozen at step 61).
+///
+/// History: 6 on the A7b tree (p = 2/32: `P(>= 7)` 0.03 % at p, 0.59 % at one standard error
+/// above it); its draws took 2 there (movers 2 and 9) and 1 at L9 C4 (mover 12). Before A7b this
+/// was 56, sized for p = 48/78.
+const G7_MAX_EVENTS: usize = 0;
 /// The per-latch-attempt wake probability at height 4, pooled over the 30 height-4 draws
-/// of `flicker_redraw_distribution` on the A7b tree (2 events in 32 attempts, msvc release,
-/// 2026-09-18; before A7b, 48 in 78).
-const MEASURED_P_HEIGHT_4: f64 = 2.0 / 32.0;
-/// The same at height 5, pooled over its 56 draws (20 events in 76 attempts; before A7b,
-/// 160 in 216).
-const MEASURED_P_HEIGHT_5: f64 = 20.0 / 76.0;
+/// of `flicker_redraw_distribution` on V2's flip (0 events in 30 attempts, msvc release,
+/// 2026-10-01; on the A7b tree 2 in 32, before A7b 48 in 78).
+const MEASURED_P_HEIGHT_4: f64 = 0.0 / 30.0;
+/// The same at height 5, pooled over its 56 draws (0 events in 56 attempts on V2's flip; on the
+/// A7b tree 20 in 76, before A7b 160 in 216).
+const MEASURED_P_HEIGHT_5: f64 = 0.0 / 56.0;
 /// G4's mover: layer 0's `j = 3, k = 0` corner, spawned at (2, 1, -4). A pinned
 /// trajectory, not a structural property — every change to contact ids, impulses or
 /// ordering re-draws it, so the premise is re-measured over all 16 layer-0 movers each time
@@ -338,12 +350,14 @@ const CREEP_FROM: usize = 600;
 const CREEP_TO: usize = 3000;
 /// A7-R1's bound on horizontal displacement over the window: 2 × Box2D's `B2_LINEAR_SLOP`.
 const CREEP_BOUND_M: f32 = 0.01;
-/// A7-R1's exact reading on the default config, pinned by its bits: D_max = 0.0006670445 m
-/// (`0x3a2e_dc99`; box 1240, layer 14), with contact reuse on. Re-pinned at L9 C4 (contact reuse
-/// on by default; msvc release, 2026-09-24) from the old value 0.0007180063 m (`0x3a3c_3896`;
-/// box 1227, layer 12), read at L9 C3 (`aef7dda4`) when the default had reuse off, which is now
-/// [`A7_R1_D_MAX_BITS_REUSE_OFF`]. The reading is in the L9 design's pre-registered "confirms"
-/// band (under 2 mm). The comparison is on bits. The test prints D_max with `{}`, which is
+/// A7-R1's exact reading on the default config, pinned by its bits: D_max = 0.0007244835 m
+/// (`0x3a3d_eb44`; box 997, layer 6), with contact reuse on. Re-pinned at V2's flip (speculative
+/// contacts and the approach-velocity margin on by default, owner V2a/V2b, rulings 2026-09-30;
+/// msvc release, 2026-10-01, from A7-R1's own `D_max` line) from 0.0006670445 m (`0x3a2e_dc99`;
+/// box 1240, layer 14), which the overlap-only rule still reads exactly
+/// ([`A7_R1_D_MAX_BITS_D0`]). L9 C4 (contact reuse on by default, 2026-09-24) had re-pinned it from
+/// 0.0007180063 m (`0x3a3c_3896`; box 1227, layer 12), read at L9 C3 (`aef7dda4`) when the default
+/// had reuse off. Every reading is in the L9 design's pre-registered "confirms" band (under 2 mm). The comparison is on bits. The test prints D_max with `{}`, which is
 /// `f32`'s shortest round-trip form, so the printed decimal parses back to exactly these bits.
 ///
 /// This is a regression pin, separate from [`CREEP_BOUND_M`], which is an acceptance
@@ -355,18 +369,21 @@ const CREEP_BOUND_M: f32 = 0.01;
 /// value-changing lever). That commit re-reads it from A7-R1's own `D_max` line (msvc
 /// release), re-pins it here in the same commit, and names the lever and the old value in
 /// this doc. In a commit that claims bit identity, a change is a defect, never a re-pin.
-const A7_R1_D_MAX_BITS: u32 = 0x3a2e_dc99;
-/// A7-R1's exact reading with contact reuse OFF, the exact narrowphase: D_max = 0.0007180063 m
-/// (`0x3a3c_3896`; box 1227, layer 12). Read in msvc release at L9 C3 (`aef7dda4`), when it was
-/// the default's, and again on the L9 C4 tree by the reuse-off arm: the L9 design requires that
-/// arm to read it exactly. The S5 rung recorded it as 0.0007180 m (module header).
+const A7_R1_D_MAX_BITS: u32 = 0x3a3d_eb44;
+/// A7-R1's exact reading with contact reuse OFF, the exact narrowphase: D_max = 0.0005266388 m
+/// (`0x3a0a_0e22`; box 1227, layer 12). Re-pinned at V2's flip (msvc release, 2026-10-01, from the
+/// reuse-off arm's `D_max` line) from 0.0007180063 m (`0x3a3c_3896`; box 1227, layer 12), read at
+/// L9 C3 (`aef7dda4`) when it was the default's and again on the L9 C4 tree by this arm. V2 is not
+/// a contact-reuse change: its rule reaches the reuse-off narrowphase too. The S5 rung recorded
+/// the pre-V2 value as 0.0007180 m (module header).
 ///
 /// **Re-pin rule.** [`A7_R1_D_MAX_BITS`]'s, except that no contact-reuse change may move it:
 /// with reuse off no reuse code runs.
-const A7_R1_D_MAX_BITS_REUSE_OFF: u32 = 0x3a3c_3896;
-/// A7-R1's exact reading with `speculative_distance = 0` (V2's overlap-only rule) and contact
-/// reuse on: D_max = 0.0006670445 m (`0x3a2e_dc99`), [`A7_R1_D_MAX_BITS`]'s value on the tree
-/// before V2 (`16191fda`).
+const A7_R1_D_MAX_BITS_REUSE_OFF: u32 = 0x3a0a_0e22;
+/// A7-R1's exact reading with `speculative_distance = 0` and `speculative_velocity_cap = 0` (V2's
+/// overlap-only rule) and contact reuse on: D_max = 0.0006670445 m (`0x3a2e_dc99`),
+/// [`A7_R1_D_MAX_BITS`]'s value on the tree before V2 (`16191fda`), read again exactly at V2's
+/// flip.
 ///
 /// **Re-pin rule.** [`A7_R1_D_MAX_BITS`]'s, except that no V2 change may move it:
 /// `speculative_distance = 0` is the contact rule from before V2, bit for bit.
@@ -502,7 +519,7 @@ fn flicker_triage(events: usize, attempts: usize, budget: &Budget) -> String {
          docs/OPEN-QUESTIONS.md together with the numbers above (observed events, the measured p \
          for this height, and the negative-binomial tail) and does not block.\n\
          4. A budget is re-sized ONLY from a fresh run of the `flicker_redraw_distribution` \
-         generator (the last: the A7b tree, 2026-09-18). Never raise a budget to turn a red \
+         generator (the last: V2's flip, 2026-10-01). Never raise a budget to turn a red \
          green.\n\
          Escalate to the orchestrator with these numbers: Decision 3 is to be decided again now \
          that A7 has landed (A4 round-2 ruling §3.4), and has not been yet",
@@ -1657,10 +1674,11 @@ fn sixteen_height_4_draws_freeze_within_the_onset_flicker_budget() {
         // checked against this same cap, so this assertion cannot fire: it restates the bound
         // where the loop ends, and carries the triage paragraph for a reader who arrives here.
         assert!(
-            spent <= G7_MAX_EVENTS,
-            "G7, {} {spent} contact-change wake events (budget {G7_MAX_EVENTS}); (mover, freeze \
+            spent <= budget.max,
+            "G7, {} {spent} contact-change wake events (budget {}); (mover, freeze \
              step, events, K) {rows:?}. {}",
             budget.label,
+            budget.max,
             flicker_triage(spent, spent + rows.len(), &budget)
         );
     });
@@ -1685,6 +1703,8 @@ fn sixteen_height_4_draws_freeze_within_the_onset_flicker_budget() {
 ///   same line in release.
 /// * L9 C4 (contact reuse on by default, 2026-09-24): it froze at step 66 with `contact_wakes`
 ///   0 and no rise event, the same line in release and debug.
+/// * V2 (speculative contacts on by default, 2026-10-01): it froze at step 61 with
+///   `contact_wakes` 0 and no rise event.
 ///
 /// Every contact change re-draws that freeze step, so it is a reading, not a pin. The
 /// test's bound is [`LONG_SETTLE_LIMIT`]. At 2.4 s in debug a `slow:` ignore would be a false
@@ -2029,6 +2049,8 @@ fn a7_r1_fallback_census(
 ///   froze at step 248 with `contact_wakes` 3720 and three rise events, at [68, 128, 188].
 /// * L9 C4 (contact reuse on by default, 2026-09-24): it froze at step 250 with
 ///   `contact_wakes` 3720 and three rise events, at [70, 130, 190].
+/// * V2 (speculative contacts on by default, 2026-10-01): it froze at step 86 with
+///   `contact_wakes` 0 and no rise event.
 ///
 /// The freeze step is a reading, not a pin: every contact change re-draws it — the two kernels
 /// differ only in that yield, so it fired in this scene and moved the freeze by one latch
@@ -2798,7 +2820,13 @@ fn a_frozen_box_pile_ignores_a_spawn_that_shifts_every_row_it_holds_under_specul
 )]
 fn a_height_5_box_pyramid_ignores_a_spawn_that_shifts_every_row_it_holds() {
     under_watchdog("G6", MEDIUM_TIMEOUT, || {
-        shift_scene("G6", MEDIUM, MEDIUM_SETTLE_LIMIT, ClearBound::Pairs, ShiftRule::OverlapOnly);
+        shift_scene(
+            "G6",
+            MEDIUM,
+            OVERLAP_ONLY_MEDIUM_SETTLE_LIMIT,
+            ClearBound::Pairs,
+            ShiftRule::OverlapOnly,
+        );
     });
 }
 

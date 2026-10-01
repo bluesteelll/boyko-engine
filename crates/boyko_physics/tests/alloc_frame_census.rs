@@ -518,6 +518,38 @@
 //! S8b's exact `scope == 1 + np` did not move: its colours stay under the floor, and S4's gate
 //! is the colours' own.
 //!
+//! **S1c and S1e after V2 (speculative contacts and the approach-velocity margin on by default,
+//! 2026-10-01; owner V2a/V2b, rulings 2026-09-30 item 10c) — sixteen colours on every frame, one
+//! chunk per scope; attributed by a same-binary `d = 0` twin.** V2 keeps a contact point while
+//! its separation is at most `d` (20 mm) plus the approach-velocity term, so the resting pile
+//! keeps every pair within 20 mm as a speculative contact: 8,554 steady contacts against 5,021,
+//! and its colouring needs sixteen colours, dispatched on every frame of both piles (reuse on and
+//! off). Every scope still holds one chunk (at W = 4 a colour spawns at most 24 tasks, under the
+//! 34 a first block holds). The census's fourth re-pin form, from this file's scene extended to
+//! 17 x 256 steady steps (the extension applied by content and restored by content, md5-checked;
+//! release all scenes, debug S1b / S1c / S1e / S1f), `stable-x86_64-pc-windows-msvc`:
+//!
+//! ```text
+//!                             S1c (reuse on)          S1e (reuse off)         S1f (d = 0, reuse on)
+//! release long, histogram     390->3800 391->552      390->3800 391->552      246->3789 247->551 270->11 271->1
+//! release long, scope / MAX   195..=195 / disp. 391   195..=195 / disp. 391   123..=135 / dispatch 271
+//! release steady contacts     8,554                   8,553                   5,021
+//! debug long, histogram       391->3800 392->552      391->3800 392->552      199->3521 200->511 223->279 224->41
+//! debug long, scope / MAX     195..=195 / disp. 391   195..=195 / disp. 391   99..=111 / dispatch 223
+//! ```
+//!
+//! `195 = 1 install + 1 narrowphase + 1 setup + 12 passes x 16 colours`, on all 4,352 frames of
+//! every long run, the per-frame structural assertion holding throughout. S1f, the same binary
+//! with `speculative_distance = 0` and the velocity term off, reads S4's long run above bin for bin
+//! with the same frame counts: the move is V2's contact rule, attributed by the switch alone, and
+//! no allocation site was added (`K` 0 on both V2 piles, `OTHER` 0 in release and the debug
+//! build's one `debug_assert_coloring` scratch per step, `realloc` 0). Pins, no headroom either
+//! way: S1c and S1e scope and chunk 195..=195, dispatch MAX 391, in both profiles; S1f keeps S4's
+//! S1c pins. The fan-out regression (+12 scope and +12 chunks a frame) now lands at 207 / 207 on
+//! every frame of S1c as well as S1e — arithmetic on the measured long runs, not a re-run of that
+//! mutation — so S1c, which saw it on 12 window frames before V2, reds on all 256 again; S1f, at
+//! the pre-V2 pin, sees it on those same 12.
+//!
 //! **S2 after EM2′ (same tree plus the entity-id recycling fix, 2026-09-11,
 //! release and debug alike): 4.031 / 5, `realloc` 0.** The 0.008 it lost is
 //! exactly the two free-list reallocs the AFTER column's window carried
@@ -550,11 +582,16 @@
 //! S2        2 exact      2 exact            2/63       0 (first touch)  0 (was 2, EM2′)
 //! S3        1 exact      1 exact            4/63       0 (first touch)  0
 //! S1a/S1b   1 exact      1 exact            ~7/63      0                0
-//! S1c   123..135 (window) 123..135 (1.00/scope) 0.125  0           0
-//! S1c long 123..135    123..135              —         0                0
-//! S1e   135 exact (window) 135 exact (1.00/scope) 0.125  0          0
-//! S1e long 135 exact   135 exact             —         0                0
+//! S1c   195 exact (window) 195 exact (1.00/scope) 0.125  0           0
+//! S1c long 195 exact   195 exact             —         0                0
+//! S1e   195 exact (window) 195 exact (1.00/scope) 0.125  0          0
+//! S1e long 195 exact   195 exact             —         0                0
+//! S1f   123..135 (window) 123..135 (1.00/scope) 0.125  0           0
+//! S1f long 123..135    123..135              —         0                0
 //! ```
+//!
+//! (Since V2 S1c and S1e dispatch sixteen colours on every frame, `195 = 1 + 1 + 1 + 12 x 16`,
+//! and S1f is S1c's pile at `d = 0`, which carries S1c's rows from before V2, below.)
 //!
 //! (S1c's rows are the tree after S4: 1 of the scopes and 1 of the chunks are the
 //! narrowphase's, 1 and 1 the solve setup's, every scope holds exactly one chunk, and 12 of the
@@ -630,7 +667,9 @@
 //! long run's envelope, no upward headroom (header, "S1c after the default parallel
 //! narrowphase"); L11 C2's debug long run reproduced every one of those figures, so
 //! the cell shrink moved nothing here. S4 adds the solve setup's scope and chunk on every
-//! frame: 99..=111, dispatch MAX 223 (header, "S1c and S1e after S4"). (After A7b it read
+//! frame: 99..=111, dispatch MAX 223 (header, "S1c and S1e after S4"). Since V2 the debug S1c and
+//! S1e piles dispatch sixteen colours on every frame too: 195..=195, dispatch MAX 391 (header, "S1c
+//! and S1e after V2"); S1f keeps 99..=111 / 223. (After A7b it read
 //! 97..=109 / 97..=109, MAX
 //! 220, dispatch 219; before A7b it read 85..=97 in the window and 73..=97 over 4,352
 //! steps before A7a, 85..=97 after it, MAX 196, pinned 73..=97 / 195.)
@@ -668,6 +707,14 @@
 //! 133..=133, 229..=229, 363; after A7b on the scalar kernel:
 //! 133..=133, 229..=241, 375; after A7a alone: 109..=133,
 //! 205..=217, 350; before A7a: 109..=121, 193..=217, 339):
+//!
+//! * **The eighth re-pin, after V2 (speculative contacts on by default), moves S1c and S1e UP to
+//!   195..=195, dispatch MAX 391, in both profiles, attributed by a same-binary `d = 0` twin** —
+//!   the fourth re-pin's form with the switch as the counter: S1f (`speculative_distance = 0`, the
+//!   velocity term off) reads S4's long run bin for bin, so the move is the contact rule's colours
+//!   (sixteen on every frame), not an allocation site (header, "S1c and S1e after V2"). An upward
+//!   move is a re-measure here only because a value-changing lever ordered it and its `d = 0` twin
+//!   attributes it; the pins keep no headroom either way.
 //!
 //! * **The seventh re-pin, after S4 (W8S lane, commit 4), is a +1 / +1 shift of S1c and S1e,
 //!   in both profiles, attributed by a counter** — the fourth re-pin's form. The solve
@@ -2075,8 +2122,8 @@ fn spawn_jolt_pyramid(world: &mut EcsMaster) -> Vec<Entity> {
 /// sleep, `IslandSleep`); a sleeping arm must also see a frozen row on some steady frame.
 /// `reuse_off` overrides `PhysicsConfig::contact_reuse` to `false`; every other arm
 /// inherits the default (on since L9 C4). `speculative_zero` overrides
-/// `PhysicsConfig::speculative_distance` to `0` (V2's overlap-only rule); every other arm
-/// inherits the default.
+/// `PhysicsConfig::speculative_distance` and `speculative_velocity_cap` to `0` (V2's overlap-only
+/// rule); every other arm inherits the default.
 #[allow(clippy::too_many_arguments)]
 fn run_pyramid_arm(
     rows: &mut Vec<Row>,
@@ -2393,10 +2440,11 @@ fn s1e_rigid_pile_colored_parallel_reuse_off(rows: &mut Vec<Row>) {
     );
 }
 
-/// S1c's scene and switches with `speculative_distance` overridden to `0`, V2's overlap-only
-/// rule: the pile S1c ran before V2, whose envelope it keeps when the default moves, so the
-/// fan-out regression still reds against a pin no value change of V2's can move (the S1e
-/// precedent for L9 C4). Identical to S1c while the default is `0`.
+/// S1c's scene and switches with `speculative_distance` and `speculative_velocity_cap` overridden
+/// to `0`, V2's overlap-only rule: the pile S1c ran before V2, whose envelope it keeps now that the
+/// default has moved (S1c's long run before V2 bin for bin, header "S1c and S1e after V2"), so the
+/// fan-out regression reds against a pin no value change of V2's can move (the S1e precedent for
+/// L9 C4).
 fn s1f_rigid_pile_colored_parallel_d0(rows: &mut Vec<Row>) {
     run_pyramid_arm(
         rows,
@@ -3340,12 +3388,16 @@ fn pins() -> [Pin; 19] {
             // scope and its one block on every one of 4,352 long-run frames, its own counter +1 on
             // each, every histogram bin +2 with the same frame counts (header, "S1c and S1e after
             // S4"). No headroom either way.
+            // RE-PINNED UP after V2 (2026-10-01): sixteen colours on every one of the 4,352
+            // long-run frames (scope and chunk 195, dispatch MAX 391), attributed by S1f, the
+            // same binary at `d = 0`, which reads S4's long run bin for bin (header, "S1c and S1e
+            // after V2"). Old 123..=135 / 123..=135 / 271, now S1f's. No headroom either way.
             Pin {
                 scene: "S1c",
                 workers: 4,
-                scope: (123, 135),
-                chunk: (123, 135),
-                dispatch_max: 271,
+                scope: (195, 195),
+                chunk: (195, 195),
+                dispatch_max: 391,
                 other_per_frame: 0,
                 realloc_sum: 0,
             }
@@ -3369,13 +3421,16 @@ fn pins() -> [Pin; 19] {
             // longer reds on the fan-out regression (measured); S1e's debug arm, below,
             // does (header, "S1c after L9 C4"). RE-PINNED +1 / +1 after S4 (W8S lane commit 4,
             // 2026-09-27): the solve setup's scope and block on every frame of the 4,352-step
-            // debug long run, its counter +1 on each (header, "S1c and S1e after S4").
+            // debug long run, its counter +1 on each (header, "S1c and S1e after S4"). RE-PINNED UP
+            // after V2 (2026-10-01): the height-10 pile dispatches sixteen colours on every one of
+            // the 4,352 debug long-run frames too, 195 / 195, dispatch MAX 391; old 99..=111 / 223,
+            // now S1f's (header, "S1c and S1e after V2").
             Pin {
                 scene: "S1c",
                 workers: 4,
-                scope: (99, 111),
-                chunk: (99, 111),
-                dispatch_max: 223,
+                scope: (195, 195),
+                chunk: (195, 195),
+                dispatch_max: 391,
                 other_per_frame: 1,
                 realloc_sum: 0,
             }
@@ -3389,12 +3444,15 @@ fn pins() -> [Pin; 19] {
             // (measured, 2026-09-25), where S1c's pin sees it on 12. RE-PINNED +1 / +1 after S4
             // (W8S lane commit 4, 2026-09-27): 135 / 135 on all 4,352 long-run frames, dispatch
             // MAX 271, the solve setup's counter +1 on each (header, "S1c and S1e after S4").
+            // RE-PINNED UP after V2 (2026-10-01): 195 / 195 on all 4,352 long-run frames, dispatch
+            // MAX 391, S1c's figures — under V2 the reuse-off pile dispatches the same sixteen
+            // colours (header, "S1c and S1e after V2"). No headroom either way.
             Pin {
                 scene: "S1e",
                 workers: 4,
-                scope: (135, 135),
-                chunk: (135, 135),
-                dispatch_max: 271,
+                scope: (195, 195),
+                chunk: (195, 195),
+                dispatch_max: 391,
                 other_per_frame: 0,
                 realloc_sum: 0,
             }
@@ -3406,18 +3464,22 @@ fn pins() -> [Pin; 19] {
             // (measured, 2026-09-25: scope 110..=122, dispatch 244), where S1c's pin is green.
             // RE-PINNED +1 / +1 after S4 (W8S lane commit 4, 2026-09-27): 99 or 111 on the
             // 4,352-step debug long run, dispatch MAX 223 (header, "S1c and S1e after S4").
+            // RE-PINNED UP after V2 (2026-10-01): 195 / 195 on all 4,352 debug long-run frames,
+            // dispatch MAX 391 (header, "S1c and S1e after V2").
             Pin {
                 scene: "S1e",
                 workers: 4,
-                scope: (99, 111),
-                chunk: (99, 111),
-                dispatch_max: 223,
+                scope: (195, 195),
+                chunk: (195, 195),
+                dispatch_max: 391,
                 other_per_frame: 1,
                 realloc_sum: 0,
             }
         },
-        // V2: S1c at `speculative_distance = 0`, which carries S1c's pins from before V2 (the
-        // S4 re-pin, both profiles) and never moves with a value change of V2's.
+        // V2: S1c at `speculative_distance = 0` and the velocity term off, which carries S1c's
+        // pins from before V2 (the S4 re-pin, both profiles) and never moves with a value change of
+        // V2's; read again at V2's flip on the 4,352-step long runs, S4's histograms bin for bin
+        // (header, "S1c and S1e after V2").
         if RELEASE {
             Pin {
                 scene: "S1f",
