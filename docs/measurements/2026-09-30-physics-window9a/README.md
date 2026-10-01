@@ -63,7 +63,8 @@ it). The window was launched from the tester's prep report, recorded verbatim as
 
 `analysis.md` § 1 and R1, restated with its numbers. The scene is the J-T pyramid (1,240 boxes, 500 steps), measured in
 the steady state [100,500) on the shipped default after C4 (the Tree broadphase), ours = `C4-JD#tip`; K = 9 per cell.
-- **Against Jolt 5.6: ours is faster at every W**, on the wall and on equal work (in-block, first run). Ours/Jolt on the wall
+- **Against Jolt 5.6: ours is faster at every W in medians** (NOT CLAIMED by the letter; post hoc STRONG at W1–W4 on the wall
+  and W1–W8 per row), on the wall and on equal work (in-block, first run). Ours/Jolt on the wall
   is 0.435 / 0.506 / 0.586 / 0.696 / 0.818 at W 1/2/4/8/16; per velocity row-iteration, the equal-work unit (Jolt does 0.949×
   our rows), 0.413 / 0.480 / 0.556 / 0.660 / 0.776. Per manifold Jolt is cheaper from W4 up (1.11 / 1.32 / 1.55×), which
   the plan rates an unfair unit: Jolt carries 1.90× our manifolds.
@@ -76,9 +77,10 @@ the steady state [100,500) on the shipped default after C4 (the Tree broadphase)
 - **Fidelity caveat.** Every "ours faster" is at unequal fidelity: the pre-V2 pile deforms (26 boxes past 0.5 m, 2.18 m
   maximum drift) where Jolt and Rapier hold theirs. V2 is ruled in and nearly doubles our contact work (points ×1.86;
   manifolds 8,496–8,501 against Jolt's 8,489), so the lead over Jolt at W ≥ 8 is not safe at equal fidelity.
-- **C4 merges by its own rule (M7).** All 10 no-slower comparisons HOLD: J-D is 1.58–1.69 ms faster than the parent's default
-  at every W (93–100 % of the plan's −1.70 ms), and G5 is recorded with every bar STRONG (B1 0.2502 ms at W1 against 0.36,
-  0.2608 ms at W8 against 0.35; B2 +1.5779 ms against 1.03).
+- **C4 merges by its own rule (M7).** All 10 no-slower comparisons HOLD. In medians J-D is 1.58–1.68 ms below C4-JDap (the
+  tip's own AllPairs) and 1.61–1.69 ms below the parent's default (C4-JDpar) at every W, 93–100 % of the plan's −1.70 ms
+  ("J-D claimed faster" is NOT CLAIMED by the letter; CLAIMED STRONG ×9 post hoc). G5 is recorded: B1–B3 STRONG, B4 and B5 hold
+  (B1 0.2502 ms at W1 against 0.36, 0.2608 ms at W8 against 0.35; B2 +1.5779 ms against 1.03).
 - **The resume.** C4-CGU: the profile stays at codegen-units 16 (cgu1/cgu16 within ±1.05 % at every W, nothing claimed).
   C4-G4: the thresholds are **MEASURED** at 128/136 in both families, and window 7's 144/152 is REFUTED. C4-G4-kd: F3
   (`LeafListKd`) is FREEZE-AND-REMOVE. C4-BR: the all_pairs slowdown since window 7 is a binary (placement) term, about
