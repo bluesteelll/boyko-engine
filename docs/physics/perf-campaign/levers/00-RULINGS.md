@@ -440,9 +440,9 @@ Amended on 2026-09-29 (the next section): S7's partial form (ruling 4) is reject
 ## After window 8b: S7's partial form rejected and frozen, S4 kept, F3 not the default, the tree thresholds not reproduced, helpers spin (2026-09-29)
 
 Window 8b ran on 2026-09-29 under ruling 1 of the previous section (K = 9 over three passes; a claim needs IQR AND SE,
-and a claim that also passes min–max is STRONG): 894 timed processes, 0 invalid, 0 voided passes, and 26 of 786 slots
-dropped because the desktop and agent sessions were busy. Its numbers are recorded in the window 8b measurement record
-(to be committed). 8b carried no Jolt row, so the standing against Jolt 5.6 is not re-measured.
+and a claim that also passes min–max is STRONG): 894 timed processes, 0 invalid, 0 voided passes, and 26 of 786 slots dropped
+because the desktop and agent sessions were busy. Its numbers are recorded in the window 8b measurement record
+(`docs/measurements/2026-09-28-physics-window8b/`). 8b carried no Jolt row, so the standing against Jolt 5.6 is not re-measured.
 - **1. Owner value: helpers SPIN.** This answers the owner-value question of 2026-09-26. The S1 region, and any later
   region-style scheduler, keeps its helpers in active waiting between stages; spin-then-park is not the default, and
   laptop energy is accepted as the price. The park path of the ω_b v2 bench stays a measurement axis only.
@@ -482,10 +482,10 @@ three passes: C4-AB with Jolt 5.6 in-block, C4-RAPIER (Rapier 0.36) and C4-G5. C
 machine was never idle), and C4-G4 and C4-G4-kd never ran. There were 696 timed process records, 0 invalid and 0
 voided passes, but a busy desktop left 30 of C4-AB's 102 pass-cells, all in pass 0, at K < 3, so almost nothing is
 claimed by the letter; the one claim is Jolt's per-manifold lead at W16 (STRONG). Its numbers are recorded in the
-window 9a measurement record (to be committed). Unclaimed, and at unequal fidelity (the pre-V2 pile deforms, 26 boxes
-past 0.5 m and 2.18 m maximum drift, where Jolt and Rapier hold theirs), ours/Jolt 5.6 on the wall reads 0.435 / 0.506
-/ 0.586 / 0.696 / 0.818 at W 1/2/4/8/16, and ours/Rapier's default (its simd8 build) 0.884 / 0.987 / 1.073 / 1.266 /
-1.298.
+window 9a measurement record (`docs/measurements/2026-09-30-physics-window9a/`). Unclaimed, and at unequal fidelity
+(the pre-V2 pile deforms, 26 boxes past 0.5 m and 2.18 m maximum drift, where Jolt and Rapier hold theirs), ours/Jolt
+5.6 on the wall reads 0.435 / 0.506 / 0.586 / 0.696 / 0.818 at W 1/2/4/8/16, and ours/Rapier's default (its simd8
+build) 0.884 / 0.987 / 1.073 / 1.266 / 1.298.
 
 The rulings were taken in two sittings. Those of 2026-09-30 came before the window, after the Jolt-gap diagnosis F0
 (verdict: DEFECT yes, REGRESSION no) and on the Jolt-gap plan (PLAN rev 3): owner values, then the V2 flip rulings.
@@ -627,3 +627,43 @@ S5.
   cgu = 1 twin + Rapier's fastest holding configuration and Jolt 5.6 in-block, adjacent to our rows + the SR / S5 A/B
   when they exist. The desktop must be quiet: the owner's question 1 from 9a is still open (Telegram, the browser and
   other Claude sessions made C4-AB's pass 0 unusable).
+
+Amended on 2026-10-01 (the next section): the build profile stays at codegen-units 16, the tree thresholds are measured
+at 128/136 and their PROVISIONAL marks are lifted (ruling 4 above waited for window 9b's re-read, which the resume
+made), F3 is frozen and removed, and window 9b's list (ruling 5 above) drops the blocks that are measured.
+
+## After the window 9a resume (2026-10-01): the build profile stays at codegen-units 16, the tree thresholds measured at 128/136, F3 frozen and removed, C4-BR a binary term, window 9b's list
+
+The resume of window 9a ran on 2026-10-01 (03:37–05:49, 131.3 min) with the same tip (`u/phys-tree-c4` `50e31f1a`,
+merged as `d6521a43`) and four blocks: C4-CGU (codegen-units 1 against 16, added after the owner's ruling 3 above),
+C4-BR (the all_pairs bracket, K = 3, diagnostic only), C4-G4 (the threshold re-read, K = 9) and C4-G4-kd (F3's keep or
+freeze, with its own K = 3). All 8 passes closed and every pass-cell has K = 3, so every pre-registered comparison
+gates: 134 timed processes, 0 invalid, 0 slots dropped. Its numbers are recorded in the window 9a measurement record
+(`docs/measurements/2026-09-30-physics-window9a/`), in the section "Resume 2026-10-01" of its `analysis.md`, whose three
+group reports were each verified (AGREE ×3). The rulings below were taken after the analyst's report, at about 06:45 the
+same morning. "Owner ruling 3" in ruling 6 is ruling 3 of 2026-10-01 in the previous section.
+
+**2026-10-01, after the resume (the orchestrator's decisions):**
+- **6. The build profile stays at codegen-units 16.** C4-CGU: codegen-units 1 is not claimed faster at W8 (0.9903, below
+  the rule's resolution of about 11 %; the paired geometric mean over 45 pairs is 0.9996) and is not claimed slower
+  anywhere. The condition of owner ruling 3 (a claimed gain) was not met. The twin is not re-measured in window 9b,
+  because the paired data bound any effect to about 1 %.
+- **7. The tree thresholds are MEASURED: `TREE_BRUTE_MAX_ROWS` 128 and `AUTO_TREE_LO/HI` 128/136.** G4 at K = 9, in both
+  families: all_pairs is STRONG faster at 96–120, nothing is claimed at 128, and the tree is STRONG faster at 136–160;
+  window 7's 144/152 is REFUTED. The PROVISIONAL marks are lifted now: ruling 4's "until window 9b's re-read" is
+  satisfied by the resume's re-read. It is a doc-only commit on the trunk, after the C4 merge verify, and no value or
+  pin moves.
+- **8. F3 (`LeafListKd`) is FREEZE-AND-REMOVE,** by the clause of ruling 4 of the section "After window 8b" ("if C4 does
+  not use it, it is frozen and removed"). C4 never selects kd; below the threshold all_pairs beats kd by 25–47 %, and at
+  128 kd is faster than neither arm. The code is frozen under an annotated tag on the kd commit and a registry line, and
+  then removed as its own small lane. The return condition is a kd build form that claims t_qb lower at J W1 and is not
+  slower at W8.
+- **9. C4-BR: a binary (placement) term, and no fix lane opens.** all_pairs g4r8b/g4r7 reads 1.119 at 4 of 4 ids, and
+  the tree control moves by at most +2.7 %; that is consistent with verdict (b) of M9. The bench-shipped G4 reading (the
+  trigger of the C4 cut's Q2) is NOT taken: the stake is under 1 µs per step.
+- **10. Window 9b's contents (amends ruling 5 of 2026-10-01).** C4-BR, C4-G4, C4-G4-kd and the cgu 1 twin are DROPPED,
+  because they are measured. Window 9b is V2-AB / SPAN / RES, Jolt 5.6 in-block, Rapier's fastest holding configuration
+  in-block and adjacent to our rows, the SR and S5 A/B when they exist, and an armed C4-JD W16 row for S5. Every bar is
+  formed IN-BLOCK: the resume read the same tip exe about 5 % slower at W ≥ 8 than the first run, so cross-run baselines
+  are void. No agent session may run during the window (`claude.exe` was the only source of uncleanness: 23 of the 113
+  C4-CGU processes), and the orchestrator reads no more than the progress file.

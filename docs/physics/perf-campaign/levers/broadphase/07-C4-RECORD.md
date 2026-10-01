@@ -22,8 +22,9 @@ and the Tree runs `all_pairs_into` itself at or below `TREE_BRUTE_MAX_ROWS` rows
 ## 2. The provisional thresholds
 
 - **The reading** (window 8b's G4 block: `16191fda` + the G4-sizes patch, bench profile, K = 3,
-  the Q3 recipe; figures quoted from the window's verified analysis `win8b/analysis/f3.md:104-118`,
-  whose record is not yet in the tree, PC-C4-1):
+  the Q3 recipe; figures quoted from the window's verified analysis
+  `docs/measurements/2026-09-28-physics-window8b/analysis/f3.md:104-118`; PC-C4-1, the path of that
+  record, is resolved):
   - `all_pairs` is claimed slower than `tree` at 144 in both families: all_pairs/tree 1.1294
     (uniform), 1.1003 (disparity); at 152: 1.1971 and 1.1432.
   - The recipe (`treebp/g4_g5_recipe.md`, ruled on 2026-09-25) reads LO 128 / HI 136 in the
@@ -33,7 +34,8 @@ and the Tree runs `all_pairs_into` itself at or below `TREE_BRUTE_MAX_ROWS` rows
     median 1.1380), not from `tree` (1.0189).
 - **Status.** PROVISIONAL, by the 2026-09-29 ruling 5 as the lane spec applies it: window 9 re-reads
   G4 at 96..160 in steps of 8 under ruling 1 (section 6, block C4-G4), and a one-constant
-  follow-up commit sets the final values, with G-TH1's reds re-shown.
+  follow-up commit sets the final values, with G-TH1's reds re-shown. **Window 9a's resume re-read
+  G4 and the values are now MEASURED: section 8.**
 - **What imprecision costs** (arith. from `f3.md:104-118`): at 144 the two arms are 14.154 µs and
   12.532 µs apart by 1.6 µs; one 8-row grid step near the crossover is worth about 1 µs per step.
 
@@ -272,7 +274,8 @@ Decisions:
 - **`ADMIT_BUILD_RATIO`** is a G4 output in the design, but it stays at the design's starting
   1/4. It is not in this lane's spec.
 - **PC lines** (not this lane's commits; the cut, section 6, lists all fourteen):
-  - window 8b's record path for section 2's figures, when u/win8b lands;
+  - ~~window 8b's record path for section 2's figures, when u/win8b lands~~: resolved,
+    `docs/measurements/2026-09-28-physics-window8b/` (PC-C4-1);
   - `SYSTEMS.md` and `FEATURE_MAP.md` ("opt-in until its commit C4", "`AllPairs` default");
   - the dated note under `OPEN-QUESTIONS.md`'s "AllPairs is the DEFAULT";
   - the mdBook physics page;
@@ -282,3 +285,42 @@ Decisions:
   - the runner's `--bp-kernel` refusal hint;
   - "J-D = AllPairs" in the window tooling;
   - the stale "(AllPairs)" comments in `soft_body_sp2.rs`.
+
+## 8. Window 9a: what it read (2026-09-30, resumed 2026-10-01)
+
+Section 6's blocks ran in window 9a, in two runs under one preparation. The numbers, the protocol
+and the binaries are recorded in `docs/measurements/2026-09-30-physics-window9a/` (its `README.md`,
+and the analyst's `analysis.md` with both parts); the rulings are in `levers/00-RULINGS.md`,
+sections "After window 9a (2026-09-30)" and "After the window 9a resume (2026-10-01)". The tip
+measured is this lane's `50e31f1a`.
+
+- **M7 is met: C4 merges.** All 10 no-slower comparisons hold (C4-JD against C4-JDap, and against
+  C4-JDpar, at W 1/2/4/8/16). C4-JD is 1.58–1.69 ms faster than the parent's default at every W,
+  93–100 % of the −1.70 ms of section 6, and no W is slower. By the letter "C4-JD claimed faster" is
+  NOT CLAIMED, because C4-AB's pass 0 was contaminated; the merge rule asks only that it is not
+  claimed slower. The controls (C4-JA and C4-JT, parent against tip) are not claimed different.
+- **G5 is recorded, and every bar passes** (B1–B3 STRONG; B4 and B5 hold). B1: the four `phys_bp_*`
+  spans on C4-JD-armed are 0.2502 ms at W1 against the 0.36 bar and 0.2608 ms at W8 against 0.35.
+  B2: the realised Δbp(8) is +1.5779 ms against 1.03. B3: the Tree is claimed faster than AllPairs on
+  the rest scene, −20.21 % at W1 and −39.61 % at W8. B4: s16 is not claimed slower (+1.59 %).
+- **G4 re-read (C4-G4, resume run `033740`; g4rT, bench profile, K = 9, ruling 1): the thresholds
+  are MEASURED at 128/136.** In both families all_pairs is STRONG faster than the tree at 96–120,
+  nothing is claimed at 128 (so LO = 128), and the tree is STRONG faster at 136–160 (so HI = 136).
+  `TREE_BRUTE_MAX_ROWS` 128 and `AUTO_TREE_LO/HI` 128/136 therefore equal the provisional values of
+  section 2, which stand, and **window 7's 144/152 is REFUTED**. Ruling 7 of 2026-10-01 lifts the
+  PROVISIONAL marks in the code by a doc-only commit; this record does not.
+- **C4-BR (diagnostic, K = 3, nothing claimed): the all_pairs slowdown since window 7 is a binary
+  placement term, about 1.12, and no fix lane opens.** all_pairs on g4r8b against g4r7 reads 1.1302
+  / 1.1184 / 1.1200 / 1.1145 at the four ids (median 1.1192), separated at 4 of 4; the tree control
+  moves by at most +2.7 %. This is consistent with section 3's verdict (b), not proven. The loop
+  head of `all_pairs_into` sits at 0 mod 64 in g4r7 and at 32 mod 64 in g4rT and g4r8b. The revisit
+  trigger of the cut's Q2 fires, and ruling 9 declines the bench-shipped reading: its stake is under
+  1 µs per step.
+- **F3 (`LeafListKd`) is FREEZE-AND-REMOVE** (ruling 8 of 2026-10-01): C4 never selects kd, below
+  the threshold all_pairs beats kd by 25–47 %, and at 128 kd is faster than neither arm. The lane
+  `c4-final` (branch `u/phys-c4-final`) freezes it under the annotated tag `phys/f3-kd-frozen` on
+  the kd commit and removes it. The return condition is a kd build form that claims t_qb lower at J
+  W1 and is not slower at W8.
+- **Not claimed, with the reasons in the window's analysis:** the Jolt standing (C4-AB's pass-0
+  cells are short), the Rapier standing (cross-block, and the same short cells), and the cgu 1 twin
+  (codegen-units 1 is not claimed faster at W8, so the profile stays at 16).
