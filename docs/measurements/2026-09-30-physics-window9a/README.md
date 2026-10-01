@@ -231,11 +231,17 @@ carries a `sha256_pin` in `rows9a*.json`, and the driver stops at start if one d
 The Rapier comparator is an external cargo project, not a member of the workspace (`D:/tmp/rapier-parity` in the scratch
 tree). `rapier-harness/` records it **at revision 2, the revision that built the two arms the window ran**, taken from the
 harness's `gate/prev_rev2/` (its README, `Cargo.toml`, `build.sh` and `src/main.rs` as `*.rev2`):
-- `README.md`, `Cargo.toml`, `Cargo.lock.txt`, `build.sh`, `.cargo/config.toml`, `src/main.rs`, and `gate/*.md` (the harness's
+- `README.md`, `Cargo.toml`, `Cargo.lock.txt`, `build.sh`, `.cargo/config.toml`, `src/main.rs.txt`, and `gate/*.md` (the harness's
   research, build, audit and review reports of its first revision, and `window9a_rows.md`, the rows and void rules the window used);
 - `gate/bin/SHA256SUMS` and `gate/bin/SOURCES.sha256`, the revision 2 receipts. `sha256sum -c gate/bin/SOURCES.sha256` run
-  from `rapier-harness/` passes for the five source files once `Cargo.lock.txt` is copied back to `Cargo.lock` (it is stored with
-  the `.txt` suffix because the repository ignores `*.lock`; the bytes are the lock the exes were built with). They are the same hashes `bin/COMMIT.txt` records for the window
+  from `rapier-harness/` passes for the five source files once the two renamed files are copied back:
+  `cp Cargo.lock.txt Cargo.lock` and `cp src/main.rs.txt src/main.rs`. Both carry the `.txt` suffix in this record, and the bytes
+  are the ones the exes were built with. `Cargo.lock.txt` because the repository ignores `*.lock`. `src/main.rs.txt` because
+  `internal_docs_anchors` bounds-checks every `file.rs:N` citation written inside a `.rs` source under the tree, and the harness
+  source holds four such citations of rapier3d's own files (lines 37, 51, 56 and 446: `solve.rs:98` twice, `lib.rs:19`,
+  `staged_island_solver/init.rs:601`), files that are not in this repository, so they would count against that gate's caps (the
+  precedent is window 8b's `analysis/f3/broadphase_16191fda.rs.txt`). The harness's own `README.md` and `gate/*.md` keep saying
+  `src/main.rs`, as they were written. They are the same hashes `bin/COMMIT.txt` records for the window
   (`src/main.rs` `a27f8b55…`, `Cargo.toml` `c0368ed7…`, `Cargo.lock` `36dc81e0…`, `build.sh` `ff3cfeaf…`, `.cargo/config.toml` `2fab97fc…`).
 - **The three arm exes** (not committed; the first two were the window's, copied into `bin/`):
 
