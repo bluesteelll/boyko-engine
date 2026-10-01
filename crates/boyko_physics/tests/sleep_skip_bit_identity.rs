@@ -2242,14 +2242,15 @@ fn s3_despawn_shifts_the_stream_under_held_slots() {
 
 /// S4 (design 04 D10; M18): a tower on an SDF floor, held; the field replaced wholesale with the
 /// floor 1 mm lower (the edit bits change; `gen` is no witness), which flushes; later the box
-/// kernel toggled, which flushes again. On the default configuration and on the Tree with its
-/// brute path off, where the SDF pipeline's broadphase keeps the sleeper set (L10 C3c): the
-/// tower's two box–box pairs are withheld while it is held, and each flush dissolves the set.
+/// kernel toggled, which flushes again. On the default configuration (the Tree since the tree
+/// broadphase's C4, on its brute path for a three-box tower), on AllPairs (the verbatim arm the
+/// default ran before C4), and on the Tree with its brute path off, where the SDF pipeline's
+/// broadphase keeps the sleeper set (L10 C3c): the tower's two box–box pairs are withheld while
+/// it is held, and each flush dissolves the set.
 #[test]
 fn s4_sdf_pile_field_edit_and_kernel_toggle() {
     let specs = tower(3, 0.0, 0.0, 0.5);
-    let tree = |w| Variant { brute_max_rows: Some(0), ..Variant::cell(BroadphaseKind::Tree, true, w) };
-    for (kind, variant) in [1, 8].into_iter().flat_map(|w| [("default", Variant::default_cfg(w)), ("Tree", tree(w))]) {
+    for (kind, variant) in s4_variants() {
         let w = variant.workers;
         let label = format!("S4 SDF [{kind}] W{w}");
         let mut script = |step: usize, rig: &mut Rig| {
@@ -2668,10 +2669,16 @@ fn sdf_tower_and_ball() -> Vec<Spec> {
     v
 }
 
-/// S4's variants: the default configuration and the Tree with its brute path off, at W ∈ {1, 8}.
+/// S4's variants at W ∈ {1, 8}: the default configuration, the default with AllPairs named (the
+/// verbatim arm the default ran before the tree broadphase's C4, kept covered since), and the
+/// Tree with its brute path off.
 fn s4_variants() -> Vec<(&'static str, Variant)> {
+    let all_pairs = |w| Variant { kind: Some(BroadphaseKind::AllPairs), ..Variant::default_cfg(w) };
     let tree = |w| Variant { brute_max_rows: Some(0), ..Variant::cell(BroadphaseKind::Tree, true, w) };
-    [1, 8].into_iter().flat_map(|w| [("default", Variant::default_cfg(w)), ("Tree", tree(w))]).collect()
+    [1, 8]
+        .into_iter()
+        .flat_map(|w| [("default", Variant::default_cfg(w)), ("AllPairs", all_pairs(w)), ("Tree", tree(w))])
+        .collect()
 }
 
 /// The soft scene (design 10, Tests A): the floor, one tower, the witness ball, and — spawned at
@@ -3056,8 +3063,15 @@ fn da9_rows(shape: Shape) -> Vec<Row> {
         Row { name: "contact_hertz", write: |c| c.contact_hertz *= 0.5, class: O },
         Row { name: "contact_damping", write: |c| c.contact_damping *= 0.5, class: O },
         // The coupling path requires the grid (`soft/solver.rs`): wiring there. Elsewhere every
-        // kind emits the same pair set (the tree's `PairOracle` checks it).
-        Row { name: "broadphase", write: |c| c.broadphase = BroadphaseKind::Tree, class: pick(coupled, W, U) },
+        // kind emits the same pair set (the tree's `PairOracle` checks it). The write moves the
+        // kind off the one it lands on (a literal `Tree` became a no-op when C4 made it the default).
+        Row {
+            name: "broadphase",
+            write: |c| {
+                c.broadphase = if c.broadphase == BroadphaseKind::Tree { BroadphaseKind::AllPairs } else { BroadphaseKind::Tree };
+            },
+            class: pick(coupled, W, U),
+        },
         Row { name: "broadphase_select", write: |c| c.broadphase_select = BroadphaseSelectMode::Auto, class: pick(coupled, W, U) },
         // The bit-identity theorems: each changes cost, never a result bit.
         Row { name: "simd", write: |c| c.simd = !c.simd, class: U },
@@ -3141,6 +3155,25 @@ fn da9(shape: Shape) {
     fields.sort_unstable();
     assert_eq!(names, fields, "DA9: the rows are not PhysicsConfig's fields");
     let variant = Variant::default_cfg(1);
+    // Anti-vacuity per row: every perturbed field's write changes the configuration it lands on
+    // (the shape's world after its step-0 setup). A write that leaves the value as it was would
+    // make M == B hold trivially; the literal `Tree` of the broadphase row became exactly that
+    // when the tree broadphase's C4 made the Tree the default.
+    let base = {
+        let mut rig = Rig::with_mode(pipeline, variant, None, &specs);
+        setup(0, &mut rig);
+        *rig.cfg()
+    };
+    for row in rows.iter().filter(|r| r.class != Class::Wiring) {
+        let mut written = base;
+        (row.write)(&mut written);
+        assert_ne!(
+            format!("{written:?}"),
+            format!("{base:?}"),
+            "DA9 {shape:?}: void: the {} row's write leaves the configuration it lands on unchanged",
+            row.name
+        );
+    }
     let mut unobservable = Vec::new();
     for row in rows.iter().filter(|r| r.class != Class::Wiring) {
         let write = if row.name == "dt" { Defer::dt(Place::Early, row.write, 2.0 * DT) } else { Defer::cfg(Place::Early, row.write) };
