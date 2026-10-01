@@ -181,17 +181,18 @@ mod tests;
 
 /// Row counts at or below which the Tree runs the brute all-pairs loop instead of the tree.
 ///
-/// `[MEASURED 2026-09-28, window 8b's G4 block (16191fda + the G4-sizes patch, bench profile,
-/// K=3, the Q3 recipe)]`: `all_pairs` is claimed slower than the shipped [`QueryKernel::LeafList`]
-/// `tree` at 144 in both families (all_pairs/tree 1.1294 on `bp_g4_uniform`, 1.1003 on
-/// `bp_g4_disparity`), and the recipe's rule (`treebp/g4_g5_recipe.md`, ruled in
-/// `levers/00-RULINGS.md` on 2026-09-25) reads LO 128 / HI 136 there. Window 7 wave 2's 144 / 152
-/// (`docs/measurements/2026-09-25-physics-window7/wave2/`) did not reproduce; the figures and the
-/// binary evidence are in `levers/broadphase/07-C4-RECORD.md`.
-///
-/// **PROVISIONAL** (the 2026-09-29 rulings after window 8b, ruling 5): window 9's G4 re-read at
-/// sizes 96 to 160 in steps of 8, under ruling 1, sets the final value. Measured on the Morton
-/// leaf order, so it is re-derived by the same rule if the default [`QueryKernel`] changes.
+/// `[MEASURED 2026-10-01, window 9a's C4-G4 block (run 033740; 50e31f1a + the g4ref patch, bench
+/// profile, K = 9 under ruling 1, the Q3 recipe)]`: `all_pairs` is claimed faster (STRONG) than
+/// the shipped [`QueryKernel::LeafList`] `tree` at 96 to 120 rows in both families, nothing is
+/// claimed at 128, and `tree` is claimed faster (STRONG) from 136 (all_pairs/tree 1.0500 on
+/// `bp_g4_uniform`, 1.0537 on `bp_g4_disparity`); the recipe's rule (`treebp/g4_g5_recipe.md`,
+/// ruled in `levers/00-RULINGS.md` on 2026-09-25) reads LO 128 / HI 136, the values window 8b's
+/// G4 block first read (16191fda + the G4-sizes patch, K = 3; all_pairs/tree 1.1294 and 1.1003 at
+/// 144). Window 7 wave 2's 144 / 152 (`docs/measurements/2026-09-25-physics-window7/wave2/`) is
+/// refuted. Figures: `docs/measurements/2026-09-30-physics-window9a/analysis.md` ("Resume
+/// 2026-10-01", R3 and R4.2); window 8b's figures and the binary evidence:
+/// `levers/broadphase/07-C4-RECORD.md`. Measured on the Morton leaf order, so it is re-derived by
+/// the same rule if the default [`QueryKernel`] changes.
 ///
 /// Value-neutral: the brute loop ([`all_pairs_into`]) and the tree path write the same pairs in
 /// the same `(min, max)` order (module docs, "What it computes").

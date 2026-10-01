@@ -14,9 +14,9 @@
 //! 0.30 ms; the Tree slower than the Grid at the same W above the brute threshold; any
 //! maintenance arm above 2× the upper value of the design's D3.5 cost table) are read off the
 //! medians by whoever runs the quiet window, and its outputs are derived there:
-//! `TREE_BRUTE_MAX_ROWS` and `AUTO_TREE_LO` / `AUTO_TREE_HI` from window 8b's reading (128 and
-//! 128 / 136, provisional since the tree broadphase's C4; window 9 re-reads 96..160), while
-//! `ADMIT_BUILD_RATIO` still holds the design's starting 1/4.
+//! `TREE_BRUTE_MAX_ROWS` and `AUTO_TREE_LO` / `AUTO_TREE_HI` from window 9a's G4 reading (128 and
+//! 128 / 136, measured at 96..160; window 8b read them first), while `ADMIT_BUILD_RATIO` still
+//! holds the design's starting 1/4.
 //!
 //! **Pair finding** (`bp_g4_uniform`, `bp_g4_disparity`, `bp_g4_scene`): `all_pairs` (the
 //! crate's [`all_pairs_into`], the Tree's own brute path and the gates' oracle), `grid_w1`

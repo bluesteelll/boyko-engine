@@ -28,7 +28,7 @@
 //! derived from the constants: [`BAND_BASE_ROWS`] (the threshold − 4; three-layer rest piles plus
 //! loose floor boxes) and a script that spawns one box every [`BAND_PERIOD`] steps up to
 //! [`BAND_TOP_ROWS`] (`AUTO_TREE_HI` + 1) and despawns back, twice, so the row count crosses the
-//! threshold both ways, with sleeping off and on. At the provisional 128 / 136 that is 124 → 137
+//! threshold both ways, with sleeping off and on. At the measured 128 / 136 that is 124 → 137
 //! rows. On every step the oracle and the pose bytes of the AllPairs twin hold, and the path
 //! derived from the row count against `brute_max_rows()` is the path the step took — a tree-path
 //! step answers leaf-list leaves or holds sleepers, a brute step moves no counter and holds no
@@ -706,12 +706,12 @@ const BAND_PILES: usize = BAND_BASE_BOXES / BAND_PILE_BOXES;
 /// Loose base boxes resting on the floor clear of the piles and of each other: the remainder.
 const BAND_LOOSE: usize = BAND_BASE_BOXES % BAND_PILE_BOXES;
 /// Boxes the script spawns and despawns: `BAND_BASE_ROWS` → `BAND_TOP_ROWS` and back (124 → 137
-/// at the provisional 128 / 136), across `TREE_BRUTE_MAX_ROWS` ↔ `+ 1`.
+/// at the measured 128 / 136), across `TREE_BRUTE_MAX_ROWS` ↔ `+ 1`.
 const BAND_EXTRAS: usize = BAND_TOP_ROWS - BAND_BASE_ROWS;
 /// Loose boxes and extras per row of their floor strip, 5 apart.
 const BAND_STRIP: usize = 17;
 
-// The scene follows the constants, so a window-9 value needs no re-scene; these say it still
+// The scene follows the constants, so a re-derived value needs no re-scene; these say it still
 // crosses the threshold and fits its layout.
 const _: () = assert!(
     BAND_BASE_ROWS < TREE_BRUTE_MAX_ROWS as usize && (TREE_BRUTE_MAX_ROWS as usize) < BAND_TOP_ROWS,
