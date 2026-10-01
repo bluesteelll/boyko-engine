@@ -637,6 +637,60 @@ const fn hint_of(item: SchedItem, base: u64) -> u64 {
     if item.prev_off == 0 { 0 } else { base + item.prev_off as u64 }
 }
 
+// The nested-scope guard (debug builds; `Scope::new` asserts against it).
+
+#[cfg(all(debug_assertions, not(loom)))]
+std::thread_local! {
+    /// Whether this thread is running a region block right now.
+    static IN_REGION_BLOCK: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Whether the calling thread is running a region block. Read by `Scope::new`'s debug assertion: a
+/// scope (or `install`) opened inside a block can run this region's own queued helper task in its
+/// join, and that helper then waits for a publish the blocked participant cannot make. Always false
+/// in release builds and under loom.
+#[inline]
+pub(crate) fn in_region_block() -> bool {
+    #[cfg(all(debug_assertions, not(loom)))]
+    {
+        IN_REGION_BLOCK.with(core::cell::Cell::get)
+    }
+    #[cfg(not(all(debug_assertions, not(loom))))]
+    {
+        false
+    }
+}
+
+/// Marks the thread as inside a region block for one block; cleared on drop, an unwinding block
+/// included (a caught panic must not leave the thread marked).
+#[cfg(all(debug_assertions, not(loom)))]
+struct BlockFlag;
+
+#[cfg(all(debug_assertions, not(loom)))]
+impl BlockFlag {
+    #[inline]
+    fn set() -> Self {
+        IN_REGION_BLOCK.with(|f| f.set(true));
+        Self
+    }
+}
+
+#[cfg(all(debug_assertions, not(loom)))]
+impl Drop for BlockFlag {
+    #[inline]
+    fn drop(&mut self) {
+        IN_REGION_BLOCK.with(|f| f.set(false));
+    }
+}
+
+/// Runs one block (debug builds: with the thread marked as inside a region block).
+#[inline]
+fn run_block<S: RegionStages>(stages: &S, entry: u32, block: u32, participant: u32) {
+    #[cfg(all(debug_assertions, not(loom)))]
+    let _flag = BlockFlag::set();
+    stages.run_block(entry, block, participant);
+}
+
 /// One participant's private tallies and its unwind guard.
 ///
 /// Armed from creation; every normal exit disarms it after storing the receipt. Dropped while
@@ -907,7 +961,7 @@ fn claim_sweep<W: RegionWords, S: RegionStages, P: RegionPolicy>(
             break;
         }
         if claim::<W, P>(w, x, b, participants) {
-            stages.run_block(x.e, b, part.index);
+            run_block(stages, x.e, b, part.index);
             part.blocks += 1;
             k += 1;
             if !P::DONE_BATCHED {
@@ -1027,7 +1081,7 @@ pub(crate) fn run_orchestrator<W: RegionWords, S: RegionStages, P: RegionPolicy,
         }
         if n <= 1 {
             if n == 1 {
-                stages.run_block(e, 0, 0);
+                run_block(stages, e, 0, 0);
                 part.blocks += 1;
             }
             stats.inline += 1;
