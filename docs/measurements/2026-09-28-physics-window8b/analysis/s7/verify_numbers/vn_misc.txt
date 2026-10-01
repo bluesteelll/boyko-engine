@@ -1,0 +1,3 @@
+my [0,500) mean == driver mean_ms: 171/171
+main_cycle_frac: cell medians 0.0021..0.0160; per process 0.0021..0.0162
+paired W1 T/P median 1.0050 [0.9836-1.0364], T slower 6/9

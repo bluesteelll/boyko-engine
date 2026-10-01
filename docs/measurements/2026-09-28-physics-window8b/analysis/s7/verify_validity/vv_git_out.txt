@@ -1,0 +1,18 @@
+== git diff --stat 54a7714f 16191fda
+ CLAUDE.md | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+== git diff --stat 16191fda a3adc827
+ crates/boyko_physics/benches/omega_b_region.rs     | 804 ++++++++++++++++++++-
+ crates/boyko_physics/src/solver/colored.rs         | 571 +++++++++++++--
+ crates/boyko_physics/src/solver/colored_tests.rs   | 235 ++++++
+ crates/boyko_physics/src/solver/cpu_topology.rs    | 397 ++++++++++
+ crates/boyko_physics/src/solver/mod.rs             |   4 +-
+ .../boyko_physics/tests/alloc_frame_attribution.rs |  66 +-
+ crates/boyko_physics/tests/s7_lane_cap.rs          | 119 +++
+ crates/boyko_physics/tests/s7_lane_cap_armed.rs    | 195 +++++
+ crates/boyko_physics/tests/support/s7_pyramid.rs   | 164 +++++
+ docs/physics/perf-campaign/levers/00-RULINGS.md    |  84 +++
+ .../perf-campaign/levers/scaling/01-DESIGN.md      |  80 +-
+ 11 files changed, 2636 insertions(+), 83 deletions(-)
+54a7714f is an ancestor of 16191fda
+16191fda is an ancestor of a3adc827

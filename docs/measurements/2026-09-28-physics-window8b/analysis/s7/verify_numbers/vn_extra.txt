@@ -1,0 +1,44 @@
+selected slots 171
+selected processes without a placement receipt (no top3): 0
+selected processes lacking main_share_top_est: 11
+    ((0, 0, 'S7-JT', 's7t', 16), 0.0)
+    ((0, 0, 'S7-JT-W1', 's7p', 1), 0.0)
+    ((0, 2, 'S7-ladder8-F0.5', 's7p', 8), 0.0)
+    ((1, 0, 'S7-JA', 's7p', 16), 0.0)
+    ((1, 2, 'S7-JT', 's7t', 16), 0.0)
+    ((2, 0, 'S7-ladder16-F2', 's7p', 16), 0.0)
+    ((2, 0, 'S7-JT', 's7t', 16), 0.0)
+    ((2, 0, 'S7-ladder8-F2', 's7p', 8), 0.0)
+    ((2, 1, 'S7-JT', 's7t', 8), 0.0)
+    ((2, 2, 'S7-ladder16-F1.5', 's7p', 16), 0.0)
+    ((2, 2, 'S7-JT-W1', 's7p', 1), 0.0)
+all timed records (incl. dirty originals) without placement: 0
+processes > 1.5 % from their cell median: 11; max 3.16 %, min 1.6 %
+    (('S7-JA', 's7p', 16), 0, 1, 2.07, 0.96, 0.92, 0.52)
+    (('S7-JA', 's7t', 8), 0, 2, 1.88, 0.41, 0.58, 1.15)
+    (('S7-JA', 's7t', 16), 2, 2, 1.68, 3.63, 2.37, 0.95)
+    (('S7-JT', 's7p', 8), 2, 0, 1.87, 1.51, 0.57, 0.31)
+    (('S7-JT', 's7t', 8), 0, 2, 1.86, 0.98, 0.21, 0.21)
+    (('S7-JT', 's7t', 8), 2, 0, 2.34, 1.14, 1.51, 0.21)
+    (('S7-JT', 's7t', 16), 0, 2, 2.0, 1.24, 0.47, 0.18)
+    (('S7-JT-W1', 's7p', 1), 0, 0, 3.16, 0.62, 0.83, 0.35)
+    (('S7-JT-W1', 's7t', 1), 0, 0, 2.11, 0.37, 0.62, 0.13)
+    (('S7-JT-W1', 's7t', 1), 2, 0, 2.35, 1.31, 0.45, 0.26)
+    (('S7-ladder8-F1.5', 's7p', 8), 0, 2, 1.6, 0.27, 1.14, 1.0)
+cells and n: {'S7-JA#s7p@W8': 9, 'S7-JA#s7p@W16': 9, 'S7-JA#s7t@W8': 9, 'S7-JA#s7t@W16': 9, 'S7-JA-ladder16-F1#s7p@W16': 9, 'S7-JT#s7p@W8': 9, 'S7-JT#s7p@W16': 9, 'S7-JT#s7t@W8': 9, 'S7-JT#s7t@W16': 9, 'S7-JT-W1#s7p@W1': 9, 'S7-JT-W1#s7t@W1': 9, 'S7-ladder16-F0.5#s7p@W16': 9, 'S7-ladder16-F1#s7p@W16': 9, 'S7-ladder16-F1.5#s7p@W16': 9, 'S7-ladder16-F2#s7p@W16': 9, 'S7-ladder8-F0.5#s7p@W8': 9, 'S7-ladder8-F1#s7p@W8': 9, 'S7-ladder8-F1.5#s7p@W8': 9, 'S7-ladder8-F2#s7p@W8': 9}
+paired S7-JT W8: T slower in 3/9; median T/P 0.9985; min 0.9840 max 1.0102
+     [(0, 0, 0.9985, 'T first', 'original'), (0, 1, 1.0028, 'T first', 'original'), (0, 2, 1.0102, 'T first', 'original'), (1, 0, 0.999, 'P first', 'original'), (1, 1, 0.9946, 'P first', 'original'), (1, 2, 0.9908, 'P first', 'original'), (2, 0, 1.0024, 'T first', 'original'), (2, 1, 0.9981, 'T first', 'original'), (2, 2, 0.984, 'T first', 'original')]
+paired S7-JT W16: T slower in 9/9; median T/P 1.0690; min 1.0600 max 1.0874
+     [(0, 0, 1.06, 'T first', 'original'), (0, 1, 1.069, 'T first', 'original'), (0, 2, 1.0874, 'T first', 'original'), (1, 0, 1.0613, 'P first', 'original'), (1, 1, 1.0651, 'P first', 'original'), (1, 2, 1.0669, 'P first', 'original'), (2, 0, 1.0705, 'T first', 'original'), (2, 1, 1.074, 'T first', 'original'), (2, 2, 1.0742, 'T first', 'original')]
+paired S7-JA W8: T slower in 6/9; median T/P 1.0011; min 0.9967 max 1.0186
+     [(0, 0, 0.9968, 'T first', 'original'), (0, 1, 0.9967, 'T first', 'original'), (0, 2, 1.0186, 'T first', 'original'), (1, 0, 1.0053, 'P first', 'rerun'), (1, 1, 1.0011, 'P first', 'original'), (1, 2, 1.0038, 'P first', 'original'), (2, 0, 1.0013, 'T first', 'original'), (2, 1, 0.9996, 'T first', 'original'), (2, 2, 1.0006, 'T first', 'original')]
+paired S7-JA W16: T slower in 9/9; median T/P 1.1245; min 1.1035 max 1.1483
+     [(0, 0, 1.1229, 'T first', 'original'), (0, 1, 1.1035, 'T first', 'original'), (0, 2, 1.1153, 'T first', 'original'), (1, 0, 1.1245, 'P first', 'original'), (1, 1, 1.1253, 'P first', 'original'), (1, 2, 1.124, 'P first', 'original'), (2, 0, 1.1247, 'T first', 'original'), (2, 1, 1.1259, 'T first', 'original'), (2, 2, 1.1483, 'T first', 'original')]
+  armed P-JT-W8: exit-free SUMMARY pose 0x30c5438bc6ad9ffa void 0 steps 500 armed True w8s keys {'waves': 49904, 'lanes_mean': 7.855542641872395, 'color_scopes': 49404, 'color_tasks': 1126176, 'np_waves': 500, 'np_lanes_mean': 7.996, 'helped_waves': 49857, 'first_waves': 500, 'pass_waves': 6000, 'setup_steps': 500, 'setup_tasks': 15980}
+  armed T-JT-W8: exit-free SUMMARY pose 0x30c5438bc6ad9ffa void 0 steps 500 armed True w8s keys {'waves': 49904, 'lanes_mean': 7.636642353318371, 'color_scopes': 49404, 'color_tasks': 1126176, 'np_waves': 500, 'np_lanes_mean': 7.986, 'helped_waves': 49897, 'first_waves': 500, 'pass_waves': 6000, 'setup_steps': 500, 'setup_tasks': 15980}
+  armed P-JT-W16: exit-free SUMMARY pose 0x30c5438bc6ad9ffa void 0 steps 500 armed True w8s keys {'waves': 49904, 'lanes_mean': 12.168804103879449, 'color_scopes': 49404, 'color_tasks': 1126176, 'np_waves': 500, 'np_lanes_mean': 13.828, 'helped_waves': 49904, 'first_waves': 500, 'pass_waves': 6000, 'setup_steps': 500, 'setup_tasks': 15980}
+  armed T-JT-W16: exit-free SUMMARY pose 0x30c5438bc6ad9ffa void 0 steps 500 armed True w8s keys {'waves': 49904, 'lanes_mean': 7.842277172170568, 'color_scopes': 49404, 'color_tasks': 1126176, 'np_waves': 500, 'np_lanes_mean': 13.846, 'helped_waves': 49901, 'first_waves': 500, 'pass_waves': 6000, 'setup_steps': 500, 'setup_tasks': 15980}
+  armed P-JA-W8: exit-free SUMMARY pose 0x30c5438bc6ad9ffa void 0 steps 500 armed True w8s keys {'waves': 49904, 'lanes_mean': 7.906059634498237, 'color_scopes': 49404, 'color_tasks': 1485480, 'np_waves': 500, 'np_lanes_mean': 8, 'helped_waves': 49904, 'first_waves': 500, 'pass_waves': 6000, 'setup_steps': 500, 'setup_tasks': 15980}
+  armed T-JA-W8: exit-free SUMMARY pose 0x30c5438bc6ad9ffa void 0 steps 500 armed True w8s keys {'waves': 49904, 'lanes_mean': 7.634578390509779, 'color_scopes': 49404, 'color_tasks': 1485480, 'np_waves': 500, 'np_lanes_mean': 7.97, 'helped_waves': 49902, 'first_waves': 500, 'pass_waves': 6000, 'setup_steps': 500, 'setup_tasks': 15980}
+  armed P-JA-W16: exit-free SUMMARY pose 0x30c5438bc6ad9ffa void 0 steps 500 armed True w8s keys {'waves': 49904, 'lanes_mean': 11.971344982366142, 'color_scopes': 49404, 'color_tasks': 1485480, 'np_waves': 500, 'np_lanes_mean': 13.942, 'helped_waves': 49904, 'first_waves': 500, 'pass_waves': 6000, 'setup_steps': 500, 'setup_tasks': 15980}
+  armed T-JA-W16: exit-free SUMMARY pose 0x30c5438bc6ad9ffa void 0 steps 500 armed True w8s keys {'waves': 49904, 'lanes_mean': 7.995691728117986, 'color_scopes': 49404, 'color_tasks': 1485480, 'np_waves': 500, 'np_lanes_mean': 14.01, 'helped_waves': 49904, 'first_waves': 500, 'pass_waves': 6000, 'setup_steps': 500, 'setup_tasks': 15980}

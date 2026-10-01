@@ -1,0 +1,11 @@
+--- a/crates/boyko_physics/benches/broadphase.rs
++++ b/crates/boyko_physics/benches/broadphase.rs
+@@ -300,7 +300,7 @@
+ // ── G4: the tree broadphase (design C3; module docs, "G4 of the tree broadphase") ────────────
+ 
+ /// G4 pair-finding sizes of the `uniform` and `disparity` families: the design's list.
+-const G4_SIZES: [usize; 7] = [17, 64, 128, 256, 1_000, 10_000, 100_000];
++const G4_SIZES: [usize; 28] = [17, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 208, 224, 240, 256, 1_000];
+ /// G4 `scene` sizes, in dynamic boxes (the floor is one more row): J, and the design's 10k and
+ /// 100k.
+ const G4_SCENE_SIZES: [usize; 3] = [1_240, 10_000, 100_000];

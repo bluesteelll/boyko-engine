@@ -1,0 +1,210 @@
+
+## ours (C4-JD#tip) / Jolt 5.6, window [0..500)
+
+### W1
+  Jolt : 10.1435 [9.4989-10.9129] n=8 (IQR 11.73 %, SE 2.63 %, range 13.94 %)
+  ours : 4.5692 [4.4430-4.9939] n=7 (IQR 7.65 %, SE 2.32 %, range 12.05 %)
+    p0: Jolt 10.3821 [10.0312-10.7331] n=2 (IQR 3.38 %, SE 4.24 %, range 6.76 %) | ours 4.9397 [4.9397-4.9397] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: Jolt 9.5402 [9.4989-10.8283] n=3 (IQR 6.97 %, SE 5.73 %, range 13.93 %) | ours 4.5338 [4.5034-4.7965] n=3 (IQR 3.23 %, SE 2.57 %, range 6.47 %)
+    p2: Jolt 10.2559 [9.5760-10.9129] n=3 (IQR 6.52 %, SE 4.72 %, range 13.03 %) | ours 4.5692 [4.4430-4.9939] n=3 (IQR 6.03 %, SE 4.57 %, range 12.05 %)
+  [wall] LETTER     : ours/Jolt 0.4505 pooled YYY (bars i 28.01 / s 7.01 / r 36.86 %); passes p0:nnn(K2/1 0.4758,sep) p1:YYY(K3/3 0.4752,sep) p2:YYY(K3/3 0.4455,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [wall] GATING-ONLY: ours/Jolt 0.4505 pooled YYY (bars i 28.01 / s 7.01 / r 36.86 %); passes p0:nnn(K2/1 0.4758,sep) p1:YYY(K3/3 0.4752,sep) p2:YYY(K3/3 0.4455,sep) gates [1, 2] -> CLAIMED STRONG (ours faster)
+
+### W2
+  Jolt : 5.8263 [5.6143-5.9624] n=8 (IQR 2.57 %, SE 1.01 %, range 5.97 %)
+  ours : 3.0706 [2.9863-3.1163] n=8 (IQR 1.90 %, SE 0.68 %, range 4.23 %)
+    p0: Jolt 5.8300 [5.7858-5.8743] n=2 (IQR 0.76 %, SE 0.95 %, range 1.52 %) | ours 3.1082 [3.1001-3.1163] n=2 (IQR 0.26 %, SE 0.33 %, range 0.52 %)
+    p1: Jolt 5.7820 [5.6143-5.8667] n=3 (IQR 2.18 %, SE 1.61 %, range 4.36 %) | ours 3.0428 [2.9863-3.0859] n=3 (IQR 1.64 %, SE 1.19 %, range 3.27 %)
+    p2: Jolt 5.9370 [5.6155-5.9624] n=3 (IQR 2.92 %, SE 2.36 %, range 5.84 %) | ours 3.0609 [2.9967-3.0803] n=3 (IQR 1.36 %, SE 1.03 %, range 2.73 %)
+  [wall] LETTER     : ours/Jolt 0.5270 pooled YYY (bars i 6.38 / s 2.44 / r 14.64 %); passes p0:nnn(K2/2 0.5331,sep) p1:YYY(K3/3 0.5263,sep) p2:YYY(K3/3 0.5156,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [wall] GATING-ONLY: ours/Jolt 0.5270 pooled YYY (bars i 6.38 / s 2.44 / r 14.64 %); passes p0:nnn(K2/2 0.5331,sep) p1:YYY(K3/3 0.5263,sep) p2:YYY(K3/3 0.5156,sep) gates [1, 2] -> CLAIMED STRONG (ours faster)
+
+### W4
+  Jolt : 3.6547 [3.6057-3.7142] n=7 (IQR 1.41 %, SE 0.50 %, range 2.97 %)
+  ours : 2.2356 [2.1959-2.3091] n=7 (IQR 3.40 %, SE 1.02 %, range 5.06 %)
+    p0: Jolt 3.6877 [3.6877-3.6877] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | ours 2.3091 [2.3091-2.3091] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: Jolt 3.6513 [3.6057-3.6547] n=3 (IQR 0.67 %, SE 0.54 %, range 1.34 %) | ours 2.2356 [2.1985-2.2585] n=3 (IQR 1.34 %, SE 0.98 %, range 2.68 %)
+    p2: Jolt 3.7019 [3.6351-3.7142] n=3 (IQR 1.07 %, SE 0.83 %, range 2.14 %) | ours 2.2168 [2.1959-2.3090] n=3 (IQR 2.55 %, SE 1.96 %, range 5.10 %)
+  [wall] LETTER     : ours/Jolt 0.6117 pooled YYY (bars i 7.37 / s 2.27 / r 11.74 %); passes p0:nnn(K1/1 0.6261,sep) p1:YYY(K3/3 0.6123,sep) p2:YYY(K3/3 0.5988,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [wall] GATING-ONLY: ours/Jolt 0.6117 pooled YYY (bars i 7.37 / s 2.27 / r 11.74 %); passes p0:nnn(K1/1 0.6261,sep) p1:YYY(K3/3 0.6123,sep) p2:YYY(K3/3 0.5988,sep) gates [1, 2] -> CLAIMED STRONG (ours faster)
+
+### W8
+  Jolt : 2.5311 [2.4772-2.7301] n=6 (IQR 2.64 %, SE 1.86 %, range 9.99 %)
+  ours : 1.8277 [1.8135-2.0274] n=7 (IQR 4.33 %, SE 2.02 %, range 11.70 %)
+    p0: Jolt n=0 | ours 1.8967 [1.8967-1.8967] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: Jolt 2.5288 [2.4772-2.5785] n=3 (IQR 2.00 %, SE 1.45 %, range 4.01 %) | ours 1.8263 [1.8139-1.8277] n=3 (IQR 0.38 %, SE 0.30 %, range 0.75 %)
+    p2: Jolt 2.5334 [2.4909-2.7301] n=3 (IQR 4.72 %, SE 3.65 %, range 9.44 %) | ours 1.9019 [1.8135-2.0274] n=3 (IQR 5.62 %, SE 4.09 %, range 11.24 %)
+  [wall] LETTER     : ours/Jolt 0.7221 pooled YYn (bars i 10.15 / s 5.50 / r 30.78 %); passes p0:nnn(K0/1 -) p1:YYY(K3/3 0.7222,sep) p2:YYn(K3/3 0.7507,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [wall] GATING-ONLY: ours/Jolt 0.7221 pooled YYn (bars i 10.15 / s 5.50 / r 30.78 %); passes p0:nnn(K0/1 -) p1:YYY(K3/3 0.7222,sep) p2:YYn(K3/3 0.7507,sep) gates [1, 2] -> CLAIMED (ours faster)
+
+### W16
+  Jolt : 2.4535 [2.3440-2.9357] n=9 (IQR 22.63 %, SE 4.65 %, range 24.12 %)
+  ours : 2.0887 [2.0503-2.2770] n=9 (IQR 4.35 %, SE 1.62 %, range 10.85 %)
+    p0: Jolt 2.9158 [2.4323-2.9189] n=3 (IQR 8.34 %, SE 6.95 %, range 16.69 %) | ours 2.2310 [2.0887-2.2770] n=3 (IQR 4.22 %, SE 3.18 %, range 8.44 %)
+    p1: Jolt 2.4535 [2.3606-2.8361] n=3 (IQR 9.69 %, SE 7.43 %, range 19.38 %) | ours 2.0553 [2.0503-2.1619] n=3 (IQR 2.71 %, SE 2.22 %, range 5.43 %)
+    p2: Jolt 2.3603 [2.3440-2.9357] n=3 (IQR 12.53 %, SE 10.33 %, range 25.07 %) | ours 2.0811 [2.0711-2.1093] n=3 (IQR 0.92 %, SE 0.69 %, range 1.84 %)
+  [wall] LETTER     : ours/Jolt 0.8513 pooled nYn (bars i 46.09 / s 9.85 / r 52.89 %); passes p0:YYn(K3/3 0.7651,sep) p1:nYn(K3/3 0.8377,sep) p2:nnn(K3/3 0.8817,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [wall] GATING-ONLY: ours/Jolt 0.8513 pooled nYn (bars i 46.09 / s 9.85 / r 52.89 %); passes p0:YYn(K3/3 0.7651,sep) p1:nYn(K3/3 0.8377,sep) p2:nnn(K3/3 0.8817,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+
+## ours (C4-JD#tip) / Jolt 5.6, window [100..500)
+
+### W1
+  Jolt : 10.0044 [9.3879-10.8886] n=8 (IQR 13.26 %, SE 2.90 %, range 15.00 %)
+  ours : 4.3504 [4.2115-4.7890] n=7 (IQR 7.94 %, SE 2.50 %, range 13.27 %)
+    p0: Jolt 10.3191 [9.8861-10.7521] n=2 (IQR 4.20 %, SE 5.26 %, range 8.39 %) | ours 4.7135 [4.7135-4.7135] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: Jolt 9.4313 [9.3879-10.8300] n=3 (IQR 7.65 %, SE 6.29 %, range 15.29 %) | ours 4.2849 [4.2797-4.5416] n=3 (IQR 3.06 %, SE 2.53 %, range 6.11 %)
+    p2: Jolt 10.1227 [9.4491-10.8886] n=3 (IQR 7.11 %, SE 5.15 %, range 14.22 %) | ours 4.3504 [4.2115-4.7890] n=3 (IQR 6.64 %, SE 5.01 %, range 13.27 %)
+  [wall] LETTER     : ours/Jolt 0.4348 pooled YYY (bars i 30.91 / s 7.66 / r 40.06 %); passes p0:nnn(K2/1 0.4568,sep) p1:YYY(K3/3 0.4543,sep) p2:YYY(K3/3 0.4298,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [wall] GATING-ONLY: ours/Jolt 0.4348 pooled YYY (bars i 30.91 / s 7.66 / r 40.06 %); passes p0:nnn(K2/1 0.4568,sep) p1:YYY(K3/3 0.4543,sep) p2:YYY(K3/3 0.4298,sep) gates [1, 2] -> CLAIMED STRONG (ours faster)
+  [velocity rows] LETTER     : ours/Jolt 0.4128 pooled YYY (bars i 30.91 / s 7.66 / r 40.06 %); passes p0:nnn(K2/1 0.4337,sep) p1:YYY(K3/3 0.4313,sep) p2:YYY(K3/3 0.4080,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [velocity rows] GATING-ONLY: ours/Jolt 0.4128 pooled YYY (bars i 30.91 / s 7.66 / r 40.06 %); passes p0:nnn(K2/1 0.4337,sep) p1:YYY(K3/3 0.4313,sep) p2:YYY(K3/3 0.4080,sep) gates [1, 2] -> CLAIMED STRONG (ours faster)
+  [all rows] LETTER     : ours/Jolt 0.4583 pooled YYY (bars i 30.91 / s 7.66 / r 40.06 %); passes p0:nnn(K2/1 0.4814,sep) p1:YYY(K3/3 0.4788,sep) p2:YYY(K3/3 0.4529,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [all rows] GATING-ONLY: ours/Jolt 0.4583 pooled YYY (bars i 30.91 / s 7.66 / r 40.06 %); passes p0:nnn(K2/1 0.4814,sep) p1:YYY(K3/3 0.4788,sep) p2:YYY(K3/3 0.4529,sep) gates [1, 2] -> CLAIMED STRONG (ours faster)
+  [manifold] LETTER     : ours/Jolt 0.8263 pooled nYn (bars i 30.91 / s 7.66 / r 40.06 %); passes p0:nnn(K2/1 0.8679,sep) p1:nYn(K3/3 0.8633,sep) p2:nYn(K3/3 0.8166,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [manifold] GATING-ONLY: ours/Jolt 0.8263 pooled nYn (bars i 30.91 / s 7.66 / r 40.06 %); passes p0:nnn(K2/1 0.8679,sep) p1:nYn(K3/3 0.8633,sep) p2:nYn(K3/3 0.8166,sep) gates [1, 2] -> NOT CLAIMED (no resolved difference)
+
+### W2
+  Jolt : 5.8123 [5.5912-5.9449] n=8 (IQR 2.73 %, SE 1.04 %, range 6.09 %)
+  ours : 2.9392 [2.8604-2.9761] n=8 (IQR 1.79 %, SE 0.66 %, range 3.94 %)
+    p0: Jolt 5.8177 [5.7669-5.8685] n=2 (IQR 0.87 %, SE 1.09 %, range 1.75 %) | ours 2.9724 [2.9687-2.9761] n=2 (IQR 0.13 %, SE 0.16 %, range 0.25 %)
+    p1: Jolt 5.7695 [5.5912-5.8551] n=3 (IQR 2.29 %, SE 1.69 %, range 4.57 %) | ours 2.9223 [2.8604-2.9598] n=3 (IQR 1.70 %, SE 1.24 %, range 3.40 %)
+    p2: Jolt 5.9206 [5.5917-5.9449] n=3 (IQR 2.98 %, SE 2.41 %, range 5.97 %) | ours 2.9232 [2.8711-2.9552] n=3 (IQR 1.44 %, SE 1.05 %, range 2.88 %)
+  [wall] LETTER     : ours/Jolt 0.5057 pooled YYY (bars i 6.52 / s 2.47 / r 14.50 %); passes p0:nnn(K2/2 0.5109,sep) p1:YYY(K3/3 0.5065,sep) p2:YYY(K3/3 0.4937,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [wall] GATING-ONLY: ours/Jolt 0.5057 pooled YYY (bars i 6.52 / s 2.47 / r 14.50 %); passes p0:nnn(K2/2 0.5109,sep) p1:YYY(K3/3 0.5065,sep) p2:YYY(K3/3 0.4937,sep) gates [1, 2] -> CLAIMED STRONG (ours faster)
+  [velocity rows] LETTER     : ours/Jolt 0.4801 pooled YYY (bars i 6.52 / s 2.47 / r 14.50 %); passes p0:nnn(K2/2 0.4851,sep) p1:YYY(K3/3 0.4809,sep) p2:YYY(K3/3 0.4688,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [velocity rows] GATING-ONLY: ours/Jolt 0.4801 pooled YYY (bars i 6.52 / s 2.47 / r 14.50 %); passes p0:nnn(K2/2 0.4851,sep) p1:YYY(K3/3 0.4809,sep) p2:YYY(K3/3 0.4688,sep) gates [1, 2] -> CLAIMED STRONG (ours faster)
+  [all rows] LETTER     : ours/Jolt 0.5329 pooled YYY (bars i 6.52 / s 2.47 / r 14.50 %); passes p0:nnn(K2/2 0.5384,sep) p1:YYY(K3/3 0.5338,sep) p2:YYY(K3/3 0.5203,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [all rows] GATING-ONLY: ours/Jolt 0.5329 pooled YYY (bars i 6.52 / s 2.47 / r 14.50 %); passes p0:nnn(K2/2 0.5384,sep) p1:YYY(K3/3 0.5338,sep) p2:YYY(K3/3 0.5203,sep) gates [1, 2] -> CLAIMED STRONG (ours faster)
+  [manifold] LETTER     : ours/Jolt 0.9609 pooled nYn (bars i 6.52 / s 2.47 / r 14.50 %); passes p0:nnn(K2/2 0.9708,sep) p1:nnn(K3/3 0.9624) p2:nYn(K3/3 0.9381) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [manifold] GATING-ONLY: ours/Jolt 0.9609 pooled nYn (bars i 6.52 / s 2.47 / r 14.50 %); passes p0:nnn(K2/2 0.9708,sep) p1:nnn(K3/3 0.9624) p2:nYn(K3/3 0.9381) gates [1, 2] -> NOT CLAIMED (no resolved difference)
+
+### W4
+  Jolt : 3.6881 [3.6354-3.7564] n=7 (IQR 1.09 %, SE 0.50 %, range 3.28 %)
+  ours : 2.1605 [2.1266-2.2431] n=7 (IQR 3.24 %, SE 1.04 %, range 5.39 %)
+    p0: Jolt 3.7215 [3.7215-3.7215] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | ours 2.2338 [2.2338-2.2338] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: Jolt 3.6777 [3.6354-3.6881] n=3 (IQR 0.72 %, SE 0.55 %, range 1.43 %) | ours 2.1605 [2.1291-2.1874] n=3 (IQR 1.35 %, SE 0.98 %, range 2.70 %)
+    p2: Jolt 3.7042 [3.6676-3.7564] n=3 (IQR 1.20 %, SE 0.87 %, range 2.40 %) | ours 2.1522 [2.1266-2.2431] n=3 (IQR 2.71 %, SE 2.06 %, range 5.41 %)
+  [wall] LETTER     : ours/Jolt 0.5858 pooled YYY (bars i 6.83 / s 2.30 / r 12.62 %); passes p0:nnn(K1/1 0.6002,sep) p1:YYY(K3/3 0.5875,sep) p2:YYY(K3/3 0.5810,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [wall] GATING-ONLY: ours/Jolt 0.5858 pooled YYY (bars i 6.83 / s 2.30 / r 12.62 %); passes p0:nnn(K1/1 0.6002,sep) p1:YYY(K3/3 0.5875,sep) p2:YYY(K3/3 0.5810,sep) gates [1, 2] -> CLAIMED STRONG (ours faster)
+  [velocity rows] LETTER     : ours/Jolt 0.5562 pooled YYY (bars i 6.83 / s 2.30 / r 12.62 %); passes p0:nnn(K1/1 0.5699,sep) p1:YYY(K3/3 0.5577,sep) p2:YYY(K3/3 0.5516,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [velocity rows] GATING-ONLY: ours/Jolt 0.5562 pooled YYY (bars i 6.83 / s 2.30 / r 12.62 %); passes p0:nnn(K1/1 0.5699,sep) p1:YYY(K3/3 0.5577,sep) p2:YYY(K3/3 0.5516,sep) gates [1, 2] -> CLAIMED STRONG (ours faster)
+  [all rows] LETTER     : ours/Jolt 0.6174 pooled YYY (bars i 6.83 / s 2.30 / r 12.62 %); passes p0:nnn(K1/1 0.6325,sep) p1:YYY(K3/3 0.6191,sep) p2:YYY(K3/3 0.6123,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [all rows] GATING-ONLY: ours/Jolt 0.6174 pooled YYY (bars i 6.83 / s 2.30 / r 12.62 %); passes p0:nnn(K1/1 0.6325,sep) p1:YYY(K3/3 0.6191,sep) p2:YYY(K3/3 0.6123,sep) gates [1, 2] -> CLAIMED STRONG (ours faster)
+  [manifold] LETTER     : ours/Jolt 1.1131 pooled YYn (bars i 6.83 / s 2.30 / r 12.62 %); passes p0:nnn(K1/1 1.1405,sep) p1:YYY(K3/3 1.1162,sep) p2:YYn(K3/3 1.1040,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [manifold] GATING-ONLY: ours/Jolt 1.1131 pooled YYn (bars i 6.83 / s 2.30 / r 12.62 %); passes p0:nnn(K1/1 1.1405,sep) p1:YYY(K3/3 1.1162,sep) p2:YYn(K3/3 1.1040,sep) gates [1, 2] -> CLAIMED (Jolt faster)
+
+### W8
+  Jolt : 2.5702 [2.5178-2.7753] n=6 (IQR 2.38 %, SE 1.86 %, range 10.02 %)
+  ours : 1.7878 [1.7707-1.9758] n=7 (IQR 3.59 %, SE 1.95 %, range 11.47 %)
+    p0: Jolt n=0 | ours 1.8501 [1.8501-1.8501] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: Jolt 2.5710 [2.5178-2.6168] n=3 (IQR 1.93 %, SE 1.39 %, range 3.85 %) | ours 1.7830 [1.7707-1.7878] n=3 (IQR 0.48 %, SE 0.36 %, range 0.96 %)
+    p2: Jolt 2.5694 [2.5357-2.7753] n=3 (IQR 4.66 %, SE 3.65 %, range 9.32 %) | ours 1.8325 [1.7713-1.9758] n=3 (IQR 5.58 %, SE 4.14 %, range 11.16 %)
+  [wall] LETTER     : ours/Jolt 0.6956 pooled YYn (bars i 8.62 / s 5.39 / r 30.46 %); passes p0:nnn(K0/1 -) p1:YYY(K3/3 0.6935,sep) p2:YYn(K3/3 0.7132,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [wall] GATING-ONLY: ours/Jolt 0.6956 pooled YYn (bars i 8.62 / s 5.39 / r 30.46 %); passes p0:nnn(K0/1 -) p1:YYY(K3/3 0.6935,sep) p2:YYn(K3/3 0.7132,sep) gates [1, 2] -> CLAIMED (ours faster)
+  [velocity rows] LETTER     : ours/Jolt 0.6604 pooled YYY (bars i 8.62 / s 5.39 / r 30.46 %); passes p0:nnn(K0/1 -) p1:YYY(K3/3 0.6584,sep) p2:YYY(K3/3 0.6771,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [velocity rows] GATING-ONLY: ours/Jolt 0.6604 pooled YYY (bars i 8.62 / s 5.39 / r 30.46 %); passes p0:nnn(K0/1 -) p1:YYY(K3/3 0.6584,sep) p2:YYY(K3/3 0.6771,sep) gates [1, 2] -> CLAIMED STRONG (ours faster)
+  [all rows] LETTER     : ours/Jolt 0.7330 pooled YYn (bars i 8.62 / s 5.39 / r 30.46 %); passes p0:nnn(K0/1 -) p1:YYY(K3/3 0.7308,sep) p2:YYn(K3/3 0.7516,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [all rows] GATING-ONLY: ours/Jolt 0.7330 pooled YYn (bars i 8.62 / s 5.39 / r 30.46 %); passes p0:nnn(K0/1 -) p1:YYY(K3/3 0.7308,sep) p2:YYn(K3/3 0.7516,sep) gates [1, 2] -> CLAIMED (ours faster)
+  [manifold] LETTER     : ours/Jolt 1.3217 pooled YYY (bars i 8.62 / s 5.39 / r 30.46 %); passes p0:nnn(K0/1 -) p1:YYY(K3/3 1.3177,sep) p2:YYY(K3/3 1.3552,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [manifold] GATING-ONLY: ours/Jolt 1.3217 pooled YYY (bars i 8.62 / s 5.39 / r 30.46 %); passes p0:nnn(K0/1 -) p1:YYY(K3/3 1.3177,sep) p2:YYY(K3/3 1.3552,sep) gates [1, 2] -> CLAIMED STRONG (Jolt faster)
+
+### W16
+  Jolt : 2.5056 [2.3891-3.0038] n=9 (IQR 21.85 %, SE 4.75 %, range 24.53 %)
+  ours : 2.0486 [2.0110-2.2229] n=9 (IQR 4.17 %, SE 1.50 %, range 10.35 %)
+    p0: Jolt 2.9424 [2.4781-2.9875] n=3 (IQR 8.66 %, SE 6.94 %, range 17.31 %) | ours 2.1671 [2.0245-2.2229] n=3 (IQR 4.58 %, SE 3.42 %, range 9.16 %)
+    p1: Jolt 2.5056 [2.4039-2.9531] n=3 (IQR 10.96 %, SE 8.44 %, range 21.92 %) | ours 2.0189 [2.0110-2.1100] n=3 (IQR 2.45 %, SE 1.97 %, range 4.91 %)
+    p2: Jolt 2.4055 [2.3891-3.0038] n=3 (IQR 12.78 %, SE 10.54 %, range 25.55 %) | ours 2.0486 [2.0350-2.0791] n=3 (IQR 1.08 %, SE 0.80 %, range 2.15 %)
+  [wall] LETTER     : ours/Jolt 0.8176 pooled nYn (bars i 44.50 / s 9.97 / r 53.25 %); passes p0:YYn(K3/3 0.7365,sep) p1:nYn(K3/3 0.8058,sep) p2:nnn(K3/3 0.8516,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [wall] GATING-ONLY: ours/Jolt 0.8176 pooled nYn (bars i 44.50 / s 9.97 / r 53.25 %); passes p0:YYn(K3/3 0.7365,sep) p1:nYn(K3/3 0.8058,sep) p2:nnn(K3/3 0.8516,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [velocity rows] LETTER     : ours/Jolt 0.7763 pooled nYn (bars i 44.50 / s 9.97 / r 53.25 %); passes p0:YYn(K3/3 0.6993,sep) p1:YYn(K3/3 0.7650,sep) p2:nnn(K3/3 0.8086,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [velocity rows] GATING-ONLY: ours/Jolt 0.7763 pooled nYn (bars i 44.50 / s 9.97 / r 53.25 %); passes p0:YYn(K3/3 0.6993,sep) p1:YYn(K3/3 0.7650,sep) p2:nnn(K3/3 0.8086,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [all rows] LETTER     : ours/Jolt 0.8616 pooled nYn (bars i 44.50 / s 9.97 / r 53.25 %); passes p0:YYn(K3/3 0.7762,sep) p1:nnn(K3/3 0.8491,sep) p2:nnn(K3/3 0.8975,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [all rows] GATING-ONLY: ours/Jolt 0.8616 pooled nYn (bars i 44.50 / s 9.97 / r 53.25 %); passes p0:YYn(K3/3 0.7762,sep) p1:nnn(K3/3 0.8491,sep) p2:nnn(K3/3 0.8975,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [manifold] LETTER     : ours/Jolt 1.5536 pooled YYY (bars i 44.50 / s 9.97 / r 53.25 %); passes p0:YYY(K3/3 1.3995,sep) p1:YYY(K3/3 1.5310,sep) p2:YYY(K3/3 1.6182,sep) gates [0, 1, 2] -> CLAIMED STRONG (Jolt faster)
+  [manifold] GATING-ONLY: ours/Jolt 1.5536 pooled YYY (bars i 44.50 / s 9.97 / r 53.25 %); passes p0:YYY(K3/3 1.3995,sep) p1:YYY(K3/3 1.5310,sep) p2:YYY(K3/3 1.6182,sep) gates [0, 1, 2] -> CLAIMED STRONG (Jolt faster)
+
+## ours (C4-JD#tip) / Jolt 5.6, window [0..100)
+
+### W1
+  Jolt : 10.6344 [9.9432-11.0100] n=8 (IQR 6.96 %, SE 1.75 %, range 10.03 %)
+  ours : 5.5295 [5.3693-5.8448] n=7 (IQR 7.12 %, SE 1.84 %, range 8.60 %)
+    p0: Jolt 10.6344 [10.6117-10.6571] n=2 (IQR 0.21 %, SE 0.27 %, range 0.43 %) | ours 5.8448 [5.8448-5.8448] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: Jolt 9.9756 [9.9432-10.8213] n=3 (IQR 4.40 %, SE 3.61 %, range 8.80 %) | ours 5.5295 [5.3979-5.8164] n=3 (IQR 3.78 %, SE 2.80 %, range 7.57 %)
+    p2: Jolt 10.7885 [10.0839-11.0100] n=3 (IQR 4.29 %, SE 3.24 %, range 8.58 %) | ours 5.4445 [5.3693-5.8134] n=3 (IQR 4.08 %, SE 3.16 %, range 8.16 %)
+  [wall] LETTER     : ours/Jolt 0.5200 pooled YYY (bars i 19.91 / s 5.08 / r 26.42 %); passes p0:nnn(K2/1 0.5496,sep) p1:YYY(K3/3 0.5543,sep) p2:YYY(K3/3 0.5047,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [wall] GATING-ONLY: ours/Jolt 0.5200 pooled YYY (bars i 19.91 / s 5.08 / r 26.42 %); passes p0:nnn(K2/1 0.5496,sep) p1:YYY(K3/3 0.5543,sep) p2:YYY(K3/3 0.5047,sep) gates [1, 2] -> CLAIMED STRONG (ours faster)
+
+### W2
+  Jolt : 5.8793 [5.7069-6.0324] n=8 (IQR 2.28 %, SE 0.90 %, range 5.54 %)
+  ours : 3.5855 [3.4901-3.7066] n=8 (IQR 2.28 %, SE 0.87 %, range 6.04 %)
+    p0: Jolt 5.8793 [5.8615-5.8971] n=2 (IQR 0.30 %, SE 0.38 %, range 0.61 %) | ours 3.6512 [3.5957-3.7066] n=2 (IQR 1.52 %, SE 1.90 %, range 3.04 %)
+    p1: Jolt 5.8318 [5.7069-5.9130] n=3 (IQR 1.77 %, SE 1.29 %, range 3.54 %) | ours 3.5245 [3.4901-3.5905] n=3 (IQR 1.42 %, SE 1.05 %, range 2.85 %)
+    p2: Jolt 6.0027 [5.7105-6.0324] n=3 (IQR 2.68 %, SE 2.14 %, range 5.36 %) | ours 3.5805 [3.4993-3.6120] n=3 (IQR 1.57 %, SE 1.18 %, range 3.15 %)
+  [wall] LETTER     : ours/Jolt 0.6099 pooled YYY (bars i 6.44 / s 2.51 / r 16.39 %); passes p0:nnn(K2/2 0.6210,sep) p1:YYY(K3/3 0.6044,sep) p2:YYY(K3/3 0.5965,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [wall] GATING-ONLY: ours/Jolt 0.6099 pooled YYY (bars i 6.44 / s 2.51 / r 16.39 %); passes p0:nnn(K2/2 0.6210,sep) p1:YYY(K3/3 0.6044,sep) p2:YYY(K3/3 0.5965,sep) gates [1, 2] -> CLAIMED STRONG (ours faster)
+
+### W4
+  Jolt : 3.5455 [3.4870-3.6927] n=7 (IQR 1.02 %, SE 0.90 %, range 5.80 %)
+  ours : 2.5360 [2.4728-2.6103] n=7 (IQR 3.23 %, SE 1.01 %, range 5.42 %)
+    p0: Jolt 3.5527 [3.5527-3.5527] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | ours 2.6103 [2.6103-2.6103] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: Jolt 3.5209 [3.4870-3.5455] n=3 (IQR 0.83 %, SE 0.60 %, range 1.66 %) | ours 2.5360 [2.4763-2.5428] n=3 (IQR 1.31 %, SE 1.04 %, range 2.62 %)
+    p2: Jolt 3.5457 [3.5053-3.6927] n=3 (IQR 2.64 %, SE 2.01 %, range 5.29 %) | ours 2.4753 [2.4728-2.5726] n=3 (IQR 2.02 %, SE 1.66 %, range 4.03 %)
+  [wall] LETTER     : ours/Jolt 0.7153 pooled YYY (bars i 6.77 / s 2.70 / r 15.88 %); passes p0:nnn(K1/1 0.7347,sep) p1:YYY(K3/3 0.7203,sep) p2:YYY(K3/3 0.6981,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [wall] GATING-ONLY: ours/Jolt 0.7153 pooled YYY (bars i 6.77 / s 2.70 / r 15.88 %); passes p0:nnn(K1/1 0.7347,sep) p1:YYY(K3/3 0.7203,sep) p2:YYY(K3/3 0.6981,sep) gates [1, 2] -> CLAIMED STRONG (ours faster)
+
+### W8
+  Jolt : 2.3747 [2.3115-2.5495] n=6 (IQR 3.80 %, SE 1.91 %, range 10.02 %)
+  ours : 2.0064 [1.9803-2.2338] n=7 (IQR 7.31 %, SE 2.47 %, range 12.64 %)
+    p0: Jolt n=0 | ours 2.0833 [2.0833-2.0833] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: Jolt 2.3599 [2.3147-2.4252] n=3 (IQR 2.34 %, SE 1.70 %, range 4.68 %) | ours 1.9866 [1.9803-2.0064] n=3 (IQR 0.66 %, SE 0.50 %, range 1.32 %)
+    p2: Jolt 2.3894 [2.3115-2.5495] n=3 (IQR 4.98 %, SE 3.67 %, range 9.96 %) | ours 2.1792 [1.9826-2.2338] n=3 (IQR 5.77 %, SE 4.39 %, range 11.53 %)
+  [wall] LETTER     : ours/Jolt 0.8449 pooled nYn (bars i 16.48 / s 6.24 / r 32.26 %); passes p0:nnn(K0/1 -) p1:YYY(K3/3 0.8418,sep) p2:nnn(K3/3 0.9120,sep) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [wall] GATING-ONLY: ours/Jolt 0.8449 pooled nYn (bars i 16.48 / s 6.24 / r 32.26 %); passes p0:nnn(K0/1 -) p1:YYY(K3/3 0.8418,sep) p2:nnn(K3/3 0.9120,sep) gates [1, 2] -> NOT CLAIMED (no resolved difference)
+
+### W16
+  Jolt : 2.2492 [2.1636-2.8252] n=9 (IQR 19.64 %, SE 4.64 %, range 29.41 %)
+  ours : 2.2302 [2.2009-2.4931] n=9 (IQR 7.11 %, SE 2.26 %, range 13.10 %)
+    p0: Jolt 2.6290 [2.2492-2.8252] n=3 (IQR 10.95 %, SE 8.06 %, range 21.91 %) | ours 2.4866 [2.3453-2.4931] n=3 (IQR 2.97 %, SE 2.43 %, range 5.94 %)
+    p1: Jolt 2.2452 [2.1873-2.3682] n=3 (IQR 4.03 %, SE 2.98 %, range 8.06 %) | ours 2.2076 [2.2009-2.3693] n=3 (IQR 3.81 %, SE 3.12 %, range 7.63 %)
+    p2: Jolt 2.1794 [2.1636-2.6633] n=3 (IQR 11.46 %, SE 9.43 %, range 22.93 %) | ours 2.2157 [2.2107-2.2302] n=3 (IQR 0.44 %, SE 0.33 %, range 0.88 %)
+  [wall] LETTER     : ours/Jolt 0.9915 pooled nnn (bars i 41.77 / s 10.33 / r 64.40 %); passes p0:nnn(K3/3 0.9459) p1:nnn(K3/3 0.9833) p2:nnn(K3/3 1.0166) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+  [wall] GATING-ONLY: ours/Jolt 0.9915 pooled nnn (bars i 41.77 / s 10.33 / r 64.40 %); passes p0:nnn(K3/3 0.9459) p1:nnn(K3/3 0.9833) p2:nnn(K3/3 1.0166) gates [0, 1, 2] -> NOT CLAIMED (no resolved difference)
+
+## per unit, absolute ([100,500), pooled medians)
+  W 1: ns/manifold ours 973.7  Jolt 1178.5 | ns/velocity row-it ours 7.300  Jolt 17.682 | ns/all row-it Jolt 15.930
+  W 2: ns/manifold ours 657.9  Jolt 684.7 | ns/velocity row-it ours 4.932  Jolt 10.273 | ns/all row-it Jolt 9.255
+  W 4: ns/manifold ours 483.6  Jolt 434.5 | ns/velocity row-it ours 3.625  Jolt 6.518 | ns/all row-it Jolt 5.873
+  W 8: ns/manifold ours 400.2  Jolt 302.8 | ns/velocity row-it ours 3.000  Jolt 4.543 | ns/all row-it Jolt 4.093
+  W16: ns/manifold ours 458.5  Jolt 295.2 | ns/velocity row-it ours 3.438  Jolt 4.428 | ns/all row-it Jolt 3.990
+
+## scaling T(1)/T(W), pooled cell medians
+  [0..500] T1/T2: ours 1.488  Jolt 1.741  (ours/Jolt scaling 0.855); T(W) ours 3.0706 Jolt 5.8263 ms
+  [0..500] T1/T4: ours 2.044  Jolt 2.776  (ours/Jolt scaling 0.736); T(W) ours 2.2356 Jolt 3.6547 ms
+  [0..500] T1/T8: ours 2.500  Jolt 4.008  (ours/Jolt scaling 0.624); T(W) ours 1.8277 Jolt 2.5311 ms
+  [0..500] T1/T16: ours 2.188  Jolt 4.134  (ours/Jolt scaling 0.529); T(W) ours 2.0887 Jolt 2.4535 ms
+  [0..500] T16/T8: ours 1.1428  Jolt 0.9693
+  [100..500] T1/T2: ours 1.480  Jolt 1.721  (ours/Jolt scaling 0.860); T(W) ours 2.9392 Jolt 5.8123 ms
+  [100..500] T1/T4: ours 2.014  Jolt 2.713  (ours/Jolt scaling 0.742); T(W) ours 2.1605 Jolt 3.6881 ms
+  [100..500] T1/T8: ours 2.433  Jolt 3.892  (ours/Jolt scaling 0.625); T(W) ours 1.7878 Jolt 2.5702 ms
+  [100..500] T1/T16: ours 2.124  Jolt 3.993  (ours/Jolt scaling 0.532); T(W) ours 2.0486 Jolt 2.5056 ms
+  [100..500] T16/T8: ours 1.1459  Jolt 0.9749
+
+## W16 against W8 inside each engine (ruling 1), [0,500)
+  ours T16 vs T8 LETTER: B/A 1.1428 (+14.28 %, B-A +0.2610) pooled YYn (bars i 12.27 / s 5.18 / r 31.92 %); passes p0:nnn(K1/3 1.1762,sep) p1:YYY(K3/3 1.1254,sep) p2:nYn(K3/3 1.0942,sep) gates [0, 1, 2] -> NOT CLAIMED [B>A]
+  ours T16 vs T8 GATING-ONLY: B/A 1.1428 (+14.28 %, B-A +0.2610) pooled YYn (bars i 12.27 / s 5.18 / r 31.92 %); passes p0:nnn(K1/3 1.1762,sep) p1:YYY(K3/3 1.1254,sep) p2:nYn(K3/3 1.0942,sep) gates [1, 2] -> NOT CLAIMED [B>A]
+  Jolt T16 vs T8 LETTER: B/A 0.9693 (-3.07 %, B-A -0.0776) pooled nnn (bars i 45.57 / s 10.02 / r 52.21 %); passes p0:nnn(K0/3 -) p1:nnn(K3/3 0.9702) p2:nnn(K3/3 0.9317) gates [0, 1, 2] -> NOT CLAIMED [B<A]
+  Jolt T16 vs T8 GATING-ONLY: B/A 0.9693 (-3.07 %, B-A -0.0776) pooled nnn (bars i 45.57 / s 10.02 / r 52.21 %); passes p0:nnn(K0/3 -) p1:nnn(K3/3 0.9702) p2:nnn(K3/3 0.9317) gates [1, 2] -> NOT CLAIMED [B<A]
+
+## post hoc: paired rounds (both originals used, adjacent cells), ours/Jolt on [0,500)
+  W1: n=5 paired ratios median 0.4741 [0.4071-0.4771]; ours faster in 5 of 5
+  W2: n=7 paired ratios median 0.5263 [0.5134-0.5386]; ours faster in 7 of 7
+  W4: n=6 paired ratios median 0.6082 [0.5988-0.6264]; ours faster in 6 of 6
+  W8: n=5 paired ratios median 0.7227 [0.7083-0.7635]; ours faster in 5 of 5
+  W16: n=6 paired ratios median 0.8637 [0.7623-0.8937]; ours faster in 6 of 6
+
+## post hoc cross-window (no claim; window 8 = win8/analysis.md section 1, window 8b = win8b/analysis.md section 5)
+  W 1: 9a ours J-D 4.5692 (8b trunk J-T 4.4500, 9a/8b 1.0268; w8 J-T 4.4701, 9a/w8 1.0222) | Jolt 9a 10.1435 (w8 9.9612, 9a/w8 1.0183)
+  W 2: 9a ours J-D 3.0706 (8b trunk J-T 2.9998, 9a/8b 1.0236) | Jolt 9a 5.8263
+  W 4: 9a ours J-D 2.2356 (8b trunk J-T 2.1981, 9a/8b 1.0171) | Jolt 9a 3.6547
+  W 8: 9a ours J-D 1.8277 (8b trunk J-T 1.8154, 9a/8b 1.0068; w8 J-T 2.0357, 9a/w8 0.8978) | Jolt 9a 2.5311 (w8 2.5598, 9a/w8 0.9888)
+  W16: 9a ours J-D 2.0887 (8b trunk J-T 2.0502, 9a/8b 1.0188; w8 J-T 2.2233, 9a/w8 0.9395) | Jolt 9a 2.4535 (w8 2.5674, 9a/w8 0.9556)

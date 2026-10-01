@@ -1,0 +1,1916 @@
+{
+ "result": {
+  "JST-AW-W1": {
+   "noguard": "NOT CLAIMED",
+   "guard": "NOT CLAIMED",
+   "pooled": {
+    "off": 15.8842985,
+    "on": 15.910739,
+    "delta_pct": 0.16645683156859548,
+    "Koff": 8,
+    "Kon": 9,
+    "min_claimable_pct": 1.883882403011063
+   }
+  },
+  "JST-G-W1": {
+   "noguard": "CLAIMED STRONG (ON faster)",
+   "guard": "NOT CLAIMED",
+   "pooled": {
+    "off": 14.750136125000001,
+    "on": 6.51636975,
+    "delta_pct": -55.82162974784072,
+    "Koff": 8,
+    "Kon": 9,
+    "min_claimable_pct": 2.8133409703298304
+   }
+  },
+  "JST-F-W1": {
+   "noguard": "CLAIMED STRONG (ON faster)",
+   "guard": "NOT CLAIMED",
+   "pooled": {
+    "off": 14.614497345132744,
+    "on": 0.12540619469026548,
+    "delta_pct": -99.14190552210795,
+    "Koff": 8,
+    "Kon": 9,
+    "min_claimable_pct": 10.618640036112904
+   }
+  },
+  "JST-F277posthoc-W1": {
+   "noguard": "CLAIMED STRONG (ON faster)",
+   "guard": "NOT CLAIMED",
+   "pooled": {
+    "off": 14.61475067264574,
+    "on": 0.10848251121076233,
+    "delta_pct": -99.25771904262584,
+    "Koff": 8,
+    "Kon": 9,
+    "min_claimable_pct": 8.68268251813279
+   }
+  },
+  "JST-AW-W8": {
+   "noguard": "NOT CLAIMED",
+   "guard": "NOT CLAIMED",
+   "pooled": {
+    "off": 4.097053000000001,
+    "on": 4.123514,
+    "delta_pct": 0.6458544714945003,
+    "Koff": 8,
+    "Kon": 9,
+    "min_claimable_pct": 12.932080536896946
+   }
+  },
+  "JST-G-W8": {
+   "noguard": "CLAIMED STRONG (ON faster)",
+   "guard": "NOT CLAIMED",
+   "pooled": {
+    "off": 3.82602125,
+    "on": 1.712651,
+    "delta_pct": -55.23676194950564,
+    "Koff": 8,
+    "Kon": 9,
+    "min_claimable_pct": 14.699442191902772
+   }
+  },
+  "JST-F-W8": {
+   "noguard": "CLAIMED STRONG (ON faster)",
+   "guard": "NOT CLAIMED",
+   "pooled": {
+    "off": 3.8594276548672566,
+    "on": 0.13368053097345134,
+    "delta_pct": -96.53626021970221,
+    "Koff": 8,
+    "Kon": 9,
+    "min_claimable_pct": 12.480157386064793
+   }
+  },
+  "JST-F277posthoc-W8": {
+   "noguard": "CLAIMED STRONG (ON faster)",
+   "guard": "NOT CLAIMED",
+   "pooled": {
+    "off": 3.860811210762332,
+    "on": 0.11769955156950673,
+    "delta_pct": -96.95142950161848,
+    "Koff": 8,
+    "Kon": 9,
+    "min_claimable_pct": 12.46057702683367
+   }
+  },
+  "JST-AW-W1-a": {
+   "noguard": "NOT CLAIMED",
+   "guard": "NOT CLAIMED",
+   "pooled": {
+    "off": 15.919557,
+    "on": 15.936305,
+    "delta_pct": 0.10520393249637827,
+    "Koff": 9,
+    "Kon": 9,
+    "min_claimable_pct": 1.7774191257116334
+   }
+  },
+  "JST-G-W1-a": {
+   "noguard": "CLAIMED STRONG (ON faster)",
+   "guard": "CLAIMED STRONG (ON faster)",
+   "pooled": {
+    "off": 14.7673685,
+    "on": 6.5397485,
+    "delta_pct": -55.71486890165976,
+    "Koff": 9,
+    "Kon": 9,
+    "min_claimable_pct": 3.040680962528924
+   }
+  },
+  "JST-F-W1-a": {
+   "noguard": "CLAIMED STRONG (ON faster)",
+   "guard": "CLAIMED STRONG (ON faster)",
+   "pooled": {
+    "off": 14.65513407079646,
+    "on": 0.12768008849557522,
+    "delta_pct": -99.12876888141197,
+    "Koff": 9,
+    "Kon": 9,
+    "min_claimable_pct": 7.58837152328878
+   }
+  },
+  "JST-F277posthoc-W1-a": {
+   "noguard": "CLAIMED STRONG (ON faster)",
+   "guard": "CLAIMED STRONG (ON faster)",
+   "pooled": {
+    "off": 14.65807130044843,
+    "on": 0.11119686098654707,
+    "delta_pct": -99.24139500547288,
+    "Koff": 9,
+    "Kon": 9,
+    "min_claimable_pct": 5.674904276578401
+   }
+  },
+  "JST-AW-W8-a": {
+   "noguard": "NOT CLAIMED",
+   "guard": "NOT CLAIMED",
+   "pooled": {
+    "off": 4.225876,
+    "on": 4.239247,
+    "delta_pct": 0.3164077696553136,
+    "Koff": 9,
+    "Kon": 9,
+    "min_claimable_pct": 14.215658260074038
+   }
+  },
+  "JST-G-W8-a": {
+   "noguard": "CLAIMED STRONG (ON faster)",
+   "guard": "CLAIMED STRONG (ON faster)",
+   "pooled": {
+    "off": 3.942021,
+    "on": 1.78133,
+    "delta_pct": -54.81175772528862,
+    "Koff": 9,
+    "Kon": 9,
+    "min_claimable_pct": 12.033654340375314
+   }
+  },
+  "JST-F-W8-a": {
+   "noguard": "CLAIMED STRONG (ON faster)",
+   "guard": "CLAIMED STRONG (ON faster)",
+   "pooled": {
+    "off": 3.9985048672566372,
+    "on": 0.13341681415929202,
+    "delta_pct": -96.66333245579294,
+    "Koff": 9,
+    "Kon": 9,
+    "min_claimable_pct": 18.707800191828728
+   }
+  },
+  "JST-F277posthoc-W8-a": {
+   "noguard": "CLAIMED STRONG (ON faster)",
+   "guard": "CLAIMED STRONG (ON faster)",
+   "pooled": {
+    "off": 3.9984914798206277,
+    "on": 0.11767847533632286,
+    "delta_pct": -97.05692819579042,
+    "Koff": 9,
+    "Kon": 9,
+    "min_claimable_pct": 14.168172030539655
+   }
+  }
+ },
+ "used": [
+  {
+   "pass_": 0,
+   "round": 0,
+   "row": "JSoffT-a",
+   "W": 1,
+   "attempt": "original",
+   "seq": 5,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 15.212174599999999,
+   "wall": {
+    "0..100": 15.912593,
+    "100..500": 15.03707,
+    "274..500": 14.963769469026548,
+    "277..500": 14.967257399103138
+   },
+   "wall500": 15.212174599999999
+  },
+  {
+   "pass_": 0,
+   "round": 0,
+   "row": "JSoffT-a",
+   "W": 8,
+   "attempt": "original",
+   "seq": 1,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "steam.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 3.9876104,
+   "wall": {
+    "0..100": 4.301962,
+    "100..500": 3.9090225,
+    "274..500": 3.798833628318584,
+    "277..500": 3.79590134529148
+   },
+   "wall500": 3.9876104
+  },
+  {
+   "pass_": 0,
+   "round": 0,
+   "row": "JSonT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 8,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.391154,
+   "wall": {
+    "0..100": 15.958315,
+    "100..500": 6.49936375,
+    "274..500": 0.1302070796460177,
+    "277..500": 0.113752466367713
+   },
+   "wall500": 8.391154
+  },
+  {
+   "pass_": 0,
+   "round": 0,
+   "row": "JSonT",
+   "W": 8,
+   "attempt": "rerun",
+   "seq": 4,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "explorer.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.27689,
+   "wall": {
+    "0..100": 4.160169,
+    "100..500": 1.80607025,
+    "274..500": 0.13663672566371682,
+    "277..500": 0.12172869955156951
+   },
+   "wall500": 2.27689
+  },
+  {
+   "pass_": 0,
+   "round": 0,
+   "row": "JSonT-a",
+   "W": 1,
+   "attempt": "original",
+   "seq": 7,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.4246024,
+   "wall": {
+    "0..100": 16.015285,
+    "100..500": 6.52693175,
+    "274..500": 0.12762477876106193,
+    "277..500": 0.11131838565022421
+   },
+   "wall500": 8.4246024,
+   "l10": {
+    "0..100": 20.37608,
+    "100..500": 22.7414725,
+    "274..500": 25.16419469026549,
+    "277..500": 25.16182062780269
+   }
+  },
+  {
+   "pass_": 0,
+   "round": 0,
+   "row": "JSonT-a",
+   "W": 8,
+   "attempt": "rerun",
+   "seq": 3,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.33363,
+   "wall": {
+    "0..100": 4.293512,
+    "100..500": 1.8436595,
+    "274..500": 0.13646681415929202,
+    "277..500": 0.11774573991031391
+   },
+   "wall500": 2.33363,
+   "l10": {
+    "0..100": 22.85362,
+    "100..500": 24.71471,
+    "274..500": 27.014756637168137,
+    "277..500": 26.952112107623318
+   }
+  },
+  {
+   "pass_": 0,
+   "round": 1,
+   "row": "JSoffT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 14,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 14.9338358,
+   "wall": {
+    "0..100": 15.874459,
+    "100..500": 14.69868,
+    "274..500": 14.576357079646018,
+    "277..500": 14.579906278026906
+   },
+   "wall500": 14.9338358
+  },
+  {
+   "pass_": 0,
+   "round": 1,
+   "row": "JSoffT",
+   "W": 8,
+   "attempt": "original",
+   "seq": 10,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 3.8023314,
+   "wall": {
+    "0..100": 3.961327,
+    "100..500": 3.7625825,
+    "274..500": 3.85721814159292,
+    "277..500": 3.861716143497758
+   },
+   "wall500": 3.8023314
+  },
+  {
+   "pass_": 0,
+   "round": 1,
+   "row": "JSoffT-a",
+   "W": 1,
+   "attempt": "original",
+   "seq": 13,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 14.9937384,
+   "wall": {
+    "0..100": 15.922336,
+    "100..500": 14.761589,
+    "274..500": 14.636638053097345,
+    "277..500": 14.633066367713004
+   },
+   "wall500": 14.9937384
+  },
+  {
+   "pass_": 0,
+   "round": 1,
+   "row": "JSoffT-a",
+   "W": 8,
+   "attempt": "original",
+   "seq": 9,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 3.9771334,
+   "wall": {
+    "0..100": 4.225876,
+    "100..500": 3.91494775,
+    "274..500": 3.817346902654867,
+    "277..500": 3.813630044843049
+   },
+   "wall500": 3.9771334
+  },
+  {
+   "pass_": 0,
+   "round": 1,
+   "row": "JSonT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 16,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.3769712,
+   "wall": {
+    "0..100": 15.816469,
+    "100..500": 6.51709675,
+    "274..500": 0.12230221238938052,
+    "277..500": 0.1062493273542601
+   },
+   "wall500": 8.3769712
+  },
+  {
+   "pass_": 0,
+   "round": 1,
+   "row": "JSonT",
+   "W": 8,
+   "attempt": "original",
+   "seq": 12,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.271012,
+   "wall": {
+    "0..100": 4.154695,
+    "100..500": 1.80009125,
+    "274..500": 0.1323858407079646,
+    "277..500": 0.11769955156950673
+   },
+   "wall500": 2.271012
+  },
+  {
+   "pass_": 0,
+   "round": 1,
+   "row": "JSonT-a",
+   "W": 1,
+   "attempt": "rerun",
+   "seq": 15,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.4110106,
+   "wall": {
+    "0..100": 15.833767,
+    "100..500": 6.5553215,
+    "274..500": 0.13028230088495577,
+    "277..500": 0.1117269058295964
+   },
+   "wall500": 8.4110106,
+   "l10": {
+    "0..100": 19.17849,
+    "100..500": 23.2419,
+    "274..500": 25.379946902654865,
+    "277..500": 25.290600896860987
+   }
+  },
+  {
+   "pass_": 0,
+   "round": 1,
+   "row": "JSonT-a",
+   "W": 8,
+   "attempt": "original",
+   "seq": 11,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.3195922,
+   "wall": {
+    "0..100": 4.199875,
+    "100..500": 1.8495215,
+    "274..500": 0.13699690265486728,
+    "277..500": 0.12165874439461882
+   },
+   "wall500": 2.3195922,
+   "l10": {
+    "0..100": 19.89994,
+    "100..500": 24.933765,
+    "274..500": 27.624544247787615,
+    "277..500": 27.609417040358746
+   }
+  },
+  {
+   "pass_": 0,
+   "round": 2,
+   "row": "JSoffT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 22,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 15.1798394,
+   "wall": {
+    "0..100": 15.894138,
+    "100..500": 15.00126475,
+    "274..500": 14.932557522123894,
+    "277..500": 14.931879820627803
+   },
+   "wall500": 15.1798394
+  },
+  {
+   "pass_": 0,
+   "round": 2,
+   "row": "JSoffT",
+   "W": 8,
+   "attempt": "original",
+   "seq": 18,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 3.8997678,
+   "wall": {
+    "0..100": 4.126495,
+    "100..500": 3.843086,
+    "274..500": 3.769400442477876,
+    "277..500": 3.7681977578475334
+   },
+   "wall500": 3.8997678
+  },
+  {
+   "pass_": 0,
+   "round": 2,
+   "row": "JSoffT-a",
+   "W": 1,
+   "attempt": "original",
+   "seq": 21,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 14.9786886,
+   "wall": {
+    "0..100": 15.85377,
+    "100..500": 14.75991825,
+    "274..500": 14.67198407079646,
+    "277..500": 14.675077578475335
+   },
+   "wall500": 14.9786886
+  },
+  {
+   "pass_": 0,
+   "round": 2,
+   "row": "JSoffT-a",
+   "W": 8,
+   "attempt": "original",
+   "seq": 17,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 3.997821,
+   "wall": {
+    "0..100": 3.916159,
+    "100..500": 4.0182365,
+    "274..500": 4.046138495575221,
+    "277..500": 4.047017040358744
+   },
+   "wall500": 3.997821
+  },
+  {
+   "pass_": 0,
+   "round": 2,
+   "row": "JSonT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 24,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.406769,
+   "wall": {
+    "0..100": 15.962156,
+    "100..500": 6.51792225,
+    "274..500": 0.12499911504424778,
+    "277..500": 0.10848251121076233
+   },
+   "wall500": 8.406769
+  },
+  {
+   "pass_": 0,
+   "round": 2,
+   "row": "JSonT",
+   "W": 8,
+   "attempt": "rerun",
+   "seq": 20,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.1367136,
+   "wall": {
+    "0..100": 3.982231,
+    "100..500": 1.67533425,
+    "274..500": 0.12856106194690264,
+    "277..500": 0.11423721973094171
+   },
+   "wall500": 2.1367136
+  },
+  {
+   "pass_": 0,
+   "round": 2,
+   "row": "JSonT-a",
+   "W": 1,
+   "attempt": "original",
+   "seq": 23,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.4583654,
+   "wall": {
+    "0..100": 16.053197,
+    "100..500": 6.5596575,
+    "274..500": 0.13212964601769914,
+    "277..500": 0.11411390134529148
+   },
+   "wall500": 8.4583654,
+   "l10": {
+    "0..100": 20.41141,
+    "100..500": 23.60212,
+    "274..500": 26.112982300884955,
+    "277..500": 26.098269058295962
+   }
+  },
+  {
+   "pass_": 0,
+   "round": 2,
+   "row": "JSonT-a",
+   "W": 8,
+   "attempt": "original",
+   "seq": 19,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "explorer.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.2281062,
+   "wall": {
+    "0..100": 4.239247,
+    "100..500": 1.725321,
+    "274..500": 0.12596725663716815,
+    "277..500": 0.11210403587443946
+   },
+   "wall500": 2.2281062,
+   "l10": {
+    "0..100": 21.50871,
+    "100..500": 22.057302500000002,
+    "274..500": 25.329495575221237,
+    "277..500": 25.328650224215245
+   }
+  },
+  {
+   "pass_": 1,
+   "round": 0,
+   "row": "JSoffT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 3,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 14.963621,
+   "wall": {
+    "0..100": 15.856081,
+    "100..500": 14.740506,
+    "274..500": 14.62475,
+    "277..500": 14.625100448430494
+   },
+   "wall500": 14.963621
+  },
+  {
+   "pass_": 1,
+   "round": 0,
+   "row": "JSoffT",
+   "W": 8,
+   "attempt": "original",
+   "seq": 7,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 3.8106088,
+   "wall": {
+    "0..100": 4.093079,
+    "100..500": 3.73999125,
+    "274..500": 3.721809292035398,
+    "277..500": 3.7241932735426007
+   },
+   "wall500": 3.8106088
+  },
+  {
+   "pass_": 1,
+   "round": 0,
+   "row": "JSoffT-a",
+   "W": 1,
+   "attempt": "original",
+   "seq": 4,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 15.0042398,
+   "wall": {
+    "0..100": 15.951725,
+    "100..500": 14.7673685,
+    "274..500": 14.65513407079646,
+    "277..500": 14.65807130044843
+   },
+   "wall500": 15.0042398
+  },
+  {
+   "pass_": 1,
+   "round": 0,
+   "row": "JSoffT-a",
+   "W": 8,
+   "attempt": "original",
+   "seq": 8,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 3.9918074,
+   "wall": {
+    "0..100": 3.976961,
+    "100..500": 3.995519,
+    "274..500": 4.006688938053098,
+    "277..500": 4.00482197309417
+   },
+   "wall500": 3.9918074
+  },
+  {
+   "pass_": 1,
+   "round": 0,
+   "row": "JSonT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 1,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.3655398,
+   "wall": {
+    "0..100": 15.771377,
+    "100..500": 6.5140805,
+    "274..500": 0.12364955752212389,
+    "277..500": 0.10748116591928251
+   },
+   "wall500": 8.3655398
+  },
+  {
+   "pass_": 1,
+   "round": 0,
+   "row": "JSonT",
+   "W": 8,
+   "attempt": "original",
+   "seq": 5,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.2616156000000003,
+   "wall": {
+    "0..100": 4.123514,
+    "100..500": 1.796141,
+    "274..500": 0.13946725663716814,
+    "277..500": 0.12328116591928252
+   },
+   "wall500": 2.2616156000000003
+  },
+  {
+   "pass_": 1,
+   "round": 0,
+   "row": "JSonT-a",
+   "W": 1,
+   "attempt": "rerun",
+   "seq": 2,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.3942624,
+   "wall": {
+    "0..100": 15.868965,
+    "100..500": 6.52558675,
+    "274..500": 0.12553230088495576,
+    "277..500": 0.10869147982062781
+   },
+   "wall500": 8.3942624,
+   "l10": {
+    "0..100": 19.3564,
+    "100..500": 22.223544999999998,
+    "274..500": 24.408907079646013,
+    "277..500": 24.30608071748879
+   }
+  },
+  {
+   "pass_": 1,
+   "round": 0,
+   "row": "JSonT-a",
+   "W": 8,
+   "attempt": "original",
+   "seq": 6,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.3239412,
+   "wall": {
+    "0..100": 4.2764,
+    "100..500": 1.8358265,
+    "274..500": 0.12935442477876108,
+    "277..500": 0.1150170403587444
+   },
+   "wall500": 2.3239412,
+   "l10": {
+    "0..100": 21.58643,
+    "100..500": 23.9227575,
+    "274..500": 26.132154867256634,
+    "277..500": 26.13708071748879
+   }
+  },
+  {
+   "pass_": 1,
+   "round": 1,
+   "row": "JSoffT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 11,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 14.9384766,
+   "wall": {
+    "0..100": 15.800733,
+    "100..500": 14.7229125,
+    "274..500": 14.585433185840706,
+    "277..500": 14.58849596412556
+   },
+   "wall500": 14.9384766
+  },
+  {
+   "pass_": 1,
+   "round": 1,
+   "row": "JSoffT",
+   "W": 8,
+   "attempt": "original",
+   "seq": 15,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 3.9383622000000003,
+   "wall": {
+    "0..100": 4.101027,
+    "100..500": 3.897696,
+    "274..500": 3.8641442477876105,
+    "277..500": 3.8641094170403587
+   },
+   "wall500": 3.9383622000000003
+  },
+  {
+   "pass_": 1,
+   "round": 1,
+   "row": "JSoffT-a",
+   "W": 1,
+   "attempt": "original",
+   "seq": 12,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 15.0247552,
+   "wall": {
+    "0..100": 15.828999,
+    "100..500": 14.82369425,
+    "274..500": 14.755259292035399,
+    "277..500": 14.759206726457398
+   },
+   "wall500": 15.0247552
+  },
+  {
+   "pass_": 1,
+   "round": 1,
+   "row": "JSoffT-a",
+   "W": 8,
+   "attempt": "original",
+   "seq": 16,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 3.9462416,
+   "wall": {
+    "0..100": 4.250663,
+    "100..500": 3.87013625,
+    "274..500": 3.8349690265486727,
+    "277..500": 3.8376457399103137
+   },
+   "wall500": 3.9462416
+  },
+  {
+   "pass_": 1,
+   "round": 1,
+   "row": "JSonT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 9,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.4225224,
+   "wall": {
+    "0..100": 16.047133,
+    "100..500": 6.51636975,
+    "274..500": 0.12540619469026548,
+    "277..500": 0.10784080717488789
+   },
+   "wall500": 8.4225224
+  },
+  {
+   "pass_": 1,
+   "round": 1,
+   "row": "JSonT",
+   "W": 8,
+   "attempt": "original",
+   "seq": 13,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.2255776000000003,
+   "wall": {
+    "0..100": 3.903334,
+    "100..500": 1.8061385,
+    "274..500": 0.13723938053097345,
+    "277..500": 0.12127892376681614
+   },
+   "wall500": 2.2255776000000003
+  },
+  {
+   "pass_": 1,
+   "round": 1,
+   "row": "JSonT-a",
+   "W": 1,
+   "attempt": "original",
+   "seq": 10,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.4346234,
+   "wall": {
+    "0..100": 15.985164,
+    "100..500": 6.54698825,
+    "274..500": 0.12503362831858408,
+    "277..500": 0.1085780269058296
+   },
+   "wall500": 8.4346234,
+   "l10": {
+    "0..100": 20.14433,
+    "100..500": 22.946465,
+    "274..500": 24.51072123893805,
+    "277..500": 24.50037668161435
+   }
+  },
+  {
+   "pass_": 1,
+   "round": 1,
+   "row": "JSonT-a",
+   "W": 8,
+   "attempt": "original",
+   "seq": 14,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "Telegram.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.3193394,
+   "wall": {
+    "0..100": 4.179401,
+    "100..500": 1.854324,
+    "274..500": 0.13351194690265486,
+    "277..500": 0.11767847533632286
+   },
+   "wall500": 2.3193394,
+   "l10": {
+    "0..100": 20.134790000000002,
+    "100..500": 24.6789025,
+    "274..500": 27.037026548672568,
+    "277..500": 27.033452914798207
+   }
+  },
+  {
+   "pass_": 1,
+   "round": 2,
+   "row": "JSoffT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 19,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 14.9912926,
+   "wall": {
+    "0..100": 15.917398,
+    "100..500": 14.75976625,
+    "274..500": 14.604244690265485,
+    "277..500": 14.604400896860987
+   },
+   "wall500": 14.9912926
+  },
+  {
+   "pass_": 1,
+   "round": 2,
+   "row": "JSoffT",
+   "W": 8,
+   "attempt": "original",
+   "seq": 23,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 3.8327416000000003,
+   "wall": {
+    "0..100": 3.927882,
+    "100..500": 3.8089565,
+    "274..500": 3.89965796460177,
+    "277..500": 3.8987946188340805
+   },
+   "wall500": 3.8327416000000003
+  },
+  {
+   "pass_": 1,
+   "round": 2,
+   "row": "JSoffT-a",
+   "W": 1,
+   "attempt": "original",
+   "seq": 20,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 15.0050594,
+   "wall": {
+    "0..100": 15.919557,
+    "100..500": 14.776435,
+    "274..500": 14.646708849557523,
+    "277..500": 14.649050224215246
+   },
+   "wall500": 15.0050594
+  },
+  {
+   "pass_": 1,
+   "round": 2,
+   "row": "JSoffT-a",
+   "W": 8,
+   "attempt": "original",
+   "seq": 24,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 4.0584896,
+   "wall": {
+    "0..100": 4.220888,
+    "100..500": 4.01789,
+    "274..500": 3.9985048672566372,
+    "277..500": 3.9984914798206277
+   },
+   "wall500": 4.0584896
+  },
+  {
+   "pass_": 1,
+   "round": 2,
+   "row": "JSonT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 17,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.3742368,
+   "wall": {
+    "0..100": 15.900523,
+    "100..500": 6.49266525,
+    "274..500": 0.12616150442477875,
+    "277..500": 0.10972286995515694
+   },
+   "wall500": 8.3742368
+  },
+  {
+   "pass_": 1,
+   "round": 2,
+   "row": "JSonT",
+   "W": 8,
+   "attempt": "original",
+   "seq": 21,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.1952968,
+   "wall": {
+    "0..100": 4.144632,
+    "100..500": 1.707963,
+    "274..500": 0.12464380530973451,
+    "277..500": 0.11004349775784754
+   },
+   "wall500": 2.1952968
+  },
+  {
+   "pass_": 1,
+   "round": 2,
+   "row": "JSonT-a",
+   "W": 1,
+   "attempt": "rerun",
+   "seq": 18,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.4047746,
+   "wall": {
+    "0..100": 15.936305,
+    "100..500": 6.521892,
+    "274..500": 0.12372522123893806,
+    "277..500": 0.10743408071748879
+   },
+   "wall500": 8.4047746,
+   "l10": {
+    "0..100": 19.59903,
+    "100..500": 21.927165000000002,
+    "274..500": 24.25344247787611,
+    "277..500": 24.24804932735426
+   }
+  },
+  {
+   "pass_": 1,
+   "round": 2,
+   "row": "JSonT-a",
+   "W": 8,
+   "attempt": "rerun",
+   "seq": 22,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.1947222,
+   "wall": {
+    "0..100": 3.979862,
+    "100..500": 1.74843725,
+    "274..500": 0.13341681415929202,
+    "277..500": 0.1177780269058296
+   },
+   "wall500": 2.1947222,
+   "l10": {
+    "0..100": 18.111819999999998,
+    "100..500": 23.406155,
+    "274..500": 27.11003982300885,
+    "277..500": 27.06611659192825
+   }
+  },
+  {
+   "pass_": 2,
+   "round": 0,
+   "row": "JSoffT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 6,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 14.9829914,
+   "wall": {
+    "0..100": 15.865176,
+    "100..500": 14.76244525,
+    "274..500": 14.645946460176992,
+    "277..500": 14.648903587443947
+   },
+   "wall500": 14.9829914
+  },
+  {
+   "pass_": 2,
+   "round": 0,
+   "row": "JSoffT",
+   "W": 8,
+   "attempt": "original",
+   "seq": 2,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 3.9559142,
+   "wall": {
+    "0..100": 4.130715,
+    "100..500": 3.912214,
+    "274..500": 3.8616371681415926,
+    "277..500": 3.859906278026906
+   },
+   "wall500": 3.9559142
+  },
+  {
+   "pass_": 2,
+   "round": 0,
+   "row": "JSoffT-a",
+   "W": 1,
+   "attempt": "original",
+   "seq": 5,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 15.2324392,
+   "wall": {
+    "0..100": 15.989479,
+    "100..500": 15.04317925,
+    "274..500": 14.962669911504426,
+    "277..500": 14.963834529147983
+   },
+   "wall500": 15.2324392
+  },
+  {
+   "pass_": 2,
+   "round": 0,
+   "row": "JSoffT-a",
+   "W": 8,
+   "attempt": "original",
+   "seq": 1,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 3.9494456000000002,
+   "wall": {
+    "0..100": 3.979144,
+    "100..500": 3.942021,
+    "274..500": 4.019509292035398,
+    "277..500": 4.021152914798206
+   },
+   "wall500": 3.9494456000000002
+  },
+  {
+   "pass_": 2,
+   "round": 0,
+   "row": "JSonT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 8,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.3745868,
+   "wall": {
+    "0..100": 15.912699,
+    "100..500": 6.49005875,
+    "274..500": 0.130679203539823,
+    "277..500": 0.11218251121076232
+   },
+   "wall500": 8.3745868
+  },
+  {
+   "pass_": 2,
+   "round": 0,
+   "row": "JSonT",
+   "W": 8,
+   "attempt": "original",
+   "seq": 4,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "steamwebhelper.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.1832138,
+   "wall": {
+    "0..100": 4.17895,
+    "100..500": 1.68427975,
+    "274..500": 0.12931725663716814,
+    "277..500": 0.11484798206278027
+   },
+   "wall500": 2.1832138
+  },
+  {
+   "pass_": 2,
+   "round": 0,
+   "row": "JSonT-a",
+   "W": 1,
+   "attempt": "original",
+   "seq": 7,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.4019948,
+   "wall": {
+    "0..100": 15.926589,
+    "100..500": 6.52084625,
+    "274..500": 0.12845265486725665,
+    "277..500": 0.11119686098654707
+   },
+   "wall500": 8.4019948,
+   "l10": {
+    "0..100": 19.33287,
+    "100..500": 23.19042,
+    "274..500": 25.271991150442478,
+    "277..500": 25.245663677130043
+   }
+  },
+  {
+   "pass_": 2,
+   "round": 0,
+   "row": "JSonT-a",
+   "W": 8,
+   "attempt": "original",
+   "seq": 3,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.2753656,
+   "wall": {
+    "0..100": 4.278816,
+    "100..500": 1.774503,
+    "274..500": 0.12415442477876107,
+    "277..500": 0.10999686098654708
+   },
+   "wall500": 2.2753656,
+   "l10": {
+    "0..100": 21.904940000000003,
+    "100..500": 22.4577525,
+    "274..500": 24.748646017699112,
+    "277..500": 24.738502242152467
+   }
+  },
+  {
+   "pass_": 2,
+   "round": 1,
+   "row": "JSoffT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 14,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 15.2610714,
+   "wall": {
+    "0..100": 15.940765,
+    "100..500": 15.091148,
+    "274..500": 14.980464159292035,
+    "277..500": 14.985409417040358
+   },
+   "wall500": 15.2610714
+  },
+  {
+   "pass_": 2,
+   "round": 1,
+   "row": "JSoffT",
+   "W": 8,
+   "attempt": "original",
+   "seq": 10,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 3.861662,
+   "wall": {
+    "0..100": 3.880656,
+    "100..500": 3.8569135,
+    "274..500": 3.9422389380530976,
+    "277..500": 3.943975784753363
+   },
+   "wall500": 3.861662
+  },
+  {
+   "pass_": 2,
+   "round": 1,
+   "row": "JSoffT-a",
+   "W": 1,
+   "attempt": "original",
+   "seq": 13,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 15.002116800000001,
+   "wall": {
+    "0..100": 15.971206,
+    "100..500": 14.7598445,
+    "274..500": 14.646012831858407,
+    "277..500": 14.645717488789238
+   },
+   "wall500": 15.002116800000001
+  },
+  {
+   "pass_": 2,
+   "round": 1,
+   "row": "JSoffT-a",
+   "W": 8,
+   "attempt": "original",
+   "seq": 9,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 3.9539154,
+   "wall": {
+    "0..100": 4.264495,
+    "100..500": 3.8762705,
+    "274..500": 3.7288371681415926,
+    "277..500": 3.725412556053812
+   },
+   "wall500": 3.9539154
+  },
+  {
+   "pass_": 2,
+   "round": 1,
+   "row": "JSonT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 16,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.409615800000001,
+   "wall": {
+    "0..100": 15.910739,
+    "100..500": 6.534335,
+    "274..500": 0.13488849557522123,
+    "277..500": 0.11663946188340807
+   },
+   "wall500": 8.409615800000001
+  },
+  {
+   "pass_": 2,
+   "round": 1,
+   "row": "JSonT",
+   "W": 8,
+   "attempt": "rerun",
+   "seq": 12,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.1252572,
+   "wall": {
+    "0..100": 3.954156,
+    "100..500": 1.6680325,
+    "274..500": 0.13368053097345134,
+    "277..500": 0.11692466367713004
+   },
+   "wall500": 2.1252572
+  },
+  {
+   "pass_": 2,
+   "round": 1,
+   "row": "JSonT-a",
+   "W": 1,
+   "attempt": "original",
+   "seq": 15,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.5623616,
+   "wall": {
+    "0..100": 16.144955,
+    "100..500": 6.66671325,
+    "274..500": 0.13336946902654867,
+    "277..500": 0.1148659192825112
+   },
+   "wall500": 8.5623616,
+   "l10": {
+    "0..100": 22.48387,
+    "100..500": 24.90716,
+    "274..500": 26.09504867256637,
+    "277..500": 26.05219730941704
+   }
+  },
+  {
+   "pass_": 2,
+   "round": 1,
+   "row": "JSonT-a",
+   "W": 8,
+   "attempt": "rerun",
+   "seq": 11,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.220322,
+   "wall": {
+    "0..100": 4.241048,
+    "100..500": 1.7151405,
+    "274..500": 0.1245862831858407,
+    "277..500": 0.10972107623318386
+   },
+   "wall500": 2.220322,
+   "l10": {
+    "0..100": 21.15877,
+    "100..500": 21.5419375,
+    "274..500": 24.618535398230087,
+    "277..500": 24.60083856502242
+   }
+  },
+  {
+   "pass_": 2,
+   "round": 2,
+   "row": "JSoffT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 22,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 14.9307032,
+   "wall": {
+    "0..100": 15.901129,
+    "100..500": 14.68809675,
+    "274..500": 14.563650884955752,
+    "277..500": 14.565465919282511
+   },
+   "wall500": 14.9307032
+  },
+  {
+   "pass_": 2,
+   "round": 2,
+   "row": "JSoffT",
+   "W": 8,
+   "attempt": "original",
+   "seq": 18,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 3.8160277999999996,
+   "wall": {
+    "0..100": 4.134663,
+    "100..500": 3.736369,
+    "274..500": 3.6371362831858405,
+    "277..500": 3.6383654708520177
+   },
+   "wall500": 3.8160277999999996
+  },
+  {
+   "pass_": 2,
+   "round": 2,
+   "row": "JSoffT-a",
+   "W": 1,
+   "attempt": "rerun",
+   "seq": 21,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 14.953583199999999,
+   "wall": {
+    "0..100": 15.815295,
+    "100..500": 14.73815525,
+    "274..500": 14.626307079646017,
+    "277..500": 14.629238116591928
+   },
+   "wall500": 14.953583199999999
+  },
+  {
+   "pass_": 2,
+   "round": 2,
+   "row": "JSoffT-a",
+   "W": 8,
+   "attempt": "original",
+   "seq": 17,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": null,
+   "driver_mean": 4.1357512000000005,
+   "wall": {
+    "0..100": 4.263523,
+    "100..500": 4.10380825,
+    "274..500": 4.089973451327434,
+    "277..500": 4.092108968609866
+   },
+   "wall500": 4.1357512000000005
+  },
+  {
+   "pass_": 2,
+   "round": 2,
+   "row": "JSonT",
+   "W": 1,
+   "attempt": "original",
+   "seq": 24,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.3856888,
+   "wall": {
+    "0..100": 15.833814,
+    "100..500": 6.5236575,
+    "274..500": 0.1235362831858407,
+    "277..500": 0.1075780269058296
+   },
+   "wall500": 8.3856888
+  },
+  {
+   "pass_": 2,
+   "round": 2,
+   "row": "JSonT",
+   "W": 8,
+   "attempt": "rerun",
+   "seq": 20,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.1338578,
+   "wall": {
+    "0..100": 3.818685,
+    "100..500": 1.712651,
+    "274..500": 0.1363646017699115,
+    "277..500": 0.12077040358744394
+   },
+   "wall500": 2.1338578
+  },
+  {
+   "pass_": 2,
+   "round": 2,
+   "row": "JSonT-a",
+   "W": 1,
+   "attempt": "original",
+   "seq": 23,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "claude.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 8.416084199999998,
+   "wall": {
+    "0..100": 15.921427,
+    "100..500": 6.5397485,
+    "274..500": 0.12768008849557522,
+    "277..500": 0.11003363228699552
+   },
+   "wall500": 8.416084199999998,
+   "l10": {
+    "0..100": 19.42128,
+    "100..500": 22.4981275,
+    "274..500": 24.57329203539823,
+    "277..500": 24.530094170403586
+   }
+  },
+  {
+   "pass_": 2,
+   "round": 2,
+   "row": "JSonT-a",
+   "W": 8,
+   "attempt": "original",
+   "seq": 19,
+   "valid": true,
+   "clean": true,
+   "clean_why": [],
+   "witness_top": [
+    "steamwebhelper.exe"
+   ],
+   "freeze": 274,
+   "driver_mean": 2.215011,
+   "wall": {
+    "0..100": 3.949735,
+    "100..500": 1.78133,
+    "274..500": 0.13706769911504424,
+    "277..500": 0.12089058295964125
+   },
+   "wall500": 2.215011,
+   "l10": {
+    "0..100": 17.446930000000002,
+    "100..500": 23.682467499999998,
+    "274..500": 27.053743362831856,
+    "277..500": 26.96052466367713
+   }
+  }
+ ]
+}

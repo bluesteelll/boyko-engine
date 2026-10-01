@@ -1,0 +1,806 @@
+{
+ "0..500|SELECTED|C1-JT": {
+  "A": 1.8112432,
+  "B": 2.1901957999999997,
+  "ratio": 1.209222372787928,
+  "delta": 0.37895259999999964,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.032714767539740626,
+  "verdict": "FAILS (B claimed slower)",
+  "per_pass_ratio": [
+   1.2088057417662488,
+   1.2115476072382594,
+   1.2108730591451875
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..500|SELECTED|C1-JA": {
+  "A": 5.304042,
+  "B": 5.86577,
+  "ratio": 1.1059056470518145,
+  "delta": 0.5617280000000004,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.020870689151563843,
+  "verdict": "FAILS (B claimed slower)",
+  "per_pass_ratio": [
+   1.1059469320741713,
+   1.1049930101809842,
+   1.104827258876215
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..500|SELECTED|C2-JT": {
+  "A": 1.8152158,
+  "B": 1.8112432,
+  "ratio": 0.9978114998778658,
+  "delta": -0.003972599999999993,
+  "claimed": false,
+  "strong": false,
+  "strong_pooled": false,
+  "binding": 0.0347510687871889,
+  "verdict": "HOLDS (no resolved difference)",
+  "per_pass_ratio": [
+   0.9984927541855477,
+   0.9945827915150006,
+   0.9902386009244339
+  ],
+  "flags": {
+   "pooled": "n/n/n",
+   "p0": "n/n/n",
+   "p1": "n/n/n",
+   "p2": "n/n/n"
+  }
+ },
+ "0..500|SELECTED|C2-JA": {
+  "A": 5.3080822,
+  "B": 5.304042,
+  "ratio": 0.9992388588104381,
+  "delta": -0.004040200000000382,
+  "claimed": false,
+  "strong": false,
+  "strong_pooled": false,
+  "binding": 0.020639568030526058,
+  "verdict": "HOLDS (no resolved difference)",
+  "per_pass_ratio": [
+   0.9984168678681402,
+   1.001661054580589,
+   1.0006818130208475
+  ],
+  "flags": {
+   "pooled": "n/n/n",
+   "p0": "n/n/n",
+   "p1": "n/n/n",
+   "p2": "n/n/n"
+  }
+ },
+ "0..500|SELECTED|C3-JT": {
+  "A": 2.0501972,
+  "B": 2.1901957999999997,
+  "ratio": 1.0682854312746108,
+  "delta": 0.13999859999999975,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.026319735750872254,
+  "verdict": "REFUTED: T16 claimed SLOWER than P16 by 0.1400 ms",
+  "per_pass_ratio": [
+   1.065882474569229,
+   1.0633257492810277,
+   1.0734206315956765
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..500|SELECTED|PH-P16vsP8-JT": {
+  "A": 1.8152158,
+  "B": 2.0501972,
+  "ratio": 1.1294509446204688,
+  "delta": 0.2349813999999999,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.020287857143141408,
+  "verdict": "post hoc: claimed",
+  "per_pass_ratio": [
+   1.1323797915518614,
+   1.1332222529879512,
+   1.1170394984886642
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..500|SELECTED|PH-P16vsP8-JA": {
+  "A": 5.3080822,
+  "B": 5.207888400000001,
+  "ratio": 0.9811242938174546,
+  "delta": -0.10019379999999956,
+  "claimed": false,
+  "strong": false,
+  "strong_pooled": false,
+  "binding": 0.021690819403730407,
+  "verdict": "post hoc: not claimed",
+  "per_pass_ratio": [
+   0.9904446587079607,
+   0.9836695642601769,
+   0.9800546060489638
+  ],
+  "flags": {
+   "pooled": "n/Y/Y",
+   "p0": "n/n/n",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..500|SELECTED|PH-JA-P16vsT16": {
+  "A": 5.207888400000001,
+  "B": 5.86577,
+  "ratio": 1.1263240587106282,
+  "delta": 0.6578815999999996,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.0219108544694117,
+  "verdict": "post hoc: claimed",
+  "per_pass_ratio": [
+   1.1148488330385882,
+   1.1252035277868089,
+   1.1280805555765825
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..500|SELECTED|PH-W1-PvsT": {
+  "A": 4.416727799999999,
+  "B": 4.4551418,
+  "ratio": 1.0086973890489699,
+  "delta": 0.03841400000000039,
+  "claimed": false,
+  "strong": false,
+  "strong_pooled": false,
+  "binding": 0.04696018838048645,
+  "verdict": "post hoc: not claimed",
+  "per_pass_ratio": [
+   0.9847086790197617,
+   1.006738139360466,
+   1.0117328752048729
+  ],
+  "flags": {
+   "pooled": "n/n/n",
+   "p0": "n/n/n",
+   "p1": "n/n/n",
+   "p2": "n/n/n"
+  }
+ },
+ "0..500|SELECTED|ladder8": 0.06,
+ "0..500|SELECTED|ladder16": 0.0525,
+ "0..500|SELECTED|JA-ladder16": null,
+ "0..500|ORIGINALS-ONLY|C1-JT": {
+  "A": 1.8112432,
+  "B": 2.1901957999999997,
+  "ratio": 1.209222372787928,
+  "delta": 0.37895259999999964,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.032714767539740626,
+  "verdict": "FAILS (B claimed slower)",
+  "per_pass_ratio": [
+   1.2088057417662488,
+   1.2115476072382594,
+   1.2108730591451875
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..500|ORIGINALS-ONLY|C1-JA": {
+  "A": 5.3144612,
+  "B": 5.86577,
+  "ratio": 1.1037374776581304,
+  "delta": 0.5513088000000002,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.020870689151563843,
+  "verdict": "FAILS (B claimed slower)",
+  "per_pass_ratio": [
+   1.1059469320741713,
+   1.0997465937783,
+   1.104827258876215
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..500|ORIGINALS-ONLY|C2-JT": {
+  "A": 1.8152158,
+  "B": 1.8112432,
+  "ratio": 0.9978114998778658,
+  "delta": -0.003972599999999993,
+  "claimed": false,
+  "strong": false,
+  "strong_pooled": false,
+  "binding": 0.0347510687871889,
+  "verdict": "HOLDS (no resolved difference)",
+  "per_pass_ratio": [
+   0.9984927541855477,
+   0.9945827915150006,
+   0.9902386009244339
+  ],
+  "flags": {
+   "pooled": "n/n/n",
+   "p0": "n/n/n",
+   "p1": "n/n/n",
+   "p2": "n/n/n"
+  }
+ },
+ "0..500|ORIGINALS-ONLY|C2-JA": {
+  "A": 5.3080822,
+  "B": 5.3144612,
+  "ratio": 1.0012017523014245,
+  "delta": 0.0063789999999999125,
+  "claimed": false,
+  "strong": false,
+  "strong_pooled": false,
+  "binding": 0.020639568030526058,
+  "verdict": "HOLDS (no resolved difference)",
+  "per_pass_ratio": [
+   0.9984168678681402,
+   1.006439547204628,
+   1.0006818130208475
+  ],
+  "flags": {
+   "pooled": "n/n/n",
+   "p0": "n/n/n",
+   "p1": "n/n/n",
+   "p2": "n/n/n"
+  }
+ },
+ "0..500|ORIGINALS-ONLY|C3-JT": {
+  "A": 2.0501972,
+  "B": 2.1901957999999997,
+  "ratio": 1.0682854312746108,
+  "delta": 0.13999859999999975,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.026319735750872254,
+  "verdict": "REFUTED: T16 claimed SLOWER than P16 by 0.1400 ms",
+  "per_pass_ratio": [
+   1.065882474569229,
+   1.0633257492810277,
+   1.0734206315956765
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..500|ORIGINALS-ONLY|PH-P16vsP8-JT": {
+  "A": 1.8152158,
+  "B": 2.0501972,
+  "ratio": 1.1294509446204688,
+  "delta": 0.2349813999999999,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.020287857143141408,
+  "verdict": "post hoc: claimed",
+  "per_pass_ratio": [
+   1.1323797915518614,
+   1.1332222529879512,
+   1.1170394984886642
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..500|ORIGINALS-ONLY|PH-P16vsP8-JA": {
+  "A": 5.3080822,
+  "B": 5.207888400000001,
+  "ratio": 0.9811242938174546,
+  "delta": -0.10019379999999956,
+  "claimed": false,
+  "strong": false,
+  "strong_pooled": false,
+  "binding": 0.021690819403730407,
+  "verdict": "post hoc: not claimed",
+  "per_pass_ratio": [
+   0.9904446587079607,
+   0.9836695642601769,
+   0.9800546060489638
+  ],
+  "flags": {
+   "pooled": "n/Y/Y",
+   "p0": "n/n/n",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..500|ORIGINALS-ONLY|PH-JA-P16vsT16": {
+  "A": 5.207888400000001,
+  "B": 5.86577,
+  "ratio": 1.1263240587106282,
+  "delta": 0.6578815999999996,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.0219108544694117,
+  "verdict": "post hoc: claimed",
+  "per_pass_ratio": [
+   1.1148488330385882,
+   1.1252035277868089,
+   1.1280805555765825
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..500|ORIGINALS-ONLY|PH-W1-PvsT": {
+  "A": 4.416727799999999,
+  "B": 4.4551418,
+  "ratio": 1.0086973890489699,
+  "delta": 0.03841400000000039,
+  "claimed": false,
+  "strong": false,
+  "strong_pooled": false,
+  "binding": 0.18008617263225069,
+  "verdict": "post hoc: not claimed",
+  "per_pass_ratio": [
+   0.9847086790197617,
+   1.006738139360466,
+   1.0117328752048729
+  ],
+  "flags": {
+   "pooled": "n/n/n",
+   "p0": "n/n/n",
+   "p1": "n/n/n",
+   "p2": "n/n/n"
+  }
+ },
+ "0..500|ORIGINALS-ONLY|ladder8": 0.06,
+ "0..500|ORIGINALS-ONLY|ladder16": 0.0525,
+ "0..500|ORIGINALS-ONLY|JA-ladder16": null,
+ "0..100|SELECTED|C1-JT": {
+  "A": 1.974043,
+  "B": 2.331662,
+  "ratio": 1.181160694067961,
+  "delta": 0.35761900000000013,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.02009398662773881,
+  "verdict": "FAILS (B claimed slower)",
+  "per_pass_ratio": [
+   1.1857320379862317,
+   1.1808851174974406,
+   1.1647320752869668
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..100|SELECTED|C1-JA": {
+  "A": 5.438612,
+  "B": 5.983947,
+  "ratio": 1.1002709882595043,
+  "delta": 0.5453349999999997,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.01563165436173815,
+  "verdict": "FAILS (B claimed slower)",
+  "per_pass_ratio": [
+   1.1007809375630913,
+   1.1003813105255533,
+   1.1000987557292752
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..100|SELECTED|C2-JT": {
+  "A": 1.982898,
+  "B": 1.974043,
+  "ratio": 0.9955343139183155,
+  "delta": -0.008855000000000057,
+  "claimed": false,
+  "strong": false,
+  "strong_pooled": false,
+  "binding": 0.029161070033786353,
+  "verdict": "HOLDS (no resolved difference)",
+  "per_pass_ratio": [
+   0.9933569376280158,
+   0.9955343139183155,
+   0.9938577908799215
+  ],
+  "flags": {
+   "pooled": "n/n/n",
+   "p0": "n/n/n",
+   "p1": "n/n/n",
+   "p2": "n/n/n"
+  }
+ },
+ "0..100|SELECTED|C2-JA": {
+  "A": 5.439739,
+  "B": 5.438612,
+  "ratio": 0.9997928209423282,
+  "delta": -0.0011270000000003222,
+  "claimed": false,
+  "strong": false,
+  "strong_pooled": false,
+  "binding": 0.011945107850557067,
+  "verdict": "HOLDS (no resolved difference)",
+  "per_pass_ratio": [
+   0.9989012007190268,
+   1.0010622434928613,
+   0.9988914459763509
+  ],
+  "flags": {
+   "pooled": "n/n/n",
+   "p0": "n/n/n",
+   "p1": "n/n/n",
+   "p2": "n/n/n"
+  }
+ },
+ "0..100|SELECTED|C3-JT": {
+  "A": 2.200814,
+  "B": 2.331662,
+  "ratio": 1.059454365521121,
+  "delta": 0.1308480000000003,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.011952602017877956,
+  "verdict": "REFUTED: T16 claimed SLOWER than P16 by 0.1308 ms",
+  "per_pass_ratio": [
+   1.0610658172050542,
+   1.056581589941091,
+   1.060980648402292
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..100|SELECTED|PH-P16vsP8-JT": {
+  "A": 1.982898,
+  "B": 2.200814,
+  "ratio": 1.1098977355365731,
+  "delta": 0.21791599999999978,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.028292214183472945,
+  "verdict": "post hoc: claimed",
+  "per_pass_ratio": [
+   1.1100679401811369,
+   1.1126558199161025,
+   1.0910453918786016
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..100|SELECTED|PH-P16vsP8-JA": {
+  "A": 5.439739,
+  "B": 5.348431,
+  "ratio": 0.9832146358492566,
+  "delta": -0.09130800000000061,
+  "claimed": false,
+  "strong": false,
+  "strong_pooled": false,
+  "binding": 0.02122703972790607,
+  "verdict": "post hoc: not claimed",
+  "per_pass_ratio": [
+   0.9997222208945037,
+   0.9844630093168565,
+   0.9812371999004909
+  ],
+  "flags": {
+   "pooled": "n/Y/Y",
+   "p0": "n/n/n",
+   "p1": "n/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..100|SELECTED|PH-JA-P16vsT16": {
+  "A": 5.348431,
+  "B": 5.983947,
+  "ratio": 1.1188228846927257,
+  "delta": 0.635516,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.021376555561001494,
+  "verdict": "post hoc: claimed",
+  "per_pass_ratio": [
+   1.0998769230882395,
+   1.1189350671252936,
+   1.119891537885681
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "0..100|SELECTED|PH-W1-PvsT": {
+  "A": 5.337425,
+  "B": 5.375377,
+  "ratio": 1.0071105448788509,
+  "delta": 0.03795200000000065,
+  "claimed": false,
+  "strong": false,
+  "strong_pooled": false,
+  "binding": 0.054197526962837216,
+  "verdict": "post hoc: not claimed",
+  "per_pass_ratio": [
+   0.9701860729304292,
+   1.009916017555282,
+   1.007891187636302
+  ],
+  "flags": {
+   "pooled": "n/n/n",
+   "p0": "n/n/n",
+   "p1": "n/n/n",
+   "p2": "n/n/n"
+  }
+ },
+ "0..100|SELECTED|ladder8": null,
+ "0..100|SELECTED|ladder16": 0.0525,
+ "0..100|SELECTED|JA-ladder16": null,
+ "100..500|SELECTED|C1-JT": {
+  "A": 1.763804,
+  "B": 2.1552185,
+  "ratio": 1.2219149633405981,
+  "delta": 0.3914145000000002,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.03986172937131163,
+  "verdict": "FAILS (B claimed slower)",
+  "per_pass_ratio": [
+   1.2165171300778421,
+   1.220147711503217,
+   1.2242176568371541
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "100..500|SELECTED|C1-JA": {
+  "A": 5.27129,
+  "B": 5.8369125,
+  "ratio": 1.1073024819351622,
+  "delta": 0.5656225000000008,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.02587814007709352,
+  "verdict": "FAILS (B claimed slower)",
+  "per_pass_ratio": [
+   1.1075824089861064,
+   1.1057599278355015,
+   1.1059088335709812
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "100..500|SELECTED|C2-JT": {
+  "A": 1.7746045,
+  "B": 1.763804,
+  "ratio": 0.9939138551716735,
+  "delta": -0.01080049999999999,
+  "claimed": false,
+  "strong": false,
+  "strong_pooled": false,
+  "binding": 0.03687625838962009,
+  "verdict": "HOLDS (no resolved difference)",
+  "per_pass_ratio": [
+   0.9988518925932194,
+   0.9943162384891185,
+   0.9890106131397707
+  ],
+  "flags": {
+   "pooled": "n/n/n",
+   "p0": "n/n/n",
+   "p1": "n/n/n",
+   "p2": "n/n/n"
+  }
+ },
+ "100..500|SELECTED|C2-JA": {
+  "A": 5.27368925,
+  "B": 5.27129,
+  "ratio": 0.9995450528299519,
+  "delta": -0.002399250000000741,
+  "claimed": false,
+  "strong": false,
+  "strong_pooled": false,
+  "binding": 0.02570101525421007,
+  "verdict": "HOLDS (no resolved difference)",
+  "per_pass_ratio": [
+   0.9978121798532058,
+   1.0021989746990525,
+   1.0018700381331722
+  ],
+  "flags": {
+   "pooled": "n/n/n",
+   "p0": "n/n/n",
+   "p1": "n/n/n",
+   "p2": "n/n/n"
+  }
+ },
+ "100..500|SELECTED|C3-JT": {
+  "A": 2.011518,
+  "B": 2.1552185,
+  "ratio": 1.071438833756397,
+  "delta": 0.1437005,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.030484339216829692,
+  "verdict": "REFUTED: T16 claimed SLOWER than P16 by 0.1437 ms",
+  "per_pass_ratio": [
+   1.0678032540812958,
+   1.0651713416968136,
+   1.0768290723103677
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "100..500|SELECTED|PH-P16vsP8-JT": {
+  "A": 1.7746045,
+  "B": 2.011518,
+  "ratio": 1.133502140899564,
+  "delta": 0.23691350000000022,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.02078374564685447,
+  "verdict": "post hoc: claimed",
+  "per_pass_ratio": [
+   1.137962853274666,
+   1.1389835939167703,
+   1.1243792413658722
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "100..500|SELECTED|PH-P16vsP8-JA": {
+  "A": 5.27368925,
+  "B": 5.174502,
+  "ratio": 0.9811920563958144,
+  "delta": -0.09918724999999995,
+  "claimed": false,
+  "strong": false,
+  "strong_pooled": false,
+  "binding": 0.02301007619960824,
+  "verdict": "post hoc: not claimed",
+  "per_pass_ratio": [
+   0.9867110043424584,
+   0.9837972486769267,
+   0.9804342851638442
+  ],
+  "flags": {
+   "pooled": "n/Y/Y",
+   "p0": "n/n/n",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "100..500|SELECTED|PH-JA-P16vsT16": {
+  "A": 5.174502,
+  "B": 5.8369125,
+  "ratio": 1.1280143480474063,
+  "delta": 0.6624105,
+  "claimed": true,
+  "strong": true,
+  "strong_pooled": true,
+  "binding": 0.023207747746481405,
+  "verdict": "post hoc: claimed",
+  "per_pass_ratio": [
+   1.1200434706958264,
+   1.1264429407892778,
+   1.130087902909691
+  ],
+  "flags": {
+   "pooled": "Y/Y/Y",
+   "p0": "Y/Y/Y",
+   "p1": "Y/Y/Y",
+   "p2": "Y/Y/Y"
+  }
+ },
+ "100..500|SELECTED|PH-W1-PvsT": {
+  "A": 4.18172125,
+  "B": 4.2213395,
+  "ratio": 1.0094741489524202,
+  "delta": 0.03961825000000019,
+  "claimed": false,
+  "strong": false,
+  "strong_pooled": false,
+  "binding": 0.0492999275765928,
+  "verdict": "post hoc: not claimed",
+  "per_pass_ratio": [
+   0.9951271868333676,
+   1.012382401146418,
+   1.011925727226074
+  ],
+  "flags": {
+   "pooled": "n/n/n",
+   "p0": "n/n/n",
+   "p1": "n/Y/Y",
+   "p2": "n/n/n"
+  }
+ },
+ "100..500|SELECTED|ladder8": 0.06,
+ "100..500|SELECTED|ladder16": 0.0525,
+ "100..500|SELECTED|JA-ladder16": null
+}

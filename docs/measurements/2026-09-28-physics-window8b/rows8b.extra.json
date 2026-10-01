@@ -1,0 +1,1093 @@
+{
+ "_comment": "2026-09-29: the reserved blocks (PREP.md 'Adding a block' and 'S7-AB and omega-v2 added'). S7-AB = s7-omega2/cut.md \u00a75 item 3 (P = s7p, T = s7t; disarmed; P and T adjacent at every W by cell_order); omega-v2 = the four omega-b2 command lines of cut.md 'Window 8b: the S7 commands as amended'; omega-v1-cont = cut.md \u00a75 item 4's optional continuity (window 8's omega-b rows, v1 modes of T's exe), K 3. sha256_pin: each key is labelled with its exe's sha256 (verify_binaries), so a P/T swap of exe paths is red. s7: the S7 engagement label read by tools/s7pre8b.py (capped = T, uncapped = P). void_rules: tools/micro8b.py. 2026-09-29 (later): omega-wgap-worker / omega-wgap-external added to omega-v2 = the ruling's \"omega(W, gap) with the N4 receipt\" (w8s-s4/cut.md:698/:709); expect_present = the receipt keys (tools/micro8b.py).",
+ "binaries": {
+  "s7p": {
+   "exe": "bin/runner_tip_16191fda.exe",
+   "commit": "16191fda6de68ab377391c3e781d4709b7a3ecd7",
+   "kind": "runner",
+   "s4": "on",
+   "s7": "uncapped",
+   "sha256_pin": "aa34fadff73923bcc69daa3e517bbbf1de693f01659ab86900460f84e0a371a1",
+   "what": "S7-AB P: the SAME FILE as key tip (trunk 16191fda = 54a7714f's crates + S4, no S7), reused by orchestrator decision"
+  },
+  "s7t": {
+   "exe": "bin/runner_s7_tip_a3adc827.exe",
+   "commit": "a3adc827e2b528ca3519babc50de36f7f20748b0",
+   "kind": "runner",
+   "s4": "on",
+   "s7": "capped",
+   "sha256_pin": "c4232eaed89e8afc7edd2bf51fa7504acde772d1ff43a1c0ad9c91f42323ace8",
+   "what": "S7-AB T: u/phys-s7 tip a3adc827 (S4 + S7 partial), --profile parity from an unmodified export"
+  },
+  "omega2": {
+   "exe": "bin/omega_b_region_v2_a3adc827.exe",
+   "commit": "a3adc827e2b528ca3519babc50de36f7f20748b0",
+   "kind": "micro",
+   "sha256_pin": "48e9486ac04a36c0f16426c0b6f3eaa50e782f4ea6951d099df392fb2ba954f4",
+   "what": "omega_b_region at a3adc827 (omega_b v2 = --mode omega-b2; v1 modes unchanged), --profile parity"
+  }
+ },
+ "rows": [
+  {
+   "id": "S7-JT",
+   "blocks": [
+    "S7-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "s7p",
+    "s7t"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null
+  },
+  {
+   "id": "S7-JA",
+   "blocks": [
+    "S7-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "s7p",
+    "s7t"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a"
+   ],
+   "workers": [
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JA500",
+   "broadphase": "AllPairs",
+   "bp_kernel": null
+  },
+  {
+   "id": "S7-ladder8-F0.5",
+   "blocks": [
+    "S7-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "s7p"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "0.5",
+    "--canary-ref-ns",
+    "60000"
+   ],
+   "workers": [
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null,
+   "canary": true,
+   "note": "C1/C2's R_8 rung ladder on P (cut.md \u00a75 item 3)"
+  },
+  {
+   "id": "S7-ladder8-F1",
+   "blocks": [
+    "S7-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "s7p"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "1",
+    "--canary-ref-ns",
+    "60000"
+   ],
+   "workers": [
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null,
+   "canary": true,
+   "note": "C1/C2's R_8 rung ladder on P (cut.md \u00a75 item 3)"
+  },
+  {
+   "id": "S7-ladder8-F1.5",
+   "blocks": [
+    "S7-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "s7p"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "1.5",
+    "--canary-ref-ns",
+    "60000"
+   ],
+   "workers": [
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null,
+   "canary": true,
+   "note": "C1/C2's R_8 rung ladder on P (cut.md \u00a75 item 3)"
+  },
+  {
+   "id": "S7-ladder8-F2",
+   "blocks": [
+    "S7-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "s7p"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "2",
+    "--canary-ref-ns",
+    "60000"
+   ],
+   "workers": [
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null,
+   "canary": true,
+   "note": "C1/C2's R_8 rung ladder on P (cut.md \u00a75 item 3)"
+  },
+  {
+   "id": "S7-ladder16-F0.5",
+   "blocks": [
+    "S7-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "s7p"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "0.5",
+    "--canary-ref-ns",
+    "105000"
+   ],
+   "workers": [
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null,
+   "canary": true,
+   "note": "C1's R_16 rung ladder on P (cut.md \u00a75 item 3)"
+  },
+  {
+   "id": "S7-ladder16-F1",
+   "blocks": [
+    "S7-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "s7p"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "1",
+    "--canary-ref-ns",
+    "105000"
+   ],
+   "workers": [
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null,
+   "canary": true,
+   "note": "C1's R_16 rung ladder on P (cut.md \u00a75 item 3)"
+  },
+  {
+   "id": "S7-ladder16-F1.5",
+   "blocks": [
+    "S7-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "s7p"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "1.5",
+    "--canary-ref-ns",
+    "105000"
+   ],
+   "workers": [
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null,
+   "canary": true,
+   "note": "C1's R_16 rung ladder on P (cut.md \u00a75 item 3)"
+  },
+  {
+   "id": "S7-ladder16-F2",
+   "blocks": [
+    "S7-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "s7p"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "2",
+    "--canary-ref-ns",
+    "105000"
+   ],
+   "workers": [
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null,
+   "canary": true,
+   "note": "C1's R_16 rung ladder on P (cut.md \u00a75 item 3)"
+  },
+  {
+   "id": "S7-JA-ladder16-F1",
+   "blocks": [
+    "S7-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "s7p"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--canary-frac",
+    "1",
+    "--canary-ref-ns",
+    "105000"
+   ],
+   "workers": [
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JA500",
+   "broadphase": "AllPairs",
+   "bp_kernel": null,
+   "canary": true,
+   "note": "recommended J-A rung at W16 on P (cut.md \u00a75 item 3)"
+  },
+  {
+   "id": "S7-JT-W1",
+   "blocks": [
+    "S7-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "s7p",
+    "s7t"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null,
+   "note": "optional (cut.md Q10): the per-step decision at W1"
+  },
+  {
+   "id": "omega2-worker",
+   "blocks": [
+    "omega-v2"
+   ],
+   "kind": "micro",
+   "binaries": [
+    "omega2"
+   ],
+   "args": [
+    "--bench",
+    "--mode",
+    "omega-b2",
+    "--participants",
+    "2,4,8",
+    "--stages",
+    "36,72",
+    "--blocks-per-participant",
+    "1,2,4",
+    "--helper",
+    "spin,park",
+    "--route",
+    "worker"
+   ],
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "expect_summaries": 36,
+   "expect_fields": {
+    "bench": "omega_b2",
+    "version": 2,
+    "route": "worker",
+    "exactly_once": true,
+    "lost_wakeups": 0
+   },
+   "void_rules": {
+    "calibration": {
+     "bench": "omega_b2",
+     "version": 2
+    },
+    "ranges": {
+     "work_ns_calibrated": [
+      500,
+      1000
+     ]
+    },
+    "park_gap": true
+   }
+  },
+  {
+   "id": "omega2-external",
+   "blocks": [
+    "omega-v2"
+   ],
+   "kind": "micro",
+   "binaries": [
+    "omega2"
+   ],
+   "args": [
+    "--bench",
+    "--mode",
+    "omega-b2",
+    "--participants",
+    "2,4,8",
+    "--stages",
+    "36,72",
+    "--blocks-per-participant",
+    "1,2,4",
+    "--helper",
+    "spin,park",
+    "--route",
+    "external"
+   ],
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "expect_summaries": 36,
+   "expect_fields": {
+    "bench": "omega_b2",
+    "version": 2,
+    "route": "external",
+    "exactly_once": true,
+    "lost_wakeups": 0
+   },
+   "void_rules": {
+    "calibration": {
+     "bench": "omega_b2",
+     "version": 2
+    },
+    "ranges": {
+     "work_ns_calibrated": [
+      500,
+      1000
+     ]
+    },
+    "park_gap": true
+   }
+  },
+  {
+   "id": "omega2-gap-worker",
+   "blocks": [
+    "omega-v2"
+   ],
+   "kind": "micro",
+   "binaries": [
+    "omega2"
+   ],
+   "args": [
+    "--bench",
+    "--mode",
+    "omega-b2",
+    "--participants",
+    "8",
+    "--stages",
+    "36,72",
+    "--blocks-per-participant",
+    "4",
+    "--helper",
+    "spin,park",
+    "--gap-us",
+    "20,80",
+    "--route",
+    "worker"
+   ],
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "expect_summaries": 8,
+   "expect_fields": {
+    "bench": "omega_b2",
+    "version": 2,
+    "route": "worker",
+    "exactly_once": true,
+    "lost_wakeups": 0,
+    "participants": 8,
+    "blocks_per_participant": 4
+   },
+   "void_rules": {
+    "calibration": {
+     "bench": "omega_b2",
+     "version": 2
+    },
+    "ranges": {
+     "work_ns_calibrated": [
+      500,
+      1000
+     ]
+    },
+    "park_gap": true
+   }
+  },
+  {
+   "id": "omega2-gap-external",
+   "blocks": [
+    "omega-v2"
+   ],
+   "kind": "micro",
+   "binaries": [
+    "omega2"
+   ],
+   "args": [
+    "--bench",
+    "--mode",
+    "omega-b2",
+    "--participants",
+    "8",
+    "--stages",
+    "36,72",
+    "--blocks-per-participant",
+    "4",
+    "--helper",
+    "spin,park",
+    "--gap-us",
+    "20,80",
+    "--route",
+    "external"
+   ],
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "expect_summaries": 8,
+   "expect_fields": {
+    "bench": "omega_b2",
+    "version": 2,
+    "route": "external",
+    "exactly_once": true,
+    "lost_wakeups": 0,
+    "participants": 8,
+    "blocks_per_participant": 4
+   },
+   "void_rules": {
+    "calibration": {
+     "bench": "omega_b2",
+     "version": 2
+    },
+    "ranges": {
+     "work_ns_calibrated": [
+      500,
+      1000
+     ]
+    },
+    "park_gap": true
+   }
+  },
+  {
+   "id": "omega-wgap-worker",
+   "blocks": [
+    "omega-v2"
+   ],
+   "kind": "micro",
+   "binaries": [
+    "omega2"
+   ],
+   "args": [
+    "--bench",
+    "--mode",
+    "omega",
+    "--workers",
+    "8,16",
+    "--gap-us",
+    "0,5,20,80",
+    "--route",
+    "worker"
+   ],
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "expect_summaries": 8,
+   "expect_bench": "omega",
+   "expect_fields": {
+    "route": "worker"
+   },
+   "expect_present": [
+    "helped_reps",
+    "first_helper_ns_median"
+   ],
+   "note": "omega(W, gap) with the N4 participation receipt: RULINGS-2026-09-27-W8 \"Window 8b contents\"; w8s-s4/cut.md:698 (row) and :709 (receipt). v1 omega mode of the omega2 exe (the v1 path is unchanged since 06e609d8, w8s-s4 commit 1b, which added the receipt). SUMMARY count 8 = the gate sample (2 workers x 4 gaps); no park / v2 void rules."
+  },
+  {
+   "id": "omega-wgap-external",
+   "blocks": [
+    "omega-v2"
+   ],
+   "kind": "micro",
+   "binaries": [
+    "omega2"
+   ],
+   "args": [
+    "--bench",
+    "--mode",
+    "omega",
+    "--workers",
+    "8,16",
+    "--gap-us",
+    "0,5,20,80",
+    "--route",
+    "external"
+   ],
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "expect_summaries": 8,
+   "expect_bench": "omega",
+   "expect_fields": {
+    "route": "external"
+   },
+   "expect_present": [
+    "helped_reps",
+    "first_helper_ns_median"
+   ],
+   "note": "omega(W, gap) with the N4 participation receipt: RULINGS-2026-09-27-W8 \"Window 8b contents\"; w8s-s4/cut.md:698 (row) and :709 (receipt). v1 omega mode of the omega2 exe (the v1 path is unchanged since 06e609d8, w8s-s4 commit 1b, which added the receipt). SUMMARY count 8 = the gate sample (2 workers x 4 gaps); no park / v2 void rules."
+  },
+  {
+   "id": "omega1-s36-worker",
+   "blocks": [
+    "omega-v1-cont"
+   ],
+   "kind": "micro",
+   "binaries": [
+    "omega2"
+   ],
+   "args": [
+    "--bench",
+    "--mode",
+    "omega-b",
+    "--participants",
+    "2,4,8,16",
+    "--stages",
+    "36",
+    "--route",
+    "worker"
+   ],
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "expect_summaries": 4,
+   "expect_bench": "omega_b",
+   "expect_route": "worker",
+   "expect_stages": 36
+  },
+  {
+   "id": "omega1-s36-external",
+   "blocks": [
+    "omega-v1-cont"
+   ],
+   "kind": "micro",
+   "binaries": [
+    "omega2"
+   ],
+   "args": [
+    "--bench",
+    "--mode",
+    "omega-b",
+    "--participants",
+    "2,4,8,16",
+    "--stages",
+    "36",
+    "--route",
+    "external"
+   ],
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "expect_summaries": 4,
+   "expect_bench": "omega_b",
+   "expect_route": "external",
+   "expect_stages": 36
+  },
+  {
+   "id": "omega1-s72-worker",
+   "blocks": [
+    "omega-v1-cont"
+   ],
+   "kind": "micro",
+   "binaries": [
+    "omega2"
+   ],
+   "args": [
+    "--bench",
+    "--mode",
+    "omega-b",
+    "--participants",
+    "2,4,8,16",
+    "--stages",
+    "72",
+    "--route",
+    "worker"
+   ],
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "expect_summaries": 4,
+   "expect_bench": "omega_b",
+   "expect_route": "worker",
+   "expect_stages": 72
+  },
+  {
+   "id": "omega1-s72-external",
+   "blocks": [
+    "omega-v1-cont"
+   ],
+   "kind": "micro",
+   "binaries": [
+    "omega2"
+   ],
+   "args": [
+    "--bench",
+    "--mode",
+    "omega-b",
+    "--participants",
+    "2,4,8,16",
+    "--stages",
+    "72",
+    "--route",
+    "external"
+   ],
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "expect_summaries": 4,
+   "expect_bench": "omega_b",
+   "expect_route": "external",
+   "expect_stages": 72
+  }
+ ],
+ "blocks": [
+  {
+   "name": "S7-AB",
+   "item": "S7",
+   "priority": 1.5,
+   "warmup": [
+    "S7-JT",
+    "s7t",
+    8
+   ],
+   "note": "cut.md \u00a75 item 3; K 9 (ruling 1); pre-flight gate/s7/ (tools/s7pre8b.py)"
+  },
+  {
+   "name": "omega-v2",
+   "item": "S1",
+   "priority": 2.5,
+   "warmup": [
+    "omega2-worker",
+    "omega2",
+    0
+   ],
+   "note": "cut.md 'Window 8b: the S7 commands as amended', K 9 over three passes; void rules tools/micro8b.py; + omega(W, gap) with the N4 receipt (omega-wgap-worker / -external, v1 omega mode, cut.md:698/:709)"
+  },
+  {
+   "name": "omega-v1-cont",
+   "item": "S1",
+   "priority": 7.5,
+   "passes": 1,
+   "rounds": 3,
+   "warmup": [
+    "omega1-s36-worker",
+    "omega2",
+    0
+   ],
+   "note": "cut.md \u00a75 item 4's optional continuity with window 8 (its omega-b rows), K 3 = one pass x three rounds"
+  }
+ ]
+}

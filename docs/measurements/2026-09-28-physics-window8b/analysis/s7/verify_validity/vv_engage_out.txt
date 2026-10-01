@@ -1,0 +1,63 @@
+P-JA-W1: W1 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+P-JA-W16: W16 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+P-JA-W16-armed: W16 armed True steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+P-JA-W2: W2 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+P-JA-W4: W4 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+P-JA-W8: W8 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+P-JA-W8-armed: W8 armed True steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+P-JT-W1: W1 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+P-JT-W16: W16 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+P-JT-W16-armed: W16 armed True steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+P-JT-W2: W2 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+P-JT-W4: W4 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+P-JT-W8: W8 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+P-JT-W8-armed: W8 armed True steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+T-JA-W1: W1 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+T-JA-W16: W16 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+T-JA-W16-armed: W16 armed True steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+T-JA-W2: W2 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+T-JA-W4: W4 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+T-JA-W8: W8 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+T-JA-W8-armed: W8 armed True steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+T-JT-W1: W1 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+T-JT-W16: W16 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+T-JT-W16-armed: W16 armed True steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+T-JT-W2: W2 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+T-JT-W4: W4 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+T-JT-W8: W8 armed False steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+T-JT-W8-armed: W8 armed True steps 500 pose 0x30c5438bc6ad9ffa match void 0 OK
+pre-flight processes all OK: True
+cmp P vs T JT W1: equal True
+cmp P vs T JT W2: equal True
+cmp P vs T JT W4: equal True
+cmp P vs T JT W8: equal True
+cmp P vs T JT W16: equal True
+cmp P vs T JA W1: equal True
+cmp P vs T JA W2: equal True
+cmp P vs T JA W4: equal True
+cmp P vs T JA W8: equal True
+cmp P vs T JA W16: equal True
+
+## Engagement (armed, 500 steps)
+P JT W8: waves 49904 = scopes 49404 + setup_steps 500: True; lanes_mean 7.8555 -> lanes sum 392023; bound (W+1) 399732 within True; bound (16) 403232 within True; tasks 1126176 setup_tasks 15980; overflow 0; drops 0; workers 8
+P JT W16: waves 49904 = scopes 49404 + setup_steps 500: True; lanes_mean 12.1688 -> lanes sum 607272; bound (W+1) 403732 within False; bound (16) 403232 within False; tasks 1126176 setup_tasks 15980; overflow 0; drops 0; workers 16
+P JA W8: waves 49904 = scopes 49404 + setup_steps 500: True; lanes_mean 7.9061 -> lanes sum 394544; bound (W+1) 399732 within True; bound (16) 403232 within True; tasks 1485480 setup_tasks 15980; overflow 0; drops 0; workers 8
+P JA W16: waves 49904 = scopes 49404 + setup_steps 500: True; lanes_mean 11.9713 -> lanes sum 597418; bound (W+1) 403732 within False; bound (16) 403232 within False; tasks 1485480 setup_tasks 15980; overflow 0; drops 0; workers 16
+T JT W8: waves 49904 = scopes 49404 + setup_steps 500: True; lanes_mean 7.6366 -> lanes sum 381099; bound (W+1) 399732 within True; bound (16) 403232 within True; tasks 1126176 setup_tasks 15980; overflow 0; drops 0; workers 8
+T JT W16: waves 49904 = scopes 49404 + setup_steps 500: True; lanes_mean 7.8423 -> lanes sum 391361; bound (W+1) 403732 within True; bound (16) 403232 within True; tasks 1126176 setup_tasks 15980; overflow 0; drops 0; workers 16
+T JA W8: waves 49904 = scopes 49404 + setup_steps 500: True; lanes_mean 7.6346 -> lanes sum 380996; bound (W+1) 399732 within True; bound (16) 403232 within True; tasks 1485480 setup_tasks 15980; overflow 0; drops 0; workers 8
+T JA W16: waves 49904 = scopes 49404 + setup_steps 500: True; lanes_mean 7.9957 -> lanes sum 399017; bound (W+1) 403732 within True; bound (16) 403232 within True; tasks 1485480 setup_tasks 15980; overflow 0; drops 0; workers 16
+JT W8: P = T on scopes/tasks/setup: True
+JT W16: P = T on scopes/tasks/setup: True
+JA W8: P = T on scopes/tasks/setup: True
+JA W16: P = T on scopes/tasks/setup: True
+receipt: T within at W16 on JT and JA: True; P above at W16 on JT and JA: True
+engine read lines: 11: test the_default_cap_engages_exactly_where_the_pool_exceeds_the_physical_cores ... S7 default at W8 (physical 8): 0 capped steps, 24 dispatching | 12: S7 default at W16 (physical 8): 24 capped steps, 24 dispatching | 14: test the_engine_reads_a_physical_core_count ... S7 host receipt: physical 8, logical 16, source Os
+t_s7_debug commit line: 17:19:10 | a3adc827e2b528ca3519babc50de36f7f20748b0 | Finished `test` profile [unoptimized + debuginfo] target(s) in 6.21s
+
+## Timed disarmed SUMMARY: fields that differ between s7p and s7t within a (row, W) (identity evidence)
+S7-JT@W16: 86 SUMMARY fields; differing P vs T: 
+S7-JA@W16: 86 SUMMARY fields; differing P vs T: 
+S7-JT@W8: 86 SUMMARY fields; differing P vs T: 
+S7-JA@W8: 86 SUMMARY fields; differing P vs T: 
+S7-JT-W1@W1: 86 SUMMARY fields; differing P vs T: 

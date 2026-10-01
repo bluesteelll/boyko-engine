@@ -1,0 +1,57 @@
+2026-09-30T15:25:32.972+03:00 === gate9a preflight start
+2026-09-30T15:25:37.635+03:00 preflight tip-flagless     W1  exit 0 bp Tree brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:25:43.067+03:00 preflight tip-allpairs     W1  exit 0 bp AllPairs brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:25:47.598+03:00 preflight parent-flagless  W1  exit 0 bp AllPairs brute 144 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:25:47.598+03:00 preflight bytes W1: TIP --broadphase allpairs == PARENT flagless True; TIP flagless == PARENT flagless True
+2026-09-30T15:25:50.448+03:00 preflight tip-flagless     W2  exit 0 bp Tree brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:25:54.273+03:00 preflight tip-allpairs     W2  exit 0 bp AllPairs brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:25:58.077+03:00 preflight parent-flagless  W2  exit 0 bp AllPairs brute 144 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:25:58.078+03:00 preflight bytes W2: TIP --broadphase allpairs == PARENT flagless True; TIP flagless == PARENT flagless True
+2026-09-30T15:26:00.223+03:00 preflight tip-flagless     W4  exit 0 bp Tree brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:03.696+03:00 preflight tip-allpairs     W4  exit 0 bp AllPairs brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:07.008+03:00 preflight parent-flagless  W4  exit 0 bp AllPairs brute 144 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:07.009+03:00 preflight bytes W4: TIP --broadphase allpairs == PARENT flagless True; TIP flagless == PARENT flagless True
+2026-09-30T15:26:08.698+03:00 preflight tip-flagless     W8  exit 0 bp Tree brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:11.552+03:00 preflight tip-allpairs     W8  exit 0 bp AllPairs brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:14.134+03:00 preflight parent-flagless  W8  exit 0 bp AllPairs brute 144 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:14.134+03:00 preflight bytes W8: TIP --broadphase allpairs == PARENT flagless True; TIP flagless == PARENT flagless True
+2026-09-30T15:26:15.693+03:00 preflight tip-flagless     W16 exit 0 bp Tree brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:18.082+03:00 preflight tip-allpairs     W16 exit 0 bp AllPairs brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:20.506+03:00 preflight parent-flagless  W16 exit 0 bp AllPairs brute 144 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:20.507+03:00 preflight bytes W16: TIP --broadphase allpairs == PARENT flagless True; TIP flagless == PARENT flagless True
+2026-09-30T15:26:23.427+03:00 preflight tip-armed W1: exit 0 void_steps 0 setup 0/0 PASS
+2026-09-30T15:26:24.899+03:00 preflight tip-armed W8: exit 0 void_steps 0 setup 500/15980 PASS
+2026-09-30T15:26:24.901+03:00 preflight: PASS
+2026-09-30T15:26:24.901+03:00 === gate9a preflight end
+2026-09-30T15:26:25.150+03:00 === gate9a red start
+2026-09-30T15:26:28.874+03:00 red 501-steps-vs-JT500           parent exit 4 expect_pose mismatch: 64480 vs 64480 bytes, first differing body Some(0) PASS (red as required)
+2026-09-30T15:26:33.805+03:00 red contact-reuse-off-vs-JT500   parent exit 4 expect_pose mismatch: 64480 vs 64480 bytes, first differing body Some(0) PASS (red as required)
+2026-09-30T15:26:37.022+03:00 red 501-steps-vs-JT500           tip    exit 4 expect_pose mismatch: 64480 vs 64480 bytes, first differing body Some(0) PASS (red as required)
+2026-09-30T15:26:40.906+03:00 red contact-reuse-off-vs-JT500   tip    exit 4 expect_pose mismatch: 64480 vs 64480 bytes, first differing body Some(0) PASS (red as required)
+2026-09-30T15:26:40.907+03:00 === gate9a red end
+2026-09-30T15:26:41.134+03:00 === gate9a r4 start
+2026-09-30T15:26:41.135+03:00 R4 C4-S16 vs C4-S16ap W1: equal
+2026-09-30T15:26:41.137+03:00 === gate9a r4 end
+2026-09-30T15:26:41.364+03:00 === gate9a list start
+2026-09-30T15:29:49.231+03:00 list C4-BR      g4r7   exit 0 listed 8 expected 8 missing [] unexpected [] PASS
+2026-09-30T15:32:32.050+03:00 list C4-BR      g4r8b  exit 0 listed 8 expected 8 missing [] unexpected [] PASS
+2026-09-30T15:35:12.014+03:00 list C4-BR      g4rT   exit 0 listed 8 expected 8 missing [] unexpected [] PASS
+2026-09-30T15:38:04.011+03:00 list C4-G4      g4rT   exit 0 listed 36 expected 36 missing [] unexpected [] PASS
+Traceback (most recent call last):
+  File "C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\238150a2-5c92-4147-8309-b6428586e8a7\scratchpad\win9a\tools\gate9a.py", line 363, in <module>
+    {'fixtures': part_fixtures, 'preflight': part_preflight, 'red': part_red, 'r4': part_r4, 'list': part_list}[part]()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\238150a2-5c92-4147-8309-b6428586e8a7\scratchpad\win9a\tools\gate9a.py", line 298, in part_list
+    rc, ids = list_ids(BINS[key], regex)
+              ~~~~~~~~^^^^^^^^^^^^^^^^^^
+  File "C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\238150a2-5c92-4147-8309-b6428586e8a7\scratchpad\win9a\tools\gate9a.py", line 286, in list_ids
+    p = subprocess.run([exe, '--bench', '--list', regex], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=300)
+  File "C:\Python314\Lib\subprocess.py", line 557, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\subprocess.py", line 1221, in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\subprocess.py", line 1664, in _communicate
+    raise TimeoutExpired(self.args, orig_timeout)
+subprocess.TimeoutExpired: Command '['C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win9a\\bin\\broadphase_g4rT_50e31f1a.exe', '--bench', '--list', '^bp_g4_(uniform|disparity)/tree_kd/(96|112|128)$']' timed out after 300 seconds

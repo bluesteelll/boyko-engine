@@ -1,0 +1,79 @@
+Physics window 8b (2026-09-28) - binaries, provenance and build commands. sha256 in bin/SHA256SUMS.
+Toolchain for every cargo build: rustc 1.98.1 (48a229cea 2026-09-01) x86_64-pc-windows-msvc,
+RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc, PATH="$HOME/.cargo/bin:$PATH", CARGO_INCREMENTAL=0, CARGO_BUILD_JOBS=8,
+TMP/TEMP=D:/wt/_targets/tmp, RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS unset (x86-64-v3 from the tree's .cargo/config.toml),
+--locked with the tree's own Cargo.lock (exported file sha256 c00bf4c41c52c8ae4bd12ec437acde99ae5dfc6881166551c8ddd93f4afceeab,
+CRLF as exported; identical before and after every build: logs/build_*.log.lock_{before,after}).
+Every tree: git -C D:/wt/joltab archive 16191fda | tar -x -C D:/wt/_targets/w8b-trees/<name>  (never built in a worktree).
+The archive applies core.autocrlf=true, so the trees are CRLF; both edits below were made byte-exactly by
+tools/patch_trees.py (found by content, not line number), so each edited tree differs from the tip tree in ONE line of
+ONE file: `diff -rq` over the whole trees prints exactly one file each (logs/ + the patch files).
+
+TRUNK 16191fda6de68ab377391c3e781d4709b7a3ecd7 (integ/unified, pushed): "merge: u/phys-w8s (physics W8S + S4 ...) into
+integ/unified"; contains tree F3 (ff6869ec), the W8S instrument with its review fixes, --bp-kernel
+rowwalk|leaflist|leaflist-kd (6f110017; parse_bp_kernel in benches/jolt_parity_pyramid.rs), kd_order_builds in the
+runner's broadphase_tree JSON, and S4 (b6e1c6bc and before).
+
+runner_tip_16191fda.exe  (key tip)
+  tree   D:/wt/_targets/w8b-trees/tip (unmodified export)
+  cmd    tools/build_runner.sh D:/wt/_targets/w8b-trees/tip D:/wt/_targets/w8b-tip logs/build_tip.log
+         = cd <tree> && CARGO_TARGET_DIR=D:/wt/_targets/w8b-tip cargo bench --no-run --locked --profile parity -p boyko-physics --bench jolt_parity_pyramid
+  exe    D:/wt/_targets/w8b-tip/parity/deps/jolt_parity_pyramid-5662a59aaaeba37e.exe
+  log    "Compiling boyko-physics v0.1.0 (D:\wt\_targets\w8b-trees\tip\crates\boyko_physics)", "Finished `parity` profile [optimized]", exit 0
+
+runner_parent_16191fda_s4off.exe  (key parent)
+  tree   D:/wt/_targets/w8b-trees/parent = the same export + bin/parent.patch (ONE line):
+           crates/boyko_physics/src/solver/colored.rs  pub(crate) const SETUP_MAX_TASKS: usize = 32;  ->  = 1;
+         setup_chunk_count() then returns <= 1, `tasks >= 2` never holds, n_ranges is 0 and the step runs
+         SetupRun::Inline { fused: false } - the path TIP takes at W1. The runner re-exports the constant
+         (profiling.rs:441 `pub const SETUP_MAX_TASKS = crate::solver::colored::SETUP_MAX_TASKS`) and its per-step
+         check (expected_setup_tasks) reads it, so the void check stays consistent (void_steps 0 in the gate).
+  cmd    tools/build_runner.sh D:/wt/_targets/w8b-trees/parent D:/wt/_targets/w8b-parent logs/build_parent.log
+  exe    D:/wt/_targets/w8b-parent/parity/deps/jolt_parity_pyramid-5662a59aaaeba37e.exe (sha256 differs from tip's)
+
+broadphase_g4ref_16191fda.exe  (key g4ref)
+  tree   D:/wt/_targets/w8b-trees/g4ref = the same export + bin/g4ref.patch (ONE line, tree-f3/window_cmds.md §1):
+           crates/boyko_physics/benches/broadphase.rs  const G4_SIZES: [usize; 7] = [17, 64, 128, 256, 1_000, 10_000, 100_000];
+           -> const G4_SIZES: [usize; 28] = [17, 24, 32, ..., 240, 256, 1_000];
+  cmd    tools/build_g4ref.sh logs/build_g4ref.log
+         = cd <tree> && CARGO_TARGET_DIR=D:/wt/_targets/w8b-g4ref cargo bench --no-run --locked -p boyko-physics --bench broadphase
+  exe    D:/wt/_targets/w8b-g4ref/release/deps/broadphase-f2515a6f878ca59a.exe ("Finished `bench` profile [optimized]", exit 0)
+
+dm1_A.exe / dm1_B.exe  (keys dmA / dmB) - NOT rebuilt: window 8's exes, run in place from
+  C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/238150a2-5c92-4147-8309-b6428586e8a7/scratchpad/win8/bin/
+  sha256 checked against win8/bin/SHA256SUMS (sha256sum -c: dm1_A.exe OK, dm1_B.exe OK) and recorded in this SHA256SUMS;
+  A = cad5439b (host-visible table), B = 97ee830f (C6, device-local); provenance in win8/bin/COMMIT.txt.
+  They read runtime files through D:/wt/_dm1_ab (window 8's checkout, still at 97ee830f; cad5439b..97ee830f touches one
+  .rs file only) - keep that checkout until the window has run.
+
+Target dirs for the orchestrator to remove after the window: D:/wt/_targets/w8b-{tip,parent,g4ref}, D:/wt/_targets/w8b-trees.
+
+=== 2026-09-29: the reserved blocks S7-AB and omega-v2 (+ omega-v1-cont), rows8b.extra.json ===
+Provenance (git -C D:/wt/merge, read only; no worktree edited or checked out):
+  git diff --stat 54a7714f 16191fda   -> CLAUDE.md only (1 file, 4+/4-): no crates/ file, so 16191fda's runner = 54a7714f's
+                                         code (the cut's P) plus S4 as merged; the lane's trunk-sync merge brought CLAUDE.md only.
+  git diff --stat 16191fda a3adc827   -> the lane's 11 files exactly: benches/omega_b_region.rs, solver/colored.rs,
+                                         solver/colored_tests.rs, solver/cpu_topology.rs (new), solver/mod.rs,
+                                         tests/alloc_frame_attribution.rs, tests/s7_lane_cap.rs, tests/s7_lane_cap_armed.rs,
+                                         tests/support/s7_pyramid.rs, docs/.../00-RULINGS.md, docs/.../01-DESIGN.md; Cargo.lock unchanged.
+  16191fda and 54a7714f are ancestors of a3adc827 (merge-base --is-ancestor).
+
+key s7p  (S7-AB P) = bin/runner_tip_16191fda.exe - the SAME FILE as key `tip`, reused (orchestrator decision), not rebuilt.
+  sha256 aa34fadff73923bcc69daa3e517bbbf1de693f01659ab86900460f84e0a371a1 (the existing SHA256SUMS line); S4 on.
+
+runner_s7_tip_a3adc827.exe  (key s7t, S7-AB T)
+omega_b_region_v2_a3adc827.exe  (keys omega2: the omega-v2 block, and the omega-v1-cont block's v1 modes)
+  commit a3adc827e2b528ca3519babc50de36f7f20748b0 (u/phys-s7 tip, worktree D:/wt/merge; S4 on, S7 partial, omega_b v2)
+  tree   git -C D:/wt/merge archive a3adc827e2b528ca3519babc50de36f7f20748b0 | tar -x -C D:/wt/_targets/w8b-trees/s7tip
+         (unmodified export; Cargo.lock sha256 c00bf4c41c52c8ae4bd12ec437acde99ae5dfc6881166551c8ddd93f4afceeab, = 16191fda's)
+  cmd    tools/build_runner.sh D:/wt/_targets/w8b-trees/s7tip D:/wt/_targets/w8b-s7 logs/build_s7tip.log --bench omega_b_region
+         = cd <tree> && CARGO_TARGET_DIR=D:/wt/_targets/w8b-s7 cargo bench --no-run --locked --profile parity -p boyko-physics
+           --bench jolt_parity_pyramid --bench omega_b_region   (same toolchain/env as above; COLD target dir)
+  exe    D:/wt/_targets/w8b-s7/parity/deps/jolt_parity_pyramid-5662a59aaaeba37e.exe
+           sha256 c4232eaed89e8afc7edd2bf51fa7504acde772d1ff43a1c0ad9c91f42323ace8
+         D:/wt/_targets/w8b-s7/parity/deps/omega_b_region-a6c2abbefcd392b9.exe
+           sha256 48e9486ac04a36c0f16426c0b6f3eaa50e782f4ea6951d099df392fb2ba954f4
+  log    "Compiling boyko-physics v0.1.0 (D:\wt\_targets\w8b-trees\s7tip\crates\boyko_physics)",
+         "Finished `parity` profile [optimized] target(s)", exit 0; Cargo.lock sha256 equal before/after
+         (logs/build_s7tip.log.lock_{before,after}); rustc 1.98.1 (48a229cea 2026-09-01) x86_64-pc-windows-msvc.
+Target dirs for the orchestrator to remove after the window (in addition): D:/wt/_targets/w8b-s7, D:/wt/_targets/w8b-trees/s7tip.

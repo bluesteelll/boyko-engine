@@ -1,0 +1,182 @@
+2026-09-28T15:42:19.742+03:00 === gate8b fixtures start
+2026-09-28T15:42:23.658+03:00 fixture JT500      pose 0x30c5438bc6ad9ffa known 0x30c5438bc6ad9ffa frozen None tree {'static_rebuilds': 1, 'sleeper_rebuilds': 0, 'evictions': 0, 'translations': 0, 'patches': 0, 'hint_candidates': 0, 'wide_rows': 0, 'excluded_rows': 0, 'locator_resets': 0, 'members': 1, 'leaf_list_leaves': 77500, 'fallback_leaves': 2, 'row_walk_leaves': 0, 'kd_order_builds': 0, 'bp_kernel': 'LeafList'} OK
+2026-09-28T15:42:27.803+03:00 fixture JToff500   pose 0x32d5e235342b4143 known 0x32d5e235342b4143 frozen None tree {'static_rebuilds': 1, 'sleeper_rebuilds': 0, 'evictions': 0, 'translations': 0, 'patches': 0, 'hint_candidates': 0, 'wide_rows': 0, 'excluded_rows': 0, 'locator_resets': 0, 'members': 1, 'leaf_list_leaves': 77500, 'fallback_leaves': 2, 'row_walk_leaves': 0, 'kd_order_builds': 0, 'bp_kernel': 'LeafList'} OK
+2026-09-28T15:42:36.578+03:00 fixture JTA500     pose 0x30c5438bc6ad9ffa known 0x30c5438bc6ad9ffa frozen None tree {'static_rebuilds': 1, 'sleeper_rebuilds': 0, 'evictions': 0, 'translations': 0, 'patches': 0, 'hint_candidates': 0, 'wide_rows': 0, 'excluded_rows': 0, 'locator_resets': 0, 'members': 1, 'leaf_list_leaves': 77500, 'fallback_leaves': 2, 'row_walk_leaves': 0, 'kd_order_builds': 0, 'bp_kernel': 'LeafList'} OK
+2026-09-28T15:42:40.647+03:00 fixture RT500      pose 0x6cbe24bf8fafda26 known 0x6cbe24bf8fafda26 frozen None tree {'static_rebuilds': 1, 'sleeper_rebuilds': 0, 'evictions': 0, 'translations': 0, 'patches': 0, 'hint_candidates': 0, 'wide_rows': 0, 'excluded_rows': 0, 'locator_resets': 0, 'members': 1, 'leaf_list_leaves': 77500, 'fallback_leaves': 2, 'row_walk_leaves': 0, 'kd_order_builds': 0, 'bp_kernel': 'LeafList'} OK
+2026-09-28T15:42:45.425+03:00 fixture JSonT500   pose 0x3db47fae414b655c known None frozen 274 tree {'static_rebuilds': 1, 'sleeper_rebuilds': 1, 'evictions': 0, 'translations': 0, 'patches': 0, 'hint_candidates': 2480, 'wide_rows': 0, 'excluded_rows': 0, 'locator_resets': 0, 'members': 1241, 'leaf_list_leaves': 42935, 'fallback_leaves': 2, 'row_walk_leaves': 0, 'kd_order_builds': 0, 'bp_kernel': 'LeafList'} OK
+2026-09-28T15:42:53.459+03:00 fixture JSoffT500  pose 0x30c5438bc6ad9ffa known None frozen None tree {'static_rebuilds': 1, 'sleeper_rebuilds': 0, 'evictions': 0, 'translations': 0, 'patches': 0, 'hint_candidates': 0, 'wide_rows': 0, 'excluded_rows': 0, 'locator_resets': 0, 'members': 1, 'leaf_list_leaves': 77500, 'fallback_leaves': 2, 'row_walk_leaves': 0, 'kd_order_builds': 0, 'bp_kernel': 'LeafList'} OK
+2026-09-28T15:42:53.459+03:00 === gate8b fixtures end
+2026-09-28T15:43:05.446+03:00 === gate8b s4 start
+2026-09-28T15:43:08.003+03:00 s4 J-T      parent W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup None/None PASS
+2026-09-28T15:43:10.695+03:00 s4 J-T-a    parent W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup 0/0 (cut: (0, 0)) PASS
+2026-09-28T15:43:14.238+03:00 s4 J-T-off  parent W1  exit 0 pose 0x32d5e235342b4143 expect match void 0 setup None/None PASS
+2026-09-28T15:43:17.225+03:00 s4 J-T      tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup None/None PASS
+2026-09-28T15:43:20.843+03:00 s4 J-T-a    tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup 0/0 (cut: (0, 0)) PASS
+2026-09-28T15:43:24.545+03:00 s4 J-T-off  tip    W1  exit 0 pose 0x32d5e235342b4143 expect match void 0 setup None/None PASS
+2026-09-28T15:43:26.574+03:00 s4 J-T      parent W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup None/None PASS
+2026-09-28T15:43:28.793+03:00 s4 J-T-a    parent W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup 0/0 (cut: (0, 0)) PASS
+2026-09-28T15:43:31.428+03:00 s4 J-T-off  parent W2  exit 0 pose 0x32d5e235342b4143 expect match void 0 setup None/None PASS
+2026-09-28T15:43:33.387+03:00 s4 J-T      tip    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup None/None PASS
+2026-09-28T15:43:35.500+03:00 s4 J-T-a    tip    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup 500/6000 (cut: (500, 6000)) PASS
+2026-09-28T15:43:37.839+03:00 s4 J-T-off  tip    W2  exit 0 pose 0x32d5e235342b4143 expect match void 0 setup None/None PASS
+2026-09-28T15:43:39.340+03:00 s4 J-T      parent W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup None/None PASS
+2026-09-28T15:43:41.022+03:00 s4 J-T-a    parent W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup 0/0 (cut: (0, 0)) PASS
+2026-09-28T15:43:42.831+03:00 s4 J-T-off  parent W4  exit 0 pose 0x32d5e235342b4143 expect match void 0 setup None/None PASS
+2026-09-28T15:43:44.200+03:00 s4 J-T      tip    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup None/None PASS
+2026-09-28T15:43:45.717+03:00 s4 J-T-a    tip    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup 500/12000 (cut: (500, 12000)) PASS
+2026-09-28T15:43:47.334+03:00 s4 J-T-off  tip    W4  exit 0 pose 0x32d5e235342b4143 expect match void 0 setup None/None PASS
+2026-09-28T15:43:48.755+03:00 s4 J-T      parent W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup None/None PASS
+2026-09-28T15:43:50.367+03:00 s4 J-T-a    parent W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup 0/0 (cut: (0, 0)) PASS
+2026-09-28T15:43:51.889+03:00 s4 J-T-off  parent W8  exit 0 pose 0x32d5e235342b4143 expect match void 0 setup None/None PASS
+2026-09-28T15:43:53.151+03:00 s4 J-T      tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup None/None PASS
+2026-09-28T15:43:54.568+03:00 s4 J-T-a    tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup 500/15980 (cut: (500, 15980)) PASS
+2026-09-28T15:43:56.000+03:00 s4 J-T-off  tip    W8  exit 0 pose 0x32d5e235342b4143 expect match void 0 setup None/None PASS
+2026-09-28T15:43:57.527+03:00 s4 J-T      parent W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup None/None PASS
+2026-09-28T15:43:59.224+03:00 s4 J-T-a    parent W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup 0/0 (cut: (0, 0)) PASS
+2026-09-28T15:44:00.846+03:00 s4 J-T-off  parent W16 exit 0 pose 0x32d5e235342b4143 expect match void 0 setup None/None PASS
+2026-09-28T15:44:02.195+03:00 s4 J-T      tip    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup None/None PASS
+2026-09-28T15:44:03.718+03:00 s4 J-T-a    tip    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 setup 500/15980 (cut: (500, 15980)) PASS
+2026-09-28T15:44:05.145+03:00 s4 J-T-off  tip    W16 exit 0 pose 0x32d5e235342b4143 expect match void 0 setup None/None PASS
+2026-09-28T15:44:05.150+03:00 s4 columns TIP vs PARENT W1: 143 non-timing columns, differ none
+2026-09-28T15:44:05.154+03:00 s4 columns TIP vs PARENT W2: 143 non-timing columns, differ ['phys_np_wave_join', 'phys_np_wave_ramp', 'phys_np_wave_tail', 'phys_route_worker', 'phys_setup_chunks', 'phys_setup_stamped', 'phys_setup_stamped_n', 'phys_wave_first_ramp', 'phys_wave_first_tail', 'phys_wave_helped', 'phys_wave_inflight', 'phys_wave_join', 'phys_wave_lanes', 'phys_wave_pass_ramp', 'phys_wave_ramp', 'phys_wave_tail', 'worker_lane_max']
+2026-09-28T15:44:05.159+03:00 s4 columns TIP vs PARENT W4: 143 non-timing columns, differ ['phys_np_wave_join', 'phys_np_wave_ramp', 'phys_np_wave_tail', 'phys_route_worker', 'phys_setup_chunks', 'phys_setup_stamped', 'phys_setup_stamped_n', 'phys_wave_first_ramp', 'phys_wave_first_tail', 'phys_wave_helped', 'phys_wave_inflight', 'phys_wave_join', 'phys_wave_lanes', 'phys_wave_pass_ramp', 'phys_wave_ramp', 'phys_wave_tail', 'worker_lane_max']
+2026-09-28T15:44:05.164+03:00 s4 columns TIP vs PARENT W8: 143 non-timing columns, differ ['phys_np_wave_inflight', 'phys_np_wave_join', 'phys_np_wave_lanes', 'phys_np_wave_ramp', 'phys_np_wave_tail', 'phys_route_worker', 'phys_setup_chunks', 'phys_setup_stamped', 'phys_setup_stamped_n', 'phys_wave_first_ramp', 'phys_wave_first_tail', 'phys_wave_helped', 'phys_wave_inflight', 'phys_wave_join', 'phys_wave_lanes', 'phys_wave_pass_ramp', 'phys_wave_ramp', 'phys_wave_tail', 'worker_lane_max']
+2026-09-28T15:44:05.167+03:00 s4 columns TIP vs PARENT W16: 143 non-timing columns, differ ['phys_np_wave_inflight', 'phys_np_wave_join', 'phys_np_wave_lanes', 'phys_np_wave_ramp', 'phys_np_wave_tail', 'phys_route_worker', 'phys_setup_chunks', 'phys_setup_stamped', 'phys_setup_stamped_n', 'phys_wave_first_ramp', 'phys_wave_first_tail', 'phys_wave_helped', 'phys_wave_inflight', 'phys_wave_join', 'phys_wave_lanes', 'phys_wave_pass_ramp', 'phys_wave_ramp', 'phys_wave_tail', 'worker_lane_max']
+2026-09-28T15:44:05.170+03:00 s4 gate: 30 processes, 0 failing
+2026-09-28T15:44:05.198+03:00 === gate8b s4 end
+2026-09-28T15:44:22.038+03:00 === gate8b red start
+2026-09-28T15:44:25.037+03:00 red 501-steps-vs-JT500   parent exit 4 expect_pose mismatch: 64480 vs 64480 bytes, first differing body Some(0) PASS (red as required)
+2026-09-28T15:44:28.973+03:00 red J-T-off-vs-JT500     parent exit 4 expect_pose mismatch: 64480 vs 64480 bytes, first differing body Some(0) PASS (red as required)
+2026-09-28T15:44:32.709+03:00 red 501-steps-vs-JT500   tip    exit 4 expect_pose mismatch: 64480 vs 64480 bytes, first differing body Some(0) PASS (red as required)
+2026-09-28T15:44:37.450+03:00 red J-T-off-vs-JT500     tip    exit 4 expect_pose mismatch: 64480 vs 64480 bytes, first differing body Some(0) PASS (red as required)
+2026-09-28T15:44:37.452+03:00 === gate8b red end
+2026-09-28T15:44:37.901+03:00 === gate8b rows start
+2026-09-28T15:44:40.814+03:00 row S4-JT                  parent W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:44:42.865+03:00 row S4-JT                  parent W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:44:44.430+03:00 row S4-JT                  parent W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:44:45.818+03:00 row S4-JT                  parent W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:44:47.416+03:00 row S4-JT                  parent W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:44:50.170+03:00 row S4-JT                  tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:44:52.017+03:00 row S4-JT                  tip    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:44:53.335+03:00 row S4-JT                  tip    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:44:54.490+03:00 row S4-JT                  tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:44:55.853+03:00 row S4-JT                  tip    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:44:57.307+03:00 row S4-JT-a                parent W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup 0/0 frozen None PASS
+2026-09-28T15:44:59.164+03:00 row S4-JT-a                parent W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup 0/0 frozen None PASS
+2026-09-28T15:45:00.559+03:00 row S4-JT-a                tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup 500/15980 frozen None PASS
+2026-09-28T15:45:01.999+03:00 row S4-JT-a                tip    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup 500/15980 frozen None PASS
+2026-09-28T15:45:03.179+03:00 row S4-rung                tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:45:04.469+03:00 row S4-zone-N30000         tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup 500/15980 frozen None PASS
+2026-09-28T15:45:05.856+03:00 row S4-zone-N60000         tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup 500/15980 frozen None PASS
+2026-09-28T15:45:08.864+03:00 row SPLIT-J-T              parent W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:45:10.307+03:00 row SPLIT-J-T              parent W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:45:11.748+03:00 row SPLIT-J-T              parent W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:45:14.532+03:00 row SPLIT-J-T-a            parent W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup 0/0 frozen None PASS
+2026-09-28T15:45:16.072+03:00 row SPLIT-J-T-a            parent W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup 0/0 frozen None PASS
+2026-09-28T15:45:17.796+03:00 row SPLIT-J-T-a            parent W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup 0/0 frozen None PASS
+2026-09-28T15:45:20.821+03:00 row F3-TD-armed-leaflist   tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup 0/0 frozen None PASS
+2026-09-28T15:45:22.094+03:00 row F3-TD-armed-leaflist   tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup 500/15980 frozen None PASS
+2026-09-28T15:45:24.947+03:00 row F3-TD-armed-kd         tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 500 setup 0/0 frozen None PASS
+2026-09-28T15:45:26.285+03:00 row F3-TD-armed-kd         tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 500 setup 500/15980 frozen None PASS
+2026-09-28T15:45:34.166+03:00 row F3-TA-armed-leaflist   tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup 0/0 frozen None PASS
+2026-09-28T15:45:42.500+03:00 row F3-TA-armed-kd         tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 500 setup 0/0 frozen None PASS
+2026-09-28T15:45:47.103+03:00 row F3-TR-armed            tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup 0/0 frozen None PASS
+2026-09-28T15:45:51.923+03:00 row F3-JT-leaflist         tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:45:54.824+03:00 row F3-JT-leaflist         tip    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:45:57.922+03:00 row F3-JT-leaflist         tip    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:46:00.196+03:00 row F3-JT-leaflist         tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:46:02.123+03:00 row F3-JT-leaflist         tip    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:46:07.367+03:00 row F3-JT-kd               tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 500 setup None/None frozen None PASS
+2026-09-28T15:46:10.582+03:00 row F3-JT-kd               tip    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 500 setup None/None frozen None PASS
+2026-09-28T15:46:13.197+03:00 row F3-JT-kd               tip    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 500 setup None/None frozen None PASS
+2026-09-28T15:46:15.621+03:00 row F3-JT-kd               tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 500 setup None/None frozen None PASS
+2026-09-28T15:46:17.939+03:00 row F3-JT-kd               tip    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 500 setup None/None frozen None PASS
+2026-09-28T15:46:26.025+03:00 row F3-RT-leaflist         tip    W1  exit 0 pose 0x6cbe24bf8fafda26 expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:46:30.469+03:00 row F3-RT-leaflist         tip    W2  exit 0 pose 0x6cbe24bf8fafda26 expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:46:34.607+03:00 row F3-RT-leaflist         tip    W4  exit 0 pose 0x6cbe24bf8fafda26 expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:46:39.623+03:00 row F3-RT-leaflist         tip    W8  exit 0 pose 0x6cbe24bf8fafda26 expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:46:43.887+03:00 row F3-RT-leaflist         tip    W16 exit 0 pose 0x6cbe24bf8fafda26 expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:46:50.353+03:00 row F3-RT-kd               tip    W1  exit 0 pose 0x6cbe24bf8fafda26 expect match void 0 kd 500 setup None/None frozen None PASS
+2026-09-28T15:46:55.911+03:00 row F3-RT-kd               tip    W2  exit 0 pose 0x6cbe24bf8fafda26 expect match void 0 kd 500 setup None/None frozen None PASS
+2026-09-28T15:47:01.656+03:00 row F3-RT-kd               tip    W4  exit 0 pose 0x6cbe24bf8fafda26 expect match void 0 kd 500 setup None/None frozen None PASS
+2026-09-28T15:47:07.678+03:00 row F3-RT-kd               tip    W8  exit 0 pose 0x6cbe24bf8fafda26 expect match void 0 kd 500 setup None/None frozen None PASS
+2026-09-28T15:47:12.941+03:00 row F3-RT-kd               tip    W16 exit 0 pose 0x6cbe24bf8fafda26 expect match void 0 kd 500 setup None/None frozen None PASS
+2026-09-28T15:47:21.227+03:00 row JSonT                  tip    W1  exit 0 pose 0x3db47fae414b655c expect match void 0 kd 0 setup None/None frozen 274 PASS
+2026-09-28T15:47:24.151+03:00 row JSonT                  tip    W8  exit 0 pose 0x3db47fae414b655c expect match void 0 kd 0 setup None/None frozen 274 PASS
+2026-09-28T15:47:32.740+03:00 row JSonT-a                tip    W1  exit 0 pose 0x3db47fae414b655c expect match void 0 kd 0 setup 0/0 frozen 274 PASS
+2026-09-28T15:47:35.464+03:00 row JSonT-a                tip    W8  exit 0 pose 0x3db47fae414b655c expect match void 0 kd 0 setup 273/8716 frozen 274 PASS
+2026-09-28T15:47:47.908+03:00 row JSoffT                 tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:47:54.355+03:00 row JSoffT                 tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-28T15:48:08.403+03:00 row JSoffT-a               tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup 0/0 frozen None PASS
+2026-09-28T15:48:15.074+03:00 row JSoffT-a               tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup 500/15980 frozen None PASS
+2026-09-28T15:48:15.080+03:00 rows gate: 58 processes, 0 failing
+2026-09-28T15:48:15.081+03:00 === gate8b rows end
+2026-09-28T15:48:24.941+03:00 === gate8b f3pre start
+2026-09-28T15:48:25.202+03:00 f3pre leaflist     exit 0 void 0 kd_order_builds 0
+2026-09-28T15:48:25.461+03:00 f3pre leaflist-kd  exit 0 void 0 kd_order_builds 20
+2026-09-28T15:48:25.462+03:00 f3pre cmp silent (equal); pre-flight PASS
+2026-09-28T15:48:25.464+03:00 R4 F3-TD-armed-kd       vs F3-TD-armed-leaflist   W1  equal
+2026-09-28T15:48:25.466+03:00 R4 F3-TD-armed-kd       vs F3-TD-armed-leaflist   W8  equal
+2026-09-28T15:48:25.467+03:00 R4 F3-TA-armed-kd       vs F3-TA-armed-leaflist   W1  equal
+2026-09-28T15:48:25.469+03:00 R4 F3-JT-kd             vs F3-JT-leaflist         W1  equal
+2026-09-28T15:48:25.471+03:00 R4 F3-JT-kd             vs F3-JT-leaflist         W2  equal
+2026-09-28T15:48:25.473+03:00 R4 F3-JT-kd             vs F3-JT-leaflist         W4  equal
+2026-09-28T15:48:25.475+03:00 R4 F3-JT-kd             vs F3-JT-leaflist         W8  equal
+2026-09-28T15:48:25.477+03:00 R4 F3-JT-kd             vs F3-JT-leaflist         W16 equal
+2026-09-28T15:48:25.479+03:00 R4 F3-RT-kd             vs F3-RT-leaflist         W1  equal
+2026-09-28T15:48:25.481+03:00 R4 F3-RT-kd             vs F3-RT-leaflist         W2  equal
+2026-09-28T15:48:25.483+03:00 R4 F3-RT-kd             vs F3-RT-leaflist         W4  equal
+2026-09-28T15:48:25.485+03:00 R4 F3-RT-kd             vs F3-RT-leaflist         W8  equal
+2026-09-28T15:48:25.486+03:00 R4 F3-RT-kd             vs F3-RT-leaflist         W16 equal
+2026-09-28T15:48:25.488+03:00 === gate8b f3pre end
+2026-09-28T15:48:25.855+03:00 === gate8b freeze start
+2026-09-28T15:48:25.862+03:00 freeze JSonT@W1: CSV first awake==0 at step 273 (frozen from 274), SUMMARY first_frozen_step 274, stays zero True
+2026-09-28T15:48:25.869+03:00 freeze JSonT@W8: CSV first awake==0 at step 273 (frozen from 274), SUMMARY first_frozen_step 274, stays zero True
+2026-09-28T15:48:25.910+03:00 freeze JSonT-a@W1: CSV first awake==0 at step 273 (frozen from 274), SUMMARY first_frozen_step 274, stays zero True
+2026-09-28T15:48:25.956+03:00 freeze JSonT-a@W8: CSV first awake==0 at step 273 (frozen from 274), SUMMARY first_frozen_step 274, stays zero True
+2026-09-28T15:48:25.959+03:00 freeze: consistent True -> [274, 500]
+2026-09-28T15:48:25.962+03:00 === gate8b freeze end
+2026-09-28T15:49:06 dm1 crash_A_vb_1280x720          dmA vb       1280x720  frames  10 exit 0 hang False passed True line 'DM1 timing: path=VisibilityBuffer res=1280x720 edit_rows=0 grow_at=None frames=31' artifact 2652 came_up None zones_n {2: 10, 4: 10, 9: 10, 14: 10} present fifo PASS
+2026-09-28T15:49:29 dm1 crash_B_vb_1280x720          dmB vb       1280x720  frames  10 exit 0 hang False passed True line 'DM1 timing: path=VisibilityBuffer res=1280x720 edit_rows=0 grow_at=None frames=31' artifact 2685 came_up None zones_n {2: 10, 4: 10, 9: 10, 14: 10} present fifo PASS
+2026-09-28T15:49:45 dm1 sample_A_vb_idle             dmA vb       1920x1080 frames 220 exit 0 hang False passed True line 'DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241' artifact 2688 came_up None zones_n {2: 220, 4: 220, 9: 220, 14: 220} present fifo PASS
+2026-09-28T15:49:52 dm1 sample_A_deferred_idle       dmA deferred 1920x1080 frames 220 exit 0 hang False passed True line 'DM1 timing: path=Deferred res=1920x1080 edit_rows=0 grow_at=None frames=241' artifact 921 came_up None zones_n {17: 220} present fifo PASS
+2026-09-28T15:50:00 dm1 sample_A_vb_edit100          dmA vb       1920x1080 frames 220 exit 0 hang False passed True line 'DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=100 grow_at=None frames=241' artifact 2682 came_up None zones_n {2: 220, 4: 220, 9: 220, 14: 220} present fifo PASS
+2026-09-28T15:50:08.308+03:00 === gate8b criterion start
+2026-09-28T16:02:27.410+03:00 criterion G4 exit 0 ids on disk 60 of 60 missing [] unexpected [] PASS
+2026-09-28T16:02:27.411+03:00 === gate8b criterion end
+2026-09-29T07:11:50.125+03:00 === gate8b rows start
+2026-09-29T07:11:52.081+03:00 row S7-JT                  s7p    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:11:54.007+03:00 row S7-JT                  s7p    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:11:55.391+03:00 row S7-JT                  s7t    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:11:56.929+03:00 row S7-JT                  s7t    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:12:00.811+03:00 row S7-JA                  s7p    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:12:04.626+03:00 row S7-JA                  s7p    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:12:08.376+03:00 row S7-JA                  s7t    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:12:12.441+03:00 row S7-JA                  s7t    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:12:13.812+03:00 row S7-ladder8-F0.5        s7p    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:12:15.339+03:00 row S7-ladder8-F1          s7p    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:12:16.888+03:00 row S7-ladder8-F1.5        s7p    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:12:18.492+03:00 row S7-ladder8-F2          s7p    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:12:20.142+03:00 row S7-ladder16-F0.5       s7p    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:12:22.088+03:00 row S7-ladder16-F1         s7p    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:12:24.165+03:00 row S7-ladder16-F1.5       s7p    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:12:25.769+03:00 row S7-ladder16-F2         s7p    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:12:29.570+03:00 row S7-JA-ladder16-F1      s7p    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:12:32.495+03:00 row S7-JT-W1               s7p    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:12:35.261+03:00 row S7-JT-W1               s7t    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+2026-09-29T07:12:35.268+03:00 rows gate: 19 processes, 0 failing
+2026-09-29T07:12:35.268+03:00 === gate8b rows end
+2026-09-29T07:12:48.463+03:00 === gate8b micro start
+2026-09-29T07:12:52.656+03:00 micro omega2-worker            exit 0 summaries 36 calibration lines 1 park rows 18 (no park taken at gap 0: 15) PASS
+2026-09-29T07:12:56.653+03:00 micro omega2-external          exit 0 summaries 36 calibration lines 1 park rows 18 (no park taken at gap 0: 18) PASS
+2026-09-29T07:13:21.813+03:00 micro omega2-gap-worker        exit 0 summaries 8 calibration lines 1 park rows 4 (no park taken at gap 0: 0) PASS
+2026-09-29T07:13:46.731+03:00 micro omega2-gap-external      exit 0 summaries 8 calibration lines 1 park rows 4 (no park taken at gap 0: 0) PASS
+2026-09-29T07:13:47.579+03:00 micro omega1-s36-worker        exit 0 summaries 4 calibration lines 0 park rows 0 (no park taken at gap 0: 0) PASS
+2026-09-29T07:13:48.391+03:00 micro omega1-s36-external      exit 0 summaries 4 calibration lines 0 park rows 0 (no park taken at gap 0: 0) PASS
+2026-09-29T07:13:49.906+03:00 micro omega1-s72-worker        exit 0 summaries 4 calibration lines 0 park rows 0 (no park taken at gap 0: 0) PASS
+2026-09-29T07:13:51.593+03:00 micro omega1-s72-external      exit 0 summaries 4 calibration lines 0 park rows 0 (no park taken at gap 0: 0) PASS
+2026-09-29T07:13:51.596+03:00 === gate8b micro end
+2026-09-29T07:40:32.058+03:00 === gate8b micro start
+2026-09-29T07:40:32.702+03:00 micro omega-wgap-worker        exit 0 summaries 8 calibration lines 0 park rows 0 (no park taken at gap 0: 0) PASS
+2026-09-29T07:40:33.345+03:00 micro omega-wgap-external      exit 0 summaries 8 calibration lines 0 park rows 0 (no park taken at gap 0: 0) PASS
+2026-09-29T07:40:33.347+03:00 === gate8b micro end

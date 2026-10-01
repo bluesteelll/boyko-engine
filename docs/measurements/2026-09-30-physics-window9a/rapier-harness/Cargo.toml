@@ -1,0 +1,35 @@
+[package]
+name = "rapier-parity"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "External Rapier 0.36 comparator for boyko's J-T (Jolt parity) pyramid. Not a boyko workspace member."
+
+# Its own workspace root, so no parent directory's manifest can adopt it and the boyko trunk never
+# resolves Rapier's dependency tree. Its own Cargo.lock sits next to this file.
+[workspace]
+
+[features]
+# Exactly ONE of `simd8` | `simd4` | `det` names a build (main.rs refuses any other combination).
+# rapier3d 0.36 has no `simd-stable` (removed in 0.35) and no `simd4` feature: its SIMD is always on
+# through `wide`, at 4 lanes, and `simd8` widens that to 8 (`simd8 = ["parry3d/simd8"]`, AVX2;
+# x86-64-v3 provides it). So the two timed arms are:
+#   simd8 (default): rapier3d `parallel` + `simd8`                        -> 8 lanes
+#   simd4          : rapier3d `parallel` only (`--no-default-features --features simd4`) -> 4 lanes
+# `simd4` is a marker: it enables nothing in rapier3d, it only names the arm so the exe can say so.
+default = ["simd8"]
+simd8 = ["rapier3d/simd8"]
+simd4 = []
+# The determinism arm (not timed): bitwise-identical results for any rayon pool size (rapier3d
+# CHANGELOG, 0.35). rapier3d refuses to compile it together with `simd8` (lib.rs:19-21).
+det = ["rapier3d/enhanced-determinism"]
+
+[dependencies]
+# `parallel` pulls rayon; the harness uses rapier3d's own re-export (`rapier3d::rayon`) so its pool
+# is guaranteed to be the rayon crate Rapier's step runs on.
+rapier3d = { version = "=0.36.0", features = ["parallel"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+debug = false

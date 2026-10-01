@@ -1,0 +1,13 @@
+slots 90 used 90
+window [100,500)
+  W1: n 3+3/3+3/3+3; A 4.3096 B 4.2956 B/A 0.9967 pooled nnn per pass ['nnn', 'nnn', 'nnn'] -> NOT CLAIMED
+  W2: n 3+3/3+3/3+3; A 2.9569 B 2.9725 B/A 1.0053 pooled nnn per pass ['nnn', 'nnn', 'nnn'] -> NOT CLAIMED
+  W4: n 3+3/3+3/3+3; A 2.2015 B 2.1993 B/A 0.9990 pooled nnn per pass ['nnn', 'nnn', 'nnn'] -> NOT CLAIMED
+  W8: n 3+3/3+3/3+3; A 1.8884 B 1.8699 B/A 0.9903 pooled nnn per pass ['nnn', 'nnn', 'nnn'] -> NOT CLAIMED
+  W16: n 3+3/3+3/3+3; A 2.1576 B 2.1705 B/A 1.0060 pooled nnn per pass ['nnn', 'nnn', 'nnn'] -> NOT CLAIMED
+window [0,500)
+  W1: n 3+3/3+3/3+3; A 4.5499 B 4.5132 B/A 0.9919 pooled nnn per pass ['nnn', 'nnn', 'nnn'] -> NOT CLAIMED
+  W2: n 3+3/3+3/3+3; A 3.0922 B 3.0954 B/A 1.0010 pooled nnn per pass ['nnn', 'nnn', 'nnn'] -> NOT CLAIMED
+  W4: n 3+3/3+3/3+3; A 2.2706 B 2.2764 B/A 1.0026 pooled nnn per pass ['nnn', 'nnn', 'nnn'] -> NOT CLAIMED
+  W8: n 3+3/3+3/3+3; A 1.9269 B 1.9331 B/A 1.0032 pooled nnn per pass ['nnn', 'nnn', 'nnn'] -> NOT CLAIMED
+  W16: n 3+3/3+3/3+3; A 2.1885 B 2.2116 B/A 1.0105 pooled nnn per pass ['nnn', 'nnn', 'nnn'] -> NOT CLAIMED

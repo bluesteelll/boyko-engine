@@ -1,0 +1,17 @@
+used v2 processes 34, SUMMARY lines 776, CALIBRATION lines 34
+region/scope medians that are not multiples of 100 ns: 0 of 952
+gap>0 park rows: parks_per_region_median == (P - 1) x stages on every used SUMMARY (7 x 36 = 252, 7 x 72 = 504): True
+P8 gap 0: active_median min 8; all_active_reps min 997 of 1000
+worker P4 b=4P gap 0: first72 - first36 per process 100..1800 ns -> slope bias bound (first72-first36)/36 = 3..50 ns/stage
+worker P8 b=4P gap 0: first72 - first36 per process 6400..6800 ns -> slope bias bound (first72-first36)/36 = 178..189 ns/stage
+external P4 b=4P gap 0: first72 - first36 per process -100..100 ns -> slope bias bound (first72-first36)/36 = -3..3 ns/stage
+external P8 b=4P gap 0: first72 - first36 per process 100..500 ns -> slope bias bound (first72-first36)/36 = 3..14 ns/stage
+warm apply: per-participant stage work at P8 1043 ns; omega_b(b=1P) 346-416 ns = 33-40 % of it
+warm apply: per-participant stage work at P8 1043 ns; omega_b(b=2P) 502-679 ns = 48-65 % of it
+warm apply: per-participant stage work at P8 1043 ns; omega_b(b=4P) 857-1073 ns = 82-103 % of it
+integrate group: per-participant stage work at P8 1651 ns; omega_b(b=1P) 346-416 ns = 21-25 % of it
+integrate group: per-participant stage work at P8 1651 ns; omega_b(b=2P) 502-679 ns = 30-41 % of it
+integrate group: per-participant stage work at P8 1651 ns; omega_b(b=4P) 857-1073 ns = 52-65 % of it
+per-block work (median calibrated) 571.9 ns; b=4P work per participant per stage 2288 ns; omega_b(4P) 857-1073 = 37-47 % of it
+window 8 per-wave omega(8) 3.30 us vs region per-stage omega_b 0.346-1.073 us: ratio 3.1-9.5x
+dirty timed processes 35 of 95; omega-v2 used re-runs 19; omega-v1-cont used re-runs 4

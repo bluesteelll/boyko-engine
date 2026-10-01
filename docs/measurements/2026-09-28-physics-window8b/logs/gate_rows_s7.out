@@ -1,0 +1,22 @@
+=== gate8b rows start
+row S7-JT                  s7p    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-JT                  s7p    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-JT                  s7t    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-JT                  s7t    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-JA                  s7p    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-JA                  s7p    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-JA                  s7t    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-JA                  s7t    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-ladder8-F0.5        s7p    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-ladder8-F1          s7p    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-ladder8-F1.5        s7p    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-ladder8-F2          s7p    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-ladder16-F0.5       s7p    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-ladder16-F1         s7p    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-ladder16-F1.5       s7p    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-ladder16-F2         s7p    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-JA-ladder16-F1      s7p    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-JT-W1               s7p    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+row S7-JT-W1               s7t    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 kd 0 setup None/None frozen None PASS
+rows gate: 19 processes, 0 failing
+=== gate8b rows end

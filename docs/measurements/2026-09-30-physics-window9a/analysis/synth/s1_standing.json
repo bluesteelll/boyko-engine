@@ -1,0 +1,713 @@
+{
+ "head": {
+  "1": {
+   "ours": 4.3503785,
+   "jolt": 10.004406,
+   "rpd": 4.92131,
+   "rpm": 7.717186,
+   "bd": "rs8",
+   "bm": "rs8",
+   "oj": 0.4348462567392807,
+   "oj_v": 0.41284970556783973,
+   "oj_m": 0.8262503731725082,
+   "od": 0.8839879015953068,
+   "om": 0.5637260136013308,
+   "om_row": 1.0132156978053897,
+   "od_row": 0.526110113201261
+  },
+  "2": {
+   "ours": 2.939192625,
+   "jolt": 5.812302000000001,
+   "rpd": 2.976692,
+   "rpm": 4.468307,
+   "bd": "rs8",
+   "bm": "rs8",
+   "oj": 0.5056847742942469,
+   "oj_v": 0.48010488061460294,
+   "oj_m": 0.9608504775948649,
+   "od": 0.9874023328580854,
+   "om": 0.6577866348485008,
+   "om_row": 1.182276013798469,
+   "od_row": 0.587657763389818
+  },
+  "4": {
+   "ours": 2.160546,
+   "jolt": 3.6880875,
+   "rpd": 2.01291375,
+   "rpm": 3.192653,
+   "bd": "rs8",
+   "bm": "rs8",
+   "oj": 0.5858174460340217,
+   "oj_v": 0.5561840681927674,
+   "oj_m": 1.1131103830262141,
+   "od": 1.07334256124983,
+   "om": 0.6767243417934865,
+   "om_row": 1.2163137936669486,
+   "od_row": 0.6388055485643962
+  },
+  "8": {
+   "ours": 1.78779675,
+   "jolt": 2.5701962499999995,
+   "rpd": 1.4126975,
+   "rpm": 2.54944425,
+   "bd": "rs8",
+   "bm": "rs8",
+   "oj": 0.6955876423833396,
+   "oj_v": 0.6604015761983874,
+   "oj_m": 1.3216844808624124,
+   "od": 1.265519865363958,
+   "om": 0.7012495958678053,
+   "om_row": 1.2603943785986544,
+   "od_row": 0.7531808958284633
+  },
+  "16": {
+   "ours": 2.04863425,
+   "jolt": 2.50559325,
+   "rpd": 1.578045,
+   "rpm": 2.79580075,
+   "bd": "rs8",
+   "bm": "rs8",
+   "oj": 0.8176244288652997,
+   "oj_v": 0.7762651730137796,
+   "oj_m": 1.5535662984215535,
+   "od": 1.2982102855115032,
+   "om": 0.7327540240483875,
+   "om_row": 1.3170190161225188,
+   "od_row": 0.772636773689895
+  }
+ },
+ "jolt": {
+  "('0..500', 'wall', 1)": [
+   0.45045476171841303,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B<A"
+  ],
+  "('0..500', 'wall', 2)": [
+   0.52703002765809,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B<A"
+  ],
+  "('0..500', 'wall', 4)": [
+   0.6117248797724237,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B<A"
+  ],
+  "('0..500', 'wall', 8)": [
+   0.7220841244101123,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B<A"
+  ],
+  "('0..500', 'wall', 16)": [
+   0.8513131974810267,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('100..500', 'wall', 1)": [
+   0.4348462567392807,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B<A"
+  ],
+  "('100..500', 'wall', 2)": [
+   0.5056847742942469,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B<A"
+  ],
+  "('100..500', 'wall', 4)": [
+   0.5858174460340217,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B<A"
+  ],
+  "('100..500', 'wall', 8)": [
+   0.6955876423833396,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B<A"
+  ],
+  "('100..500', 'wall', 16)": [
+   0.8176244288652997,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('100..500', 'velocity rows', 1)": [
+   0.41284970556783973,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B<A"
+  ],
+  "('100..500', 'velocity rows', 2)": [
+   0.48010488061460294,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B<A"
+  ],
+  "('100..500', 'velocity rows', 4)": [
+   0.5561840681927673,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B<A"
+  ],
+  "('100..500', 'velocity rows', 8)": [
+   0.6604015761983872,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B<A"
+  ],
+  "('100..500', 'velocity rows', 16)": [
+   0.7762651730137796,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('100..500', 'all rows', 1)": [
+   0.4582537602157715,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B<A"
+  ],
+  "('100..500', 'all rows', 2)": [
+   0.532905471101114,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B<A"
+  ],
+  "('100..500', 'all rows', 4)": [
+   0.6173516347090133,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B<A"
+  ],
+  "('100..500', 'all rows', 8)": [
+   0.7330306924382793,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B<A"
+  ],
+  "('100..500', 'all rows', 16)": [
+   0.8616366432158147,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('100..500', 'manifold', 1)": [
+   0.8262503731725083,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('100..500', 'manifold', 2)": [
+   0.9608504775948649,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('100..500', 'manifold', 4)": [
+   1.113110383026214,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B>A"
+  ],
+  "('100..500', 'manifold', 8)": [
+   1.3216844808624124,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('100..500', 'manifold', 16)": [
+   1.5535662984215535,
+   "CLAIMED STRONG",
+   "CLAIMED STRONG",
+   "B>A"
+  ]
+ },
+ "rapier": {
+  "('PRE', 'RP-D', 'wall', 1, 'rs8')": [
+   0.8863899043140953,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B>A"
+  ],
+  "('PRE', 'RP-D', 'wall', 1, 'rs4')": [
+   0.7587786518466336,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B>A"
+  ],
+  "('PRE', 'RP-D', 'wall', 2, 'rs8')": [
+   0.9874023328580854,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B>A"
+  ],
+  "('PRE', 'RP-D', 'wall', 2, 'rs4')": [
+   0.8632291140843753,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B>A"
+  ],
+  "('PRE', 'RP-D', 'wall', 4, 'rs8')": [
+   1.07334256124983,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('PRE', 'RP-D', 'wall', 4, 'rs4')": [
+   0.9448827575469564,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B>A"
+  ],
+  "('PRE', 'RP-D', 'wall', 8, 'rs8')": [
+   1.2813826031404458,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B<A"
+  ],
+  "('PRE', 'RP-D', 'wall', 8, 'rs4')": [
+   1.1529293412761763,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B<A"
+  ],
+  "('PRE', 'RP-D', 'wall', 16, 'rs8')": [
+   1.2788326695373073,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('PRE', 'RP-D', 'wall', 16, 'rs4')": [
+   1.1871249894114657,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('PRE', 'RP-D', 'row', 1, 'rs8')": [
+   0.5275396779272158,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-D', 'row', 1, 'rs4')": [
+   0.4515911605773181,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-D', 'row', 2, 'rs8')": [
+   0.587657763389818,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-D', 'row', 2, 'rs4')": [
+   0.5137554101249093,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-D', 'row', 4, 'rs8')": [
+   0.6388055485643961,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-D', 'row', 4, 'rs4')": [
+   0.5623520114221302,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-D', 'row', 8, 'rs8')": [
+   0.7626216887988295,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-D', 'row', 8, 'rs4')": [
+   0.6861720450666908,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-D', 'row', 16, 'rs8')": [
+   0.7611040822182623,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B>A"
+  ],
+  "('PRE', 'RP-D', 'row', 16, 'rs4')": [
+   0.7065237673911484,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B>A"
+  ],
+  "('PRE', 'RP-M', 'wall', 1, 'rs8')": [
+   0.5652577895621539,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-M', 'wall', 1, 'rs4')": [
+   0.4336771706453551,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-M', 'wall', 2, 'rs8')": [
+   0.6577866348485008,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-M', 'wall', 2, 'rs4')": [
+   0.5238507574106591,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-M', 'wall', 4, 'rs8')": [
+   0.6767243417934865,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-M', 'wall', 4, 'rs4')": [
+   0.5790604358177907,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-M', 'wall', 8, 'rs8')": [
+   0.7100394527160184,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B>A"
+  ],
+  "('PRE', 'RP-M', 'wall', 8, 'rs4')": [
+   0.661705476058903,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-M', 'wall', 16, 'rs8')": [
+   0.7218166387572504,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-M', 'wall', 16, 'rs4')": [
+   0.6827313883635898,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-M', 'row', 1, 'rs8')": [
+   1.015968842793523,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('PRE', 'RP-M', 'row', 1, 'rs4')": [
+   0.7794717761392007,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('PRE', 'RP-M', 'row', 2, 'rs8')": [
+   1.1822760137984687,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('PRE', 'RP-M', 'row', 2, 'rs4')": [
+   0.9415457117632471,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B>A"
+  ],
+  "('PRE', 'RP-M', 'row', 4, 'rs8')": [
+   1.2163137936669486,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B<A"
+  ],
+  "('PRE', 'RP-M', 'row', 4, 'rs4')": [
+   1.0407770963068268,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('PRE', 'RP-M', 'row', 8, 'rs8')": [
+   1.2761928706412267,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('PRE', 'RP-M', 'row', 8, 'rs4')": [
+   1.1893195621460428,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B<A"
+  ],
+  "('PRE', 'RP-M', 'row', 16, 'rs8')": [
+   1.2973606533673043,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B<A"
+  ],
+  "('PRE', 'RP-M', 'row', 16, 'rs4')": [
+   1.227110588094429,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B<A"
+  ],
+  "('JD', 'RP-D', 'wall', 1, 'rs8')": [
+   0.8839879015953069,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B>A"
+  ],
+  "('JD', 'RP-D', 'wall', 1, 'rs4')": [
+   0.7567224592209915,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B>A"
+  ],
+  "('JD', 'RP-D', 'wall', 2, 'rs8')": [
+   0.9874023328580854,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B>A"
+  ],
+  "('JD', 'RP-D', 'wall', 2, 'rs4')": [
+   0.8632291140843753,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B>A"
+  ],
+  "('JD', 'RP-D', 'wall', 4, 'rs8')": [
+   1.07334256124983,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('JD', 'RP-D', 'wall', 4, 'rs4')": [
+   0.9448827575469564,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B>A"
+  ],
+  "('JD', 'RP-D', 'wall', 8, 'rs8')": [
+   1.2655198653639579,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B<A"
+  ],
+  "('JD', 'RP-D', 'wall', 8, 'rs4')": [
+   1.1386567768050646,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('JD', 'RP-D', 'wall', 16, 'rs8')": [
+   1.2982102855115034,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('JD', 'RP-D', 'wall', 16, 'rs4')": [
+   1.2051129973081594,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('JD', 'RP-D', 'row', 1, 'rs8')": [
+   0.526110113201261,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('JD', 'RP-D', 'row', 1, 'rs4')": [
+   0.4503674065722147,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('JD', 'RP-D', 'row', 2, 'rs8')": [
+   0.587657763389818,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('JD', 'RP-D', 'row', 2, 'rs4')": [
+   0.5137554101249093,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('JD', 'RP-D', 'row', 4, 'rs8')": [
+   0.6388055485643961,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('JD', 'RP-D', 'row', 4, 'rs4')": [
+   0.5623520114221302,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('JD', 'RP-D', 'row', 8, 'rs8')": [
+   0.7531808958284631,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('JD', 'RP-D', 'row', 8, 'rs4')": [
+   0.677677652218081,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B>A"
+  ],
+  "('JD', 'RP-D', 'row', 16, 'rs8')": [
+   0.7726367736898951,
+   "CLAIMED",
+   "CLAIMED",
+   "B>A"
+  ],
+  "('JD', 'RP-D', 'row', 16, 'rs4')": [
+   0.7172294262058402,
+   "CLAIMED",
+   "CLAIMED",
+   "B>A"
+  ],
+  "('JD', 'RP-M', 'wall', 1, 'rs8')": [
+   0.5637260136013308,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('JD', 'RP-M', 'wall', 1, 'rs4')": [
+   0.43250196125059936,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('JD', 'RP-M', 'wall', 2, 'rs8')": [
+   0.6577866348485008,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('JD', 'RP-M', 'wall', 2, 'rs4')": [
+   0.5238507574106591,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('JD', 'RP-M', 'wall', 4, 'rs8')": [
+   0.6767243417934865,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('JD', 'RP-M', 'wall', 4, 'rs4')": [
+   0.5790604358177907,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('JD', 'RP-M', 'wall', 8, 'rs8')": [
+   0.7012495958678052,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B>A"
+  ],
+  "('JD', 'RP-M', 'wall', 8, 'rs4')": [
+   0.6535139644633315,
+   "NOT CLAIMED",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('JD', 'RP-M', 'wall', 16, 'rs8')": [
+   0.7327540240483875,
+   "CLAIMED STRONG",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('JD', 'RP-M', 'wall', 16, 'rs4')": [
+   0.6930765312211193,
+   "CLAIMED STRONG",
+   "CLAIMED STRONG",
+   "B>A"
+  ],
+  "('JD', 'RP-M', 'row', 1, 'rs8')": [
+   1.0132156978053897,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('JD', 'RP-M', 'row', 1, 'rs4')": [
+   0.7773595078062778,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B>A"
+  ],
+  "('JD', 'RP-M', 'row', 2, 'rs8')": [
+   1.1822760137984687,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('JD', 'RP-M', 'row', 2, 'rs4')": [
+   0.9415457117632471,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B>A"
+  ],
+  "('JD', 'RP-M', 'row', 4, 'rs8')": [
+   1.2163137936669486,
+   "NOT CLAIMED",
+   "CLAIMED",
+   "B<A"
+  ],
+  "('JD', 'RP-M', 'row', 4, 'rs4')": [
+   1.0407770963068268,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('JD', 'RP-M', 'row', 8, 'rs8')": [
+   1.2603943785986542,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('JD', 'RP-M', 'row', 8, 'rs4')": [
+   1.1745965088592782,
+   "NOT CLAIMED",
+   "NOT CLAIMED",
+   "B<A"
+  ],
+  "('JD', 'RP-M', 'row', 16, 'rs8')": [
+   1.3170190161225188,
+   "CLAIMED",
+   "CLAIMED",
+   "B<A"
+  ],
+  "('JD', 'RP-M', 'row', 16, 'rs4')": [
+   1.2457044810253681,
+   "CLAIMED",
+   "CLAIMED",
+   "B<A"
+  ]
+ }
+}

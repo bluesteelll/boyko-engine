@@ -1,0 +1,85 @@
+F3-G4 records: 3 ([(0, 'original'), (1, 'original'), (2, 'original')])
+- round 0 original: ids 60/60, printed-vs-recomputed worst 4.51e-05, kernel receipts 60 (OK), oracle-ok lines 21; receipts 1.03/2.5 %, witness 0.99 % -> valid True, clean True; 2026-09-29T19:56:30.573+03:00 .. 2026-09-29T20:07:23.482+03:00
+- round 1 original: ids 60/60, printed-vs-recomputed worst 3.92e-05, kernel receipts 60 (OK), oracle-ok lines 21; receipts 2.5/2.16 %, witness 1.04 % -> valid True, clean True; 2026-09-29T20:07:28.538+03:00 .. 2026-09-29T20:18:36.761+03:00
+- round 2 original: ids 60/60, printed-vs-recomputed worst 4.37e-05, kernel receipts 60 (OK), oracle-ok lines 21; receipts 2.16/1.5 %, witness 1.06 % -> valid True, clean True; 2026-09-29T20:18:41.817+03:00 .. 2026-09-29T20:29:39.585+03:00
+used processes: 3
+
+## uniform
+### all_pairs / tree (ratio > 1: tree faster; flags r/i/s; ruling-1 claim = i AND s)
+- n=128  all_pairs 11.374 [11.326-11.399] n=3 (r 0.64 / i 0.32 / s 0.24 %) | tree 11.154 [11.029-11.181] n=3 (r 1.37 / i 0.68 / s 0.53 %) | all_pairs/tree 1.0197 (+1.97 %) n/Y/Y bars r/i/s 3.02/1.51/1.16 %  <- tree CLAIMED faster [w7 rule: not claimed]
+- n=136  all_pairs 12.785 [12.756-12.806] n=3 (r 0.39 / i 0.19 / s 0.14 %) | tree 11.919 [11.919-11.981] n=3 (r 0.53 / i 0.26 / s 0.22 %) | all_pairs/tree 1.0727 (+7.27 %) Y/Y/Y bars r/i/s 1.31/0.65/0.52 %  <- tree CLAIMED faster [w7 rule: claimed]
+- n=144  all_pairs 14.154 [14.151-14.329] n=3 (r 1.26 / i 0.63 / s 0.52 %) | tree 12.532 [12.446-12.585] n=3 (r 1.11 / i 0.55 / s 0.40 %) | all_pairs/tree 1.1294 (+12.94 %) Y/Y/Y bars r/i/s 3.35/1.67/1.32 %  <- tree CLAIMED faster [w7 rule: claimed]
+- n=152  all_pairs 15.613 [15.577-15.629] n=3 (r 0.34 / i 0.17 / s 0.13 %) | tree 13.042 [12.966-13.128] n=3 (r 1.24 / i 0.62 / s 0.45 %) | all_pairs/tree 1.1971 (+19.71 %) Y/Y/Y bars r/i/s 2.58/1.29/0.93 %  <- tree CLAIMED faster [w7 rule: claimed]
+- n=160  all_pairs 17.306 [17.281-17.572] n=3 (r 1.68 / i 0.84 / s 0.67 %) | tree 13.577 [13.444-13.645] n=3 (r 1.48 / i 0.74 / s 0.54 %) | all_pairs/tree 1.2747 (+27.47 %) Y/Y/Y bars r/i/s 4.48/2.24/1.73 %  <- tree CLAIMED faster [w7 rule: claimed]
+- n=176  all_pairs 20.694 [20.635-20.845] n=3 (r 1.02 / i 0.51 / s 0.38 %) | tree 14.786 [14.725-15.232] n=3 (r 3.43 / i 1.72 / s 1.36 %) | all_pairs/tree 1.3995 (+39.95 %) Y/Y/Y bars r/i/s 7.16/3.58/2.82 %  <- tree CLAIMED faster [w7 rule: claimed]
+- n=256  all_pairs 42.934 [42.899-43.355] n=3 (r 1.06 / i 0.53 / s 0.43 %) | tree 21.120 [21.095-21.348] n=3 (r 1.20 / i 0.60 / s 0.48 %) | all_pairs/tree 2.0329 (+103.29 %) Y/Y/Y bars r/i/s 3.20/1.60/1.28 %  <- tree CLAIMED faster [w7 rule: claimed]
+- n=1000 all_pairs 636.788 [635.092-637.698] n=3 (r 0.41 / i 0.20 / s 0.15 %) | tree 85.810 [85.124-85.837] n=3 (r 0.83 / i 0.42 / s 0.34 %) | all_pairs/tree 7.4209 (+642.09 %) Y/Y/Y bars r/i/s 1.85/0.93/0.74 %  <- tree CLAIMED faster [w7 rule: claimed]
+  => uniform tree: ruling 1 LO None / HI 128 (monotone True); window-7 rule LO 128 / HI 136 (monotone True); log-log crossover none in grid
+### all_pairs / tree_kd (ratio > 1: tree_kd faster; flags r/i/s; ruling-1 claim = i AND s)
+- n=128  all_pairs 11.374 [11.326-11.399] n=3 (r 0.64 / i 0.32 / s 0.24 %) | tree_kd 11.381 [11.137-11.610] n=3 (r 4.16 / i 2.08 / s 1.51 %) | all_pairs/tree_kd 0.9994 (-0.06 %) n/n/n bars r/i/s 8.42/4.21/3.05 % [w7 rule: not claimed]
+- n=136  all_pairs 12.785 [12.756-12.806] n=3 (r 0.39 / i 0.19 / s 0.14 %) | tree_kd 11.971 [11.918-11.994] n=3 (r 0.63 / i 0.32 / s 0.23 %) | all_pairs/tree_kd 1.0680 (+6.80 %) Y/Y/Y bars r/i/s 1.49/0.74/0.55 %  <- tree_kd CLAIMED faster [w7 rule: claimed]
+- n=144  all_pairs 14.154 [14.151-14.329] n=3 (r 1.26 / i 0.63 / s 0.52 %) | tree_kd 12.917 [12.844-12.986] n=3 (r 1.10 / i 0.55 / s 0.40 %) | all_pairs/tree_kd 1.0958 (+9.58 %) Y/Y/Y bars r/i/s 3.34/1.67/1.31 %  <- tree_kd CLAIMED faster [w7 rule: claimed]
+- n=152  all_pairs 15.613 [15.577-15.629] n=3 (r 0.34 / i 0.17 / s 0.13 %) | tree_kd 13.126 [13.036-13.188] n=3 (r 1.15 / i 0.58 / s 0.42 %) | all_pairs/tree_kd 1.1895 (+18.95 %) Y/Y/Y bars r/i/s 2.40/1.20/0.88 %  <- tree_kd CLAIMED faster [w7 rule: claimed]
+- n=160  all_pairs 17.306 [17.281-17.572] n=3 (r 1.68 / i 0.84 / s 0.67 %) | tree_kd 14.243 [14.204-14.322] n=3 (r 0.83 / i 0.41 / s 0.31 %) | all_pairs/tree_kd 1.2150 (+21.50 %) Y/Y/Y bars r/i/s 3.75/1.87/1.48 %  <- tree_kd CLAIMED faster [w7 rule: claimed]
+- n=176  all_pairs 20.694 [20.635-20.845] n=3 (r 1.02 / i 0.51 / s 0.38 %) | tree_kd 15.607 [15.595-15.836] n=3 (r 1.55 / i 0.77 / s 0.63 %) | all_pairs/tree_kd 1.3260 (+32.60 %) Y/Y/Y bars r/i/s 3.70/1.85/1.47 %  <- tree_kd CLAIMED faster [w7 rule: claimed]
+- n=256  all_pairs 42.934 [42.899-43.355] n=3 (r 1.06 / i 0.53 / s 0.43 %) | tree_kd 22.349 [22.340-22.456] n=3 (r 0.52 / i 0.26 / s 0.21 %) | all_pairs/tree_kd 1.9211 (+92.11 %) Y/Y/Y bars r/i/s 2.36/1.18/0.95 %  <- tree_kd CLAIMED faster [w7 rule: claimed]
+- n=1000 all_pairs 636.788 [635.092-637.698] n=3 (r 0.41 / i 0.20 / s 0.15 %) | tree_kd 99.997 [99.975-100.101] n=3 (r 0.13 / i 0.06 / s 0.05 %) | all_pairs/tree_kd 6.3681 (+536.81 %) Y/Y/Y bars r/i/s 0.86/0.43/0.32 %  <- tree_kd CLAIMED faster [w7 rule: claimed]
+  => uniform tree_kd: ruling 1 LO 128 / HI 136 (monotone True); window-7 rule LO 128 / HI 136 (monotone True); log-log crossover 128.1
+### tree_kd against tree (post hoc except where a rule names it; ratio < 1: tree_kd faster)
+- n=128  tree_kd/tree 1.0203 (+2.03 %) n/n/n bars r/i/s 8.76/4.38/3.19 %
+- n=136  tree_kd/tree 1.0043 (+0.43 %) n/n/n bars r/i/s 1.65/0.82/0.64 %
+- n=144  tree_kd/tree 1.0307 (+3.07 %) n/Y/Y bars r/i/s 3.12/1.56/1.13 %  CLAIMED
+- n=152  tree_kd/tree 1.0064 (+0.64 %) n/n/n bars r/i/s 3.39/1.70/1.23 %
+- n=160  tree_kd/tree 1.0491 (+4.91 %) Y/Y/Y bars r/i/s 3.39/1.70/1.25 %  CLAIMED
+- n=176  tree_kd/tree 1.0555 (+5.55 %) n/Y/Y bars r/i/s 7.53/3.77/2.99 %  CLAIMED
+- n=256  tree_kd/tree 1.0582 (+5.82 %) Y/Y/Y bars r/i/s 2.62/1.31/1.04 %  CLAIMED
+- n=1000 tree_kd/tree 1.1653 (+16.53 %) Y/Y/Y bars r/i/s 1.68/0.84/0.69 %  CLAIMED
+### bridge: tree (LeafList) against tree_rowwalk (ratio < 1: LeafList faster)
+- n=144 tree_rowwalk 12.270 [12.251-12.271] n=3 (r 0.17 / i 0.08 / s 0.07 %); LeafList/RowWalk 1.0214 (+2.14 %) n/Y/Y bars r/i/s 2.24/1.12/0.82 %; tree_kd/RowWalk 1.0528 (+5.28 %) Y/Y/Y bars r/i/s 2.22/1.11/0.81 %; all_pairs/tree_rowwalk 1.154
+- n=256 tree_rowwalk 22.801 [22.681-23.163] n=3 (r 2.12 / i 1.06 / s 0.80 %); LeafList/RowWalk 0.9263 (-7.37 %) Y/Y/Y bars r/i/s 4.87/2.43/1.86 %; tree_kd/RowWalk 0.9802 (-1.98 %) n/n/Y bars r/i/s 4.36/2.18/1.65 %; all_pairs/tree_rowwalk 1.883
+
+## disparity
+### all_pairs / tree (ratio > 1: tree faster; flags r/i/s; ruling-1 claim = i AND s)
+- n=128  all_pairs 13.630 [13.586-13.684] n=3 (r 0.72 / i 0.36 / s 0.26 %) | tree 14.305 [13.830-14.396] n=3 (r 3.96 / i 1.98 / s 1.54 %) | all_pairs/tree 0.9528 (-4.72 %) n/Y/Y bars r/i/s 8.05/4.02/3.12 %  <- all_pairs CLAIMED faster [w7 rule: not claimed]
+- n=136  all_pairs 15.125 [15.110-15.357] n=3 (r 1.64 / i 0.82 / s 0.66 %) | tree 14.309 [14.286-14.561] n=3 (r 1.92 / i 0.96 / s 0.77 %) | all_pairs/tree 1.0571 (+5.71 %) Y/Y/Y bars r/i/s 5.05/2.53/2.04 %  <- tree CLAIMED faster [w7 rule: claimed]
+- n=144  all_pairs 16.862 [16.668-16.904] n=3 (r 1.41 / i 0.70 / s 0.54 %) | tree 15.324 [15.309-15.600] n=3 (r 1.90 / i 0.95 / s 0.77 %) | all_pairs/tree 1.1003 (+10.03 %) Y/Y/Y bars r/i/s 4.72/2.36/1.89 %  <- tree CLAIMED faster [w7 rule: claimed]
+- n=152  all_pairs 18.431 [18.294-18.455] n=3 (r 0.88 / i 0.44 / s 0.34 %) | tree 16.123 [16.098-16.595] n=3 (r 3.08 / i 1.54 / s 1.26 %) | all_pairs/tree 1.1432 (+14.32 %) Y/Y/Y bars r/i/s 6.41/3.21/2.61 %  <- tree CLAIMED faster [w7 rule: claimed]
+- n=160  all_pairs 20.227 [20.211-20.284] n=3 (r 0.36 / i 0.18 / s 0.14 %) | tree 16.930 [16.788-17.319] n=3 (r 3.14 / i 1.57 / s 1.18 %) | all_pairs/tree 1.1947 (+19.47 %) Y/Y/Y bars r/i/s 6.31/3.16/2.37 %  <- tree CLAIMED faster [w7 rule: claimed]
+- n=176  all_pairs 23.965 [23.783-23.982] n=3 (r 0.83 / i 0.42 / s 0.33 %) | tree 17.804 [17.772-18.520] n=3 (r 4.20 / i 2.10 / s 1.72 %) | all_pairs/tree 1.3460 (+34.60 %) Y/Y/Y bars r/i/s 8.56/4.28/3.50 %  <- tree CLAIMED faster [w7 rule: claimed]
+- n=256  all_pairs 48.002 [47.874-48.365] n=3 (r 1.02 / i 0.51 / s 0.38 %) | tree 25.751 [25.665-26.173] n=3 (r 1.97 / i 0.99 / s 0.76 %) | all_pairs/tree 1.8641 (+86.41 %) Y/Y/Y bars r/i/s 4.44/2.22/1.71 %  <- tree CLAIMED faster [w7 rule: claimed]
+- n=1000 all_pairs 661.113 [657.630-661.146] n=3 (r 0.53 / i 0.27 / s 0.22 %) | tree 107.905 [107.643-107.912] n=3 (r 0.25 / i 0.12 / s 0.10 %) | all_pairs/tree 6.1268 (+512.68 %) Y/Y/Y bars r/i/s 1.18/0.59/0.49 %  <- tree CLAIMED faster [w7 rule: claimed]
+  => disparity tree: ruling 1 LO 128 / HI 136 (monotone True); window-7 rule LO 128 / HI 136 (monotone True); log-log crossover 131.7
+### all_pairs / tree_kd (ratio > 1: tree_kd faster; flags r/i/s; ruling-1 claim = i AND s)
+- n=128  all_pairs 13.630 [13.586-13.684] n=3 (r 0.72 / i 0.36 / s 0.26 %) | tree_kd 13.951 [13.873-13.969] n=3 (r 0.68 / i 0.34 / s 0.26 %) | all_pairs/tree_kd 0.9770 (-2.30 %) Y/Y/Y bars r/i/s 1.98/0.99/0.74 %  <- all_pairs CLAIMED faster [w7 rule: claimed]
+- n=136  all_pairs 15.125 [15.110-15.357] n=3 (r 1.64 / i 0.82 / s 0.66 %) | tree_kd 14.213 [14.174-14.220] n=3 (r 0.32 / i 0.16 / s 0.13 %) | all_pairs/tree_kd 1.0642 (+6.42 %) Y/Y/Y bars r/i/s 3.34/1.67/1.35 %  <- tree_kd CLAIMED faster [w7 rule: claimed]
+- n=144  all_pairs 16.862 [16.668-16.904] n=3 (r 1.41 / i 0.70 / s 0.54 %) | tree_kd 14.772 [14.734-14.885] n=3 (r 1.02 / i 0.51 / s 0.39 %) | all_pairs/tree_kd 1.1415 (+14.15 %) Y/Y/Y bars r/i/s 3.48/1.74/1.33 %  <- tree_kd CLAIMED faster [w7 rule: claimed]
+- n=152  all_pairs 18.431 [18.294-18.455] n=3 (r 0.88 / i 0.44 / s 0.34 %) | tree_kd 16.222 [16.168-16.345] n=3 (r 1.09 / i 0.54 / s 0.40 %) | all_pairs/tree_kd 1.1362 (+13.62 %) Y/Y/Y bars r/i/s 2.79/1.40/1.06 %  <- tree_kd CLAIMED faster [w7 rule: claimed]
+- n=160  all_pairs 20.227 [20.211-20.284] n=3 (r 0.36 / i 0.18 / s 0.14 %) | tree_kd 16.464 [16.424-16.512] n=3 (r 0.53 / i 0.27 / s 0.19 %) | all_pairs/tree_kd 1.2286 (+22.86 %) Y/Y/Y bars r/i/s 1.29/0.64/0.47 %  <- tree_kd CLAIMED faster [w7 rule: claimed]
+- n=176  all_pairs 23.965 [23.783-23.982] n=3 (r 0.83 / i 0.42 / s 0.33 %) | tree_kd 18.429 [18.352-18.443] n=3 (r 0.49 / i 0.24 / s 0.19 %) | all_pairs/tree_kd 1.3004 (+30.04 %) Y/Y/Y bars r/i/s 1.93/0.96/0.77 %  <- tree_kd CLAIMED faster [w7 rule: claimed]
+- n=256  all_pairs 48.002 [47.874-48.365] n=3 (r 1.02 / i 0.51 / s 0.38 %) | tree_kd 26.930 [26.829-27.677] n=3 (r 3.15 / i 1.58 / s 1.25 %) | all_pairs/tree_kd 1.7824 (+78.24 %) Y/Y/Y bars r/i/s 6.63/3.31/2.61 %  <- tree_kd CLAIMED faster [w7 rule: claimed]
+- n=1000 all_pairs 661.113 [657.630-661.146] n=3 (r 0.53 / i 0.27 / s 0.22 %) | tree_kd 122.950 [121.615-124.350] n=3 (r 2.22 / i 1.11 / s 0.80 %) | all_pairs/tree_kd 5.3771 (+437.71 %) Y/Y/Y bars r/i/s 4.57/2.29/1.67 %  <- tree_kd CLAIMED faster [w7 rule: claimed]
+  => disparity tree_kd: ruling 1 LO 128 / HI 136 (monotone True); window-7 rule LO 128 / HI 136 (monotone True); log-log crossover 130.1
+### tree_kd against tree (post hoc except where a rule names it; ratio < 1: tree_kd faster)
+- n=128  tree_kd/tree 0.9752 (-2.48 %) n/n/n bars r/i/s 8.03/4.02/3.12 %
+- n=136  tree_kd/tree 0.9933 (-0.67 %) n/n/n bars r/i/s 3.90/1.95/1.57 %
+- n=144  tree_kd/tree 0.9640 (-3.60 %) n/Y/Y bars r/i/s 4.31/2.16/1.73 %  CLAIMED
+- n=152  tree_kd/tree 1.0061 (+0.61 %) n/n/n bars r/i/s 6.54/3.27/2.64 %
+- n=160  tree_kd/tree 0.9725 (-2.75 %) n/n/Y bars r/i/s 6.36/3.18/2.38 %
+- n=176  tree_kd/tree 1.0351 (+3.51 %) n/n/Y bars r/i/s 8.45/4.23/3.46 %
+- n=256  tree_kd/tree 1.0458 (+4.58 %) n/Y/Y bars r/i/s 7.43/3.72/2.92 %  CLAIMED
+- n=1000 tree_kd/tree 1.1394 (+13.94 %) Y/Y/Y bars r/i/s 4.48/2.24/1.62 %  CLAIMED
+### bridge: tree (LeafList) against tree_rowwalk (ratio < 1: LeafList faster)
+- n=144 tree_rowwalk 17.597 [17.582-17.904] n=3 (r 1.83 / i 0.92 / s 0.75 %); LeafList/RowWalk 0.8709 (-12.91 %) Y/Y/Y bars r/i/s 5.28/2.64/2.15 %; tree_kd/RowWalk 0.8395 (-16.05 %) Y/Y/Y bars r/i/s 4.20/2.10/1.69 %; all_pairs/tree_rowwalk 0.958
+- n=256 tree_rowwalk 31.872 [31.746-32.274] n=3 (r 1.65 / i 0.83 / s 0.63 %); LeafList/RowWalk 0.8079 (-19.21 %) Y/Y/Y bars r/i/s 5.15/2.57/1.97 %; tree_kd/RowWalk 0.8450 (-15.50 %) Y/Y/Y bars r/i/s 7.12/3.56/2.79 %; all_pairs/tree_rowwalk 1.506
+
+## bp_g4_scene: tree_kd against tree (R3: not claimed slower at 10000 and 100000; ratio > 1: kd slower)
+- j100   tree 197.19 [186.26-198.25] n=3 (r 6.08 / i 3.04 / s 2.44 %) | tree_kd 143.70 [142.87-143.89] n=3 (r 0.71 / i 0.35 / s 0.27 %) | kd/tree 0.7287 (-27.13 %) Y/Y/Y bars r/i/s 12.24/6.12/4.90 % -> STRONG CLAIMED faster (w7 rule: claimed)
+- 1240   tree 153.61 [151.69-179.57] n=3 (r 18.15 / i 9.07 / s 7.34 %) | tree_kd 139.19 [138.93-139.47] n=3 (r 0.39 / i 0.19 / s 0.14 %) | kd/tree 0.9061 (-9.39 %) n/n/n bars r/i/s 36.31/18.15/14.67 % -> not claimed (w7 rule: not claimed)
+- 10000  tree 2838.41 [2837.29-2840.69] n=3 (r 0.12 / i 0.06 / s 0.04 %) | tree_kd 2497.89 [2495.82-2499.29] n=3 (r 0.14 / i 0.07 / s 0.05 %) | kd/tree 0.8800 (-12.00 %) Y/Y/Y bars r/i/s 0.37/0.18/0.13 % -> STRONG CLAIMED faster (w7 rule: claimed)
+- 100000 tree 34891.25 [34849.77-34976.64] n=3 (r 0.36 / i 0.18 / s 0.13 %) | tree_kd 31679.80 [31612.90-31985.48] n=3 (r 1.18 / i 0.59 / s 0.45 %) | kd/tree 0.9080 (-9.20 %) Y/Y/Y bars r/i/s 2.46/1.23/0.95 % -> STRONG CLAIMED faster (w7 rule: claimed)
+
+## Threshold check on tree (window_cmds: LO 144 and HI 152 in both families)
+- ruling1: tree -> TREE_BRUTE_MAX_ROWS below the grid (< 128), AUTO_TREE_LO/HI below the grid (< 128)/136: reproduces 144/152: False; tree_kd -> 128, 128/136
+- w7: tree -> TREE_BRUTE_MAX_ROWS 128, AUTO_TREE_LO/HI 128/136: reproduces 144/152: False; tree_kd -> 128, 128/136
+- L2 procedure beside (tree): crossovers {'uniform': None, 'disparity': 131.6631752524123}; not computable (a family has no ratio <= 1 inside the grid)
+- L2 procedure beside (tree_kd): crossovers {'uniform': 128.1, 'disparity': 130.1}; the larger 130.1 -> HI 130, LO 117

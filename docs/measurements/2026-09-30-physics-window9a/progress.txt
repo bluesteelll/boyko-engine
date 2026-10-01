@@ -1,0 +1,54 @@
+19:59:09 tree C4 merge gate + Jolt 5.6 C4-AB p0: 30 pass-cell(s) with unclean slots after the re-run stage: C4-JA#parent@W1 K=2/3, C4-JA#parent@W8 K=1/3, C4-JA#parent@W16 K=2/3, C4-JA#tip@W8 K=1/3, C4-JA#tip@W16 K=2/3, C4-JD#tip@W1 K=1/3, C4-JD#tip@W2 K=2/3, C4-JD#tip@W4 K=1/3, C4-JD#tip@W8 K=1/3, C4-JDap#tip@W1 K=1/3, C4-JDap#tip@W2 K=2/3, C4-JDap#tip@W4 K=1/3, C4-JDap#tip@W8 K=1/3, C4-JDap#tip@W16 K=2/3, C4-JDpar#parent@W1 K=2/3, C4-JDpar#parent@W2 K=2/3, C4-JDpar#parent@W4 K=1/3, C4-JDpar#parent@W8 K=1/3, C4-JDpar#parent@W16 K=2/3, C4-JT#parent@W1 K=2/3, C4-JT#parent@W8 K=2/3, C4-JT#parent@W16 K=2/3, C4-JT#tip@W1 K=1/3, C4-JT#tip@W8 K=1/3, C4-JT#tip@W16 K=1/3, C4-jolt56#j56@W1 K=2/3, C4-jolt56#j56@W2 K=2/3, C4-jolt56#j56@W4 K=1/3, C4-jolt56#j56@W8 K=0/3, C4-rung#tip@W16 K=2/3
+19:59:09 tree C4 merge gate + Jolt 5.6 C4-JA p0 done
+19:59:09 tree C4 merge gate + Jolt 5.6 C4-JD p0 done
+19:59:09 tree C4 merge gate + Jolt 5.6 C4-JDap p0 done
+19:59:09 tree C4 merge gate + Jolt 5.6 C4-JDpar p0 done
+19:59:09 tree C4 merge gate + Jolt 5.6 C4-JT p0 done
+19:59:09 tree C4 merge gate + Jolt 5.6 C4-jolt56 p0 done
+19:59:09 tree C4 merge gate + Jolt 5.6 C4-rung p0 done
+20:14:31 tree C4 merge gate + Jolt 5.6 C4-JA p1 done
+20:14:31 tree C4 merge gate + Jolt 5.6 C4-JD p1 done
+20:14:31 tree C4 merge gate + Jolt 5.6 C4-JDap p1 done
+20:14:31 tree C4 merge gate + Jolt 5.6 C4-JDpar p1 done
+20:14:31 tree C4 merge gate + Jolt 5.6 C4-JT p1 done
+20:14:31 tree C4 merge gate + Jolt 5.6 C4-jolt56 p1 done
+20:14:31 tree C4 merge gate + Jolt 5.6 C4-rung p1 done
+20:43:29 tree C4 merge gate + Jolt 5.6 C4-JA p2 done
+20:43:29 tree C4 merge gate + Jolt 5.6 C4-JD p2 done
+20:43:29 tree C4 merge gate + Jolt 5.6 C4-JDap p2 done
+20:43:29 tree C4 merge gate + Jolt 5.6 C4-JDpar p2 done
+20:43:29 tree C4 merge gate + Jolt 5.6 C4-JT p2 done
+20:43:29 tree C4 merge gate + Jolt 5.6 C4-jolt56 p2 done
+20:43:29 tree C4 merge gate + Jolt 5.6 C4-rung p2 done
+21:01:10 Rapier 0.36 vs boyko J-T (window 9a Rapier rows) RP-D p0 done
+21:01:10 Rapier 0.36 vs boyko J-T (window 9a Rapier rows) RP-M p0 done
+21:12:35 Rapier 0.36 vs boyko J-T (window 9a Rapier rows) RP-D p1 done
+21:12:35 Rapier 0.36 vs boyko J-T (window 9a Rapier rows) RP-M p1 done
+21:22:09 Rapier 0.36 vs boyko J-T (window 9a Rapier rows) RP-D p2 done
+21:22:09 Rapier 0.36 vs boyko J-T (window 9a Rapier rows) RP-M p2 done
+21:28:10 tree C4 G5 C4-JD-armed p0 done
+21:28:10 tree C4 G5 C4-JDap-armed p0 done
+21:28:10 tree C4 G5 C4-R p0 done
+21:28:10 tree C4 G5 C4-Rap p0 done
+21:28:10 tree C4 G5 C4-S16 p0 done
+21:28:10 tree C4 G5 C4-S16ap p0 done
+21:34:06 tree C4 G5 C4-JD-armed p1 done
+21:34:06 tree C4 G5 C4-JDap-armed p1 done
+21:34:06 tree C4 G5 C4-R p1 done
+21:34:06 tree C4 G5 C4-Rap p1 done
+21:34:06 tree C4 G5 C4-S16 p1 done
+21:34:06 tree C4 G5 C4-S16ap p1 done
+21:40:51 tree C4 G5 C4-JD-armed p2 done
+21:40:51 tree C4 G5 C4-JDap-armed p2 done
+21:40:51 tree C4 G5 C4-R p2 done
+21:40:51 tree C4 G5 C4-Rap p2 done
+21:40:51 tree C4 G5 C4-S16 p2 done
+21:40:51 tree C4 G5 C4-S16ap p2 done
+03:45:05 codegen-units 1 vs 16 (tip default, C4-JD) C4-JDcgu p0 done
+03:51:36 codegen-units 1 vs 16 (tip default, C4-JD) C4-JDcgu p1 done
+03:58:21 codegen-units 1 vs 16 (tip default, C4-JD) C4-JDcgu p2 done
+04:26:17 tree C4 / M9 C4-BR p0 done
+04:50:22 tree C4 thresholds C4-G4 p0 done
+05:14:36 tree C4 thresholds C4-G4 p1 done
+05:38:42 tree C4 thresholds C4-G4 p2 done
+05:48:56 tree C4 / F3 keep-freeze C4-G4-kd p0 done

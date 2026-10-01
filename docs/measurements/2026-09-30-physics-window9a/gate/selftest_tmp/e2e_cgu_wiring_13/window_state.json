@@ -1,0 +1,18 @@
+{
+ "start": "2026-10-01T03:08:27.062+03:00",
+ "test": true,
+ "placement": "P-none (no affinity call)",
+ "voids": [],
+ "machine_before": {
+  "time": "2026-10-01T03:08:27.075+03:00",
+  "powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)"
+ },
+ "last": null,
+ "end": "2026-10-01T03:08:27.114+03:00",
+ "status": "STOP at start: binaries do not match bin/SHA256SUMS ['tip C:\\\\Users\\\\flint\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\D--claude-BoykoEngine\\\\238150a2-5c92-4147-8309-b6428586e8a7\\\\scratchpad\\\\win9a\\\\bin\\\\runner_tipcgu1_50e31f1a.exe 3e1f72babf76987260988481f12ddbe409ecdc308ce141326529ef89b020d771 != its pinned sha256 8d6e7d4173857ca83b47cd350890b8e178451fb48f030ac3d25aaef33cd268c3 (a key/exe swap)']",
+ "exit": 3,
+ "timed": 0,
+ "binaries_after": [
+  "tip C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win9a\\bin\\runner_tipcgu1_50e31f1a.exe 3e1f72babf76987260988481f12ddbe409ecdc308ce141326529ef89b020d771 != its pinned sha256 8d6e7d4173857ca83b47cd350890b8e178451fb48f030ac3d25aaef33cd268c3 (a key/exe swap)"
+ ]
+}

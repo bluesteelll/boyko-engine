@@ -1,0 +1,571 @@
+=== cells (ms per step): median [min-max] n (IQR, SE, range) ; per-pass medians p0/p1/p2 ===
+--- window [100,500) ---
+  W1  ours C4-JT#tip     4.3622 [4.2044-4.6021] n=7 (IQR 3.86 %, SE 1.52 %, range 9.12 %)  passes 4.3525(K1) / 4.3622(K3) / 4.4676(K3)
+  W1  RP-D rs8           4.9213 [4.8375-5.4518] n=9 (IQR 3.39 %, SE 2.05 %, range 12.48 %)  passes 5.4465(K3) / 4.9213(K3) / 4.8715(K3)
+  W1  RP-D rs4           5.7490 [5.6781-6.6849] n=9 (IQR 6.37 %, SE 2.37 %, range 17.51 %)  passes 6.1101(K3) / 5.7425(K3) / 5.7454(K3)
+  W1  RP-M rs8           7.7172 [7.4531-8.3237] n=9 (IQR 5.99 %, SE 1.66 %, range 11.28 %)  passes 8.0151(K3) / 7.5118(K3) / 7.6920(K3)
+  W1  RP-M rs4           10.0586 [9.5974-10.3638] n=9 (IQR 4.74 %, SE 1.16 %, range 7.62 %)  passes 10.0866(K3) / 10.2076(K3) / 9.6972(K3)
+  W1  Jolt 5.6           10.0044 [9.3879-10.8886] n=8 (IQR 13.26 %, SE 2.90 %, range 15.00 %)  passes 10.3191(K2) / 9.4313(K3) / 10.1227(K3)
+  W2  ours C4-JD#tip     2.9392 [2.8604-2.9761] n=8 (IQR 1.79 %, SE 0.66 %, range 3.94 %)  passes 2.9724(K2) / 2.9223(K3) / 2.9232(K3)
+  W2  RP-D rs8           2.9767 [2.9110-3.1637] n=9 (IQR 4.62 %, SE 1.23 %, range 8.49 %)  passes 2.9767(K3) / 3.0105(K3) / 2.9665(K3)
+  W2  RP-D rs4           3.4049 [3.2347-3.6618] n=9 (IQR 2.89 %, SE 1.49 %, range 12.54 %)  passes 3.4726(K3) / 3.3653(K3) / 3.3343(K3)
+  W2  RP-M rs8           4.4683 [4.4025-5.0998] n=9 (IQR 3.46 %, SE 2.49 %, range 15.61 %)  passes 4.5858(K3) / 4.4413(K3) / 4.4311(K3)
+  W2  RP-M rs4           5.6107 [5.4655-5.7796] n=9 (IQR 2.41 %, SE 0.75 %, range 5.60 %)  passes 5.7113(K3) / 5.6437(K3) / 5.5759(K3)
+  W2  Jolt 5.6           5.8123 [5.5912-5.9449] n=8 (IQR 2.73 %, SE 1.04 %, range 6.09 %)  passes 5.8177(K2) / 5.7695(K3) / 5.9206(K3)
+  W4  ours C4-JD#tip     2.1605 [2.1266-2.2431] n=7 (IQR 3.24 %, SE 1.04 %, range 5.39 %)  passes 2.2338(K1) / 2.1605(K3) / 2.1522(K3)
+  W4  RP-D rs8           2.0129 [1.9577-2.0810] n=9 (IQR 2.50 %, SE 0.90 %, range 6.13 %)  passes 2.0186(K3) / 2.0424(K3) / 1.9921(K3)
+  W4  RP-D rs4           2.2866 [2.1798-2.3442] n=9 (IQR 3.63 %, SE 1.04 %, range 7.19 %)  passes 2.2866(K3) / 2.3174(K3) / 2.2345(K3)
+  W4  RP-M rs8           3.1927 [3.0170-3.4077] n=9 (IQR 4.03 %, SE 1.51 %, range 12.24 %)  passes 3.1927(K3) / 3.3091(K3) / 3.1407(K3)
+  W4  RP-M rs4           3.7311 [3.5323-3.9608] n=9 (IQR 5.79 %, SE 1.78 %, range 11.49 %)  passes 3.7311(K3) / 3.7365(K3) / 3.5667(K3)
+  W4  Jolt 5.6           3.6881 [3.6354-3.7564] n=7 (IQR 1.09 %, SE 0.50 %, range 3.28 %)  passes 3.7215(K1) / 3.6777(K3) / 3.7042(K3)
+  W8  ours C4-JT#tip     1.8102 [1.7783-1.9442] n=7 (IQR 2.98 %, SE 1.53 %, range 9.16 %)  passes 1.9442(K1) / 1.7856(K3) / 1.8279(K3)
+  W8  RP-D rs8           1.4127 [1.3647-1.5236] n=9 (IQR 3.66 %, SE 1.42 %, range 11.24 %)  passes 1.4483(K3) / 1.4409(K3) / 1.3969(K3)
+  W8  RP-D rs4           1.5701 [1.4931-1.7401] n=9 (IQR 4.89 %, SE 1.97 %, range 15.73 %)  passes 1.5600(K3) / 1.6308(K3) / 1.5202(K3)
+  W8  RP-M rs8           2.5494 [2.3742-3.4557] n=9 (IQR 5.28 %, SE 5.42 %, range 42.42 %)  passes 2.5769(K3) / 2.6033(K3) / 2.4145(K3)
+  W8  RP-M rs4           2.7357 [2.6180-3.0167] n=9 (IQR 7.12 %, SE 2.19 %, range 14.57 %)  passes 2.7926(K3) / 2.8378(K3) / 2.6215(K3)
+  W8  Jolt 5.6           2.5702 [2.5178-2.7753] n=6 (IQR 2.38 %, SE 1.86 %, range 10.02 %)  passes -(K0) / 2.5710(K3) / 2.5694(K3)
+  W16 ours C4-JT#tip     2.0181 [2.0076-2.1830] n=7 (IQR 2.67 %, SE 1.60 %, range 8.69 %)  passes 2.0174(K1) / 2.0230(K3) / 2.0181(K3)
+  W16 RP-D rs8           1.5780 [1.5441-1.9684] n=9 (IQR 1.30 %, SE 3.53 %, range 26.89 %)  passes 1.5684(K3) / 1.5886(K3) / 1.5780(K3)
+  W16 RP-D rs4           1.7000 [1.5914-2.0882] n=9 (IQR 8.32 %, SE 3.90 %, range 29.22 %)  passes 1.7000(K3) / 1.6720(K3) / 1.7032(K3)
+  W16 RP-M rs8           2.7958 [2.7219-3.0125] n=9 (IQR 3.97 %, SE 1.37 %, range 10.39 %)  passes 2.8136(K3) / 2.8659(K3) / 2.7503(K3)
+  W16 RP-M rs4           2.9559 [2.8020-3.3519] n=9 (IQR 4.90 %, SE 2.37 %, range 18.60 %)  passes 3.0690(K3) / 3.0245(K3) / 2.8788(K3)
+  W16 Jolt 5.6           2.5056 [2.3891-3.0038] n=9 (IQR 21.85 %, SE 4.75 %, range 24.53 %)  passes 2.9424(K3) / 2.5056(K3) / 2.4055(K3)
+--- window [0,100) ---
+  W1  ours C4-JT#tip     5.5164 [5.3576-5.7353] n=7 (IQR 2.69 %, SE 1.17 %, range 6.85 %)  passes 5.5410(K1) / 5.5164(K3) / 5.5082(K3)
+  W1  RP-D rs8           4.3484 [4.2193-4.6637] n=9 (IQR 6.44 %, SE 1.56 %, range 10.22 %)  passes 4.5197(K3) / 4.3282(K3) / 4.2592(K3)
+  W1  RP-D rs4           5.1136 [5.0038-5.4144] n=9 (IQR 6.89 %, SE 1.42 %, range 8.03 %)  passes 5.3856(K3) / 5.0262(K3) / 5.0753(K3)
+  W1  RP-M rs8           8.7647 [8.5553-9.2209] n=9 (IQR 3.16 %, SE 1.14 %, range 7.59 %)  passes 8.8399(K3) / 8.5845(K3) / 8.7647(K3)
+  W1  RP-M rs4           10.7658 [10.4920-11.2749] n=9 (IQR 3.79 %, SE 1.04 %, range 7.27 %)  passes 10.6377(K3) / 10.7658(K3) / 10.9809(K3)
+  W1  Jolt 5.6           10.6344 [9.9432-11.0100] n=8 (IQR 6.96 %, SE 1.75 %, range 10.03 %)  passes 10.6344(K2) / 9.9756(K3) / 10.7885(K3)
+  W2  ours C4-JD#tip     3.5855 [3.4901-3.7066] n=8 (IQR 2.28 %, SE 0.87 %, range 6.04 %)  passes 3.6512(K2) / 3.5245(K3) / 3.5805(K3)
+  W2  RP-D rs8           2.7219 [2.6240-2.8448] n=9 (IQR 3.59 %, SE 1.13 %, range 8.11 %)  passes 2.7219(K3) / 2.7288(K3) / 2.6263(K3)
+  W2  RP-D rs4           3.0162 [2.8939-3.1161] n=9 (IQR 2.99 %, SE 0.94 %, range 7.37 %)  passes 3.0162(K3) / 3.0068(K3) / 3.0687(K3)
+  W2  RP-M rs8           5.1997 [5.1134-5.5799] n=9 (IQR 3.86 %, SE 1.42 %, range 8.97 %)  passes 5.3348(K3) / 5.1608(K3) / 5.1340(K3)
+  W2  RP-M rs4           6.0898 [5.9948-6.2564] n=9 (IQR 1.30 %, SE 0.51 %, range 4.30 %)  passes 6.1163(K3) / 6.0825(K3) / 6.0370(K3)
+  W2  Jolt 5.6           5.8793 [5.7069-6.0324] n=8 (IQR 2.28 %, SE 0.90 %, range 5.54 %)  passes 5.8793(K2) / 5.8318(K3) / 6.0027(K3)
+  W4  ours C4-JD#tip     2.5360 [2.4728-2.6103] n=7 (IQR 3.23 %, SE 1.01 %, range 5.42 %)  passes 2.6103(K1) / 2.5360(K3) / 2.4753(K3)
+  W4  RP-D rs8           1.8640 [1.8504-1.9766] n=9 (IQR 3.83 %, SE 1.04 %, range 6.77 %)  passes 1.8581(K3) / 1.9409(K3) / 1.8603(K3)
+  W4  RP-D rs4           2.0304 [1.9846-2.1388] n=9 (IQR 4.63 %, SE 1.14 %, range 7.59 %)  passes 2.0304(K3) / 2.1057(K3) / 2.0233(K3)
+  W4  RP-M rs8           3.5926 [3.5183-4.1191] n=9 (IQR 5.64 %, SE 2.68 %, range 16.72 %)  passes 3.5926(K3) / 3.7769(K3) / 3.5548(K3)
+  W4  RP-M rs4           4.0010 [3.8025-4.0539] n=9 (IQR 2.28 %, SE 0.98 %, range 6.28 %)  passes 4.0010(K3) / 4.0196(K3) / 3.9647(K3)
+  W4  Jolt 5.6           3.5455 [3.4870-3.6927] n=7 (IQR 1.02 %, SE 0.90 %, range 5.80 %)  passes 3.5527(K1) / 3.5209(K3) / 3.5457(K3)
+  W8  ours C4-JT#tip     2.0022 [1.9807-2.2673] n=7 (IQR 3.60 %, SE 2.51 %, range 14.31 %)  passes 2.2673(K1) / 1.9865(K3) / 2.0022(K3)
+  W8  RP-D rs8           1.4350 [1.3948-1.4661] n=9 (IQR 2.27 %, SE 0.76 %, range 4.97 %)  passes 1.4532(K3) / 1.4527(K3) / 1.4030(K3)
+  W8  RP-D rs4           1.5106 [1.4146-1.5943] n=9 (IQR 3.74 %, SE 1.52 %, range 11.89 %)  passes 1.4630(K3) / 1.5179(K3) / 1.4630(K3)
+  W8  RP-M rs8           2.9307 [2.7347-3.3828] n=9 (IQR 6.38 %, SE 2.89 %, range 22.11 %)  passes 2.9488(K3) / 2.9594(K3) / 2.7496(K3)
+  W8  RP-M rs4           2.9364 [2.7899-3.2024] n=9 (IQR 4.25 %, SE 2.17 %, range 14.05 %)  passes 2.9364(K3) / 2.9870(K3) / 2.8017(K3)
+  W8  Jolt 5.6           2.3747 [2.3115-2.5495] n=6 (IQR 3.80 %, SE 1.91 %, range 10.02 %)  passes -(K0) / 2.3599(K3) / 2.3894(K3)
+  W16 ours C4-JT#tip     2.2264 [2.1965-2.3902] n=7 (IQR 5.00 %, SE 1.78 %, range 8.70 %)  passes 2.2037(K1) / 2.2104(K3) / 2.2570(K3)
+  W16 RP-D rs8           1.6227 [1.5651-1.8966] n=9 (IQR 3.44 %, SE 3.36 %, range 20.43 %)  passes 1.5814(K3) / 1.8875(K3) / 1.6308(K3)
+  W16 RP-D rs4           1.6135 [1.5632-1.9518] n=9 (IQR 2.92 %, SE 3.51 %, range 24.09 %)  passes 1.6406(K3) / 1.6135(K3) / 1.5651(K3)
+  W16 RP-M rs8           3.0750 [2.9982-3.3116] n=9 (IQR 2.39 %, SE 1.38 %, range 10.19 %)  passes 3.0752(K3) / 3.1147(K3) / 3.0407(K3)
+  W16 RP-M rs4           3.1458 [2.9523-3.4126] n=9 (IQR 5.83 %, SE 1.93 %, range 14.63 %)  passes 3.2590(K3) / 3.1542(K3) / 2.9876(K3)
+  W16 Jolt 5.6           2.2492 [2.1636-2.8252] n=9 (IQR 19.64 %, SE 4.64 %, range 29.41 %)  passes 2.6290(K3) / 2.2452(K3) / 2.1794(K3)
+--- window [0,500) ---
+  W1  ours C4-JT#tip     4.5930 [4.4350-4.8287] n=7 (IQR 3.20 %, SE 1.41 %, range 8.57 %)  passes 4.5902(K1) / 4.5930(K3) / 4.6649(K3)
+  W1  RP-D rs8           4.8228 [4.7138-5.2899] n=9 (IQR 3.69 %, SE 1.89 %, range 11.94 %)  passes 5.2654(K3) / 4.7851(K3) / 4.7490(K3)
+  W1  RP-D rs4           5.6190 [5.5432-6.4308] n=9 (IQR 6.45 %, SE 2.17 %, range 15.80 %)  passes 5.9652(K3) / 5.5993(K3) / 5.6142(K3)
+  W1  RP-M rs8           7.9267 [7.6747-8.4865] n=9 (IQR 4.86 %, SE 1.50 %, range 10.24 %)  passes 8.1800(K3) / 7.7263(K3) / 7.9259(K3)
+  W1  RP-M rs4           10.2521 [9.7764-10.5460] n=9 (IQR 3.79 %, SE 1.03 %, range 7.51 %)  passes 10.2586(K3) / 10.3192(K3) / 9.8812(K3)
+  W1  Jolt 5.6           10.1435 [9.4989-10.9129] n=8 (IQR 11.73 %, SE 2.63 %, range 13.94 %)  passes 10.3821(K2) / 9.5402(K3) / 10.2559(K3)
+  W2  ours C4-JD#tip     3.0706 [2.9863-3.1163] n=8 (IQR 1.90 %, SE 0.68 %, range 4.23 %)  passes 3.1082(K2) / 3.0428(K3) / 3.0609(K3)
+  W2  RP-D rs8           2.9137 [2.8541-3.0999] n=9 (IQR 3.84 %, SE 1.17 %, range 8.44 %)  passes 2.9137(K3) / 2.9602(K3) / 2.8980(K3)
+  W2  RP-D rs4           3.3271 [3.1665-3.5467] n=9 (IQR 2.90 %, SE 1.30 %, range 11.43 %)  passes 3.3737(K3) / 3.2998(K3) / 3.2635(K3)
+  W2  RP-M rs8           4.6416 [4.5488-5.1958] n=9 (IQR 3.03 %, SE 2.22 %, range 13.94 %)  passes 4.7086(K3) / 4.5757(K3) / 4.5681(K3)
+  W2  RP-M rs4           5.7119 [5.5793-5.8750] n=9 (IQR 1.98 %, SE 0.67 %, range 5.18 %)  passes 5.7870(K3) / 5.7315(K3) / 5.6737(K3)
+  W2  Jolt 5.6           5.8263 [5.6143-5.9624] n=8 (IQR 2.57 %, SE 1.01 %, range 5.97 %)  passes 5.8300(K2) / 5.7820(K3) / 5.9370(K3)
+  W4  ours C4-JD#tip     2.2356 [2.1959-2.3091] n=7 (IQR 3.40 %, SE 1.02 %, range 5.06 %)  passes 2.3091(K1) / 2.2356(K3) / 2.2168(K3)
+  W4  RP-D rs8           1.9850 [1.9378-2.0499] n=9 (IQR 2.89 %, SE 0.88 %, range 5.65 %)  passes 1.9850(K3) / 2.0221(K3) / 1.9648(K3)
+  W4  RP-D rs4           2.2353 [2.1485-2.2965] n=9 (IQR 4.05 %, SE 1.01 %, range 6.62 %)  passes 2.2353(K3) / 2.2817(K3) / 2.1845(K3)
+  W4  RP-M rs8           3.2943 [3.1173-3.4711] n=9 (IQR 4.49 %, SE 1.52 %, range 10.74 %)  passes 3.2943(K3) / 3.4590(K3) / 3.2235(K3)
+  W4  RP-M rs4           3.7919 [3.5863-3.9694] n=9 (IQR 4.75 %, SE 1.56 %, range 10.10 %)  passes 3.7919(K3) / 3.7931(K3) / 3.6463(K3)
+  W4  Jolt 5.6           3.6547 [3.6057-3.7142] n=7 (IQR 1.41 %, SE 0.50 %, range 2.97 %)  passes 3.6877(K1) / 3.6513(K3) / 3.7019(K3)
+  W8  ours C4-JT#tip     1.8502 [1.8200-2.0088] n=7 (IQR 3.01 %, SE 1.72 %, range 10.21 %)  passes 2.0088(K1) / 1.8246(K3) / 1.8611(K3)
+  W8  RP-D rs8           1.4091 [1.3724-1.5095] n=9 (IQR 3.54 %, SE 1.25 %, range 9.73 %)  passes 1.4515(K3) / 1.4433(K3) / 1.4017(K3)
+  W8  RP-D rs4           1.5663 [1.4774-1.7109] n=9 (IQR 4.59 %, SE 1.84 %, range 14.91 %)  passes 1.5406(K3) / 1.6068(K3) / 1.5088(K3)
+  W8  RP-M rs8           2.6293 [2.4463-3.4411] n=9 (IQR 5.52 %, SE 4.83 %, range 37.83 %)  passes 2.6477(K3) / 2.6745(K3) / 2.4815(K3)
+  W8  RP-M rs4           2.7664 [2.6524-3.0538] n=9 (IQR 6.08 %, SE 2.14 %, range 14.51 %)  passes 2.8214(K3) / 2.8676(K3) / 2.6747(K3)
+  W8  Jolt 5.6           2.5311 [2.4772-2.7301] n=6 (IQR 2.64 %, SE 1.86 %, range 9.99 %)  passes -(K0) / 2.5288(K3) / 2.5334(K3)
+  W16 ours C4-JT#tip     2.0597 [2.0482-2.2244] n=7 (IQR 3.05 %, SE 1.63 %, range 8.56 %)  passes 2.0547(K1) / 2.0577(K3) / 2.0658(K3)
+  W16 RP-D rs8           1.5896 [1.5500-1.9522] n=9 (IQR 2.15 %, SE 3.31 %, range 25.30 %)  passes 1.5710(K3) / 1.6502(K3) / 1.5899(K3)
+  W16 RP-D rs4           1.6881 [1.5858-2.0609] n=9 (IQR 6.18 %, SE 3.76 %, range 28.15 %)  passes 1.6881(K3) / 1.6603(K3) / 1.6914(K3)
+  W16 RP-M rs8           2.8517 [2.7857-3.0723] n=9 (IQR 3.63 %, SE 1.31 %, range 10.05 %)  passes 2.8965(K3) / 2.9157(K3) / 2.7999(K3)
+  W16 RP-M rs4           2.9830 [2.8320-3.3640] n=9 (IQR 4.64 %, SE 2.27 %, range 17.83 %)  passes 3.1070(K3) / 3.0505(K3) / 2.9006(K3)
+  W16 Jolt 5.6           2.4535 [2.3440-2.9357] n=9 (IQR 22.63 %, SE 4.65 %, range 24.12 %)  passes 2.9158(K3) / 2.4535(K3) / 2.3603(K3)
+
+=== R-ARM(cfg, W): A = rs8, B = rs4 (B/A > 1: rs8 faster) ===
+--- window [100,500) ---
+  R-ARM(D, W1 ) rs8 4.9213 rs4 5.7490: B/A 1.1682 (+16.82 %) pooled YYn (bars i 14.42 / s 6.26 / r 43.01 %); passes p0:nYn(K3/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A] => faster arm: tied
+  R-ARM(D, W2 ) rs8 2.9767 rs4 3.4049: B/A 1.1438 (+14.38 %) pooled YYn (bars i 10.90 / s 3.86 / r 30.29 %); passes p0:YYn(K3/3) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B>A] => faster arm: rs8
+  R-ARM(D, W4 ) rs8 2.0129 rs4 2.2866: B/A 1.1360 (+13.60 %) pooled YYn (bars i 8.83 / s 2.74 / r 18.89 %); passes p0:YYn(K3/3) p1:YYY(K3/3) p2:YYn(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B>A] => faster arm: rs8
+  R-ARM(D, W8 ) rs8 1.4127 rs4 1.5701: B/A 1.1114 (+11.14 %) pooled nYn (bars i 12.22 / s 4.85 / r 38.68 %); passes p0:nYn(K3/3) p1:YYY(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A] => faster arm: tied
+  R-ARM(D, W16) rs8 1.5780 rs4 1.7000: B/A 1.0773 (+7.73 %) pooled nnn (bars i 16.84 / s 10.53 / r 79.43 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A] => faster arm: tied
+  R-ARM(M, W1 ) rs8 7.7172 rs4 10.0586: B/A 1.3034 (+30.34 %) pooled YYY (bars i 15.28 / s 4.05 / r 27.23 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED STRONG | EXCL CLAIMED STRONG [B>A] => faster arm: rs8
+  R-ARM(M, W2 ) rs8 4.4683 rs4 5.6107: B/A 1.2557 (+25.57 %) pooled YYn (bars i 8.44 / s 5.21 / r 33.16 %); passes p0:YYn(K3/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B>A] => faster arm: rs8
+  R-ARM(M, W4 ) rs8 3.1927 rs4 3.7311: B/A 1.1687 (+16.87 %) pooled YYn (bars i 14.12 / s 4.66 / r 33.56 %); passes p0:YYY(K3/3) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B>A] => faster arm: rs8
+  R-ARM(M, W8 ) rs8 2.5494 rs4 2.7357: B/A 1.0730 (+7.30 %) pooled nnn (bars i 17.73 / s 11.69 / r 89.71 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A] => faster arm: tied
+  R-ARM(M, W16) rs8 2.7958 rs4 2.9559: B/A 1.0572 (+5.72 %) pooled nYn (bars i 12.61 / s 5.48 / r 42.62 %); passes p0:YYn(K3/3) p1:nnn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A] => faster arm: tied
+--- window [0,100) ---
+  R-ARM(D, W1 ) rs8 4.3484 rs4 5.1136: B/A 1.1760 (+17.60 %) pooled nYn (bars i 18.86 / s 4.22 / r 25.99 %); passes p0:YYY(K3/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A] => faster arm: tied
+  R-ARM(D, W2 ) rs8 2.7219 rs4 3.0162: B/A 1.1081 (+10.81 %) pooled YYn (bars i 9.35 / s 2.94 / r 21.92 %); passes p0:YYn(K3/3) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B>A] => faster arm: rs8
+  R-ARM(D, W4 ) rs8 1.8640 rs4 2.0304: B/A 1.0892 (+8.92 %) pooled nYn (bars i 12.02 / s 3.08 / r 20.34 %); passes p0:YYn(K3/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A] => faster arm: tied
+  R-ARM(D, W8 ) rs8 1.4350 rs4 1.5106: B/A 1.0527 (+5.27 %) pooled nYn (bars i 8.75 / s 3.39 / r 25.78 %); passes p0:nnn(K3/3) p1:YYY(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A] => faster arm: tied
+  R-ARM(D, W16) rs8 1.6227 rs4 1.6135: B/A 0.9943 (-0.57 %) pooled nnn (bars i 9.02 / s 9.72 / r 63.17 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A] => faster arm: tied
+  R-ARM(M, W1 ) rs8 8.7647 rs4 10.7658: B/A 1.2283 (+22.83 %) pooled YYY (bars i 9.87 / s 3.09 / r 21.03 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED STRONG | EXCL CLAIMED STRONG [B>A] => faster arm: rs8
+  R-ARM(M, W2 ) rs8 5.1997 rs4 6.0898: B/A 1.1712 (+17.12 %) pooled YYn (bars i 8.15 / s 3.03 / r 19.89 %); passes p0:YYY(K3/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B>A] => faster arm: rs8
+  R-ARM(M, W4 ) rs8 3.5926 rs4 4.0010: B/A 1.1137 (+11.37 %) pooled nYn (bars i 12.17 / s 5.71 / r 35.73 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A] => faster arm: tied
+  R-ARM(M, W8 ) rs8 2.9307 rs4 2.9364: B/A 1.0019 (+0.19 %) pooled nnn (bars i 15.33 / s 7.22 / r 52.39 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A] => faster arm: tied
+  R-ARM(M, W16) rs8 3.0750 rs4 3.1458: B/A 1.0230 (+2.30 %) pooled nnn (bars i 12.61 / s 4.74 / r 35.66 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A] => faster arm: tied
+--- window [0,500)  (post hoc window) ---
+  R-ARM(D, W1 ) rs8 4.8228 rs4 5.6190: B/A 1.1651 (+16.51 %) pooled YYn (bars i 14.85 / s 5.75 / r 39.61 %); passes p0:nYn(K3/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A] => faster arm: tied
+  R-ARM(D, W2 ) rs8 2.9137 rs4 3.3271: B/A 1.1419 (+14.19 %) pooled YYn (bars i 9.63 / s 3.51 / r 28.41 %); passes p0:YYn(K3/3) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B>A] => faster arm: rs8
+  R-ARM(D, W4 ) rs8 1.9850 rs4 2.2353: B/A 1.1261 (+12.61 %) pooled YYn (bars i 9.94 / s 2.68 / r 17.41 %); passes p0:YYn(K3/3) p1:YYY(K3/3) p2:YYn(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B>A] => faster arm: rs8
+  R-ARM(D, W8 ) rs8 1.4091 rs4 1.5663: B/A 1.1115 (+11.15 %) pooled nYn (bars i 11.59 / s 4.45 / r 35.61 %); passes p0:nYn(K3/3) p1:YYY(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A] => faster arm: tied
+  R-ARM(D, W16) rs8 1.5896 rs4 1.6881: B/A 1.0619 (+6.19 %) pooled nnn (bars i 13.09 / s 10.02 / r 75.70 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A] => faster arm: tied
+  R-ARM(M, W1 ) rs8 7.9267 rs4 10.2521: B/A 1.2934 (+29.34 %) pooled YYY (bars i 12.33 / s 3.64 / r 25.40 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED STRONG | EXCL CLAIMED STRONG [B>A] => faster arm: rs8
+  R-ARM(M, W2 ) rs8 4.6416 rs4 5.7119: B/A 1.2306 (+23.06 %) pooled YYn (bars i 7.24 / s 4.64 / r 29.74 %); passes p0:YYY(K3/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B>A] => faster arm: rs8
+  R-ARM(M, W4 ) rs8 3.2943 rs4 3.7919: B/A 1.1510 (+15.10 %) pooled YYn (bars i 13.07 / s 4.36 / r 29.49 %); passes p0:YYY(K3/3) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B>A] => faster arm: rs8
+  R-ARM(M, W8 ) rs8 2.6293 rs4 2.7664: B/A 1.0521 (+5.21 %) pooled nnn (bars i 16.42 / s 10.57 / r 81.04 %); passes p0:nnn(K3/3) p1:nnn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A] => faster arm: tied
+  R-ARM(M, W16) rs8 2.8517 rs4 2.9830: B/A 1.0460 (+4.60 %) pooled nnn (bars i 11.78 / s 5.25 / r 40.94 %); passes p0:nYn(K3/3) p1:nnn(K3/3) p2:nYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A] => faster arm: tied
+
+=== R-WALL / R-ROW claims; A = ours, B = Rapier build: B/A = Rapier/ours (above 1: ours faster) ===
+--- window [100,500) ---
+  R-WALL-D(W1)   vs rs8: B/A 1.1282 (+12.82 %) pooled YYn (bars i 10.28 / s 5.10 / r 30.91 %); passes p0:nnn(K1/3) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-D(W1)   vs rs4: B/A 1.3179 (+31.79 %) pooled YYn (bars i 14.89 / s 5.63 / r 39.49 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-D(W1)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build
+  R-WALL-D(W2)   vs rs8: B/A 1.0128 (+1.28 %) pooled nnn (bars i 9.91 / s 2.79 / r 18.72 %); passes p0:nnn(K2/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-WALL-D(W2)   vs rs4: B/A 1.1584 (+15.84 %) pooled YYn (bars i 6.80 / s 3.26 / r 26.29 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-D(W2)   => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-WALL-D(W4)   vs rs8: B/A 0.9317 (-6.83 %) pooled nYn (bars i 8.18 / s 2.74 / r 16.32 %); passes p0:nnn(K1/3) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-WALL-D(W4)   vs rs4: B/A 1.0583 (+5.83 %) pooled nYn (bars i 9.73 / s 2.93 / r 17.97 %); passes p0:nnn(K1/3) p1:YYn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-WALL-D(W4)   => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED
+  R-WALL-D(W8)   vs rs8: B/A 0.7804 (-21.96 %) pooled YYn (bars i 9.44 / s 4.17 / r 29.01 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W8)   vs rs4: B/A 0.8674 (-13.26 %) pooled YYn (bars i 11.45 / s 4.98 / r 36.42 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W8)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4
+  R-WALL-D(W16)  vs rs8: B/A 0.7820 (-21.80 %) pooled YYn (bars i 5.94 / s 7.76 / r 56.52 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-WALL-D(W16)  vs rs4: B/A 0.8424 (-15.76 %) pooled nYn (bars i 17.48 / s 8.44 / r 60.98 %); passes p0:nnn(K1/3) p1:nYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-WALL-D(W16)  => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED
+  R-WALL-M(W1)   vs rs8: B/A 1.7691 (+76.91 %) pooled YYY (bars i 14.26 / s 4.50 / r 29.01 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W1)   vs rs4: B/A 2.3059 (+130.59 %) pooled YYY (bars i 12.23 / s 3.82 / r 23.76 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W1)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W2)   vs rs8: B/A 1.5202 (+52.02 %) pooled YYY (bars i 7.79 / s 5.16 / r 32.19 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W2)   vs rs4: B/A 1.9089 (+90.89 %) pooled YYY (bars i 6.00 / s 2.00 / r 13.69 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W2)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W4)   vs rs8: B/A 1.4777 (+47.77 %) pooled YYY (bars i 10.34 / s 3.66 / r 26.74 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W4)   vs rs4: B/A 1.7269 (+72.69 %) pooled YYY (bars i 13.27 / s 4.12 / r 25.37 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W4)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W8)   vs rs8: B/A 1.4084 (+40.84 %) pooled YYn (bars i 12.12 / s 11.26 / r 86.80 %); passes p0:nnn(K1/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-M(W8)   vs rs4: B/A 1.5112 (+51.12 %) pooled YYY (bars i 15.44 / s 5.34 / r 34.43 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W8)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs4]
+  R-WALL-M(W16)  vs rs8: B/A 1.3854 (+38.54 %) pooled YYY (bars i 9.56 / s 4.21 / r 27.09 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W16)  vs rs4: B/A 1.4647 (+46.47 %) pooled YYY (bars i 11.16 / s 5.73 / r 41.07 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W16)  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W1)    vs rs8: B/A 1.8956 (+89.56 %) pooled YYY (bars i 10.28 / s 5.10 / r 30.91 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W1)    vs rs4: B/A 2.2144 (+121.44 %) pooled YYY (bars i 14.89 / s 5.63 / r 39.49 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W1)    => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W2)    vs rs8: B/A 1.7017 (+70.17 %) pooled YYY (bars i 9.91 / s 2.79 / r 18.72 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W2)    vs rs4: B/A 1.9465 (+94.65 %) pooled YYY (bars i 6.80 / s 3.26 / r 26.29 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W2)    => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W4)    vs rs8: B/A 1.5654 (+56.54 %) pooled YYY (bars i 8.18 / s 2.74 / r 16.32 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W4)    vs rs4: B/A 1.7782 (+77.82 %) pooled YYY (bars i 9.73 / s 2.93 / r 17.97 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W4)    => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W8)    vs rs8: B/A 1.3113 (+31.13 %) pooled YYY (bars i 9.44 / s 4.17 / r 29.01 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W8)    vs rs4: B/A 1.4574 (+45.74 %) pooled YYY (bars i 11.45 / s 4.98 / r 36.42 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W8)    => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W16)   vs rs8: B/A 1.3139 (+31.39 %) pooled YYn (bars i 5.94 / s 7.76 / r 56.52 %); passes p0:nnn(K1/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-ROW-D(W16)   vs rs4: B/A 1.4154 (+41.54 %) pooled YYn (bars i 17.48 / s 8.44 / r 60.98 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-ROW-D(W16)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build
+  R-ROW-M(W1)    vs rs8: B/A 0.9843 (-1.57 %) pooled nnn (bars i 14.26 / s 4.50 / r 29.01 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:nYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W1)    vs rs4: B/A 1.2829 (+28.29 %) pooled YYY (bars i 12.23 / s 3.82 / r 23.76 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-M(W1)    => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only) [STRONG vs rs4]
+  R-ROW-M(W2)    vs rs8: B/A 0.8458 (-15.42 %) pooled YYn (bars i 7.79 / s 5.16 / r 32.19 %); passes p0:nnn(K2/3) p1:nYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W2)    vs rs4: B/A 1.0621 (+6.21 %) pooled YYn (bars i 6.00 / s 2.00 / r 13.69 %); passes p0:nnn(K2/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-ROW-M(W2)    => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-ROW-M(W4)    vs rs8: B/A 0.8222 (-17.78 %) pooled YYn (bars i 10.34 / s 3.66 / r 26.74 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-ROW-M(W4)    vs rs4: B/A 0.9608 (-3.92 %) pooled nnn (bars i 13.27 / s 4.12 / r 25.37 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W4)    => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8
+  R-ROW-M(W8)    vs rs8: B/A 0.7836 (-21.64 %) pooled YYn (bars i 12.12 / s 11.26 / r 86.80 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W8)    vs rs4: B/A 0.8408 (-15.92 %) pooled YYn (bars i 15.44 / s 5.34 / r 34.43 %); passes p0:nnn(K1/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-ROW-M(W8)    => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs4
+  R-ROW-M(W16)   vs rs8: B/A 0.7708 (-22.92 %) pooled YYn (bars i 9.56 / s 4.21 / r 27.09 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-ROW-M(W16)   vs rs4: B/A 0.8149 (-18.51 %) pooled YYn (bars i 11.16 / s 5.73 / r 41.07 %); passes p0:nnn(K1/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-ROW-M(W16)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4
+--- window [0,100) ---
+  R-WALL-D(W1)   vs rs8: B/A 0.7883 (-21.17 %) pooled YYn (bars i 13.95 / s 3.90 / r 24.60 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W1)   vs rs4: B/A 0.9270 (-7.30 %) pooled nYn (bars i 14.80 / s 3.69 / r 21.11 %); passes p0:nnn(K1/3) p1:nYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-WALL-D(W1)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8
+  R-WALL-D(W2)   vs rs8: B/A 0.7591 (-24.09 %) pooled YYY (bars i 8.51 / s 2.85 / r 20.23 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-D(W2)   vs rs4: B/A 0.8412 (-15.88 %) pooled YYn (bars i 7.52 / s 2.56 / r 19.05 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W2)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4 [STRONG vs rs8]
+  R-WALL-D(W4)   vs rs8: B/A 0.7350 (-26.50 %) pooled YYY (bars i 10.02 / s 2.89 / r 17.35 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-D(W4)   vs rs4: B/A 0.8006 (-19.94 %) pooled YYY (bars i 11.29 / s 3.05 / r 18.66 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-D(W4)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4 [STRONG vs rs8+rs4]
+  R-WALL-D(W8)   vs rs8: B/A 0.7167 (-28.33 %) pooled YYn (bars i 8.52 / s 5.24 / r 30.30 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W8)   vs rs4: B/A 0.7545 (-24.55 %) pooled YYn (bars i 10.39 / s 5.86 / r 37.22 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W8)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4
+  R-WALL-D(W16)  vs rs8: B/A 0.7289 (-27.11 %) pooled YYn (bars i 12.13 / s 7.60 / r 44.41 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-WALL-D(W16)  vs rs4: B/A 0.7247 (-27.53 %) pooled YYn (bars i 11.57 / s 7.87 / r 51.22 %); passes p0:nnn(K1/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W16)  => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs4
+  R-WALL-M(W1)   vs rs8: B/A 1.5889 (+58.89 %) pooled YYY (bars i 8.31 / s 3.28 / r 20.45 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W1)   vs rs4: B/A 1.9516 (+95.16 %) pooled YYY (bars i 9.29 / s 3.13 / r 19.98 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W1)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W2)   vs rs8: B/A 1.4502 (+45.02 %) pooled YYY (bars i 8.96 / s 3.34 / r 21.63 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W2)   vs rs4: B/A 1.6984 (+69.84 %) pooled YYY (bars i 5.24 / s 2.02 / r 14.82 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W2)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W4)   vs rs8: B/A 1.4166 (+41.66 %) pooled YYY (bars i 13.00 / s 5.73 / r 35.16 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W4)   vs rs4: B/A 1.5776 (+57.76 %) pooled YYY (bars i 7.91 / s 2.81 / r 16.60 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W4)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W8)   vs rs8: B/A 1.4637 (+46.37 %) pooled YYn (bars i 14.66 / s 7.65 / r 52.68 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-M(W8)   vs rs4: B/A 1.4666 (+46.66 %) pooled YYY (bars i 11.14 / s 6.62 / r 40.11 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W8)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs4]
+  R-WALL-M(W16)  vs rs8: B/A 1.3811 (+38.11 %) pooled YYY (bars i 11.08 / s 4.49 / r 26.80 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W16)  vs rs4: B/A 1.4130 (+41.30 %) pooled YYY (bars i 15.36 / s 5.24 / r 34.04 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W16)  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W1)    vs rs8: B/A 1.5317 (+53.17 %) pooled YYY (bars i 13.95 / s 3.90 / r 24.60 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W1)    vs rs4: B/A 1.8012 (+80.12 %) pooled YYY (bars i 14.80 / s 3.69 / r 21.11 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W1)    => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W2)    vs rs8: B/A 1.4751 (+47.51 %) pooled YYY (bars i 8.51 / s 2.85 / r 20.23 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W2)    vs rs4: B/A 1.6346 (+63.46 %) pooled YYY (bars i 7.52 / s 2.56 / r 19.05 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W2)    => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W4)    vs rs8: B/A 1.4282 (+42.82 %) pooled YYY (bars i 10.02 / s 2.89 / r 17.35 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W4)    vs rs4: B/A 1.5557 (+55.57 %) pooled YYY (bars i 11.29 / s 3.05 / r 18.66 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W4)    => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W8)    vs rs8: B/A 1.3927 (+39.27 %) pooled YYY (bars i 8.52 / s 5.24 / r 30.30 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W8)    vs rs4: B/A 1.4660 (+46.60 %) pooled YYY (bars i 10.39 / s 5.86 / r 37.22 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W8)    => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W16)   vs rs8: B/A 1.4162 (+41.62 %) pooled YYn (bars i 12.13 / s 7.60 / r 44.41 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-ROW-D(W16)   vs rs4: B/A 1.4082 (+40.82 %) pooled YYn (bars i 11.57 / s 7.87 / r 51.22 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-ROW-D(W16)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build
+  R-ROW-M(W1)    vs rs8: B/A 0.9997 (-0.03 %) pooled nnn (bars i 8.31 / s 3.28 / r 20.45 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W1)    vs rs4: B/A 1.2280 (+22.80 %) pooled YYY (bars i 9.29 / s 3.13 / r 19.98 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-M(W1)    => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only) [STRONG vs rs4]
+  R-ROW-M(W2)    vs rs8: B/A 0.9125 (-8.75 %) pooled nYn (bars i 8.96 / s 3.34 / r 21.63 %); passes p0:nnn(K2/3) p1:nYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W2)    vs rs4: B/A 1.0687 (+6.87 %) pooled YYn (bars i 5.24 / s 2.02 / r 14.82 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-ROW-M(W2)    => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-ROW-M(W4)    vs rs8: B/A 0.8914 (-10.86 %) pooled nYn (bars i 13.00 / s 5.73 / r 35.16 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W4)    vs rs4: B/A 0.9927 (-0.73 %) pooled nnn (bars i 7.91 / s 2.81 / r 16.60 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W4)    => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED
+  R-ROW-M(W8)    vs rs8: B/A 0.9210 (-7.90 %) pooled nYn (bars i 14.66 / s 7.65 / r 52.68 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W8)    vs rs4: B/A 0.9228 (-7.72 %) pooled nYn (bars i 11.14 / s 6.62 / r 40.11 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W8)    => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED
+  R-ROW-M(W16)   vs rs8: B/A 0.8690 (-13.10 %) pooled YYn (bars i 11.08 / s 4.49 / r 26.80 %); passes p0:nnn(K1/3) p1:nYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W16)   vs rs4: B/A 0.8890 (-11.10 %) pooled nYn (bars i 15.36 / s 5.24 / r 34.04 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W16)   => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED
+--- window [0,500)  (post hoc window: no row pin for Rapier; WALL only) ---
+  R-WALL-D(W1)   vs rs8: B/A 1.0500 (+5.00 %) pooled nYn (bars i 9.76 / s 4.71 / r 29.40 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-WALL-D(W1)   vs rs4: B/A 1.2234 (+22.34 %) pooled YYn (bars i 14.40 / s 5.17 / r 35.94 %); passes p0:nnn(K1/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-D(W1)   => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-WALL-D(W2)   vs rs8: B/A 0.9489 (-5.11 %) pooled nYn (bars i 8.57 / s 2.71 / r 18.88 %); passes p0:nnn(K2/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-WALL-D(W2)   vs rs4: B/A 1.0835 (+8.35 %) pooled YYn (bars i 6.93 / s 2.94 / r 24.37 %); passes p0:nnn(K2/3) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-D(W2)   => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-WALL-D(W4)   vs rs8: B/A 0.8879 (-11.21 %) pooled YYn (bars i 8.92 / s 2.68 / r 15.17 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W4)   vs rs4: B/A 0.9999 (-0.01 %) pooled nnn (bars i 10.57 / s 2.87 / r 16.67 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-WALL-D(W4)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8
+  R-WALL-D(W8)   vs rs8: B/A 0.7616 (-23.84 %) pooled YYn (bars i 9.29 / s 4.26 / r 28.20 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W8)   vs rs4: B/A 0.8466 (-15.34 %) pooled YYn (bars i 10.98 / s 5.04 / r 36.14 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W8)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4
+  R-WALL-D(W16)  vs rs8: B/A 0.7718 (-22.82 %) pooled YYn (bars i 7.46 / s 7.38 / r 53.42 %); passes p0:nnn(K1/3) p1:nYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-WALL-D(W16)  vs rs4: B/A 0.8196 (-18.04 %) pooled YYn (bars i 13.79 / s 8.19 / r 58.84 %); passes p0:nnn(K1/3) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W16)  => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs4
+  R-WALL-M(W1)   vs rs8: B/A 1.7258 (+72.58 %) pooled YYY (bars i 11.64 / s 4.11 / r 26.71 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W1)   vs rs4: B/A 2.2321 (+123.21 %) pooled YYY (bars i 9.93 / s 3.49 / r 22.79 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W1)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W2)   vs rs8: B/A 1.5116 (+51.16 %) pooled YYY (bars i 7.14 / s 4.64 / r 29.14 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W2)   vs rs4: B/A 1.8602 (+86.02 %) pooled YYY (bars i 5.49 / s 1.91 / r 13.37 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W2)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W4)   vs rs8: B/A 1.4735 (+47.35 %) pooled YYY (bars i 11.26 / s 3.66 / r 23.75 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W4)   vs rs4: B/A 1.6961 (+69.61 %) pooled YYY (bars i 11.69 / s 3.73 / r 22.60 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W4)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W8)   vs rs8: B/A 1.4211 (+42.11 %) pooled YYn (bars i 12.57 / s 10.26 / r 78.38 %); passes p0:nnn(K1/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-M(W8)   vs rs4: B/A 1.4952 (+49.52 %) pooled YYY (bars i 13.57 / s 5.49 / r 35.48 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W8)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs4]
+  R-WALL-M(W16)  vs rs8: B/A 1.3845 (+38.45 %) pooled YYY (bars i 9.48 / s 4.18 / r 26.40 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W16)  vs rs4: B/A 1.4483 (+44.83 %) pooled YYY (bars i 11.11 / s 5.59 / r 39.56 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W16)  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+
+=== R-WALL / R-ROW claims; ROBUSTNESS, A = Rapier build, B = ours: B/A = ours/Rapier (below 1: ours faster) ===
+--- window [100,500) ---
+  R-WALL-D(W1)   vs rs8: B/A 0.8864 (-11.36 %) pooled YYn (bars i 10.28 / s 5.10 / r 30.91 %); passes p0:nnn(K3/1) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W1)   vs rs4: B/A 0.7588 (-24.12 %) pooled YYn (bars i 14.89 / s 5.63 / r 39.49 %); passes p0:nnn(K3/1) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W1)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build
+  R-WALL-D(W2)   vs rs8: B/A 0.9874 (-1.26 %) pooled nnn (bars i 9.91 / s 2.79 / r 18.72 %); passes p0:nnn(K3/2) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-WALL-D(W2)   vs rs4: B/A 0.8632 (-13.68 %) pooled YYn (bars i 6.80 / s 3.26 / r 26.29 %); passes p0:nnn(K3/2) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W2)   => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-WALL-D(W4)   vs rs8: B/A 1.0733 (+7.33 %) pooled nYn (bars i 8.18 / s 2.74 / r 16.32 %); passes p0:nnn(K3/1) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-WALL-D(W4)   vs rs4: B/A 0.9449 (-5.51 %) pooled nYn (bars i 9.73 / s 2.93 / r 17.97 %); passes p0:nnn(K3/1) p1:YYn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-WALL-D(W4)   => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED
+  R-WALL-D(W8)   vs rs8: B/A 1.2814 (+28.14 %) pooled YYn (bars i 9.44 / s 4.17 / r 29.01 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-D(W8)   vs rs4: B/A 1.1529 (+15.29 %) pooled YYn (bars i 11.45 / s 4.98 / r 36.42 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-D(W8)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4
+  R-WALL-D(W16)  vs rs8: B/A 1.2788 (+27.88 %) pooled YYn (bars i 5.94 / s 7.76 / r 56.52 %); passes p0:nnn(K3/1) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-D(W16)  vs rs4: B/A 1.1871 (+18.71 %) pooled YYn (bars i 17.48 / s 8.44 / r 60.98 %); passes p0:nnn(K3/1) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-D(W16)  => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4
+  R-WALL-M(W1)   vs rs8: B/A 0.5653 (-43.47 %) pooled YYY (bars i 14.26 / s 4.50 / r 29.01 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W1)   vs rs4: B/A 0.4337 (-56.63 %) pooled YYY (bars i 12.23 / s 3.82 / r 23.76 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W1)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W2)   vs rs8: B/A 0.6578 (-34.22 %) pooled YYY (bars i 7.79 / s 5.16 / r 32.19 %); passes p0:nnn(K3/2) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W2)   vs rs4: B/A 0.5239 (-47.61 %) pooled YYY (bars i 6.00 / s 2.00 / r 13.69 %); passes p0:nnn(K3/2) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W2)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W4)   vs rs8: B/A 0.6767 (-32.33 %) pooled YYY (bars i 10.34 / s 3.66 / r 26.74 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W4)   vs rs4: B/A 0.5791 (-42.09 %) pooled YYY (bars i 13.27 / s 4.12 / r 25.37 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W4)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W8)   vs rs8: B/A 0.7100 (-29.00 %) pooled YYn (bars i 12.12 / s 11.26 / r 86.80 %); passes p0:nnn(K3/1) p1:nYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-WALL-M(W8)   vs rs4: B/A 0.6617 (-33.83 %) pooled YYn (bars i 15.44 / s 5.34 / r 34.43 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-M(W8)   => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-WALL-M(W16)  vs rs8: B/A 0.7218 (-27.82 %) pooled YYY (bars i 9.56 / s 4.21 / r 27.09 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W16)  vs rs4: B/A 0.6827 (-31.73 %) pooled YYn (bars i 11.16 / s 5.73 / r 41.07 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-M(W16)  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8]
+  R-ROW-D(W1)    vs rs8: B/A 0.5275 (-47.25 %) pooled YYY (bars i 10.28 / s 5.10 / r 30.91 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-ROW-D(W1)    vs rs4: B/A 0.4516 (-54.84 %) pooled YYY (bars i 14.89 / s 5.63 / r 39.49 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-ROW-D(W1)    => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W2)    vs rs8: B/A 0.5877 (-41.23 %) pooled YYY (bars i 9.91 / s 2.79 / r 18.72 %); passes p0:nnn(K3/2) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-ROW-D(W2)    vs rs4: B/A 0.5138 (-48.62 %) pooled YYY (bars i 6.80 / s 3.26 / r 26.29 %); passes p0:nnn(K3/2) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-ROW-D(W2)    => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W4)    vs rs8: B/A 0.6388 (-36.12 %) pooled YYY (bars i 8.18 / s 2.74 / r 16.32 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-ROW-D(W4)    vs rs4: B/A 0.5624 (-43.76 %) pooled YYY (bars i 9.73 / s 2.93 / r 17.97 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-ROW-D(W4)    => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W8)    vs rs8: B/A 0.7626 (-23.74 %) pooled YYn (bars i 9.44 / s 4.17 / r 29.01 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-ROW-D(W8)    vs rs4: B/A 0.6862 (-31.38 %) pooled YYn (bars i 11.45 / s 4.98 / r 36.42 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-ROW-D(W8)    => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build
+  R-ROW-D(W16)   vs rs8: B/A 0.7611 (-23.89 %) pooled YYn (bars i 5.94 / s 7.76 / r 56.52 %); passes p0:nnn(K3/1) p1:nYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-D(W16)   vs rs4: B/A 0.7065 (-29.35 %) pooled YYn (bars i 17.48 / s 8.44 / r 60.98 %); passes p0:nnn(K3/1) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-ROW-D(W16)   => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-ROW-M(W1)    vs rs8: B/A 1.0160 (+1.60 %) pooled nnn (bars i 14.26 / s 4.50 / r 29.01 %); passes p0:nnn(K3/1) p1:nnn(K3/3) p2:nYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-ROW-M(W1)    vs rs4: B/A 0.7795 (-22.05 %) pooled YYn (bars i 12.23 / s 3.82 / r 23.76 %); passes p0:nnn(K3/1) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-ROW-M(W1)    => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-ROW-M(W2)    vs rs8: B/A 1.1823 (+18.23 %) pooled YYn (bars i 7.79 / s 5.16 / r 32.19 %); passes p0:nnn(K3/2) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-ROW-M(W2)    vs rs4: B/A 0.9415 (-5.85 %) pooled nYn (bars i 6.00 / s 2.00 / r 13.69 %); passes p0:nnn(K3/2) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W2)    => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8
+  R-ROW-M(W4)    vs rs8: B/A 1.2163 (+21.63 %) pooled YYn (bars i 10.34 / s 3.66 / r 26.74 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-ROW-M(W4)    vs rs4: B/A 1.0408 (+4.08 %) pooled nnn (bars i 13.27 / s 4.12 / r 25.37 %); passes p0:nnn(K3/1) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-ROW-M(W4)    => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8
+  R-ROW-M(W8)    vs rs8: B/A 1.2762 (+27.62 %) pooled YYn (bars i 12.12 / s 11.26 / r 86.80 %); passes p0:nnn(K3/1) p1:nnn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-ROW-M(W8)    vs rs4: B/A 1.1893 (+18.93 %) pooled YYn (bars i 15.44 / s 5.34 / r 34.43 %); passes p0:nnn(K3/1) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-ROW-M(W8)    => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs4
+  R-ROW-M(W16)   vs rs8: B/A 1.2974 (+29.74 %) pooled YYY (bars i 9.56 / s 4.21 / r 27.09 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-M(W16)   vs rs4: B/A 1.2271 (+22.71 %) pooled YYn (bars i 11.16 / s 5.73 / r 41.07 %); passes p0:nnn(K3/1) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-ROW-M(W16)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4 [STRONG vs rs8]
+--- window [0,100) ---
+  R-WALL-D(W1)   vs rs8: B/A 1.2686 (+26.86 %) pooled YYY (bars i 13.95 / s 3.90 / r 24.60 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-D(W1)   vs rs4: B/A 1.0788 (+7.88 %) pooled nYn (bars i 14.80 / s 3.69 / r 21.11 %); passes p0:nnn(K3/1) p1:nYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-WALL-D(W1)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8 [STRONG vs rs8]
+  R-WALL-D(W2)   vs rs8: B/A 1.3173 (+31.73 %) pooled YYY (bars i 8.51 / s 2.85 / r 20.23 %); passes p0:nnn(K3/2) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-D(W2)   vs rs4: B/A 1.1888 (+18.88 %) pooled YYn (bars i 7.52 / s 2.56 / r 19.05 %); passes p0:nnn(K3/2) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-D(W2)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4 [STRONG vs rs8]
+  R-WALL-D(W4)   vs rs8: B/A 1.3605 (+36.05 %) pooled YYY (bars i 10.02 / s 2.89 / r 17.35 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-D(W4)   vs rs4: B/A 1.2491 (+24.91 %) pooled YYY (bars i 11.29 / s 3.05 / r 18.66 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-D(W4)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4 [STRONG vs rs8+rs4]
+  R-WALL-D(W8)   vs rs8: B/A 1.3952 (+39.52 %) pooled YYY (bars i 8.52 / s 5.24 / r 30.30 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-D(W8)   vs rs4: B/A 1.3254 (+32.54 %) pooled YYn (bars i 10.39 / s 5.86 / r 37.22 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-D(W8)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4 [STRONG vs rs8]
+  R-WALL-D(W16)  vs rs8: B/A 1.3720 (+37.20 %) pooled YYn (bars i 12.13 / s 7.60 / r 44.41 %); passes p0:nnn(K3/1) p1:nYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-WALL-D(W16)  vs rs4: B/A 1.3799 (+37.99 %) pooled YYn (bars i 11.57 / s 7.87 / r 51.22 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-D(W16)  => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs4
+  R-WALL-M(W1)   vs rs8: B/A 0.6294 (-37.06 %) pooled YYY (bars i 8.31 / s 3.28 / r 20.45 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W1)   vs rs4: B/A 0.5124 (-48.76 %) pooled YYY (bars i 9.29 / s 3.13 / r 19.98 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W1)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W2)   vs rs8: B/A 0.6896 (-31.04 %) pooled YYY (bars i 8.96 / s 3.34 / r 21.63 %); passes p0:nnn(K3/2) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W2)   vs rs4: B/A 0.5888 (-41.12 %) pooled YYY (bars i 5.24 / s 2.02 / r 14.82 %); passes p0:nnn(K3/2) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W2)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W4)   vs rs8: B/A 0.7059 (-29.41 %) pooled YYn (bars i 13.00 / s 5.73 / r 35.16 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-M(W4)   vs rs4: B/A 0.6339 (-36.61 %) pooled YYY (bars i 7.91 / s 2.81 / r 16.60 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W4)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs4]
+  R-WALL-M(W8)   vs rs8: B/A 0.6832 (-31.68 %) pooled YYn (bars i 14.66 / s 7.65 / r 52.68 %); passes p0:nnn(K3/1) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-M(W8)   vs rs4: B/A 0.6819 (-31.81 %) pooled YYn (bars i 11.14 / s 6.62 / r 40.11 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-M(W8)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build
+  R-WALL-M(W16)  vs rs8: B/A 0.7240 (-27.60 %) pooled YYY (bars i 11.08 / s 4.49 / r 26.80 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W16)  vs rs4: B/A 0.7077 (-29.23 %) pooled YYn (bars i 15.36 / s 5.24 / r 34.04 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-M(W16)  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8]
+  R-ROW-D(W1)    vs rs8: B/A 0.6529 (-34.71 %) pooled YYY (bars i 13.95 / s 3.90 / r 24.60 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-ROW-D(W1)    vs rs4: B/A 0.5552 (-44.48 %) pooled YYY (bars i 14.80 / s 3.69 / r 21.11 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-ROW-D(W1)    => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W2)    vs rs8: B/A 0.6779 (-32.21 %) pooled YYY (bars i 8.51 / s 2.85 / r 20.23 %); passes p0:nnn(K3/2) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-ROW-D(W2)    vs rs4: B/A 0.6118 (-38.82 %) pooled YYY (bars i 7.52 / s 2.56 / r 19.05 %); passes p0:nnn(K3/2) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-ROW-D(W2)    => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W4)    vs rs8: B/A 0.7002 (-29.98 %) pooled YYY (bars i 10.02 / s 2.89 / r 17.35 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-ROW-D(W4)    vs rs4: B/A 0.6428 (-35.72 %) pooled YYY (bars i 11.29 / s 3.05 / r 18.66 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-ROW-D(W4)    => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W8)    vs rs8: B/A 0.7180 (-28.20 %) pooled YYn (bars i 8.52 / s 5.24 / r 30.30 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-ROW-D(W8)    vs rs4: B/A 0.6821 (-31.79 %) pooled YYn (bars i 10.39 / s 5.86 / r 37.22 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-ROW-D(W8)    => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build
+  R-ROW-D(W16)   vs rs8: B/A 0.7061 (-29.39 %) pooled YYn (bars i 12.13 / s 7.60 / r 44.41 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-ROW-D(W16)   vs rs4: B/A 0.7101 (-28.99 %) pooled YYn (bars i 11.57 / s 7.87 / r 51.22 %); passes p0:nnn(K3/1) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-ROW-D(W16)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build
+  R-ROW-M(W1)    vs rs8: B/A 1.0003 (+0.03 %) pooled nnn (bars i 8.31 / s 3.28 / r 20.45 %); passes p0:nnn(K3/1) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-ROW-M(W1)    vs rs4: B/A 0.8144 (-18.56 %) pooled YYn (bars i 9.29 / s 3.13 / r 19.98 %); passes p0:nnn(K3/1) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-ROW-M(W1)    => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-ROW-M(W2)    vs rs8: B/A 1.0959 (+9.59 %) pooled YYn (bars i 8.96 / s 3.34 / r 21.63 %); passes p0:nnn(K3/2) p1:nYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-ROW-M(W2)    vs rs4: B/A 0.9357 (-6.43 %) pooled YYn (bars i 5.24 / s 2.02 / r 14.82 %); passes p0:nnn(K3/2) p1:YYY(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-ROW-M(W2)    => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-ROW-M(W4)    vs rs8: B/A 1.1219 (+12.19 %) pooled nYn (bars i 13.00 / s 5.73 / r 35.16 %); passes p0:nnn(K3/1) p1:nnn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-ROW-M(W4)    vs rs4: B/A 1.0074 (+0.74 %) pooled nnn (bars i 7.91 / s 2.81 / r 16.60 %); passes p0:nnn(K3/1) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-ROW-M(W4)    => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED
+  R-ROW-M(W8)    vs rs8: B/A 1.0858 (+8.58 %) pooled nYn (bars i 14.66 / s 7.65 / r 52.68 %); passes p0:nnn(K3/1) p1:nnn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-ROW-M(W8)    vs rs4: B/A 1.0837 (+8.37 %) pooled nYn (bars i 11.14 / s 6.62 / r 40.11 %); passes p0:nnn(K3/1) p1:nnn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-ROW-M(W8)    => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED
+  R-ROW-M(W16)   vs rs8: B/A 1.1507 (+15.07 %) pooled YYn (bars i 11.08 / s 4.49 / r 26.80 %); passes p0:nnn(K3/1) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-ROW-M(W16)   vs rs4: B/A 1.1248 (+12.48 %) pooled nYn (bars i 15.36 / s 5.24 / r 34.04 %); passes p0:nnn(K3/1) p1:nYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-ROW-M(W16)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8
+--- window [0,500)  (post hoc window: no row pin for Rapier; WALL only) ---
+  R-WALL-D(W1)   vs rs8: B/A 0.9523 (-4.77 %) pooled nYn (bars i 9.76 / s 4.71 / r 29.40 %); passes p0:nnn(K3/1) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-WALL-D(W1)   vs rs4: B/A 0.8174 (-18.26 %) pooled YYn (bars i 14.40 / s 5.17 / r 35.94 %); passes p0:nnn(K3/1) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W1)   => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-WALL-D(W2)   vs rs8: B/A 1.0539 (+5.39 %) pooled nYn (bars i 8.57 / s 2.71 / r 18.88 %); passes p0:nnn(K3/2) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-WALL-D(W2)   vs rs4: B/A 0.9229 (-7.71 %) pooled YYn (bars i 6.93 / s 2.94 / r 24.37 %); passes p0:nnn(K3/2) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W2)   => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-WALL-D(W4)   vs rs8: B/A 1.1263 (+12.63 %) pooled YYn (bars i 8.92 / s 2.68 / r 15.17 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-D(W4)   vs rs4: B/A 1.0001 (+0.01 %) pooled nnn (bars i 10.57 / s 2.87 / r 16.67 %); passes p0:nnn(K3/1) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-WALL-D(W4)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8
+  R-WALL-D(W8)   vs rs8: B/A 1.3130 (+31.30 %) pooled YYY (bars i 9.29 / s 4.26 / r 28.20 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-D(W8)   vs rs4: B/A 1.1812 (+18.12 %) pooled YYn (bars i 10.98 / s 5.04 / r 36.14 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-D(W8)   => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4 [STRONG vs rs8]
+  R-WALL-D(W16)  vs rs8: B/A 1.2957 (+29.57 %) pooled YYn (bars i 7.46 / s 7.38 / r 53.42 %); passes p0:nnn(K3/1) p1:nYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-WALL-D(W16)  vs rs4: B/A 1.2201 (+22.01 %) pooled YYn (bars i 13.79 / s 8.19 / r 58.84 %); passes p0:nnn(K3/1) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-D(W16)  => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs4
+  R-WALL-M(W1)   vs rs8: B/A 0.5794 (-42.06 %) pooled YYY (bars i 11.64 / s 4.11 / r 26.71 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W1)   vs rs4: B/A 0.4480 (-55.20 %) pooled YYY (bars i 9.93 / s 3.49 / r 22.79 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W1)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W2)   vs rs8: B/A 0.6615 (-33.85 %) pooled YYY (bars i 7.14 / s 4.64 / r 29.14 %); passes p0:nnn(K3/2) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W2)   vs rs4: B/A 0.5376 (-46.24 %) pooled YYY (bars i 5.49 / s 1.91 / r 13.37 %); passes p0:nnn(K3/2) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W2)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W4)   vs rs8: B/A 0.6786 (-32.14 %) pooled YYY (bars i 11.26 / s 3.66 / r 23.75 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W4)   vs rs4: B/A 0.5896 (-41.04 %) pooled YYY (bars i 11.69 / s 3.73 / r 22.60 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W4)   => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W8)   vs rs8: B/A 0.7037 (-29.63 %) pooled YYn (bars i 12.57 / s 10.26 / r 78.38 %); passes p0:nnn(K3/1) p1:nYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-WALL-M(W8)   vs rs4: B/A 0.6688 (-33.12 %) pooled YYn (bars i 13.57 / s 5.49 / r 35.48 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-M(W8)   => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-WALL-M(W16)  vs rs8: B/A 0.7223 (-27.77 %) pooled YYY (bars i 9.48 / s 4.18 / r 26.40 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-M(W16)  vs rs4: B/A 0.6905 (-30.95 %) pooled YYn (bars i 11.11 / s 5.59 / r 39.56 %); passes p0:nnn(K3/1) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-M(W16)  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8]
+
+=== POST HOC sensitivity: ours = C4-JD#tip at every W (the tip A/A twin; W16 has K 3/3/3), A = ours ===
+--- window [100,500) ---
+  R-WALL-D(W1) JD vs rs8: B/A 1.1312 (+13.12 %) pooled nYn (bars i 17.26 / s 6.46 / r 36.44 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:nYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-WALL-D(W1) JD vs rs4: B/A 1.3215 (+32.15 %) pooled YYn (bars i 20.35 / s 6.88 / r 43.95 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-WALL-D(W2) JD vs rs8: B/A 1.0128 (+1.28 %) pooled nnn (bars i 9.91 / s 2.79 / r 18.72 %); passes p0:nnn(K2/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  R-WALL-D(W2) JD vs rs4: B/A 1.1584 (+15.84 %) pooled YYn (bars i 6.80 / s 3.26 / r 26.29 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-WALL-D(W4) JD vs rs8: B/A 0.9317 (-6.83 %) pooled nYn (bars i 8.18 / s 2.74 / r 16.32 %); passes p0:nnn(K1/3) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-WALL-D(W4) JD vs rs4: B/A 1.0583 (+5.83 %) pooled nYn (bars i 9.73 / s 2.93 / r 17.97 %); passes p0:nnn(K1/3) p1:YYn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED
+  R-WALL-D(W8) JD vs rs8: B/A 0.7902 (-20.98 %) pooled YYn (bars i 10.25 / s 4.82 / r 32.13 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W8) JD vs rs4: B/A 0.8782 (-12.18 %) pooled YYn (bars i 12.13 / s 5.53 / r 38.94 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:nYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8
+  R-WALL-D(W16) JD vs rs8: B/A 0.7703 (-22.97 %) pooled YYn (bars i 8.74 / s 7.68 / r 57.62 %); passes p0:YYY(K3/3) p1:nnn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-WALL-D(W16) JD vs rs4: B/A 0.8298 (-17.02 %) pooled nYn (bars i 18.62 / s 8.37 / r 62.00 %); passes p0:nYn(K3/3) p1:nYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED
+  R-WALL-M(W1) JD vs rs8: B/A 1.7739 (+77.39 %) pooled YYY (bars i 19.89 / s 6.00 / r 34.84 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W1) JD vs rs4: B/A 2.3121 (+131.21 %) pooled YYY (bars i 18.49 / s 5.51 / r 30.61 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W2) JD vs rs8: B/A 1.5202 (+52.02 %) pooled YYY (bars i 7.79 / s 5.16 / r 32.19 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W2) JD vs rs4: B/A 1.9089 (+90.89 %) pooled YYY (bars i 6.00 / s 2.00 / r 13.69 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W4) JD vs rs8: B/A 1.4777 (+47.77 %) pooled YYY (bars i 10.34 / s 3.66 / r 26.74 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W4) JD vs rs4: B/A 1.7269 (+72.69 %) pooled YYY (bars i 13.27 / s 4.12 / r 25.37 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W8) JD vs rs8: B/A 1.4260 (+42.60 %) pooled YYn (bars i 12.77 / s 11.52 / r 87.89 %); passes p0:nnn(K1/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-M(W8) JD vs rs4: B/A 1.5302 (+53.02 %) pooled YYY (bars i 15.95 / s 5.86 / r 37.09 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs4]
+  R-WALL-M(W16) JD vs rs8: B/A 1.3647 (+36.47 %) pooled YYY (bars i 11.52 / s 4.06 / r 29.33 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED STRONG | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W16) JD vs rs4: B/A 1.4428 (+44.28 %) pooled YYY (bars i 12.87 / s 5.62 / r 42.58 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED STRONG | EXCL CLAIMED STRONG [B>A]
+  => LETTER: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4] | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W1) JD vs rs8: B/A 1.9007 (+90.07 %) pooled YYY (bars i 17.26 / s 6.46 / r 36.44 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W1) JD vs rs4: B/A 2.2204 (+122.04 %) pooled YYY (bars i 20.35 / s 6.88 / r 43.95 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W2) JD vs rs8: B/A 1.7017 (+70.17 %) pooled YYY (bars i 9.91 / s 2.79 / r 18.72 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W2) JD vs rs4: B/A 1.9465 (+94.65 %) pooled YYY (bars i 6.80 / s 3.26 / r 26.29 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W4) JD vs rs8: B/A 1.5654 (+56.54 %) pooled YYY (bars i 8.18 / s 2.74 / r 16.32 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W4) JD vs rs4: B/A 1.7782 (+77.82 %) pooled YYY (bars i 9.73 / s 2.93 / r 17.97 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W8) JD vs rs8: B/A 1.3277 (+32.77 %) pooled YYY (bars i 10.25 / s 4.82 / r 32.13 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W8) JD vs rs4: B/A 1.4756 (+47.56 %) pooled YYY (bars i 12.13 / s 5.53 / r 38.94 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8]
+  R-ROW-D(W16) JD vs rs8: B/A 1.2943 (+29.43 %) pooled YYn (bars i 8.74 / s 7.68 / r 57.62 %); passes p0:YYY(K3/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B>A]
+  R-ROW-D(W16) JD vs rs4: B/A 1.3943 (+39.43 %) pooled YYn (bars i 18.62 / s 8.37 / r 62.00 %); passes p0:YYn(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B>A]
+  => LETTER: OURS FASTER CLAIMED vs every build | EXCL: OURS FASTER CLAIMED vs every build
+  R-ROW-M(W1) JD vs rs8: B/A 0.9870 (-1.30 %) pooled nnn (bars i 19.89 / s 6.00 / r 34.84 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W1) JD vs rs4: B/A 1.2864 (+28.64 %) pooled YYn (bars i 18.49 / s 5.51 / r 30.61 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-ROW-M(W2) JD vs rs8: B/A 0.8458 (-15.42 %) pooled YYn (bars i 7.79 / s 5.16 / r 32.19 %); passes p0:nnn(K2/3) p1:nYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W2) JD vs rs4: B/A 1.0621 (+6.21 %) pooled YYn (bars i 6.00 / s 2.00 / r 13.69 %); passes p0:nnn(K2/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-ROW-M(W4) JD vs rs8: B/A 0.8222 (-17.78 %) pooled YYn (bars i 10.34 / s 3.66 / r 26.74 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-ROW-M(W4) JD vs rs4: B/A 0.9608 (-3.92 %) pooled nnn (bars i 13.27 / s 4.12 / r 25.37 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8
+  R-ROW-M(W8) JD vs rs8: B/A 0.7934 (-20.66 %) pooled YYn (bars i 12.77 / s 11.52 / r 87.89 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W8) JD vs rs4: B/A 0.8514 (-14.86 %) pooled nYn (bars i 15.95 / s 5.86 / r 37.09 %); passes p0:nnn(K1/3) p1:YYn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED
+  R-ROW-M(W16) JD vs rs8: B/A 0.7593 (-24.07 %) pooled YYn (bars i 11.52 / s 4.06 / r 29.33 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B<A]
+  R-ROW-M(W16) JD vs rs4: B/A 0.8028 (-19.72 %) pooled YYn (bars i 12.87 / s 5.62 / r 42.58 %); passes p0:YYn(K3/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B<A]
+  => LETTER: RAPIER FASTER CLAIMED vs rs8+rs4 | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4
+--- window [0,100) ---
+  R-WALL-D(W1) JD vs rs8: B/A 0.7864 (-21.36 %) pooled YYn (bars i 19.20 / s 4.82 / r 26.71 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  R-WALL-D(W1) JD vs rs4: B/A 0.9248 (-7.52 %) pooled nYn (bars i 19.82 / s 4.64 / r 23.53 %); passes p0:nnn(K1/3) p1:nYn(K3/3) p2:nYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8
+  R-WALL-D(W2) JD vs rs8: B/A 0.7591 (-24.09 %) pooled YYY (bars i 8.51 / s 2.85 / r 20.23 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-D(W2) JD vs rs4: B/A 0.8412 (-15.88 %) pooled YYn (bars i 7.52 / s 2.56 / r 19.05 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4 [STRONG vs rs8]
+  R-WALL-D(W4) JD vs rs8: B/A 0.7350 (-26.50 %) pooled YYY (bars i 10.02 / s 2.89 / r 17.35 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-D(W4) JD vs rs4: B/A 0.8006 (-19.94 %) pooled YYY (bars i 11.29 / s 3.05 / r 18.66 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4 [STRONG vs rs8+rs4]
+  R-WALL-D(W8) JD vs rs8: B/A 0.7152 (-28.48 %) pooled YYY (bars i 15.31 / s 5.16 / r 27.16 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B<A]
+  R-WALL-D(W8) JD vs rs4: B/A 0.7529 (-24.71 %) pooled YYn (bars i 16.42 / s 5.79 / r 34.71 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B<A]
+  => LETTER: NOT CLAIMED | EXCL: RAPIER FASTER CLAIMED vs rs8+rs4 [STRONG vs rs8]
+  R-WALL-D(W16) JD vs rs8: B/A 0.7276 (-27.24 %) pooled YYn (bars i 15.79 / s 8.10 / r 48.54 %); passes p0:YYY(K3/3) p1:nnn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-WALL-D(W16) JD vs rs4: B/A 0.7235 (-27.65 %) pooled YYn (bars i 15.37 / s 8.36 / r 54.84 %); passes p0:YYn(K3/3) p1:YYn(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B<A]
+  => LETTER: RAPIER FASTER CLAIMED vs rs4 | EXCL: RAPIER FASTER CLAIMED vs rs4
+  R-WALL-M(W1) JD vs rs8: B/A 1.5851 (+58.51 %) pooled YYY (bars i 15.58 / s 4.33 / r 22.94 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W1) JD vs rs4: B/A 1.9470 (+94.70 %) pooled YYY (bars i 16.13 / s 4.22 / r 22.52 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W2) JD vs rs8: B/A 1.4502 (+45.02 %) pooled YYY (bars i 8.96 / s 3.34 / r 21.63 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W2) JD vs rs4: B/A 1.6984 (+69.84 %) pooled YYY (bars i 5.24 / s 2.02 / r 14.82 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W4) JD vs rs8: B/A 1.4166 (+41.66 %) pooled YYY (bars i 13.00 / s 5.73 / r 35.16 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W4) JD vs rs4: B/A 1.5776 (+57.76 %) pooled YYY (bars i 7.91 / s 2.81 / r 16.60 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-WALL-M(W8) JD vs rs8: B/A 1.4607 (+46.07 %) pooled YYn (bars i 19.41 / s 7.59 / r 50.94 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  R-WALL-M(W8) JD vs rs4: B/A 1.4635 (+46.35 %) pooled YYY (bars i 16.91 / s 6.56 / r 37.79 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs4]
+  R-WALL-M(W16) JD vs rs8: B/A 1.3788 (+37.88 %) pooled YYY (bars i 15.00 / s 5.30 / r 33.20 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED STRONG | EXCL CLAIMED STRONG [B>A]
+  R-WALL-M(W16) JD vs rs4: B/A 1.4106 (+41.06 %) pooled YYY (bars i 18.39 / s 5.95 / r 39.28 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED STRONG | EXCL CLAIMED STRONG [B>A]
+  => LETTER: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4] | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W1) JD vs rs8: B/A 1.5281 (+52.81 %) pooled YYY (bars i 19.20 / s 4.82 / r 26.71 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W1) JD vs rs4: B/A 1.7970 (+79.70 %) pooled YYY (bars i 19.82 / s 4.64 / r 23.53 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W2) JD vs rs8: B/A 1.4751 (+47.51 %) pooled YYY (bars i 8.51 / s 2.85 / r 20.23 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W2) JD vs rs4: B/A 1.6346 (+63.46 %) pooled YYY (bars i 7.52 / s 2.56 / r 19.05 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W4) JD vs rs8: B/A 1.4282 (+42.82 %) pooled YYY (bars i 10.02 / s 2.89 / r 17.35 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W4) JD vs rs4: B/A 1.5557 (+55.57 %) pooled YYY (bars i 11.29 / s 3.05 / r 18.66 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8+rs4]
+  R-ROW-D(W8) JD vs rs8: B/A 1.3897 (+38.97 %) pooled YYY (bars i 15.31 / s 5.16 / r 27.16 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED STRONG [B>A]
+  R-ROW-D(W8) JD vs rs4: B/A 1.4629 (+46.29 %) pooled YYY (bars i 16.42 / s 5.79 / r 34.71 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  => LETTER: NOT CLAIMED | EXCL: OURS FASTER CLAIMED vs every build [STRONG vs rs8]
+  R-ROW-D(W16) JD vs rs8: B/A 1.4138 (+41.38 %) pooled YYn (bars i 15.79 / s 8.10 / r 48.54 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B>A]
+  R-ROW-D(W16) JD vs rs4: B/A 1.4058 (+40.58 %) pooled YYn (bars i 15.37 / s 8.36 / r 54.84 %); passes p0:YYn(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER CLAIMED | EXCL CLAIMED [B>A]
+  => LETTER: OURS FASTER CLAIMED vs every build | EXCL: OURS FASTER CLAIMED vs every build
+  R-ROW-M(W1) JD vs rs8: B/A 0.9973 (-0.27 %) pooled nnn (bars i 15.58 / s 4.33 / r 22.94 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W1) JD vs rs4: B/A 1.2250 (+22.50 %) pooled YYn (bars i 16.13 / s 4.22 / r 22.52 %); passes p0:nnn(K1/3) p1:YYY(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-ROW-M(W2) JD vs rs8: B/A 0.9125 (-8.75 %) pooled nYn (bars i 8.96 / s 3.34 / r 21.63 %); passes p0:nnn(K2/3) p1:nYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W2) JD vs rs4: B/A 1.0687 (+6.87 %) pooled YYn (bars i 5.24 / s 2.02 / r 14.82 %); passes p0:nnn(K2/3) p1:YYY(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL CLAIMED [B>A]
+  => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED (ours faster claimed vs rs4 only)
+  R-ROW-M(W4) JD vs rs8: B/A 0.8914 (-10.86 %) pooled nYn (bars i 13.00 / s 5.73 / r 35.16 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W4) JD vs rs4: B/A 0.9927 (-0.73 %) pooled nnn (bars i 7.91 / s 2.81 / r 16.60 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED
+  R-ROW-M(W8) JD vs rs8: B/A 0.9191 (-8.09 %) pooled nYn (bars i 19.41 / s 7.59 / r 50.94 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W8) JD vs rs4: B/A 0.9208 (-7.92 %) pooled nYn (bars i 16.91 / s 6.56 / r 37.79 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:YYn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED
+  R-ROW-M(W16) JD vs rs8: B/A 0.8676 (-13.24 %) pooled nYn (bars i 15.00 / s 5.30 / r 33.20 %); passes p0:YYY(K3/3) p1:nYn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  R-ROW-M(W16) JD vs rs4: B/A 0.8875 (-11.25 %) pooled nYn (bars i 18.39 / s 5.95 / r 39.28 %); passes p0:YYY(K3/3) p1:nnn(K3/3) p2:YYY(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  => LETTER: NOT CLAIMED | EXCL: NOT CLAIMED
+
+=== POST HOC: J-T#tip vs J-D#tip A/A (C4-AB, W 1/8/16), A = J-T, B = J-D ===
+  [100,500) W1: B/A 0.9973 (-0.27 %) pooled nnn (bars i 17.65 / s 5.85 / r 32.21 %); passes p0:nnn(K1/1) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  [100,500) W8: B/A 0.9876 (-1.24 %) pooled nnn (bars i 9.33 / s 4.95 / r 29.36 %); passes p0:nnn(K1/1) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B<A]
+  [100,500) W16: B/A 1.0152 (+1.52 %) pooled nnn (bars i 9.91 / s 4.40 / r 27.02 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  [0,100) W1: B/A 1.0024 (+0.24 %) pooled nnn (bars i 15.22 / s 4.36 / r 21.98 %); passes p0:nnn(K1/1) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  [0,100) W8: B/A 1.0021 (+0.21 %) pooled nnn (bars i 16.30 / s 7.03 / r 38.19 %); passes p0:nnn(K1/1) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]
+  [0,100) W16: B/A 1.0017 (+0.17 %) pooled nnn (bars i 17.38 / s 5.75 / r 31.46 %); passes p0:nnn(K1/3) p1:nnn(K3/3) p2:nnn(K3/3) -> LETTER NOT CLAIMED | EXCL NOT CLAIMED [B>A]

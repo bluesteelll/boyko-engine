@@ -1,0 +1,132 @@
+# Broadphase stage profile, TIP 50e31f1a, [100,500), ms per step; cell = median over K of per-process values
+# columns: phys_bp_{verify,build,query,assemble}_ns, their sum S4 per step, the system span sys_physics_broadphase_colored_ns (SYS), OTHER = SYS - S4 per step, sys_select_broadphase_ns (SEL)
+
+## C4-JD-armed W1 (n=9, passes [0, 1, 2])
+  [median-over-steps]
+    verify     0.0061 [0.0061-0.0063] n=9 (IQR 1.06 %, SE 0.36 %, range 2.60 %)
+    build      0.0209 [0.0206-0.0227] n=9 (IQR 0.87 %, SE 1.27 %, range 10.08 %)
+    query      0.1960 [0.1947-0.1967] n=9 (IQR 0.39 %, SE 0.15 %, range 1.00 %)
+    assemble   0.0266 [0.0266-0.0266] n=9 (IQR 0.20 %, SE 0.05 %, range 0.34 %)
+    S4         0.2502 [0.2486-0.2522] n=9 (IQR 0.27 %, SE 0.18 %, range 1.45 %)
+    SYS        0.2504 [0.2488-0.2525] n=9 (IQR 0.25 %, SE 0.18 %, range 1.46 %)
+    OTHER      0.0003 [0.0003-0.0003] n=9 (IQR 0.19 %, SE 0.71 %, range 4.62 %)
+    SEL        0.0000 [0.0000-0.0001] n=9 (IQR 0.00 %, SE 4.61 %, range 25.00 %)
+    wall_armed 4.3056 [4.1882-4.5993] n=9 (IQR 2.80 %, SE 1.22 %, range 9.55 %)
+    shares (of cell medians): query/S4 78.3 %, S4/SYS 99.9 %, SYS/wall 5.8 %, query/wall 4.6 %
+  [mean-over-steps]
+    verify     0.0063 [0.0063-0.0064] n=9 (IQR 0.96 %, SE 0.38 %, range 2.83 %)
+    build      0.0213 [0.0208-0.0231] n=9 (IQR 1.10 %, SE 1.32 %, range 10.87 %)
+    query      0.1988 [0.1963-0.2003] n=9 (IQR 0.64 %, SE 0.25 %, range 2.05 %)
+    assemble   0.0269 [0.0267-0.0271] n=9 (IQR 0.22 %, SE 0.14 %, range 1.21 %)
+    S4         0.2535 [0.2501-0.2552] n=9 (IQR 0.41 %, SE 0.26 %, range 2.02 %)
+    SYS        0.2538 [0.2503-0.2555] n=9 (IQR 0.40 %, SE 0.26 %, range 2.03 %)
+    OTHER      0.0003 [0.0003-0.0003] n=9 (IQR 2.18 %, SE 1.74 %, range 13.79 %)
+    SEL        0.0001 [0.0000-0.0001] n=9 (IQR 11.99 %, SE 3.56 %, range 27.67 %)
+    wall_armed 4.3496 [4.2203-4.6413] n=9 (IQR 2.71 %, SE 1.22 %, range 9.68 %)
+    shares (of cell medians): query/S4 78.4 %, S4/SYS 99.9 %, SYS/wall 5.8 %, query/wall 4.6 %
+  [0,100) median-over-steps: S4 0.2698 [0.2685-0.2710] n=9 (IQR 0.41 %, SE 0.13 %, range 0.94 %); query 0.2172 [0.2165-0.2183] n=9 (IQR 0.36 %, SE 0.11 %, range 0.83 %); SYS 0.2700 [0.2687-0.2712] n=9 (IQR 0.41 %, SE 0.13 %, range 0.93 %)
+  census phys_bp_queried    median/step 1240.0; distinct values over [100,500) [1240.0]
+  census phys_bp_members    median/step 1.0; distinct values over [100,500) [1.0]
+  census phys_bp_rebuilds   median/step 0.0; distinct values over [100,500) [0.0]
+  census phys_bp_pairs      median/step 9545.0; distinct values over [100,500) [9545.0, 9546.0, 9548.0, 9549.0]
+  census manifolds          median/step 4468.0; distinct values over [100,500) [4454.0, '...', 4472.0]
+  census pairs              median/step 9545.0; distinct values over [100,500) [9545.0, 9546.0, 9548.0, 9549.0]
+  census: steps with phys_bp_rebuilds > 0 over [0,500): [2]
+  c_q = t_q / queried rows (per process, median-over-steps t_q): 158.0 [157.0-158.6] n=9 (IQR 0.39 %, SE 0.15 %, range 1.00 %) ns per row (queried 1240.0)
+
+## C4-JD-armed W8 (n=9, passes [0, 1, 2])
+  [median-over-steps]
+    verify     0.0064 [0.0063-0.0065] n=9 (IQR 1.10 %, SE 0.41 %, range 3.22 %)
+    build      0.0213 [0.0211-0.0219] n=9 (IQR 2.23 %, SE 0.62 %, range 3.89 %)
+    query      0.2046 [0.2043-0.2054] n=9 (IQR 0.21 %, SE 0.07 %, range 0.54 %)
+    assemble   0.0279 [0.0278-0.0280] n=9 (IQR 0.24 %, SE 0.07 %, range 0.47 %)
+    S4         0.2608 [0.2602-0.2617] n=9 (IQR 0.23 %, SE 0.08 %, range 0.58 %)
+    SYS        0.2611 [0.2605-0.2619] n=9 (IQR 0.23 %, SE 0.08 %, range 0.57 %)
+    OTHER      0.0003 [0.0003-0.0003] n=9 (IQR 6.55 %, SE 1.26 %, range 6.55 %)
+    SEL        0.0001 [0.0000-0.0001] n=9 (IQR 0.00 %, SE 4.18 %, range 40.00 %)
+    wall_armed 1.8352 [1.8325-1.8465] n=9 (IQR 0.15 %, SE 0.10 %, range 0.77 %)
+    shares (of cell medians): query/S4 78.5 %, S4/SYS 99.9 %, SYS/wall 14.2 %, query/wall 11.2 %
+  [mean-over-steps]
+    verify     0.0065 [0.0065-0.0067] n=9 (IQR 0.15 %, SE 0.34 %, range 2.80 %)
+    build      0.0216 [0.0215-0.0222] n=9 (IQR 1.60 %, SE 0.48 %, range 3.10 %)
+    query      0.2076 [0.2063-0.2078] n=9 (IQR 0.33 %, SE 0.10 %, range 0.72 %)
+    assemble   0.0294 [0.0289-0.0297] n=9 (IQR 0.90 %, SE 0.34 %, range 2.46 %)
+    S4         0.2651 [0.2634-0.2656] n=9 (IQR 0.25 %, SE 0.11 %, range 0.81 %)
+    SYS        0.2655 [0.2638-0.2659] n=9 (IQR 0.25 %, SE 0.11 %, range 0.80 %)
+    OTHER      0.0003 [0.0003-0.0003] n=9 (IQR 3.28 %, SE 1.10 %, range 8.37 %)
+    SEL        0.0001 [0.0000-0.0001] n=9 (IQR 10.39 %, SE 3.30 %, range 20.79 %)
+    wall_armed 1.8586 [1.8550-1.8711] n=9 (IQR 0.14 %, SE 0.10 %, range 0.87 %)
+    shares (of cell medians): query/S4 78.3 %, S4/SYS 99.9 %, SYS/wall 14.3 %, query/wall 11.2 %
+  [0,100) median-over-steps: S4 0.2744 [0.2715-0.2765] n=9 (IQR 0.89 %, SE 0.26 %, range 1.85 %); query 0.2194 [0.2176-0.2208] n=9 (IQR 0.71 %, SE 0.21 %, range 1.44 %); SYS 0.2747 [0.2718-0.2769] n=9 (IQR 0.88 %, SE 0.26 %, range 1.87 %)
+  census phys_bp_queried    median/step 1240.0; distinct values over [100,500) [1240.0]
+  census phys_bp_members    median/step 1.0; distinct values over [100,500) [1.0]
+  census phys_bp_rebuilds   median/step 0.0; distinct values over [100,500) [0.0]
+  census phys_bp_pairs      median/step 9545.0; distinct values over [100,500) [9545.0, 9546.0, 9548.0, 9549.0]
+  census manifolds          median/step 4468.0; distinct values over [100,500) [4454.0, '...', 4472.0]
+  census pairs              median/step 9545.0; distinct values over [100,500) [9545.0, 9546.0, 9548.0, 9549.0]
+  census: steps with phys_bp_rebuilds > 0 over [0,500): [2]
+  c_q = t_q / queried rows (per process, median-over-steps t_q): 165.0 [164.7-165.6] n=9 (IQR 0.21 %, SE 0.07 %, range 0.54 %) ns per row (queried 1240.0)
+
+## C4-JDap-armed W1 (n=9, passes [0, 1, 2])
+  [median-over-steps]
+    verify     0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    build      0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    query      0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    assemble   0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    S4         0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    SYS        1.8203 [1.8116-1.8222] n=9 (IQR 0.08 %, SE 0.07 %, range 0.58 %)
+    OTHER      1.8203 [1.8116-1.8222] n=9 (IQR 0.08 %, SE 0.07 %, range 0.58 %)
+    SEL        0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 3.48 %, range 25.00 %)
+    wall_armed 5.7528 [5.7105-5.9044] n=9 (IQR 2.21 %, SE 0.52 %, range 3.37 %)
+    shares: S4 = 0 (the AllPairs path runs none of the four tree stages); SYS/wall 31.6 %
+  [mean-over-steps]
+    verify     0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    build      0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    query      0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    assemble   0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    S4         0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    SYS        1.8275 [1.8212-1.8385] n=9 (IQR 0.16 %, SE 0.11 %, range 0.94 %)
+    OTHER      1.8275 [1.8212-1.8385] n=9 (IQR 0.16 %, SE 0.11 %, range 0.94 %)
+    SEL        0.0000 [0.0000-0.0001] n=9 (IQR 14.74 %, SE 3.76 %, range 26.70 %)
+    wall_armed 5.7894 [5.7468-5.9459] n=9 (IQR 2.29 %, SE 0.53 %, range 3.44 %)
+    shares: S4 = 0 (the AllPairs path runs none of the four tree stages); SYS/wall 31.6 %
+  [0,100) median-over-steps: S4 0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %); query 0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %); SYS 1.8212 [1.8110-1.8339] n=9 (IQR 0.41 %, SE 0.16 %, range 1.26 %)
+  census phys_bp_queried    median/step 0.0; distinct values over [100,500) [0.0]
+  census phys_bp_members    median/step 0.0; distinct values over [100,500) [0.0]
+  census phys_bp_rebuilds   median/step 0.0; distinct values over [100,500) [0.0]
+  census phys_bp_pairs      median/step 9545.0; distinct values over [100,500) [9545.0, 9546.0, 9548.0, 9549.0]
+  census manifolds          median/step 4468.0; distinct values over [100,500) [4454.0, '...', 4472.0]
+  census pairs              median/step 9545.0; distinct values over [100,500) [9545.0, 9546.0, 9548.0, 9549.0]
+  census: steps with phys_bp_rebuilds > 0 over [0,500): []
+
+## C4-JDap-armed W8 (n=9, passes [0, 1, 2])
+  [median-over-steps]
+    verify     0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    build      0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    query      0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    assemble   0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    S4         0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    SYS        1.8390 [1.8333-1.8449] n=9 (IQR 0.34 %, SE 0.09 %, range 0.63 %)
+    OTHER      1.8390 [1.8333-1.8449] n=9 (IQR 0.34 %, SE 0.09 %, range 0.63 %)
+    SEL        0.0001 [0.0000-0.0001] n=9 (IQR 0.00 %, SE 3.27 %, range 30.00 %)
+    wall_armed 3.5025 [3.4832-3.5123] n=9 (IQR 0.34 %, SE 0.11 %, range 0.83 %)
+    shares: S4 = 0 (the AllPairs path runs none of the four tree stages); SYS/wall 52.5 %
+  [mean-over-steps]
+    verify     0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    build      0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    query      0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    assemble   0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    S4         0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    SYS        1.8395 [1.8351-1.8455] n=9 (IQR 0.33 %, SE 0.08 %, range 0.57 %)
+    OTHER      1.8395 [1.8351-1.8455] n=9 (IQR 0.33 %, SE 0.08 %, range 0.57 %)
+    SEL        0.0001 [0.0000-0.0001] n=9 (IQR 12.32 %, SE 4.17 %, range 31.91 %)
+    wall_armed 3.5140 [3.4944-3.5246] n=9 (IQR 0.27 %, SE 0.11 %, range 0.86 %)
+    shares: S4 = 0 (the AllPairs path runs none of the four tree stages); SYS/wall 52.3 %
+  [0,100) median-over-steps: S4 0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %); query 0.0000 [0.0000-0.0000] n=9 (IQR 0.00 %, SE 0.00 %, range 0.00 %); SYS 1.8338 [1.8300-1.8398] n=9 (IQR 0.25 %, SE 0.07 %, range 0.54 %)
+  census phys_bp_queried    median/step 0.0; distinct values over [100,500) [0.0]
+  census phys_bp_members    median/step 0.0; distinct values over [100,500) [0.0]
+  census phys_bp_rebuilds   median/step 0.0; distinct values over [100,500) [0.0]
+  census phys_bp_pairs      median/step 9545.0; distinct values over [100,500) [9545.0, 9546.0, 9548.0, 9549.0]
+  census manifolds          median/step 4468.0; distinct values over [100,500) [4454.0, '...', 4472.0]
+  census pairs              median/step 9545.0; distinct values over [100,500) [9545.0, 9546.0, 9548.0, 9549.0]
+  census: steps with phys_bp_rebuilds > 0 over [0,500): []

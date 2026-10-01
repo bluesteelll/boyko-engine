@@ -1,0 +1,35 @@
+== binary identity ==
+tip file 8d6e7d417385 size 1676288 pin(brief) 8d6e7d417385 rows pin 8d6e7d417385 SHA256SUMS 8d6e7d417385 ALL EQUAL
+tipcgu1 file 3e1f72babf76 size 1654272 pin(brief) 3e1f72babf76 rows pin 3e1f72babf76 SHA256SUMS 3e1f72babf76 ALL EQUAL
+row args == C4-JD args: True ['--scene', 'jolt', '--gap', '0.5', '--cfg', 'default', '--sleeping', 'off']
+row metric_windows [[100, 500], [0, 500]] workers [1, 2, 4, 8, 16] steps 500 pose_ref JT500
+JT500.pose sha256 e268d7a5e9ff len 64480
+records with block C4-CGU: 152 {'033740': 152}
+pass_done: [(0, 0), (1, 0), (2, 0)]
+process records by (pass, pass_attempt): {(0, 0): 39, (1, 0): 39, (2, 0): 41}
+process records (non-warm-up): 113 {'original': 90, 'rerun': 23} rows {'C4-JDcgu': 113} warm-ups 6 timed flags {True: 113}
+invalid processes (incl. warm-ups): 0  driver disagreements on clean/valid: 0
+exe sha by binary: {('tipcgu1', '3e1f72ba'): 58, ('tip', '8d6e7d41'): 61}
+final manifolds/pairs: {(4468, 9545): 119}
+slots 90 used 90 dropped 0 used reruns 20 max rerun_no 2
+unclean originals: 20  reruns total 23
+unclean reasons (all attempts): {'witness': 23, 'receipt_after': 1}
+passcells 30 K==driver k_clean on 30 min K 3 any short False all gates True
+
+== window [100,500) (B = tipcgu1 / A = tip) ==
+W1  A 4.3096 [4.2649-4.3849] n=9 i 1.48% s 0.41% | B 4.2956 [4.2419-4.3501] n=9 i 1.07% s 0.35% | B/A 0.9967 (-0.33 %, -14.1 us) bars i/s/r 3.66/1.08/7.51 pooled nnn; p0:nnn(3/3 0.9947) p1:nnn(3/3 1.0084) p2:nnn(3/3 0.9851) -> NOT CLAIMED
+W2  A 2.9569 [2.9270-3.0471] n=9 i 1.84% s 0.53% | B 2.9725 [2.9419-3.0202] n=9 i 0.86% s 0.37% | B/A 1.0053 (+0.53 %, +15.6 us) bars i/s/r 4.05/1.30/9.68 pooled nnn; p0:nnn(3/3 0.9861) p1:nnn(3/3 1.0069) p2:nnn(3/3 1.0110) -> NOT CLAIMED
+W4  A 2.2015 [2.1752-2.2256] n=9 i 1.06% s 0.33% | B 2.1993 [2.1630-2.2164] n=9 i 1.42% s 0.37% | B/A 0.9990 (-0.10 %, -2.2 us) bars i/s/r 3.53/0.99/6.68 pooled nnn; p0:nnn(3/3 0.9960) p1:nnn(3/3 0.9988) p2:nnn(3/3 1.0039) -> NOT CLAIMED
+W8  A 1.8884 [1.8029-1.9096] n=9 i 3.75% s 0.95% | B 1.8699 [1.8004-1.9162] n=9 i 4.17% s 1.02% | B/A 0.9903 (-0.97 %, -18.4 us) bars i/s/r 11.22/2.78/16.77 pooled nnn; p0:nnn(3/3 0.9851) p1:nnn(3/3 0.9886) p2:nnn(3/3 1.0022) -> NOT CLAIMED
+W16 A 2.1576 [2.0734-2.2116] n=9 i 3.92% s 0.98% | B 2.1705 [2.1180-2.2191] n=9 i 3.24% s 0.78% | B/A 1.0060 (+0.60 %, +12.9 us) bars i/s/r 10.18/2.51/15.84 pooled nnn; p0:nnn(3/3 0.9927) p1:nnn(3/3 1.0249) p2:nnn(3/3 0.9997) -> NOT CLAIMED
+
+== window [0,500) (B = tipcgu1 / A = tip) ==
+W1  A 4.5499 [4.5088-4.6427] n=9 i 1.38% s 0.41% | B 4.5132 [4.4830-4.5651] n=9 i 0.57% s 0.25% | B/A 0.9919 (-0.81 %, -36.7 us) bars i/s/r 2.99/0.97/6.92 pooled nnn; p0:nnn(3/3 0.9917) p1:nnn(3/3 1.0008) p2:nnn(3/3 0.9875) -> NOT CLAIMED
+W2  A 3.0922 [3.0600-3.1736] n=9 i 1.60% s 0.49% | B 3.0954 [3.0582-3.1350] n=9 i 0.60% s 0.29% | B/A 1.0010 (+0.10 %, +3.2 us) bars i/s/r 3.41/1.14/8.86 pooled nnn; p0:nnn(3/3 0.9840) p1:nnn(3/3 1.0081) p2:nnn(3/3 1.0041) -> NOT CLAIMED
+W4  A 2.2706 [2.2540-2.2979] n=9 i 0.81% s 0.28% | B 2.2764 [2.2444-2.2985] n=9 i 1.08% s 0.36% | B/A 1.0026 (+0.26 %, +5.8 us) bars i/s/r 2.70/0.91/6.13 pooled nnn; p0:nnn(3/3 1.0003) p1:nnn(3/3 1.0011) p2:nnn(3/3 1.0063) -> NOT CLAIMED
+W8  A 1.9269 [1.8426-1.9777] n=9 i 3.64% s 0.96% | B 1.9331 [1.8585-1.9873] n=9 i 3.32% s 0.92% | B/A 1.0032 (+0.32 %, +6.2 us) bars i/s/r 9.86/2.67/19.35 pooled nnn; p0:nnn(3/3 0.9937) p1:nnn(3/3 0.9949) p2:nnn(3/3 0.9970) -> NOT CLAIMED
+W16 A 2.1885 [2.1426-2.2726] n=9 i 3.96% s 0.92% | B 2.2116 [2.1475-2.2679] n=9 i 1.44% s 0.79% | B/A 1.0105 (+1.05 %, +23.1 us) bars i/s/r 8.42/2.43/16.11 pooled nnn; p0:nnn(3/3 1.0105) p1:nnn(3/3 1.0327) p2:nnn(3/3 0.9743) -> NOT CLAIMED
+
+== pre-registered claim (primary [100,500); the beside window for reference only) ==
+[100,500) cgu1 claimed faster at W8: False | claimed slower at W: [] | claimed faster at W: [] -> PROFILE MOVES TO cgu1: False
+[0,500) cgu1 claimed faster at W8: False | claimed slower at W: [] | claimed faster at W: [] -> PROFILE MOVES TO cgu1: False

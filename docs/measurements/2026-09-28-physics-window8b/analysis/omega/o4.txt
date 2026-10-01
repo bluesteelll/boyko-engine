@@ -1,0 +1,54 @@
+# o4 S1 inputs (arith.); ns unless stated
+
+## (1) per-process fit slope(bpp) = a + b*bpp over bpp 1/2/4, gap 0 (post hoc decomposition)
+worker   P2 spin a (fixed per stage) 64 [IQR 10, SE 4, 47-74] n=9 | b (per block per participant) 601 [IQR 5, SE 3, 582-609] n=9 | b - work 30 [IQR 5, SE 3, 11-35] n=9
+worker   P2 park a (fixed per stage) 68 [IQR 8, SE 5, 56-100] n=9 | b (per block per participant) 600 [IQR 7, SE 4, 579-606] n=9 | b - work 29 [IQR 6, SE 4, 8-35] n=9
+worker   P4 spin a (fixed per stage) 187 [IQR 19, SE 6, 169-211] n=9 | b (per block per participant) 648 [IQR 8, SE 4, 621-655] n=9 | b - work 77 [IQR 8, SE 4, 50-82] n=9
+worker   P4 park a (fixed per stage) 51 [IQR 24, SE 15, -42-82] n=9 | b (per block per participant) 678 [IQR 15, SE 11, 649-742] n=9 | b - work 104 [IQR 15, SE 11, 78-171] n=9
+worker   P8 spin a (fixed per stage) 137 [IQR 176, SE 51, -56-303] n=9 | b (per block per participant) 818 [IQR 62, SE 18, 757-891] n=9 | b - work 244 [IQR 62, SE 18, 187-319] n=9
+worker   P8 park a (fixed per stage) 119 [IQR 14, SE 41, -71-250] n=9 | b (per block per participant) 810 [IQR 39, SE 19, 774-929] n=9 | b - work 236 [IQR 38, SE 20, 203-358] n=9
+external P2 spin a (fixed per stage) 72 [IQR 14, SE 35, 56-322] n=9 | b (per block per participant) 599 [IQR 13, SE 11, 518-603] n=9 | b - work 24 [IQR 14, SE 11, -54-31] n=9
+external P2 park a (fixed per stage) 75 [IQR 8, SE 25, 60-253] n=9 | b (per block per participant) 597 [IQR 2, SE 9, 534-600] n=9 | b - work 24 [IQR 4, SE 9, -38-27] n=9
+external P4 spin a (fixed per stage) 224 [IQR 18, SE 16, 133-243] n=9 | b (per block per participant) 613 [IQR 6, SE 5, 590-632] n=9 | b - work 42 [IQR 7, SE 6, 12-59] n=9
+external P4 park a (fixed per stage) 94 [IQR 7, SE 3, 85-108] n=9 | b (per block per participant) 640 [IQR 7, SE 4, 615-646] n=9 | b - work 69 [IQR 8, SE 5, 43-73] n=9
+external P8 spin a (fixed per stage) 283 [IQR 224, SE 58, 124-518] n=9 | b (per block per participant) 723 [IQR 154, SE 37, 633-876] n=9 | b - work 151 [IQR 153, SE 37, 60-303] n=9
+external P8 park a (fixed per stage) 183 [IQR 89, SE 52, -15-443] n=9 | b (per block per participant) 741 [IQR 79, SE 35, 658-905] n=9 | b - work 169 [IQR 78, SE 35, 83-334] n=9
+
+## (2) omega_b = slope - bpp x work_ns at P8, gap 0 (cell over K = 9), and the raw slope
+worker   spin b=1P: slope 919 [IQR 156, SE 38, 861-1119] n=9 | omega_b 346 [IQR 156, SE 38, 291-547] n=9
+worker   spin b=2P: slope 1742 [IQR 156, SE 43, 1597-1894] n=9 | omega_b 598 [IQR 147, SE 42, 456-749] n=9
+worker   spin b=4P: slope 3353 [IQR 111, SE 49, 3247-3608] n=9 | omega_b 1059 [IQR 109, SE 48, 960-1318] n=9
+worker   park b=1P: slope 950 [IQR 14, SE 32, 811-1089] n=9 | omega_b 378 [IQR 15, SE 32, 241-516] n=9
+worker   park b=2P: slope 1703 [IQR 50, SE 33, 1650-1914] n=9 | omega_b 554 [IQR 47, SE 33, 507-769] n=9
+worker   park b=4P: slope 3369 [IQR 94, SE 63, 3192-3692] n=9 | omega_b 1073 [IQR 106, SE 63, 907-1406] n=9
+external spin b=1P: slope 989 [IQR 75, SE 20, 931-1064] n=9 | omega_b 416 [IQR 74, SE 21, 353-492] n=9
+external spin b=2P: slope 1822 [IQR 36, SE 28, 1761-1986] n=9 | omega_b 679 [IQR 40, SE 29, 606-840] n=9
+external spin b=4P: slope 3144 [IQR 403, SE 103, 2922-3647] n=9 | omega_b 857 [IQR 411, SE 103, 622-1354] n=9
+external park b=1P: slope 972 [IQR 64, SE 36, 922-1153] n=9 | omega_b 400 [IQR 65, SE 36, 351-578] n=9
+external park b=2P: slope 1647 [IQR 108, SE 27, 1569-1742] n=9 | omega_b 502 [IQR 99, SE 27, 423-598] n=9
+external park b=4P: slope 3183 [IQR 261, SE 104, 3003-3694] n=9 | omega_b 878 [IQR 254, SE 105, 716-1402] n=9
+work_ns_calibrated median over used processes: 571.9 ns (target 700)
+
+## (3) window 8 section-5 arithmetic re-evaluated (ms; T(8) = 2.0357 ms); w = omega_b in us
+check: at w = 3.0 (window 8 v1 worker) -> wide -0.067 S2 0.117 S3 0.062 bundle 0.112 = 5.5 % (window 8 printed ~ -0.07 / 0.12 / 0.06 / 0.11-0.14 = 5.5-6.8 %)
+raw slope b=4P (the pre-registered S1 input, includes 4 blocks of work): w 3.144-3.369 us -> wide -0.103..-0.081, S2 0.104..0.112, S3 0.058..0.060, bundle 0.059..0.091 ms = 2.9-4.5 % of T(8)
+omega_b = slope - bpp*work, b=4P: w 0.857-1.073 us -> wide 0.118..0.139, S2 0.187..0.195, S3 0.079..0.081, bundle 0.384..0.415 ms = 18.9-20.4 % of T(8)
+omega_b = slope - bpp*work, b=2P: w 0.502-0.679 us -> wide 0.156..0.173, S2 0.202..0.208, S3 0.082..0.084, bundle 0.440..0.465 ms = 21.6-22.8 % of T(8)
+omega_b = slope - bpp*work, b=1P: w 0.346-0.416 us -> wide 0.181..0.188, S2 0.211..0.214, S3 0.085..0.085, bundle 0.477..0.487 ms = 23.4-23.9 % of T(8)
+build-if line (design: bundle >= 5 % of T(8)) = 0.102 ms
+omega_b at which the bundle equals 5 % of T(8): solve -> w = 3.069 us
+
+## (4) stage work the region would replace (window 8, W8, J-T) vs the per-stage cost measured here
+warm apply (S2): 0.304 ms over 36.44 stages = 8.34 us serial per stage = 1.04 us per participant at P8 = 1.8 blocks of 572 ns
+integrate group (S3): 0.119 ms over 9.00 stages = 13.21 us serial per stage = 1.65 us per participant at P8 = 2.9 blocks of 572 ns
+S2i (warm apply on today's scope path, omega(8) = 3.30 us per wave, window 8): 0.304 x 0.745 - 36.44 x 3.30 us = 0.106 ms
+S2 on S1 at omega_b(b=1P) 0.346-0.416 us: 0.211-0.214 ms (S2 - S2i = +0.105..+0.108 ms)
+S2 on S1 at omega_b(b=2P) 0.502-0.679 us: 0.202-0.208 ms (S2 - S2i = +0.096..+0.102 ms)
+S2 on S1 at omega_b(b=4P) 0.857-1.073 us: 0.187-0.195 ms (S2 - S2i = +0.081..+0.089 ms)
+
+## (5) ruling 6 (09-26 owner value: spin vs spin-then-park), from o1 / o2
+back-to-back stages (gap 0): park price at P8 = park slope - spin slope, NOT CLAIMED on every bpp and route (o1)
+after a serial stretch >= 20 us: park price per stage = +6.0..+6.3 us (o1, P8 b=4P, both routes, gaps 20 and 80); the pool idle
+budget (127 PAUSE + 4 yields) expires between 5 and 20 us of idleness (o2: first helper 0.3-0.9 us at gap 0/5,
+3.4-3.7 us at gap 20/80). So spin-then-park charges ~6 us per region-internal serial stretch longer than the budget,
+and nothing measurable per back-to-back stage; the per-step price is that x the number of such stretches (a design quantity).

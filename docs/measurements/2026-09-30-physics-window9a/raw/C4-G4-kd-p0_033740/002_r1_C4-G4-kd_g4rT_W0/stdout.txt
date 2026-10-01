@@ -1,0 +1,18 @@
+bp_g4_uniform/tree_kd/96
+                        time:   [8.7326 µs 8.7426 µs 8.7566 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+bp_g4_uniform/tree_kd/112
+                        time:   [10.162 µs 10.243 µs 10.326 µs]
+bp_g4_uniform/tree_kd/128
+                        time:   [11.284 µs 11.310 µs 11.338 µs]
+
+bp_g4_disparity/tree_kd/96
+                        time:   [10.247 µs 10.293 µs 10.350 µs]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+bp_g4_disparity/tree_kd/112
+                        time:   [11.747 µs 11.820 µs 11.905 µs]
+bp_g4_disparity/tree_kd/128
+                        time:   [13.869 µs 13.915 µs 13.964 µs]
+

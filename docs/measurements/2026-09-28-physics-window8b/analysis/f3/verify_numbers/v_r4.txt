@@ -1,0 +1,5 @@
+fixture sha256: {'J': 'e268d7a5e9ffc4c6', 'JA': 'e268d7a5e9ffc4c6', 'R': '11b83951c3eb8680'} J==JA bytes: True
+processes checked (incl. warm-ups, re-runs): 302 hash mismatches: 0 fixture byte mismatches: 0
+distinct pose files per summary hash: {'0x30c5438bc6ad9ffa': 1, '0x6cbe24bf8fafda26': 1}
+(pair, W, pass, round) keys: 117 missing: 0 attempt pairings: 180 unequal: 0
+driver R4 records: 171 verdicts: Counter({'equal': 171})

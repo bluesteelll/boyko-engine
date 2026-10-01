@@ -1,0 +1,52 @@
+[
+ {
+  "row": "C4-G4-kd",
+  "binary": "g4rT",
+  "exit": 0,
+  "listed": 6,
+  "expected": 6,
+  "missing": [],
+  "unexpected": [],
+  "pass": true
+ },
+ {
+  "row": "C4-BR",
+  "binary": "g4r7",
+  "exit": 0,
+  "listed": 8,
+  "expected": 8,
+  "missing": [],
+  "unexpected": [],
+  "pass": true
+ },
+ {
+  "row": "C4-BR",
+  "binary": "g4r8b",
+  "exit": 0,
+  "listed": 8,
+  "expected": 8,
+  "missing": [],
+  "unexpected": [],
+  "pass": true
+ },
+ {
+  "row": "C4-BR",
+  "binary": "g4rT",
+  "exit": 0,
+  "listed": 8,
+  "expected": 8,
+  "missing": [],
+  "unexpected": [],
+  "pass": true
+ },
+ {
+  "row": "C4-G4",
+  "binary": "g4rT",
+  "exit": 0,
+  "listed": 36,
+  "expected": 36,
+  "missing": [],
+  "unexpected": [],
+  "pass": true
+ }
+]

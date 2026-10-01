@@ -1,0 +1,26 @@
+J-Son-T used processes by (W, top CPU): {(8, 10): 35, (1, 12): 4, (1, 10): 31}
+J-Son-T used processes carrying main_share_top_est by W: {(8, True): 34, (1, True): 33, (1, False): 2, (8, False): 1}
+J-Son-T W1 main_cycle_frac: min 0.0065 max 0.0191
+J-Son-T ON rows first_frozen_step over ALL records: [274]
+TreeDiag (key fields) by row: {'static_rebuilds': 1, 'sleeper_rebuilds': 0, 'members': 1, 'evictions': 0} JSoffT; {'static_rebuilds': 1, 'sleeper_rebuilds': 0, 'members': 1, 'evictions': 0} JSoffT-a; {'static_rebuilds': 1, 'sleeper_rebuilds': 1, 'members': 1241, 'evictions': 0} JSonT; {'static_rebuilds': 1, 'sleeper_rebuilds': 1, 'members': 1241, 'evictions': 0} JSonT-a
+pass start/end times: p0 20:32:11-20:37:16; p1 20:39:48-20:43:40; p2 20:46:12-20:50:11
+DM1 used: receipts before max 4.15, after max 3.89, witness max 1.84
+DM1 unclean processes (8): [(1, 'original', ['witness 2.24'], ['claude.exe']), (8, 'original', ['witness 2.08'], ['claude.exe']), (11, 'original', ['receipt after 5.06'], ['claude.exe']), (13, 'original', ['witness 2.32'], ['claude.exe']), (20, 'original', ['receipt after 5.26', 'witness 2.15'], ['claude.exe']), (22, 'original', ['witness 2.1'], ['claude.exe']), (8, 'rerun', ['witness 2.1'], ['claude.exe']), (22, 'rerun', ['receipt after 5.36'], ['claude.exe'])]
+DM1 time span: 20:52:48-20:59:43
+top witness process among the unclean J-Son-T + DM1 processes: {'claude.exe': 23}
+DM1 dm-vb-1920x1080-idle|2: band 71.17 us = 21.7 % of the A cell median 328.7; pair diffs [-23.04, 48.13, -25.09]
+DM1 dm-vb-1920x1080-idle|4: band 15.22 us = 1.9 % of the A cell median 783.0; pair diffs [-4.16, -16.91, -6.94]
+DM1 dm-vb-1920x1080-idle|9: band 17.41 us = 2.0 % of the A cell median 852.0; pair diffs [-3.07, -18.43, -6.14]
+DM1 dm-vb-1920x1080-idle|14: band 72.19 us = 21.9 % of the A cell median 329.7; pair diffs [-24.06, 49.15, -25.09]
+DM1 dm-vb-1920x1080-idle|5: band 2.22 us = 3.3 % of the A cell median 66.4; pair diffs [-0.67, -2.77, -0.29]
+DM1 dm-vb-1920x1080-idle|12: band 72.19 us = 21.9 % of the A cell median 329.7; pair diffs [-24.06, 49.15, -25.09]
+DM1 dm-deferred-1920x1080-idle|17: band 130.05 us = 21.9 % of the A cell median 594.4; pair diffs [-22.02, -25.09, -150.53, -153.6]
+DM1 dm-vb-1920x1080-edit100|2: band 75.78 us = 25.2 % of the A cell median 300.5; pair diffs [-84.99, -24.58, 3.07]
+DM1 dm-vb-1920x1080-edit100|4: band 23.01 us = 2.9 % of the A cell median 789.4; pair diffs [12.02, -7.07, 2.42]
+DM1 dm-vb-1920x1080-edit100|9: band 23.04 us = 2.7 % of the A cell median 859.6; pair diffs [11.78, -7.68, 2.05]
+DM1 dm-vb-1920x1080-edit100|14: band 75.78 us = 25.1 % of the A cell median 301.3; pair diffs [-83.97, -25.6, 4.1]
+DM1 dm-vb-1920x1080-edit100|5: band 2.35 us = 3.5 % of the A cell median 68.0; pair diffs [1.39, 0.24, -1.39]
+DM1 dm-vb-1920x1080-edit100|12: band 75.78 us = 25.1 % of the A cell median 301.3; pair diffs [-83.97, -25.6, 4.1]
+J-Son-T W1 [274,500): ON floor = 0.86 % of the OFF step
+J-Son-T W8 [274,500): ON floor = 3.46 % of the OFF step
+manifold ratio OFF/ON on [274,500) (cells from jsont_post.txt): 1.00025

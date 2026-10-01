@@ -1,0 +1,172 @@
+# J-Son-T verifier: 85 timed records (originals 72, re-runs 13)
+validity problems: 0
+driver mean_ms vs my [0,500) mean: max |diff| = 0.000e+00 ms
+unclean processes: 15; witness top among them: [('claude.exe',)]
+slots 72, used 70, re-runs used 11, dropped 2
+  dropped slot ((0, 0, 'JSoffT', 1), [('original', ['after 14.77']), ('rerun', ['witness 2.01'])])
+  dropped slot ((0, 0, 'JSoffT', 8), [('original', ['witness 2.73']), ('rerun', ['after 5.51'])])
+freeze step over used ON processes: [274]; over ALL ON records: [274]
+
+## JST-AW-W1: JSoffT -> JSonT, W1, [0..100)
+  p0: OFF 15.8843 K=2 (r 0.12 i 0.06 s 0.08) | ON 15.9583 K=3 (r 0.91 i 0.46 s 0.38) | +0.47 % bars r 1.84 i 0.92 s 0.77 | r/i/s nnn (K>=3 guard nnn)
+  p1: OFF 15.8561 K=3 (r 0.74 i 0.37 s 0.27) | ON 15.9005 K=3 (r 1.73 i 0.87 s 0.63) | +0.28 % bars r 3.77 i 1.88 s 1.36 | r/i/s nnn (K>=3 guard nnn)
+  p2: OFF 15.9011 K=3 (r 0.48 i 0.24 s 0.17) | ON 15.9107 K=3 (r 0.50 i 0.25 s 0.20) | +0.06 % bars r 1.37 i 0.69 s 0.53 | r/i/s nnn (K>=3 guard nnn)
+  pooled: OFF 15.8843 K=8 (r 0.88 i 0.27 s 0.12) | ON 15.9107 K=9 (r 1.73 i 0.78 s 0.22) | +0.17 % bars r 3.89 i 1.65 s 0.50 | r/i/s nnn (K>=3 guard nnn)
+  verdict [noguard]: NOT CLAIMED
+  verdict [guard]: NOT CLAIMED
+  smallest claimable |effect| (max over passes+pooled of max(bar_i, bar_s), no guard): 1.88 %
+
+## JST-G-W1: JSoffT -> JSonT, W1, [100..500)
+  p0: OFF 14.8500 K=2 (r 2.04 i 1.02 s 1.28) | ON 6.5171 K=3 (r 0.28 i 0.14 s 0.12) | -56.11 % bars r 4.11 i 2.06 s 2.56 | r/i/s YYY (K>=3 guard nnn)
+  p1: OFF 14.7405 K=3 (r 0.25 i 0.13 s 0.09) | ON 6.5141 K=3 (r 0.36 i 0.18 s 0.15) | -55.81 % bars r 0.88 i 0.44 s 0.34 | r/i/s YYY (K>=3 guard YYY)
+  p2: OFF 14.7624 K=3 (r 2.73 i 1.37 s 1.05) | ON 6.5237 K=3 (r 0.68 i 0.34 s 0.26) | -55.81 % bars r 5.63 i 2.81 s 2.16 | r/i/s YYY (K>=3 guard YYY)
+  pooled: OFF 14.7501 K=8 (r 2.73 i 0.71 s 0.45) | ON 6.5164 K=9 (r 0.68 i 0.28 s 0.09) | -55.82 % bars r 5.63 i 1.54 s 0.93 | r/i/s YYY (K>=3 guard YYY)
+  verdict [noguard]: CLAIMED STRONG (ON faster)
+  verdict [guard]: NOT CLAIMED
+  smallest claimable |effect| (max over passes+pooled of max(bar_i, bar_s), no guard): 2.81 %
+
+## JST-F-W1: JSoffT -> JSonT, W1, [274..500)
+  p0: OFF 14.7545 K=2 (r 2.41 i 1.21 s 1.51) | ON 0.1250 K=3 (r 6.32 i 3.16 s 2.33) | -99.15 % bars r 13.54 i 6.77 s 5.55 | r/i/s YYY (K>=3 guard nnn)
+  p1: OFF 14.6042 K=3 (r 0.27 i 0.13 s 0.10) | ON 0.1254 K=3 (r 2.00 i 1.00 s 0.74) | -99.14 % bars r 4.04 i 2.02 s 1.50 | r/i/s YYY (K>=3 guard YYY)
+  p2: OFF 14.6459 K=3 (r 2.85 i 1.42 s 1.09) | ON 0.1307 K=3 (r 8.69 i 4.34 s 3.18) | -99.11 % bars r 18.28 i 9.14 s 6.72 | r/i/s YYY (K>=3 guard YYY)
+  pooled: OFF 14.6145 K=8 (r 2.85 i 0.92 s 0.51) | ON 0.1254 K=9 (r 10.04 i 5.23 s 1.39) | -99.14 % bars r 20.87 i 10.62 s 2.95 | r/i/s YYY (K>=3 guard YYY)
+  verdict [noguard]: CLAIMED STRONG (ON faster)
+  verdict [guard]: NOT CLAIMED
+  smallest claimable |effect| (max over passes+pooled of max(bar_i, bar_s), no guard): 10.62 %
+
+## JST-F277posthoc-W1: JSoffT -> JSonT, W1, [277..500)
+  p0: OFF 14.7559 K=2 (r 2.39 i 1.19 s 1.49) | ON 0.1085 K=3 (r 6.92 i 3.46 s 2.57) | -99.26 % bars r 14.63 i 7.32 s 5.95 | r/i/s YYY (K>=3 guard nnn)
+  p1: OFF 14.6044 K=3 (r 0.25 i 0.13 s 0.09) | ON 0.1078 K=3 (r 2.08 i 1.04 s 0.81) | -99.26 % bars r 4.19 i 2.09 s 1.63 | r/i/s YYY (K>=3 guard YYY)
+  p2: OFF 14.6489 K=3 (r 2.87 i 1.43 s 1.10) | ON 0.1122 K=3 (r 8.08 i 4.04 s 2.92) | -99.23 % bars r 17.14 i 8.57 s 6.24 | r/i/s YYY (K>=3 guard YYY)
+  pooled: OFF 14.6148 K=8 (r 2.87 i 0.91 s 0.51) | ON 0.1085 K=9 (r 9.58 i 4.24 s 1.34) | -99.26 % bars r 20.00 i 8.68 s 2.86 | r/i/s YYY (K>=3 guard YYY)
+  verdict [noguard]: CLAIMED STRONG (ON faster)
+  verdict [guard]: NOT CLAIMED
+  smallest claimable |effect| (max over passes+pooled of max(bar_i, bar_s), no guard): 8.68 %
+
+## JST-AW-W8: JSoffT -> JSonT, W8, [0..100)
+  p0: OFF 4.0439 K=2 (r 4.08 i 2.04 s 2.56) | ON 4.1547 K=3 (r 4.28 i 2.14 s 1.76) | +2.74 % bars r 11.84 i 5.92 s 6.22 | r/i/s nnn (K>=3 guard nnn)
+  p1: OFF 4.0931 K=3 (r 4.23 i 2.12 s 1.73) | ON 4.1235 K=3 (r 5.85 i 2.93 s 2.35) | +0.74 % bars r 14.44 i 7.22 s 5.83 | r/i/s nnn (K>=3 guard nnn)
+  p2: OFF 4.1307 K=3 (r 6.15 i 3.07 s 2.55) | ON 3.9542 K=3 (r 9.11 i 4.56 s 3.33) | -4.27 % bars r 21.98 i 10.99 s 8.39 | r/i/s nnn (K>=3 guard nnn)
+  pooled: OFF 4.0971 K=8 (r 6.20 i 4.26 s 1.12) | ON 4.1235 K=9 (r 8.74 i 4.86 s 1.35) | +0.65 % bars r 21.43 i 12.93 s 3.51 | r/i/s nnn (K>=3 guard nnn)
+  verdict [noguard]: NOT CLAIMED
+  verdict [guard]: NOT CLAIMED
+  smallest claimable |effect| (max over passes+pooled of max(bar_i, bar_s), no guard): 12.93 %
+
+## JST-G-W8: JSoffT -> JSonT, W8, [100..500)
+  p0: OFF 3.8028 K=2 (r 2.12 i 1.06 s 1.33) | ON 1.8001 K=3 (r 7.26 i 3.63 s 2.97) | -52.66 % bars r 15.13 i 7.56 s 6.50 | r/i/s YYY (K>=3 guard nnn)
+  p1: OFF 3.8090 K=3 (r 4.14 i 2.07 s 1.50) | ON 1.7961 K=3 (r 5.47 i 2.73 s 2.18) | -52.84 % bars r 13.71 i 6.86 s 5.29 | r/i/s YYY (K>=3 guard YYY)
+  p2: OFF 3.8569 K=3 (r 4.56 i 2.28 s 1.69) | ON 1.6843 K=3 (r 2.65 i 1.32 s 0.97) | -56.33 % bars r 10.55 i 5.27 s 3.89 | r/i/s YYY (K>=3 guard YYY)
+  pooled: OFF 3.8260 K=8 (r 4.60 i 2.88 s 0.80) | ON 1.7127 K=9 (r 8.06 i 6.76 s 1.49) | -55.24 % bars r 18.56 i 14.70 s 3.38 | r/i/s YYY (K>=3 guard YYY)
+  verdict [noguard]: CLAIMED STRONG (ON faster)
+  verdict [guard]: NOT CLAIMED
+  smallest claimable |effect| (max over passes+pooled of max(bar_i, bar_s), no guard): 14.70 %
+
+## JST-F-W8: JSoffT -> JSonT, W8, [274..500)
+  p0: OFF 3.8133 K=2 (r 2.30 i 1.15 s 1.44) | ON 0.1324 K=3 (r 6.10 i 3.05 s 2.21) | -96.53 % bars r 13.04 i 6.52 s 5.28 | r/i/s YYY (K>=3 guard nnn)
+  p1: OFF 3.8641 K=3 (r 4.60 i 2.30 s 1.76) | ON 0.1372 K=3 (r 10.80 i 5.40 s 4.21) | -96.45 % bars r 23.48 i 11.74 s 9.14 | r/i/s YYY (K>=3 guard YYY)
+  p2: OFF 3.8616 K=3 (r 7.90 i 3.95 s 2.96) | ON 0.1337 K=3 (r 5.27 i 2.64 s 1.93) | -96.54 % bars r 19.00 i 9.50 s 7.07 | r/i/s YYY (K>=3 guard YYY)
+  pooled: OFF 3.8594 K=8 (r 7.91 i 2.99 s 1.16) | ON 0.1337 K=9 (r 11.09 i 5.48 s 1.52) | -96.54 % bars r 27.24 i 12.48 s 3.82 | r/i/s YYY (K>=3 guard YYY)
+  verdict [noguard]: CLAIMED STRONG (ON faster)
+  verdict [guard]: NOT CLAIMED
+  smallest claimable |effect| (max over passes+pooled of max(bar_i, bar_s), no guard): 12.48 %
+
+## JST-F277posthoc-W8: JSoffT -> JSonT, W8, [277..500)
+  p0: OFF 3.8150 K=2 (r 2.45 i 1.23 s 1.54) | ON 0.1177 K=3 (r 6.36 i 3.18 s 2.31) | -96.91 % bars r 13.64 i 6.82 s 5.54 | r/i/s YYY (K>=3 guard nnn)
+  p1: OFF 3.8641 K=3 (r 4.52 i 2.26 s 1.73) | ON 0.1213 K=3 (r 10.92 i 5.46 s 4.26) | -96.86 % bars r 23.63 i 11.81 s 9.19 | r/i/s YYY (K>=3 guard YYY)
+  p2: OFF 3.8599 K=3 (r 7.92 i 3.96 s 2.96) | ON 0.1169 K=3 (r 5.07 i 2.53 s 1.86) | -96.97 % bars r 18.80 i 9.40 s 6.99 | r/i/s YYY (K>=3 guard YYY)
+  pooled: OFF 3.8608 K=8 (r 7.92 i 2.99 s 1.16) | ON 0.1177 K=9 (r 11.25 i 5.46 s 1.53) | -96.95 % bars r 27.51 i 12.46 s 3.84 | r/i/s YYY (K>=3 guard YYY)
+  verdict [noguard]: CLAIMED STRONG (ON faster)
+  verdict [guard]: NOT CLAIMED
+  smallest claimable |effect| (max over passes+pooled of max(bar_i, bar_s), no guard): 12.46 %
+
+## JST-AW-W1-a: JSoffT-a -> JSonT-a, W1, [0..100)
+  p0: OFF 15.9126 K=3 (r 0.43 i 0.22 s 0.17) | ON 16.0153 K=3 (r 1.37 i 0.69 s 0.53) | +0.65 % bars r 2.87 i 1.44 s 1.11 | r/i/s nnn (K>=3 guard nnn)
+  p1: OFF 15.9196 K=3 (r 0.77 i 0.39 s 0.29) | ON 15.9363 K=3 (r 0.73 i 0.36 s 0.26) | +0.11 % bars r 2.12 i 1.06 s 0.78 | r/i/s nnn (K>=3 guard nnn)
+  p2: OFF 15.9712 K=3 (r 1.09 i 0.55 s 0.43) | ON 15.9266 K=3 (r 1.40 i 0.70 s 0.58) | -0.28 % bars r 3.55 i 1.78 s 1.45 | r/i/s nnn (K>=3 guard nnn)
+  pooled: OFF 15.9196 K=9 (r 1.09 i 0.62 s 0.16) | ON 15.9363 K=9 (r 1.95 i 0.59 s 0.25) | +0.11 % bars r 4.48 i 1.70 s 0.60 | r/i/s nnn (K>=3 guard nnn)
+  verdict [noguard]: NOT CLAIMED
+  verdict [guard]: NOT CLAIMED
+  smallest claimable |effect| (max over passes+pooled of max(bar_i, bar_s), no guard): 1.78 %
+
+## JST-G-W1-a: JSoffT-a -> JSonT-a, W1, [100..500)
+  p0: OFF 14.7616 K=3 (r 1.88 i 0.94 s 0.78) | ON 6.5553 K=3 (r 0.50 i 0.25 s 0.20) | -55.59 % bars r 3.89 i 1.94 s 1.61 | r/i/s YYY (K>=3 guard YYY)
+  p1: OFF 14.7764 K=3 (r 0.38 i 0.19 s 0.15) | ON 6.5256 K=3 (r 0.38 i 0.19 s 0.15) | -55.84 % bars r 1.08 i 0.54 s 0.42 | r/i/s YYY (K>=3 guard YYY)
+  p2: OFF 14.7598 K=3 (r 2.07 i 1.03 s 0.83) | ON 6.5397 K=3 (r 2.23 i 1.12 s 0.88) | -55.69 % bars r 6.08 i 3.04 s 2.42 | r/i/s YYY (K>=3 guard YYY)
+  pooled: OFF 14.7674 K=9 (r 2.07 i 0.43 s 0.34) | ON 6.5397 K=9 (r 2.23 i 0.45 s 0.29) | -55.71 % bars r 6.08 i 1.25 s 0.90 | r/i/s YYY (K>=3 guard YYY)
+  verdict [noguard]: CLAIMED STRONG (ON faster)
+  verdict [guard]: CLAIMED STRONG (ON faster)
+  smallest claimable |effect| (max over passes+pooled of max(bar_i, bar_s), no guard): 3.04 %
+
+## JST-F-W1-a: JSoffT-a -> JSonT-a, W1, [274..500)
+  p0: OFF 14.6720 K=3 (r 2.23 i 1.11 s 0.89) | ON 0.1303 K=3 (r 3.46 i 1.73 s 1.26) | -99.11 % bars r 8.23 i 4.11 s 3.08 | r/i/s YYY (K>=3 guard YYY)
+  p1: OFF 14.6551 K=3 (r 0.74 i 0.37 s 0.30) | ON 0.1250 K=3 (r 1.45 i 0.72 s 0.54) | -99.15 % bars r 3.25 i 1.62 s 1.23 | r/i/s YYY (K>=3 guard YYY)
+  p2: OFF 14.6460 K=3 (r 2.30 i 1.15 s 0.93) | ON 0.1285 K=3 (r 4.43 i 2.21 s 1.74) | -99.12 % bars r 9.98 i 4.99 s 3.95 | r/i/s YYY (K>=3 guard YYY)
+  pooled: OFF 14.6551 K=9 (r 2.30 i 0.75 s 0.39) | ON 0.1277 K=9 (r 7.55 i 3.72 s 1.06) | -99.13 % bars r 15.79 i 7.59 s 2.27 | r/i/s YYY (K>=3 guard YYY)
+  verdict [noguard]: CLAIMED STRONG (ON faster)
+  verdict [guard]: CLAIMED STRONG (ON faster)
+  smallest claimable |effect| (max over passes+pooled of max(bar_i, bar_s), no guard): 7.59 %
+
+## JST-F277posthoc-W1-a: JSoffT-a -> JSonT-a, W1, [277..500)
+  p0: OFF 14.6751 K=3 (r 2.28 i 1.14 s 0.90) | ON 0.1117 K=3 (r 2.50 i 1.25 s 0.98) | -99.24 % bars r 6.77 i 3.38 s 2.65 | r/i/s YYY (K>=3 guard YYY)
+  p1: OFF 14.6581 K=3 (r 0.75 i 0.38 s 0.30) | ON 0.1086 K=3 (r 1.16 i 0.58 s 0.46) | -99.26 % bars r 2.76 i 1.38 s 1.11 | r/i/s YYY (K>=3 guard YYY)
+  p2: OFF 14.6457 K=3 (r 2.28 i 1.14 s 0.93) | ON 0.1112 K=3 (r 4.35 i 2.17 s 1.64) | -99.24 % bars r 9.82 i 4.91 s 3.77 | r/i/s YYY (K>=3 guard YYY)
+  pooled: OFF 14.6581 K=9 (r 2.31 i 0.77 s 0.39) | ON 0.1112 K=9 (r 6.68 i 2.73 s 0.94) | -99.24 % bars r 14.14 i 5.67 s 2.04 | r/i/s YYY (K>=3 guard YYY)
+  verdict [noguard]: CLAIMED STRONG (ON faster)
+  verdict [guard]: CLAIMED STRONG (ON faster)
+  smallest claimable |effect| (max over passes+pooled of max(bar_i, bar_s), no guard): 5.67 %
+
+## JST-AW-W8-a: JSoffT-a -> JSonT-a, W8, [0..100)
+  p0: OFF 4.2259 K=3 (r 9.13 i 4.56 s 3.50) | ON 4.2392 K=3 (r 2.21 i 1.10 s 0.80) | +0.32 % bars r 18.79 i 9.39 s 7.18 | r/i/s nnn (K>=3 guard nnn)
+  p1: OFF 4.2209 K=3 (r 6.48 i 3.24 s 2.57) | ON 4.1794 K=3 (r 7.10 i 3.55 s 2.62) | -0.98 % bars r 19.22 i 9.61 s 7.34 | r/i/s nnn (K>=3 guard nnn)
+  p2: OFF 4.2635 K=3 (r 6.69 i 3.35 s 2.79) | ON 4.2410 K=3 (r 7.76 i 3.88 s 3.07) | -0.53 % bars r 20.49 i 10.25 s 8.30 | r/i/s nnn (K>=3 guard nnn)
+  pooled: OFF 4.2259 K=9 (r 9.13 i 6.73 s 1.50) | ON 4.2392 K=9 (r 8.11 i 2.29 s 1.27) | +0.32 % bars r 24.42 i 14.22 s 3.93 | r/i/s nnn (K>=3 guard nnn)
+  verdict [noguard]: NOT CLAIMED
+  verdict [guard]: NOT CLAIMED
+  smallest claimable |effect| (max over passes+pooled of max(bar_i, bar_s), no guard): 14.22 %
+
+## JST-G-W8-a: JSoffT-a -> JSonT-a, W8, [100..500)
+  p0: OFF 3.9149 K=3 (r 2.79 i 1.39 s 1.14) | ON 1.8437 K=3 (r 6.74 i 3.37 s 2.75) | -52.91 % bars r 14.58 i 7.29 s 5.95 | r/i/s YYY (K>=3 guard YYY)
+  p1: OFF 3.9955 K=3 (r 3.70 i 1.85 s 1.44) | ON 1.8358 K=3 (r 5.77 i 2.88 s 2.23) | -54.05 % bars r 13.70 i 6.85 s 5.31 | r/i/s YYY (K>=3 guard YYY)
+  p2: OFF 3.9420 K=3 (r 5.77 i 2.89 s 2.15) | ON 1.7745 K=3 (r 3.73 i 1.87 s 1.48) | -54.98 % bars r 13.74 i 6.87 s 5.22 | r/i/s YYY (K>=3 guard YYY)
+  pooled: OFF 3.9420 K=9 (r 5.93 i 2.76 s 0.83) | ON 1.7813 K=9 (r 7.81 i 5.35 s 1.30) | -54.81 % bars r 19.62 i 12.03 s 3.08 | r/i/s YYY (K>=3 guard YYY)
+  verdict [noguard]: CLAIMED STRONG (ON faster)
+  verdict [guard]: CLAIMED STRONG (ON faster)
+  smallest claimable |effect| (max over passes+pooled of max(bar_i, bar_s), no guard): 12.03 %
+
+## JST-F-W8-a: JSoffT-a -> JSonT-a, W8, [274..500)
+  p0: OFF 3.8173 K=3 (r 6.48 i 3.24 s 2.61) | ON 0.1365 K=3 (r 8.08 i 4.04 s 3.30) | -96.43 % bars r 20.72 i 10.36 s 8.41 | r/i/s YYY (K>=3 guard YYY)
+  p1: OFF 3.9985 K=3 (r 4.29 i 2.15 s 1.75) | ON 0.1334 K=3 (r 3.12 i 1.56 s 1.29) | -96.66 % bars r 10.61 i 5.31 s 4.35 | r/i/s YYY (K>=3 guard YYY)
+  p2: OFF 4.0195 K=3 (r 8.98 i 4.49 s 3.45) | ON 0.1246 K=3 (r 10.36 i 5.18 s 4.26) | -96.90 % bars r 27.43 i 13.72 s 10.96 | r/i/s YYY (K>=3 guard YYY)
+  pooled: OFF 3.9985 K=9 (r 9.03 i 5.06 s 1.37) | ON 0.1334 K=9 (r 9.68 i 7.87 s 1.68) | -96.66 % bars r 26.48 i 18.71 s 4.33 | r/i/s YYY (K>=3 guard YYY)
+  verdict [noguard]: CLAIMED STRONG (ON faster)
+  verdict [guard]: CLAIMED STRONG (ON faster)
+  smallest claimable |effect| (max over passes+pooled of max(bar_i, bar_s), no guard): 18.71 %
+
+## JST-F277posthoc-W8-a: JSoffT-a -> JSonT-a, W8, [277..500)
+  p0: OFF 3.8136 K=3 (r 6.58 i 3.29 s 2.66) | ON 0.1177 K=3 (r 8.11 i 4.06 s 2.95) | -96.91 % bars r 20.90 i 10.45 s 7.95 | r/i/s YYY (K>=3 guard YYY)
+  p1: OFF 3.9985 K=3 (r 4.18 i 2.09 s 1.71) | ON 0.1177 K=3 (r 2.35 i 1.17 s 0.96) | -97.06 % bars r 9.59 i 4.79 s 3.93 | r/i/s YYY (K>=3 guard YYY)
+  p2: OFF 4.0212 K=3 (r 9.12 i 4.56 s 3.50) | ON 0.1100 K=3 (r 10.15 i 5.08 s 4.19) | -97.26 % bars r 27.30 i 13.65 s 10.92 | r/i/s YYY (K>=3 guard YYY)
+  pooled: OFF 3.9985 K=9 (r 9.17 i 5.19 s 1.38) | ON 0.1177 K=9 (r 10.14 i 4.82 s 1.57) | -97.06 % bars r 27.35 i 14.17 s 4.18 | r/i/s YYY (K>=3 guard YYY)
+  verdict [noguard]: CLAIMED STRONG (ON faster)
+  verdict [guard]: CLAIMED STRONG (ON faster)
+  smallest claimable |effect| (max over passes+pooled of max(bar_i, bar_s), no guard): 14.17 %
+
+## post hoc: spread of the [0,100) cells (pooled), % of median
+  JSoffT W1: i 0.27 % r 0.88 % K 8
+  JSoffT W8: i 4.26 % r 6.20 % K 8
+  JSonT W1: i 0.78 % r 1.73 % K 9
+  JSonT W8: i 4.86 % r 8.74 % K 9
+  JSoffT-a W1: i 0.62 % r 1.09 % K 9
+  JSoffT-a W8: i 6.73 % r 9.13 % K 9
+  JSonT-a W1: i 0.59 % r 1.95 % K 9
+  JSonT-a W8: i 2.29 % r 8.11 % K 9
+
+## L10 serial pieces (JSonT-a, begin+freeze+end+classify, us/step), median over K of per-process means
+  W1 [0..100): 19.60 us/step (K 9) = 0.123 % of the armed ON step, 0.123 % of the disarmed OFF step
+  W1 [100..500): 22.95 us/step (K 9) = 0.351 % of the armed ON step, 0.156 % of the disarmed OFF step
+  W8 [0..100): 21.16 us/step (K 9) = 0.499 % of the armed ON step, 0.516 % of the disarmed OFF step
+  W8 [100..500): 23.68 us/step (K 9) = 1.329 % of the armed ON step, 0.619 % of the disarmed OFF step
+
+## derived: frozen-pile cost on the tree ([274,500) ON / OFF, disarmed pooled)
+  W1: ON 0.1254 ms = 0.86 % of OFF [274,500) 14.6145
+  W8: ON 0.1337 ms = 3.46 % of OFF [274,500) 3.8594

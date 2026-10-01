@@ -1,0 +1,358 @@
+==== MG-ap: JD#tip (B) vs JDap#tip (A), [0,500)
+MG-ap W1 [m0_500] A=C4-JDap#tip B=C4-JD#tip
+   A 6.1501 [6.0101-6.6297] n=7 (i 2.26 s 1.59 r 10.07 %)  Ks [1, 3, 3]
+   B 4.5692 [4.4430-4.9939] n=7 (i 7.65 s 2.32 r 12.05 %)  Ks [1, 3, 3]
+   LETTER B/A 0.7429 (-25.71 %, B-A -1.5809) pooled YYn (bars i 15.96 s 5.62 r 31.42) passes p0:nnn(sep)(K1/1) p1:YYY(sep)(K3/3) p2:YYn(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED
+MG-ap W2 [m0_500] A=C4-JDap#tip B=C4-JD#tip
+   A 4.7129 [4.6224-4.7774] n=8 (i 1.04 s 0.45 r 3.29 %)  Ks [2, 3, 3]
+   B 3.0706 [2.9863-3.1163] n=8 (i 1.90 s 0.68 r 4.23 %)  Ks [2, 3, 3]
+   LETTER B/A 0.6515 (-34.85 %, B-A -1.6423) pooled YYY (bars i 4.32 s 1.64 r 10.72) passes p0:nnn(sep)(K2/2) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+MG-ap W4 [m0_500] A=C4-JDap#tip B=C4-JD#tip
+   A 3.9106 [3.8587-4.0755] n=7 (i 2.26 s 1.02 r 5.54 %)  Ks [1, 3, 3]
+   B 2.2356 [2.1959-2.3091] n=7 (i 3.40 s 1.02 r 5.06 %)  Ks [1, 3, 3]
+   LETTER B/A 0.5717 (-42.83 %, B-A -1.6750) pooled YYY (bars i 8.17 s 2.89 r 15.02) passes p0:nnn(sep)(K1/1) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+MG-ap W8 [m0_500] A=C4-JDap#tip B=C4-JD#tip
+   A 3.4851 [3.4581-3.5862] n=7 (i 1.31 s 0.60 r 3.68 %)  Ks [1, 3, 3]
+   B 1.8277 [1.8135-2.0274] n=7 (i 4.33 s 2.02 r 11.70 %)  Ks [1, 3, 3]
+   LETTER B/A 0.5244 (-47.56 %, B-A -1.6574) pooled YYY (bars i 9.06 s 4.22 r 24.53) passes p0:nnn(sep)(K1/1) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+MG-ap W16 [m0_500] A=C4-JDap#tip B=C4-JD#tip
+   A 3.7003 [3.6462-3.8975] n=8 (i 1.49 s 0.96 r 6.79 %)  Ks [2, 3, 3]
+   B 2.0887 [2.0503-2.2770] n=9 (i 4.35 s 1.62 r 10.85 %)  Ks [3, 3, 3]
+   LETTER B/A 0.5645 (-43.55 %, B-A -1.6116) pooled YYY (bars i 9.19 s 3.77 r 25.60) passes p0:nnn(sep)(K2/3) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+==== MG-par: JD#tip (B) vs JDpar#parent (A), [0,500)
+MG-par W1 [m0_500] A=C4-JDpar#parent B=C4-JD#tip
+   A 6.2008 [6.0390-6.3550] n=8 (i 1.03 s 0.71 r 5.10 %)  Ks [2, 3, 3]
+   B 4.5692 [4.4430-4.9939] n=7 (i 7.65 s 2.32 r 12.05 %)  Ks [1, 3, 3]
+   LETTER B/A 0.7369 (-26.31 %, B-A -1.6316) pooled YYY (bars i 15.44 s 4.86 r 26.18) passes p0:nnn(sep)(K2/1) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+MG-par W2 [m0_500] A=C4-JDpar#parent B=C4-JD#tip
+   A 4.6971 [4.6364-4.7735] n=8 (i 1.72 s 0.50 r 2.92 %)  Ks [2, 3, 3]
+   B 3.0706 [2.9863-3.1163] n=8 (i 1.90 s 0.68 r 4.23 %)  Ks [2, 3, 3]
+   LETTER B/A 0.6537 (-34.63 %, B-A -1.6265) pooled YYY (bars i 5.12 s 1.68 r 10.28) passes p0:nnn(sep)(K2/2) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+MG-par W4 [m0_500] A=C4-JDpar#parent B=C4-JD#tip
+   A 3.8845 [3.8567-3.9813] n=7 (i 1.42 s 0.58 r 3.21 %)  Ks [1, 3, 3]
+   B 2.2356 [2.1959-2.3091] n=7 (i 3.40 s 1.02 r 5.06 %)  Ks [1, 3, 3]
+   LETTER B/A 0.5755 (-42.45 %, B-A -1.6489) pooled YYY (bars i 7.37 s 2.34 r 11.99) passes p0:nnn(sep)(K1/1) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+MG-par W8 [m0_500] A=C4-JDpar#parent B=C4-JD#tip
+   A 3.5206 [3.4741-3.7428] n=7 (i 2.72 s 1.29 r 7.63 %)  Ks [1, 3, 3]
+   B 1.8277 [1.8135-2.0274] n=7 (i 4.33 s 2.02 r 11.70 %)  Ks [1, 3, 3]
+   LETTER B/A 0.5191 (-48.09 %, B-A -1.6929) pooled YYY (bars i 10.24 s 4.80 r 27.94) passes p0:nnn(sep)(K1/1) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+MG-par W16 [m0_500] A=C4-JDpar#parent B=C4-JD#tip
+   A 3.7023 [3.6391-3.8934] n=8 (i 3.90 s 1.13 r 6.87 %)  Ks [2, 3, 3]
+   B 2.0887 [2.0503-2.2770] n=9 (i 4.35 s 1.62 r 10.85 %)  Ks [3, 3, 3]
+   LETTER B/A 0.5642 (-43.58 %, B-A -1.6136) pooled YYY (bars i 11.68 s 3.95 r 25.69) passes p0:nnn(sep)(K2/3) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+==== MG [100,500) deltas
+   W1: JD-JDap -1.5649  JD-JDpar -1.6294 ms
+   W2: JD-JDap -1.6399  JD-JDpar -1.6285 ms
+   W4: JD-JDap -1.6679  JD-JDpar -1.6487 ms
+   W8: JD-JDap -1.6502  JD-JDpar -1.6672 ms
+   W16: JD-JDap -1.6176  JD-JDpar -1.6276 ms
+==== CTL J-A: JA#tip (B) vs JA#parent (A)
+CTL-JA W1 [m0_500] A=C4-JA#parent B=C4-JA#tip
+   A 16.6280 [16.2320-16.8753] n=8 (i 1.03 s 0.54 r 3.87 %)  Ks [2, 3, 3]
+   B 16.6133 [16.3782-17.8431] n=9 (i 0.45 s 1.08 r 8.82 %)  Ks [3, 3, 3]
+   LETTER B/A 0.9991 (-0.09 %, B-A -0.0147) pooled nnn (bars i 2.25 s 2.42 r 19.26) passes p0:nnn(sep)(K2/3) p1:nnn(sep)(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+CTL-JA W8 [m0_500] A=C4-JA#parent B=C4-JA#tip
+   A 5.3197 [5.3081-5.6435] n=7 (i 2.82 s 1.13 r 6.31 %)  Ks [1, 3, 3]
+   B 5.3231 [5.3044-5.7047] n=7 (i 4.84 s 1.51 r 7.52 %)  Ks [1, 3, 3]
+   LETTER B/A 1.0006 (+0.06 %, B-A +0.0033) pooled nnn (bars i 11.19 s 3.77 r 19.63) passes p0:nnn(sep)(K1/1) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+CTL-JA W16 [m0_500] A=C4-JA#parent B=C4-JA#tip
+   A 5.2500 [5.2179-5.8193] n=8 (i 2.74 s 1.79 r 11.46 %)  Ks [2, 3, 3]
+   B 5.2484 [5.2212-5.8170] n=8 (i 5.61 s 1.86 r 11.35 %)  Ks [2, 3, 3]
+   LETTER B/A 0.9997 (-0.03 %, B-A -0.0015) pooled nnn (bars i 12.49 s 5.16 r 32.26) passes p0:nnn(sep)(K2/2) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+==== CTL J-T: JT#tip (B) vs JT#parent (A)
+CTL-JT W1 [m0_500] A=C4-JT#parent B=C4-JT#tip
+   A 4.5465 [4.4503-4.7952] n=8 (i 2.73 s 1.06 r 7.59 %)  Ks [2, 3, 3]
+   B 4.5930 [4.4350-4.8287] n=7 (i 3.20 s 1.41 r 8.57 %)  Ks [1, 3, 3]
+   LETTER B/A 1.0102 (+1.02 %, B-A +0.0465) pooled nnn (bars i 8.41 s 3.53 r 22.89) passes p0:nnn(sep)(K2/1) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+CTL-JT W8 [m0_500] A=C4-JT#parent B=C4-JT#tip
+   A 1.8733 [1.8144-2.0088] n=8 (i 8.19 s 1.95 r 10.38 %)  Ks [2, 3, 3]
+   B 1.8502 [1.8200-2.0088] n=7 (i 3.01 s 1.72 r 10.21 %)  Ks [1, 3, 3]
+   LETTER B/A 0.9876 (-1.24 %, B-A -0.0232) pooled nnn (bars i 17.45 s 5.21 r 29.12) passes p0:nnn(sep)(K2/1) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+CTL-JT W16 [m0_500] A=C4-JT#parent B=C4-JT#tip
+   A 2.0756 [2.0562-2.2634] n=8 (i 6.03 s 1.81 r 9.98 %)  Ks [2, 3, 3]
+   B 2.0597 [2.0482-2.2244] n=7 (i 3.05 s 1.63 r 8.56 %)  Ks [1, 3, 3]
+   LETTER B/A 0.9923 (-0.77 %, B-A -0.0159) pooled nnn (bars i 13.52 s 4.86 r 26.30) passes p0:nnn(sep)(K2/1) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+==== AllPairs across binaries: JDap#tip (B) vs JDpar#parent (A)
+AP-x W1 [m0_500] A=C4-JDpar#parent B=C4-JDap#tip
+   A 6.2008 [6.0390-6.3550] n=8 (i 1.03 s 0.71 r 5.10 %)  Ks [2, 3, 3]
+   B 6.1501 [6.0101-6.6297] n=7 (i 2.26 s 1.59 r 10.07 %)  Ks [1, 3, 3]
+   LETTER B/A 0.9918 (-0.82 %, B-A -0.0506) pooled nnn (bars i 4.97 s 3.48 r 22.58) passes p0:nnn(K2/1) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+AP-x W2 [m0_500] A=C4-JDpar#parent B=C4-JDap#tip
+   A 4.6971 [4.6364-4.7735] n=8 (i 1.72 s 0.50 r 2.92 %)  Ks [2, 3, 3]
+   B 4.7129 [4.6224-4.7774] n=8 (i 1.04 s 0.45 r 3.29 %)  Ks [2, 3, 3]
+   LETTER B/A 1.0034 (+0.34 %, B-A +0.0158) pooled nnn (bars i 4.01 s 1.34 r 8.80) passes p0:nnn(K2/2) p1:YYn(sep)(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+AP-x W4 [m0_500] A=C4-JDpar#parent B=C4-JDap#tip
+   A 3.8845 [3.8567-3.9813] n=7 (i 1.42 s 0.58 r 3.21 %)  Ks [1, 3, 3]
+   B 3.9106 [3.8587-4.0755] n=7 (i 2.26 s 1.02 r 5.54 %)  Ks [1, 3, 3]
+   LETTER B/A 1.0067 (+0.67 %, B-A +0.0261) pooled nnn (bars i 5.34 s 2.36 r 12.81) passes p0:nnn(sep)(K1/1) p1:nYn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+AP-x W8 [m0_500] A=C4-JDpar#parent B=C4-JDap#tip
+   A 3.5206 [3.4741-3.7428] n=7 (i 2.72 s 1.29 r 7.63 %)  Ks [1, 3, 3]
+   B 3.4851 [3.4581-3.5862] n=7 (i 1.31 s 0.60 r 3.68 %)  Ks [1, 3, 3]
+   LETTER B/A 0.9899 (-1.01 %, B-A -0.0355) pooled nnn (bars i 6.05 s 2.85 r 16.95) passes p0:nnn(sep)(K1/1) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+AP-x W16 [m0_500] A=C4-JDpar#parent B=C4-JDap#tip
+   A 3.7023 [3.6391-3.8934] n=8 (i 3.90 s 1.13 r 6.87 %)  Ks [2, 3, 3]
+   B 3.7003 [3.6462-3.8975] n=8 (i 1.49 s 0.96 r 6.79 %)  Ks [2, 3, 3]
+   LETTER B/A 0.9995 (-0.05 %, B-A -0.0020) pooled nnn (bars i 8.35 s 2.97 r 19.32) passes p0:nnn(K2/2) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+==== A/A twin: JT#tip (B) vs JD#tip (A)
+AA W1 [m0_500] A=C4-JD#tip B=C4-JT#tip
+   A 4.5692 [4.4430-4.9939] n=7 (i 7.65 s 2.32 r 12.05 %)  Ks [1, 3, 3]
+   B 4.5930 [4.4350-4.8287] n=7 (i 3.20 s 1.41 r 8.57 %)  Ks [1, 3, 3]
+   LETTER B/A 1.0052 (+0.52 %, B-A +0.0238) pooled nnn (bars i 16.59 s 5.43 r 29.58) passes p0:nnn(sep)(K1/1) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+AA W8 [m0_500] A=C4-JD#tip B=C4-JT#tip
+   A 1.8277 [1.8135-2.0274] n=7 (i 4.33 s 2.02 r 11.70 %)  Ks [1, 3, 3]
+   B 1.8502 [1.8200-2.0088] n=7 (i 3.01 s 1.72 r 10.21 %)  Ks [1, 3, 3]
+   LETTER B/A 1.0123 (+1.23 %, B-A +0.0225) pooled nnn (bars i 10.55 s 5.31 r 31.06) passes p0:nnn(sep)(K1/1) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+AA W16 [m0_500] A=C4-JD#tip B=C4-JT#tip
+   A 2.0887 [2.0503-2.2770] n=9 (i 4.35 s 1.62 r 10.85 %)  Ks [3, 3, 3]
+   B 2.0597 [2.0482-2.2244] n=7 (i 3.05 s 1.63 r 8.56 %)  Ks [1, 3, 3]
+   LETTER B/A 0.9861 (-1.39 %, B-A -0.0290) pooled nnn (bars i 10.62 s 4.59 r 27.64) passes p0:nnn(sep)(K3/1) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+==== RUNG: rung#tip (B) vs JD#tip (A)
+RUNG W8 [m0_500] A=C4-JD#tip B=C4-rung#tip
+   A 1.8277 [1.8135-2.0274] n=7 (i 4.33 s 2.02 r 11.70 %)  Ks [1, 3, 3]
+   B 1.9191 [1.8876-2.0710] n=9 (i 7.06 s 1.65 r 9.56 %)  Ks [3, 3, 3]
+   LETTER B/A 1.0500 (+5.00 %, B-A +0.0914) pooled nnn (bars i 16.56 s 5.22 r 30.22) passes p0:nnn(sep)(K1/3) p1:YYn(sep)(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+RUNG W16 [m0_500] A=C4-JD#tip B=C4-rung#tip
+   A 2.0887 [2.0503-2.2770] n=9 (i 4.35 s 1.62 r 10.85 %)  Ks [3, 3, 3]
+   B 2.1294 [2.1074-2.3032] n=8 (i 4.00 s 1.53 r 9.19 %)  Ks [2, 3, 3]
+   LETTER B/A 1.0195 (+1.95 %, B-A +0.0407) pooled nnn (bars i 11.81 s 4.46 r 28.45) passes p0:nnn(K3/2) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B>A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+==== JOLT wall: JD#tip (B) vs jolt56 (A), [0,500)
+JOLT W1 [m0_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 10.1435 [9.4989-10.9129] n=8 (i 11.73 s 2.63 r 13.94 %)  Ks [2, 3, 3]
+   B 4.5692 [4.4430-4.9939] n=7 (i 7.65 s 2.32 r 12.05 %)  Ks [1, 3, 3]
+   LETTER B/A 0.4505 (-54.95 %, B-A -5.5743) pooled YYY (bars i 28.01 s 7.01 r 36.86) passes p0:nnn(sep)(K2/1) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+JOLT W2 [m0_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 5.8263 [5.6143-5.9624] n=8 (i 2.57 s 1.01 r 5.97 %)  Ks [2, 3, 3]
+   B 3.0706 [2.9863-3.1163] n=8 (i 1.90 s 0.68 r 4.23 %)  Ks [2, 3, 3]
+   LETTER B/A 0.5270 (-47.30 %, B-A -2.7556) pooled YYY (bars i 6.38 s 2.44 r 14.64) passes p0:nnn(sep)(K2/2) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+JOLT W4 [m0_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 3.6547 [3.6057-3.7142] n=7 (i 1.41 s 0.50 r 2.97 %)  Ks [1, 3, 3]
+   B 2.2356 [2.1959-2.3091] n=7 (i 3.40 s 1.02 r 5.06 %)  Ks [1, 3, 3]
+   LETTER B/A 0.6117 (-38.83 %, B-A -1.4190) pooled YYY (bars i 7.37 s 2.27 r 11.74) passes p0:nnn(sep)(K1/1) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+JOLT W8 [m0_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 2.5311 [2.4772-2.7301] n=6 (i 2.64 s 1.86 r 9.99 %)  Ks [0, 3, 3]
+   B 1.8277 [1.8135-2.0274] n=7 (i 4.33 s 2.02 r 11.70 %)  Ks [1, 3, 3]
+   LETTER B/A 0.7221 (-27.79 %, B-A -0.7034) pooled YYn (bars i 10.15 s 5.50 r 30.78) passes p0:nnn(K0/1) p1:YYY(sep)(K3/3) p2:YYn(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED
+JOLT W16 [m0_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 2.4535 [2.3440-2.9357] n=9 (i 22.63 s 4.65 r 24.12 %)  Ks [3, 3, 3]
+   B 2.0887 [2.0503-2.2770] n=9 (i 4.35 s 1.62 r 10.85 %)  Ks [3, 3, 3]
+   LETTER B/A 0.8513 (-14.87 %, B-A -0.3648) pooled nYn (bars i 46.09 s 9.85 r 52.89) passes p0:YYn(sep)(K3/3) p1:nYn(sep)(K3/3) p2:nnn(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (3 gating passes) -> NOT CLAIMED
+==== JOLT wall [100,500)
+JOLT100 W1 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 10.0044 [9.3879-10.8886] n=8 (i 13.26 s 2.90 r 15.00 %)  Ks [2, 3, 3]
+   B 4.3504 [4.2115-4.7890] n=7 (i 7.94 s 2.50 r 13.27 %)  Ks [1, 3, 3]
+   LETTER B/A 0.4348 (-56.52 %, B-A -5.6540) pooled YYY (bars i 30.91 s 7.66 r 40.06) passes p0:nnn(sep)(K2/1) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+JOLT100 W2 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 5.8123 [5.5912-5.9449] n=8 (i 2.73 s 1.04 r 6.09 %)  Ks [2, 3, 3]
+   B 2.9392 [2.8604-2.9761] n=8 (i 1.79 s 0.66 r 3.94 %)  Ks [2, 3, 3]
+   LETTER B/A 0.5057 (-49.43 %, B-A -2.8731) pooled YYY (bars i 6.52 s 2.47 r 14.50) passes p0:nnn(sep)(K2/2) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+JOLT100 W4 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 3.6881 [3.6354-3.7564] n=7 (i 1.09 s 0.50 r 3.28 %)  Ks [1, 3, 3]
+   B 2.1605 [2.1266-2.2431] n=7 (i 3.24 s 1.04 r 5.39 %)  Ks [1, 3, 3]
+   LETTER B/A 0.5858 (-41.42 %, B-A -1.5275) pooled YYY (bars i 6.83 s 2.30 r 12.62) passes p0:nnn(sep)(K1/1) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+JOLT100 W8 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 2.5702 [2.5178-2.7753] n=6 (i 2.38 s 1.86 r 10.02 %)  Ks [0, 3, 3]
+   B 1.7878 [1.7707-1.9758] n=7 (i 3.59 s 1.95 r 11.47 %)  Ks [1, 3, 3]
+   LETTER B/A 0.6956 (-30.44 %, B-A -0.7824) pooled YYn (bars i 8.62 s 5.39 r 30.46) passes p0:nnn(K0/1) p1:YYY(sep)(K3/3) p2:YYn(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED
+JOLT100 W16 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 2.5056 [2.3891-3.0038] n=9 (i 21.85 s 4.75 r 24.53 %)  Ks [3, 3, 3]
+   B 2.0486 [2.0110-2.2229] n=9 (i 4.17 s 1.50 r 10.35 %)  Ks [3, 3, 3]
+   LETTER B/A 0.8176 (-18.24 %, B-A -0.4570) pooled nYn (bars i 44.50 s 9.97 r 53.25) passes p0:YYn(sep)(K3/3) p1:nYn(sep)(K3/3) p2:nnn(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (3 gating passes) -> NOT CLAIMED
+units: ours vrow 595,935.2; Jolt vrow 565,789.6 + pos 62,223.9; Jolt/ours: velocity row 0.9494, all rows 1.0538, manifold 1.9001
+==== JOLT per velocity row [100,500) (scale 0.9494)
+per-velocity row W1 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 10.0044 [9.3879-10.8886] n=8 (i 13.26 s 2.90 r 15.00 %)  Ks [2, 3, 3]
+   B 4.3504 [4.2115-4.7890] n=7 (i 7.94 s 2.50 r 13.27 %)  Ks [1, 3, 3]
+   LETTER B/A 0.4128 (-58.72 %, B-A -5.6540) pooled YYY (bars i 30.91 s 7.66 r 40.06) passes p0:nnn(sep)(K2/1) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+per-velocity row W2 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 5.8123 [5.5912-5.9449] n=8 (i 2.73 s 1.04 r 6.09 %)  Ks [2, 3, 3]
+   B 2.9392 [2.8604-2.9761] n=8 (i 1.79 s 0.66 r 3.94 %)  Ks [2, 3, 3]
+   LETTER B/A 0.4801 (-51.99 %, B-A -2.8731) pooled YYY (bars i 6.52 s 2.47 r 14.50) passes p0:nnn(sep)(K2/2) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+per-velocity row W4 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 3.6881 [3.6354-3.7564] n=7 (i 1.09 s 0.50 r 3.28 %)  Ks [1, 3, 3]
+   B 2.1605 [2.1266-2.2431] n=7 (i 3.24 s 1.04 r 5.39 %)  Ks [1, 3, 3]
+   LETTER B/A 0.5562 (-44.38 %, B-A -1.5275) pooled YYY (bars i 6.83 s 2.30 r 12.62) passes p0:nnn(sep)(K1/1) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+per-velocity row W8 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 2.5702 [2.5178-2.7753] n=6 (i 2.38 s 1.86 r 10.02 %)  Ks [0, 3, 3]
+   B 1.7878 [1.7707-1.9758] n=7 (i 3.59 s 1.95 r 11.47 %)  Ks [1, 3, 3]
+   LETTER B/A 0.6604 (-33.96 %, B-A -0.7824) pooled YYY (bars i 8.62 s 5.39 r 30.46) passes p0:nnn(K0/1) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+per-velocity row W16 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 2.5056 [2.3891-3.0038] n=9 (i 21.85 s 4.75 r 24.53 %)  Ks [3, 3, 3]
+   B 2.0486 [2.0110-2.2229] n=9 (i 4.17 s 1.50 r 10.35 %)  Ks [3, 3, 3]
+   LETTER B/A 0.7763 (-22.37 %, B-A -0.4570) pooled nYn (bars i 44.50 s 9.97 r 53.25) passes p0:YYn(sep)(K3/3) p1:YYn(sep)(K3/3) p2:nnn(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (3 gating passes) -> NOT CLAIMED
+==== JOLT per all rows [100,500) (scale 1.0538)
+per-all rows W1 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 10.0044 [9.3879-10.8886] n=8 (i 13.26 s 2.90 r 15.00 %)  Ks [2, 3, 3]
+   B 4.3504 [4.2115-4.7890] n=7 (i 7.94 s 2.50 r 13.27 %)  Ks [1, 3, 3]
+   LETTER B/A 0.4583 (-54.17 %, B-A -5.6540) pooled YYY (bars i 30.91 s 7.66 r 40.06) passes p0:nnn(sep)(K2/1) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+per-all rows W2 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 5.8123 [5.5912-5.9449] n=8 (i 2.73 s 1.04 r 6.09 %)  Ks [2, 3, 3]
+   B 2.9392 [2.8604-2.9761] n=8 (i 1.79 s 0.66 r 3.94 %)  Ks [2, 3, 3]
+   LETTER B/A 0.5329 (-46.71 %, B-A -2.8731) pooled YYY (bars i 6.52 s 2.47 r 14.50) passes p0:nnn(sep)(K2/2) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+per-all rows W4 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 3.6881 [3.6354-3.7564] n=7 (i 1.09 s 0.50 r 3.28 %)  Ks [1, 3, 3]
+   B 2.1605 [2.1266-2.2431] n=7 (i 3.24 s 1.04 r 5.39 %)  Ks [1, 3, 3]
+   LETTER B/A 0.6174 (-38.26 %, B-A -1.5275) pooled YYY (bars i 6.83 s 2.30 r 12.62) passes p0:nnn(sep)(K1/1) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+per-all rows W8 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 2.5702 [2.5178-2.7753] n=6 (i 2.38 s 1.86 r 10.02 %)  Ks [0, 3, 3]
+   B 1.7878 [1.7707-1.9758] n=7 (i 3.59 s 1.95 r 11.47 %)  Ks [1, 3, 3]
+   LETTER B/A 0.7330 (-26.70 %, B-A -0.7824) pooled YYn (bars i 8.62 s 5.39 r 30.46) passes p0:nnn(K0/1) p1:YYY(sep)(K3/3) p2:YYn(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED
+per-all rows W16 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 2.5056 [2.3891-3.0038] n=9 (i 21.85 s 4.75 r 24.53 %)  Ks [3, 3, 3]
+   B 2.0486 [2.0110-2.2229] n=9 (i 4.17 s 1.50 r 10.35 %)  Ks [3, 3, 3]
+   LETTER B/A 0.8616 (-13.84 %, B-A -0.4570) pooled nYn (bars i 44.50 s 9.97 r 53.25) passes p0:YYn(sep)(K3/3) p1:nnn(sep)(K3/3) p2:nnn(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (3 gating passes) -> NOT CLAIMED
+==== JOLT per manifold [100,500) (scale 1.9001)
+per-manifold W1 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 10.0044 [9.3879-10.8886] n=8 (i 13.26 s 2.90 r 15.00 %)  Ks [2, 3, 3]
+   B 4.3504 [4.2115-4.7890] n=7 (i 7.94 s 2.50 r 13.27 %)  Ks [1, 3, 3]
+   LETTER B/A 0.8263 (-17.37 %, B-A -5.6540) pooled nYn (bars i 30.91 s 7.66 r 40.06) passes p0:nnn(sep)(K2/1) p1:nYn(sep)(K3/3) p2:nYn(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+per-manifold W2 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 5.8123 [5.5912-5.9449] n=8 (i 2.73 s 1.04 r 6.09 %)  Ks [2, 3, 3]
+   B 2.9392 [2.8604-2.9761] n=8 (i 1.79 s 0.66 r 3.94 %)  Ks [2, 3, 3]
+   LETTER B/A 0.9609 (-3.91 %, B-A -2.8731) pooled nYn (bars i 6.52 s 2.47 r 14.50) passes p0:nnn(sep)(K2/2) p1:nnn(K3/3) p2:nYn(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> NOT CLAIMED
+per-manifold W4 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 3.6881 [3.6354-3.7564] n=7 (i 1.09 s 0.50 r 3.28 %)  Ks [1, 3, 3]
+   B 2.1605 [2.1266-2.2431] n=7 (i 3.24 s 1.04 r 5.39 %)  Ks [1, 3, 3]
+   LETTER B/A 1.1131 (+11.31 %, B-A -1.5275) pooled YYn (bars i 6.83 s 2.30 r 12.62) passes p0:nnn(sep)(K1/1) p1:YYY(sep)(K3/3) p2:YYn(sep)(K3/3) -> NOT CLAIMED [B>A]
+   GATING-ONLY (2 gating passes) -> CLAIMED
+per-manifold W8 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 2.5702 [2.5178-2.7753] n=6 (i 2.38 s 1.86 r 10.02 %)  Ks [0, 3, 3]
+   B 1.7878 [1.7707-1.9758] n=7 (i 3.59 s 1.95 r 11.47 %)  Ks [1, 3, 3]
+   LETTER B/A 1.3217 (+32.17 %, B-A -0.7824) pooled YYY (bars i 8.62 s 5.39 r 30.46) passes p0:nnn(K0/1) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B>A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+per-manifold W16 [m100_500] A=C4-jolt56#j56 B=C4-JD#tip
+   A 2.5056 [2.3891-3.0038] n=9 (i 21.85 s 4.75 r 24.53 %)  Ks [3, 3, 3]
+   B 2.0486 [2.0110-2.2229] n=9 (i 4.17 s 1.50 r 10.35 %)  Ks [3, 3, 3]
+   LETTER B/A 1.5536 (+55.36 %, B-A -0.4570) pooled YYY (bars i 44.50 s 9.97 r 53.25) passes p0:YYY(sep)(K3/3) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> CLAIMED STRONG [B>A]
+   GATING-ONLY (3 gating passes) -> CLAIMED STRONG
+==== JDpar vs Jolt (shipped default before C4), [0,500)
+JDpar-Jolt W1 [m0_500] A=C4-jolt56#j56 B=C4-JDpar#parent
+   A 10.1435 [9.4989-10.9129] n=8 (i 11.73 s 2.63 r 13.94 %)  Ks [2, 3, 3]
+   B 6.2008 [6.0390-6.3550] n=8 (i 1.03 s 0.71 r 5.10 %)  Ks [2, 3, 3]
+   LETTER B/A 0.6113 (-38.87 %, B-A -3.9428) pooled YYY (bars i 23.55 s 5.44 r 29.68) passes p0:nnn(sep)(K2/2) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+JDpar-Jolt W2 [m0_500] A=C4-jolt56#j56 B=C4-JDpar#parent
+   A 5.8263 [5.6143-5.9624] n=8 (i 2.57 s 1.01 r 5.97 %)  Ks [2, 3, 3]
+   B 4.6971 [4.6364-4.7735] n=8 (i 1.72 s 0.50 r 2.92 %)  Ks [2, 3, 3]
+   LETTER B/A 0.8062 (-19.38 %, B-A -1.1292) pooled YYY (bars i 6.18 s 2.25 r 13.30) passes p0:nnn(sep)(K2/2) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B<A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+JDpar-Jolt W4 [m0_500] A=C4-jolt56#j56 B=C4-JDpar#parent
+   A 3.6547 [3.6057-3.7142] n=7 (i 1.41 s 0.50 r 2.97 %)  Ks [1, 3, 3]
+   B 3.8845 [3.8567-3.9813] n=7 (i 1.42 s 0.58 r 3.21 %)  Ks [1, 3, 3]
+   LETTER B/A 1.0629 (+6.29 %, B-A +0.2299) pooled YYn (bars i 4.00 s 1.54 r 8.74) passes p0:nnn(sep)(K1/1) p1:YYY(sep)(K3/3) p2:YYn(sep)(K3/3) -> NOT CLAIMED [B>A]
+   GATING-ONLY (2 gating passes) -> CLAIMED
+JDpar-Jolt W8 [m0_500] A=C4-jolt56#j56 B=C4-JDpar#parent
+   A 2.5311 [2.4772-2.7301] n=6 (i 2.64 s 1.86 r 9.99 %)  Ks [0, 3, 3]
+   B 3.5206 [3.4741-3.7428] n=7 (i 2.72 s 1.29 r 7.63 %)  Ks [1, 3, 3]
+   LETTER B/A 1.3909 (+39.09 %, B-A +0.9895) pooled YYY (bars i 7.59 s 4.54 r 25.15) passes p0:nnn(K0/1) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B>A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+JDpar-Jolt W16 [m0_500] A=C4-jolt56#j56 B=C4-JDpar#parent
+   A 2.4535 [2.3440-2.9357] n=9 (i 22.63 s 4.65 r 24.12 %)  Ks [3, 3, 3]
+   B 3.7023 [3.6391-3.8934] n=8 (i 3.90 s 1.13 r 6.87 %)  Ks [2, 3, 3]
+   LETTER B/A 1.5090 (+50.90 %, B-A +1.2488) pooled YYY (bars i 45.93 s 9.58 r 50.15) passes p0:nnn(sep)(K3/2) p1:YYY(sep)(K3/3) p2:YYY(sep)(K3/3) -> NOT CLAIMED [B>A]
+   GATING-ONLY (2 gating passes) -> CLAIMED STRONG
+
+==== SUMMARY
+MG-ap W1                     ratio 0.7429 delta -1.5809 pooled YYn per ['nnn(sep)', 'YYY(sep)', 'YYn(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED
+MG-ap W2                     ratio 0.6515 delta -1.6423 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+MG-ap W4                     ratio 0.5717 delta -1.6750 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+MG-ap W8                     ratio 0.5244 delta -1.6574 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+MG-ap W16                    ratio 0.5645 delta -1.6116 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+MG-par W1                    ratio 0.7369 delta -1.6316 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+MG-par W2                    ratio 0.6537 delta -1.6265 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+MG-par W4                    ratio 0.5755 delta -1.6489 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+MG-par W8                    ratio 0.5191 delta -1.6929 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+MG-par W16                   ratio 0.5642 delta -1.6136 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+CTL-JA W1                    ratio 0.9991 delta -0.0147 pooled nnn per ['nnn(sep)', 'nnn(sep)', 'nnn'] LETTER NOT CLAIMED [B<A] | GATING NOT CLAIMED
+CTL-JA W8                    ratio 1.0006 delta +0.0033 pooled nnn per ['nnn(sep)', 'nnn', 'nnn'] LETTER NOT CLAIMED [B>A] | GATING NOT CLAIMED
+CTL-JA W16                   ratio 0.9997 delta -0.0015 pooled nnn per ['nnn(sep)', 'nnn', 'nnn'] LETTER NOT CLAIMED [B<A] | GATING NOT CLAIMED
+CTL-JT W1                    ratio 1.0102 delta +0.0465 pooled nnn per ['nnn(sep)', 'nnn', 'nnn'] LETTER NOT CLAIMED [B>A] | GATING NOT CLAIMED
+CTL-JT W8                    ratio 0.9876 delta -0.0232 pooled nnn per ['nnn(sep)', 'nnn', 'nnn'] LETTER NOT CLAIMED [B<A] | GATING NOT CLAIMED
+CTL-JT W16                   ratio 0.9923 delta -0.0159 pooled nnn per ['nnn(sep)', 'nnn', 'nnn'] LETTER NOT CLAIMED [B<A] | GATING NOT CLAIMED
+AP-x W1                      ratio 0.9918 delta -0.0506 pooled nnn per ['nnn', 'nnn', 'nnn'] LETTER NOT CLAIMED [B<A] | GATING NOT CLAIMED
+AP-x W2                      ratio 1.0034 delta +0.0158 pooled nnn per ['nnn', 'YYn(sep)', 'nnn'] LETTER NOT CLAIMED [B>A] | GATING NOT CLAIMED
+AP-x W4                      ratio 1.0067 delta +0.0261 pooled nnn per ['nnn(sep)', 'nYn', 'nnn'] LETTER NOT CLAIMED [B>A] | GATING NOT CLAIMED
+AP-x W8                      ratio 0.9899 delta -0.0355 pooled nnn per ['nnn(sep)', 'nnn', 'nnn'] LETTER NOT CLAIMED [B<A] | GATING NOT CLAIMED
+AP-x W16                     ratio 0.9995 delta -0.0020 pooled nnn per ['nnn', 'nnn', 'nnn'] LETTER NOT CLAIMED [B<A] | GATING NOT CLAIMED
+AA W1                        ratio 1.0052 delta +0.0238 pooled nnn per ['nnn(sep)', 'nnn', 'nnn'] LETTER NOT CLAIMED [B>A] | GATING NOT CLAIMED
+AA W8                        ratio 1.0123 delta +0.0225 pooled nnn per ['nnn(sep)', 'nnn', 'nnn'] LETTER NOT CLAIMED [B>A] | GATING NOT CLAIMED
+AA W16                       ratio 0.9861 delta -0.0290 pooled nnn per ['nnn(sep)', 'nnn', 'nnn'] LETTER NOT CLAIMED [B<A] | GATING NOT CLAIMED
+RUNG W8                      ratio 1.0500 delta +0.0914 pooled nnn per ['nnn(sep)', 'YYn(sep)', 'nnn'] LETTER NOT CLAIMED [B>A] | GATING NOT CLAIMED
+RUNG W16                     ratio 1.0195 delta +0.0407 pooled nnn per ['nnn', 'nnn', 'nnn'] LETTER NOT CLAIMED [B>A] | GATING NOT CLAIMED
+JOLT wall W1                 ratio 0.4505 delta -5.5743 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+JOLT wall W2                 ratio 0.5270 delta -2.7556 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+JOLT wall W4                 ratio 0.6117 delta -1.4190 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+JOLT wall W8                 ratio 0.7221 delta -0.7034 pooled YYn per ['nnn', 'YYY(sep)', 'YYn(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED
+JOLT wall W16                ratio 0.8513 delta -0.3648 pooled nYn per ['YYn(sep)', 'nYn(sep)', 'nnn(sep)'] LETTER NOT CLAIMED [B<A] | GATING NOT CLAIMED
+JOLT wall100 W1              ratio 0.4348 delta -5.6540 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+JOLT wall100 W2              ratio 0.5057 delta -2.8731 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+JOLT wall100 W4              ratio 0.5858 delta -1.5275 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+JOLT wall100 W8              ratio 0.6956 delta -0.7824 pooled YYn per ['nnn', 'YYY(sep)', 'YYn(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED
+JOLT wall100 W16             ratio 0.8176 delta -0.4570 pooled nYn per ['YYn(sep)', 'nYn(sep)', 'nnn(sep)'] LETTER NOT CLAIMED [B<A] | GATING NOT CLAIMED
+JOLT per velocity row W1     ratio 0.4128 delta -5.6540 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+JOLT per velocity row W2     ratio 0.4801 delta -2.8731 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+JOLT per velocity row W4     ratio 0.5562 delta -1.5275 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+JOLT per velocity row W8     ratio 0.6604 delta -0.7824 pooled YYY per ['nnn', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+JOLT per velocity row W16    ratio 0.7763 delta -0.4570 pooled nYn per ['YYn(sep)', 'YYn(sep)', 'nnn(sep)'] LETTER NOT CLAIMED [B<A] | GATING NOT CLAIMED
+JOLT per all rows W1         ratio 0.4583 delta -5.6540 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+JOLT per all rows W2         ratio 0.5329 delta -2.8731 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+JOLT per all rows W4         ratio 0.6174 delta -1.5275 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+JOLT per all rows W8         ratio 0.7330 delta -0.7824 pooled YYn per ['nnn', 'YYY(sep)', 'YYn(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED
+JOLT per all rows W16        ratio 0.8616 delta -0.4570 pooled nYn per ['YYn(sep)', 'nnn(sep)', 'nnn(sep)'] LETTER NOT CLAIMED [B<A] | GATING NOT CLAIMED
+JOLT per manifold W1         ratio 0.8263 delta -5.6540 pooled nYn per ['nnn(sep)', 'nYn(sep)', 'nYn(sep)'] LETTER NOT CLAIMED [B<A] | GATING NOT CLAIMED
+JOLT per manifold W2         ratio 0.9609 delta -2.8731 pooled nYn per ['nnn(sep)', 'nnn', 'nYn'] LETTER NOT CLAIMED [B<A] | GATING NOT CLAIMED
+JOLT per manifold W4         ratio 1.1131 delta -1.5275 pooled YYn per ['nnn(sep)', 'YYY(sep)', 'YYn(sep)'] LETTER NOT CLAIMED [B>A] | GATING CLAIMED
+JOLT per manifold W8         ratio 1.3217 delta -0.7824 pooled YYY per ['nnn', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B>A] | GATING CLAIMED STRONG
+JOLT per manifold W16        ratio 1.5536 delta -0.4570 pooled YYY per ['YYY(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER CLAIMED STRONG [B>A] | GATING CLAIMED STRONG
+JDpar/Jolt W1                ratio 0.6113 delta -3.9428 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+JDpar/Jolt W2                ratio 0.8062 delta -1.1292 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B<A] | GATING CLAIMED STRONG
+JDpar/Jolt W4                ratio 1.0629 delta +0.2299 pooled YYn per ['nnn(sep)', 'YYY(sep)', 'YYn(sep)'] LETTER NOT CLAIMED [B>A] | GATING CLAIMED
+JDpar/Jolt W8                ratio 1.3909 delta +0.9895 pooled YYY per ['nnn', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B>A] | GATING CLAIMED STRONG
+JDpar/Jolt W16               ratio 1.5090 delta +1.2488 pooled YYY per ['nnn(sep)', 'YYY(sep)', 'YYY(sep)'] LETTER NOT CLAIMED [B>A] | GATING CLAIMED STRONG

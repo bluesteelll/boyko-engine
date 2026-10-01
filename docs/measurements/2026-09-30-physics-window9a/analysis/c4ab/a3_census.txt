@@ -1,0 +1,6 @@
+C4-JD-armed#tip W1: distinct (points, np_manifolds, manifolds, pose) over the used processes: [(16553.755, 4467.665, 4467.665, '0x30c5438bc6ad9ffa')]
+C4-JD-armed#tip W8: distinct (points, np_manifolds, manifolds, pose) over the used processes: [(16553.755, 4467.665, 4467.665, '0x30c5438bc6ad9ffa')]
+ours per step over [100,500): points 16553.76, manifolds 4467.665 (disarmed column 4467.665); velocity row-iterations 595,935.2 (DOSSIER trunk contact set: 595,935); pose 0x30c5438bc6ad9ffa
+C4-JD#tip disarmed (C4-AB) manifolds [100,500): distinct values [4467.665]
+Jolt (DOSSIER equal-work, hash 0xb8522b4e3fc62cfe): velocity row-iterations 565,790 + position rows 62,224; manifolds 8,489
+Jolt/ours work: velocity rows 0.9494, all rows 1.0538, manifolds 1.9001

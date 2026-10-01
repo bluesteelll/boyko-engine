@@ -1,0 +1,52 @@
+[
+ {
+  "row": "C4-BR",
+  "binary": "g4r7",
+  "exit": 0,
+  "ids_on_disk": 8,
+  "ids_on_stdout": 8,
+  "expected": 8,
+  "wall_s_for_schedule": 447.816,
+  "fail": []
+ },
+ {
+  "row": "C4-BR",
+  "binary": "g4r8b",
+  "exit": 0,
+  "ids_on_disk": 8,
+  "ids_on_stdout": 8,
+  "expected": 8,
+  "wall_s_for_schedule": 877.033,
+  "fail": []
+ },
+ {
+  "row": "C4-BR",
+  "binary": "g4rT",
+  "exit": 0,
+  "ids_on_disk": 8,
+  "ids_on_stdout": 8,
+  "expected": 8,
+  "wall_s_for_schedule": 531.06,
+  "fail": []
+ },
+ {
+  "row": "C4-G4",
+  "binary": "g4rT",
+  "exit": 0,
+  "ids_on_disk": 36,
+  "ids_on_stdout": 36,
+  "expected": 36,
+  "wall_s_for_schedule": 1165.675,
+  "fail": []
+ },
+ {
+  "row": "C4-G4-kd",
+  "binary": "g4rT",
+  "exit": 0,
+  "ids_on_disk": 6,
+  "ids_on_stdout": 6,
+  "expected": 6,
+  "wall_s_for_schedule": 983.451,
+  "fail": []
+ }
+]

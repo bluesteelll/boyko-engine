@@ -1,0 +1,66 @@
+rapier3d v0.36.0
+├── rapier3d feature "alloc"
+│   └── rapier3d feature "std"
+│       ├── rapier3d feature "default"
+│       │   └── rapier-parity v0.1.0 (D:\tmp\rapier-parity)
+│       │       ├── rapier-parity feature "default" (command-line)
+│       │       └── rapier-parity feature "simd8"
+│       │           └── rapier-parity feature "default" (command-line)
+│       └── rapier3d feature "parallel"
+│           └── rapier-parity v0.1.0 (D:\tmp\rapier-parity) (*)
+├── rapier3d feature "default" (*)
+├── rapier3d feature "dim3"
+│   └── rapier3d feature "default" (*)
+├── rapier3d feature "f32"
+│   └── rapier3d feature "default" (*)
+├── rapier3d feature "parallel" (*)
+├── rapier3d feature "simd8"
+│   └── rapier-parity feature "simd8" (*)
+└── rapier3d feature "std" (*)
+parry3d v0.31.1
+├── parry3d feature "alloc"
+│   └── rapier3d feature "alloc"
+│       └── rapier3d feature "std"
+│           ├── rapier3d feature "default"
+│           │   └── rapier-parity v0.1.0 (D:\tmp\rapier-parity)
+│           │       ├── rapier-parity feature "default" (command-line)
+│           │       └── rapier-parity feature "simd8"
+│           │           └── rapier-parity feature "default" (command-line)
+│           └── rapier3d feature "parallel"
+│               └── rapier-parity v0.1.0 (D:\tmp\rapier-parity) (*)
+├── parry3d feature "dim3"
+│   └── parry3d feature "required-features"
+│       └── rapier3d v0.36.0
+│           ├── rapier3d feature "alloc" (*)
+│           ├── rapier3d feature "default" (*)
+│           ├── rapier3d feature "dim3"
+│           │   └── rapier3d feature "default" (*)
+│           ├── rapier3d feature "f32"
+│           │   └── rapier3d feature "default" (*)
+│           ├── rapier3d feature "parallel" (*)
+│           ├── rapier3d feature "simd8"
+│           │   └── rapier-parity feature "simd8" (*)
+│           └── rapier3d feature "std" (*)
+├── parry3d feature "downcast-rs"
+│   └── parry3d feature "alloc" (*)
+├── parry3d feature "ena"
+│   └── parry3d feature "std"
+│       └── rapier3d feature "std" (*)
+├── parry3d feature "f32"
+│   └── parry3d feature "required-features" (*)
+├── parry3d feature "hashbrown"
+│   └── parry3d feature "alloc" (*)
+├── parry3d feature "parallel"
+│   └── rapier3d feature "parallel" (*)
+├── parry3d feature "rayon"
+│   └── parry3d feature "parallel" (*)
+├── parry3d feature "required-features" (*)
+├── parry3d feature "rstar"
+│   └── parry3d feature "alloc" (*)
+├── parry3d feature "simd8"
+│   └── rapier3d feature "simd8" (*)
+├── parry3d feature "slab"
+│   └── parry3d feature "std" (*)
+├── parry3d feature "smallvec"
+│   └── parry3d feature "alloc" (*)
+└── parry3d feature "std" (*)

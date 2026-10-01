@@ -1,0 +1,6 @@
+# The same ISA as boyko's runner (its `.cargo/config.toml` baseline) and Jolt's parity build:
+# AVX2/FMA/BMI/LZCNT/MOVBE. An env RUSTFLAGS replaces this list, so build.sh exports the same
+# value rather than a different one.
+[build]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+target-dir = "D:/wt/_targets/rapier-parity"

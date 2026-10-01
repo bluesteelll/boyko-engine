@@ -1,0 +1,14 @@
+2026-10-01T03:07:07.307+03:00 WINDOW START cutoff 2026-10-01T23:59:00 blocks ['RERUN-T'] test True resume False
+2026-10-01T03:07:07.544+03:00 RERUN-T-p0: idle rule (wait_idle9a.ps1, up to 30 polls)
+2026-10-01T03:07:07.557+03:00 RERUN-T-p0: idle reached; {'time': '2026-10-01T03:07:07.556+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-10-01T03:07:08.127+03:00 RERUN-T-p0: opening receipt 24.8% (build procs busy [], presence {'build': [], 'lane': []})
+2026-10-01T03:07:08.799+03:00   RERUN-T-p0 r0 [  1] RR-a#tip W=1: pose 0x3c1f644743b89079 expect none rb 24.8% ra 21.53% others 19.54% exit 0 waited 0.0s CONTAMINATED-before(24.8%) CONTAMINATED-after(21.53%) OTHERS-BUSY(19.54%)
+2026-10-01T03:07:09.455+03:00   RERUN-T-p0 r1 [  2] RR-a#tip W=1: pose 0x3c1f644743b89079 expect none rb 21.53% ra 17.42% others 20.03% exit 0 waited 0.0s CONTAMINATED-before(21.53%) CONTAMINATED-after(17.42%) OTHERS-BUSY(20.03%)
+2026-10-01T03:07:10.111+03:00   RERUN-T-p0 r2 [  3] RR-a#tip W=1: pose 0x3c1f644743b89079 expect none rb 17.42% ra 20.81% others 28.85% exit 0 waited 0.0s CONTAMINATED-before(17.42%) CONTAMINATED-after(20.81%) OTHERS-BUSY(28.85%)
+2026-10-01T03:07:10.112+03:00 RERUN-T-p0: re-run wave 1: 1 slot(s) unclean: [(1, 'RR-a', 'tip', 1, 'contaminated')]
+2026-10-01T03:07:10.800+03:00   RERUN-T-p0 r1 [  2] RR-a#tip W=1 RERUN 1 (contaminated): pose 0x3c1f644743b89079 expect none rb 20.81% ra 22.27% others 21.08% exit 0 waited 0.0s CONTAMINATED-before(20.81%) CONTAMINATED-after(22.27%) OTHERS-BUSY(21.08%)
+2026-10-01T03:07:10.801+03:00 RERUN-T-p0: re-run wave 2: 1 slot(s) unclean: [(1, 'RR-a', 'tip', 1, 'contaminated')]
+2026-10-01T03:07:11.452+03:00   RERUN-T-p0 r1 [  2] RR-a#tip W=1 RERUN 2 (contaminated): pose 0x3c1f644743b89079 expect none rb 22.27% ra 18.07% others 18.28% exit 0 waited 0.0s CONTAMINATED-before(22.27%) CONTAMINATED-after(18.07%) OTHERS-BUSY(18.28%)
+2026-10-01T03:07:11.452+03:00 RERUN-T-p0: re-run stage ended after 2 wave(s); 0 pass-cell(s) short of their slots (k_clean < k_target; K < 3 does not gate): []
+2026-10-01T03:07:11.453+03:00 RERUN-T-p0: done
+2026-10-01T03:07:11.492+03:00 WINDOW END exit 0: complete; counters {'timed': 5, 'rerun': 2, 'warm': 0, 'voided_processes': 0}; binaries after all match

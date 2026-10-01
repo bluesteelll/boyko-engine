@@ -1,0 +1,320 @@
+S7-AB records: 176 (173 timed, 3 warm-up)
+   (1, 0, 'S7-JA', 's7t', 8, 'original') valid [] DIRTY ['witness 2.29'] driver valid True driver contaminated True
+   (2, 0, 'S7-JT-W1', 's7t', 1, 'original') valid [] DIRTY ['after 6.5', 'witness 3.95'] driver valid True driver contaminated True
+valid from files: 173/173
+validity disagreements with the driver: []
+slots: 171 selected: 171 re-runs used: [(1, 0, 'S7-JA', 's7t', 8), (2, 0, 'S7-JT-W1', 's7t', 1)]
+distinct per-step manifold sequences per scene family: {'JA': 1, 'JT': 1}
+JT and JA manifold sequences identical to each other: True
+
+===== window [0..500) , SELECTED =====
+C1-JT: A 1.8112 [1.8003-1.8536] IQR 0.0093 SE 0.0083 K=9 | B 2.1902 [2.1816-2.2341] IQR 0.0100 SE 0.0067 K=9
+   pooled B/A 1.2092 (B-A +0.3790 ms) Y/Y/Y bars r 7.59 i 1.37 s 1.10 %
+   p0: A 1.8116 B 2.1898 K=3/3 B/A 1.2088 (+0.3783) Y/Y/Y bars r 6.54 i 3.27 s 2.54 %
+   p1: A 1.8024 B 2.1837 K=3/3 B/A 1.2115 (+0.3813) Y/Y/Y bars r 1.45 i 0.72 s 0.56 %
+   p2: A 1.8117 B 2.1938 K=3/3 B/A 1.2109 (+0.3820) Y/Y/Y bars r 5.90 i 2.95 s 2.25 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 3.27 % = 0.0593 ms of A
+   VERDICT: FAILS (B claimed slower)
+C1-JA: A 5.3040 [5.2953-5.4035] IQR 0.0144 SE 0.0139 K=9 | B 5.8658 [5.8421-5.9646] IQR 0.0116 SE 0.0148 K=9
+   pooled B/A 1.1059 (B-A +0.5617 ms) Y/Y/Y bars r 5.84 i 0.67 s 0.73 %
+   p0: A 5.3038 B 5.8658 K=3/3 B/A 1.1059 (+0.5619) Y/Y/Y bars r 4.17 i 2.09 s 1.68 %
+   p1: A 5.3031 B 5.8599 K=3/3 B/A 1.1050 (+0.5568) Y/Y/Y bars r 1.19 i 0.59 s 0.47 %
+   p2: A 5.3145 B 5.8716 K=3/3 B/A 1.1048 (+0.5571) Y/Y/Y bars r 3.58 i 1.79 s 1.42 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 2.09 % = 0.1107 ms of A
+   VERDICT: FAILS (B claimed slower)
+C2-JT: A 1.8152 [1.7989-1.8491] IQR 0.0158 SE 0.0064 K=9 | B 1.8112 [1.8003-1.8536] IQR 0.0093 SE 0.0083 K=9
+   pooled B/A 0.9978 (B-A -0.0040 ms) n/n/n bars r 8.08 i 2.01 s 1.16 %
+   p0: A 1.8143 B 1.8116 K=3/3 B/A 0.9985 (-0.0027) n/n/n bars r 5.46 i 2.73 s 2.06 %
+   p1: A 1.8123 B 1.8024 K=3/3 B/A 0.9946 (-0.0098) n/n/n bars r 3.03 i 1.52 s 1.12 %
+   p2: A 1.8296 B 1.8117 K=3/3 B/A 0.9902 (-0.0179) n/n/n bars r 6.95 i 3.48 s 2.61 %
+   CLAIMED(i&s every pass+pooled, one sign)=False STRONG(r every pass+pooled)=False STRONG(r pooled)=False pooled-only i&s=False binding max(i,s) bar 3.48 % = 0.0631 ms of A
+   VERDICT: HOLDS (no resolved difference)
+C2-JA: A 5.3081 [5.2750-5.3216] IQR 0.0114 SE 0.0058 K=9 | B 5.3040 [5.2953-5.4035] IQR 0.0144 SE 0.0139 K=9
+   pooled B/A 0.9992 (B-A -0.0040 ms) n/n/n bars r 4.44 i 0.69 s 0.57 %
+   p0: A 5.3123 B 5.3038 K=3/3 B/A 0.9984 (-0.0084) n/n/n bars r 4.13 i 2.06 s 1.66 %
+   p1: A 5.2943 B 5.3031 K=3/3 B/A 1.0017 (+0.0088) n/n/n bars r 1.64 i 0.82 s 0.62 %
+   p2: A 5.3108 B 5.3145 K=3/3 B/A 1.0007 (+0.0036) n/n/n bars r 0.78 i 0.39 s 0.29 %
+   CLAIMED(i&s every pass+pooled, one sign)=False STRONG(r every pass+pooled)=False STRONG(r pooled)=False pooled-only i&s=False binding max(i,s) bar 2.06 % = 0.1096 ms of A
+   VERDICT: HOLDS (no resolved difference)
+C3-JT: A 2.0502 [2.0393-2.0659] IQR 0.0108 SE 0.0034 K=9 | B 2.1902 [2.1816-2.2341] IQR 0.0100 SE 0.0067 K=9
+   pooled B/A 1.0683 (B-A +0.1400 ms) Y/Y/Y bars r 5.45 i 1.39 s 0.69 %
+   p0: A 2.0545 B 2.1898 K=3/3 B/A 1.0659 (+0.1354) Y/Y/Y bars r 5.26 i 2.63 s 2.03 %
+   p1: A 2.0537 B 2.1837 K=3/3 B/A 1.0633 (+0.1301) Y/Y/Y bars r 1.02 i 0.51 s 0.39 %
+   p2: A 2.0437 B 2.1938 K=3/3 B/A 1.0734 (+0.1501) Y/Y/Y bars r 1.09 i 0.55 s 0.40 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 2.63 % = 0.0540 ms of A
+   VERDICT: REFUTED: T16 claimed SLOWER than P16 by 0.1400 ms
+PH-P16vsP8-JT: A 1.8152 [1.7989-1.8491] IQR 0.0158 SE 0.0064 K=9 | B 2.0502 [2.0393-2.0659] IQR 0.0108 SE 0.0034 K=9
+   pooled B/A 1.1295 (B-A +0.2350 ms) Y/Y/Y bars r 6.11 i 2.03 s 0.79 %
+   p0: A 1.8143 B 2.0545 K=3/3 B/A 1.1324 (+0.2402) Y/Y/Y bars r 3.84 i 1.92 s 1.39 %
+   p1: A 1.8123 B 2.0537 K=3/3 B/A 1.1332 (+0.2414) Y/Y/Y bars r 2.85 i 1.43 s 1.04 %
+   p2: A 1.8296 B 2.0437 K=3/3 B/A 1.1170 (+0.2141) Y/Y/Y bars r 3.83 i 1.92 s 1.39 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 2.03 % = 0.0368 ms of A
+   VERDICT: post hoc: claimed
+PH-P16vsP8-JA: A 5.3081 [5.2750-5.3216] IQR 0.0114 SE 0.0058 K=9 | B 5.2079 [5.1945-5.3156] IQR 0.0196 SE 0.0162 K=9
+   pooled B/A 0.9811 (B-A -0.1002 ms) n/Y/Y bars r 4.97 i 0.87 s 0.66 %
+   p0: A 5.3123 B 5.2615 K=3/3 B/A 0.9904 (-0.0508) n/n/n bars r 4.34 i 2.17 s 1.57 %
+   p1: A 5.2943 B 5.2079 K=3/3 B/A 0.9837 (-0.0865) Y/Y/Y bars r 1.41 i 0.71 s 0.53 %
+   p2: A 5.3108 B 5.2049 K=3/3 B/A 0.9801 (-0.1059) Y/Y/Y bars r 1.17 i 0.58 s 0.43 %
+   CLAIMED(i&s every pass+pooled, one sign)=False STRONG(r every pass+pooled)=False STRONG(r pooled)=False pooled-only i&s=True binding max(i,s) bar 2.17 % = 0.1151 ms of A
+   VERDICT: post hoc: not claimed
+PH-JA-P16vsT16: A 5.2079 [5.1945-5.3156] IQR 0.0196 SE 0.0162 K=9 | B 5.8658 [5.8421-5.9646] IQR 0.0116 SE 0.0148 K=9
+   pooled B/A 1.1263 (B-A +0.6579 ms) Y/Y/Y bars r 6.25 i 0.85 s 0.80 %
+   p0: A 5.2615 B 5.8658 K=3/3 B/A 1.1148 (+0.6043) Y/Y/Y bars r 4.38 i 2.19 s 1.59 %
+   p1: A 5.2079 B 5.8599 K=3/3 B/A 1.1252 (+0.6520) Y/Y/Y bars r 0.85 i 0.43 s 0.34 %
+   p2: A 5.2049 B 5.8716 K=3/3 B/A 1.1281 (+0.6666) Y/Y/Y bars r 3.69 i 1.84 s 1.46 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 2.19 % = 0.1141 ms of A
+   VERDICT: post hoc: claimed
+PH-W1-PvsT: A 4.4167 [4.3957-4.5564] IQR 0.0373 SE 0.0217 K=9 | B 4.4551 [4.4037-4.5598] IQR 0.0667 SE 0.0240 K=9
+   pooled B/A 1.0087 (B-A +0.0384 ms) n/n/n bars r 10.10 i 3.44 s 1.46 %
+   p0: A 4.4770 B 4.4086 K=3/3 B/A 0.9847 (-0.0685) n/n/n bars r 9.39 i 4.70 s 3.63 %
+   p1: A 4.4299 B 4.4597 K=3/3 B/A 1.0067 (+0.0298) n/n/n bars r 2.13 i 1.07 s 0.82 %
+   p2: A 4.4000 B 4.4517 K=3/3 B/A 1.0117 (+0.0516) n/n/n bars r 6.73 i 3.37 s 2.52 %
+   CLAIMED(i&s every pass+pooled, one sign)=False STRONG(r every pass+pooled)=False STRONG(r pooled)=False pooled-only i&s=False binding max(i,s) bar 4.70 % = 0.2074 ms of A
+   VERDICT: post hoc: not claimed
+  -- ladders [0..500) SELECTED --
+   ladder8 F0.5 inj 0.0300 rise +0.0337 (1.12x) pooled n/n/Y p0 n/Y/Y p1 n/n/n p2 n/n/n seen=False
+   ladder8 F1 inj 0.0600 rise +0.0660 (1.10x) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/Y/Y seen=True
+   ladder8 F1.5 inj 0.0900 rise +0.0911 (1.01x) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 n/Y/Y seen=True
+   ladder8 F2 inj 0.1200 rise +0.1257 (1.05x) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder8: R = 0.06
+   ladder16 F0.5 inj 0.0525 rise +0.0545 (1.04x) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder16 F1 inj 0.1050 rise +0.1139 (1.09x) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder16 F1.5 inj 0.1575 rise +0.1599 (1.02x) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder16 F2 inj 0.2100 rise +0.2146 (1.02x) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder16: R = 0.0525
+   JA-ladder16 F1 inj 0.1050 rise +0.1095 (1.04x) pooled n/Y/Y p0 n/n/n p1 Y/Y/Y p2 Y/Y/Y seen=False
+   JA-ladder16: R = None
+
+===== window [0..500) , ORIGINALS-ONLY =====
+C1-JT: A 1.8112 [1.8003-1.8536] IQR 0.0093 SE 0.0083 K=9 | B 2.1902 [2.1816-2.2341] IQR 0.0100 SE 0.0067 K=9
+   pooled B/A 1.2092 (B-A +0.3790 ms) Y/Y/Y bars r 7.59 i 1.37 s 1.10 %
+   p0: A 1.8116 B 2.1898 K=3/3 B/A 1.2088 (+0.3783) Y/Y/Y bars r 6.54 i 3.27 s 2.54 %
+   p1: A 1.8024 B 2.1837 K=3/3 B/A 1.2115 (+0.3813) Y/Y/Y bars r 1.45 i 0.72 s 0.56 %
+   p2: A 1.8117 B 2.1938 K=3/3 B/A 1.2109 (+0.3820) Y/Y/Y bars r 5.90 i 2.95 s 2.25 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 3.27 % = 0.0593 ms of A
+   VERDICT: FAILS (B claimed slower)
+C1-JA: A 5.3145 [5.2953-5.4035] IQR 0.0246 SE 0.0140 K=9 | B 5.8658 [5.8421-5.9646] IQR 0.0116 SE 0.0148 K=9
+   pooled B/A 1.1037 (B-A +0.5513 ms) Y/Y/Y bars r 5.83 i 1.01 s 0.73 %
+   p0: A 5.3038 B 5.8658 K=3/3 B/A 1.1059 (+0.5619) Y/Y/Y bars r 4.17 i 2.09 s 1.68 %
+   p1: A 5.3284 B 5.8599 K=3/3 B/A 1.0997 (+0.5315) Y/Y/Y bars r 1.61 i 0.80 s 0.60 %
+   p2: A 5.3145 B 5.8716 K=3/3 B/A 1.1048 (+0.5571) Y/Y/Y bars r 3.58 i 1.79 s 1.42 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 2.09 % = 0.1109 ms of A
+   VERDICT: FAILS (B claimed slower)
+C2-JT: A 1.8152 [1.7989-1.8491] IQR 0.0158 SE 0.0064 K=9 | B 1.8112 [1.8003-1.8536] IQR 0.0093 SE 0.0083 K=9
+   pooled B/A 0.9978 (B-A -0.0040 ms) n/n/n bars r 8.08 i 2.01 s 1.16 %
+   p0: A 1.8143 B 1.8116 K=3/3 B/A 0.9985 (-0.0027) n/n/n bars r 5.46 i 2.73 s 2.06 %
+   p1: A 1.8123 B 1.8024 K=3/3 B/A 0.9946 (-0.0098) n/n/n bars r 3.03 i 1.52 s 1.12 %
+   p2: A 1.8296 B 1.8117 K=3/3 B/A 0.9902 (-0.0179) n/n/n bars r 6.95 i 3.48 s 2.61 %
+   CLAIMED(i&s every pass+pooled, one sign)=False STRONG(r every pass+pooled)=False STRONG(r pooled)=False pooled-only i&s=False binding max(i,s) bar 3.48 % = 0.0631 ms of A
+   VERDICT: HOLDS (no resolved difference)
+C2-JA: A 5.3081 [5.2750-5.3216] IQR 0.0114 SE 0.0058 K=9 | B 5.3145 [5.2953-5.4035] IQR 0.0246 SE 0.0140 K=9
+   pooled B/A 1.0012 (B-A +0.0064 ms) n/n/n bars r 4.43 i 1.02 s 0.57 %
+   p0: A 5.3123 B 5.3038 K=3/3 B/A 0.9984 (-0.0084) n/n/n bars r 4.13 i 2.06 s 1.66 %
+   p1: A 5.2943 B 5.3284 K=3/3 B/A 1.0064 (+0.0341) n/n/n bars r 1.96 i 0.98 s 0.72 %
+   p2: A 5.3108 B 5.3145 K=3/3 B/A 1.0007 (+0.0036) n/n/n bars r 0.78 i 0.39 s 0.29 %
+   CLAIMED(i&s every pass+pooled, one sign)=False STRONG(r every pass+pooled)=False STRONG(r pooled)=False pooled-only i&s=False binding max(i,s) bar 2.06 % = 0.1096 ms of A
+   VERDICT: HOLDS (no resolved difference)
+C3-JT: A 2.0502 [2.0393-2.0659] IQR 0.0108 SE 0.0034 K=9 | B 2.1902 [2.1816-2.2341] IQR 0.0100 SE 0.0067 K=9
+   pooled B/A 1.0683 (B-A +0.1400 ms) Y/Y/Y bars r 5.45 i 1.39 s 0.69 %
+   p0: A 2.0545 B 2.1898 K=3/3 B/A 1.0659 (+0.1354) Y/Y/Y bars r 5.26 i 2.63 s 2.03 %
+   p1: A 2.0537 B 2.1837 K=3/3 B/A 1.0633 (+0.1301) Y/Y/Y bars r 1.02 i 0.51 s 0.39 %
+   p2: A 2.0437 B 2.1938 K=3/3 B/A 1.0734 (+0.1501) Y/Y/Y bars r 1.09 i 0.55 s 0.40 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 2.63 % = 0.0540 ms of A
+   VERDICT: REFUTED: T16 claimed SLOWER than P16 by 0.1400 ms
+PH-P16vsP8-JT: A 1.8152 [1.7989-1.8491] IQR 0.0158 SE 0.0064 K=9 | B 2.0502 [2.0393-2.0659] IQR 0.0108 SE 0.0034 K=9
+   pooled B/A 1.1295 (B-A +0.2350 ms) Y/Y/Y bars r 6.11 i 2.03 s 0.79 %
+   p0: A 1.8143 B 2.0545 K=3/3 B/A 1.1324 (+0.2402) Y/Y/Y bars r 3.84 i 1.92 s 1.39 %
+   p1: A 1.8123 B 2.0537 K=3/3 B/A 1.1332 (+0.2414) Y/Y/Y bars r 2.85 i 1.43 s 1.04 %
+   p2: A 1.8296 B 2.0437 K=3/3 B/A 1.1170 (+0.2141) Y/Y/Y bars r 3.83 i 1.92 s 1.39 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 2.03 % = 0.0368 ms of A
+   VERDICT: post hoc: claimed
+PH-P16vsP8-JA: A 5.3081 [5.2750-5.3216] IQR 0.0114 SE 0.0058 K=9 | B 5.2079 [5.1945-5.3156] IQR 0.0196 SE 0.0162 K=9
+   pooled B/A 0.9811 (B-A -0.1002 ms) n/Y/Y bars r 4.97 i 0.87 s 0.66 %
+   p0: A 5.3123 B 5.2615 K=3/3 B/A 0.9904 (-0.0508) n/n/n bars r 4.34 i 2.17 s 1.57 %
+   p1: A 5.2943 B 5.2079 K=3/3 B/A 0.9837 (-0.0865) Y/Y/Y bars r 1.41 i 0.71 s 0.53 %
+   p2: A 5.3108 B 5.2049 K=3/3 B/A 0.9801 (-0.1059) Y/Y/Y bars r 1.17 i 0.58 s 0.43 %
+   CLAIMED(i&s every pass+pooled, one sign)=False STRONG(r every pass+pooled)=False STRONG(r pooled)=False pooled-only i&s=True binding max(i,s) bar 2.17 % = 0.1151 ms of A
+   VERDICT: post hoc: not claimed
+PH-JA-P16vsT16: A 5.2079 [5.1945-5.3156] IQR 0.0196 SE 0.0162 K=9 | B 5.8658 [5.8421-5.9646] IQR 0.0116 SE 0.0148 K=9
+   pooled B/A 1.1263 (B-A +0.6579 ms) Y/Y/Y bars r 6.25 i 0.85 s 0.80 %
+   p0: A 5.2615 B 5.8658 K=3/3 B/A 1.1148 (+0.6043) Y/Y/Y bars r 4.38 i 2.19 s 1.59 %
+   p1: A 5.2079 B 5.8599 K=3/3 B/A 1.1252 (+0.6520) Y/Y/Y bars r 0.85 i 0.43 s 0.34 %
+   p2: A 5.2049 B 5.8716 K=3/3 B/A 1.1281 (+0.6666) Y/Y/Y bars r 3.69 i 1.84 s 1.46 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 2.19 % = 0.1141 ms of A
+   VERDICT: post hoc: claimed
+PH-W1-PvsT: A 4.4167 [4.3957-4.5564] IQR 0.0373 SE 0.0217 K=9 | B 4.4551 [4.4037-5.2124] IQR 0.0667 SE 0.1075 K=9
+   pooled B/A 1.0087 (B-A +0.0384 ms) n/n/n bars r 37.03 i 3.44 s 4.93 %
+   p0: A 4.4770 B 4.4086 K=3/3 B/A 0.9847 (-0.0685) n/n/n bars r 9.39 i 4.70 s 3.63 %
+   p1: A 4.4299 B 4.4597 K=3/3 B/A 1.0067 (+0.0298) n/n/n bars r 2.13 i 1.07 s 0.82 %
+   p2: A 4.4000 B 4.4517 K=3/3 B/A 1.0117 (+0.0516) n/n/n bars r 36.02 i 18.01 s 14.68 %
+   CLAIMED(i&s every pass+pooled, one sign)=False STRONG(r every pass+pooled)=False STRONG(r pooled)=False pooled-only i&s=False binding max(i,s) bar 18.01 % = 0.7954 ms of A
+   VERDICT: post hoc: not claimed
+  -- ladders [0..500) ORIGINALS-ONLY --
+   ladder8 F0.5 inj 0.0300 rise +0.0337 (1.12x) pooled n/n/Y p0 n/Y/Y p1 n/n/n p2 n/n/n seen=False
+   ladder8 F1 inj 0.0600 rise +0.0660 (1.10x) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/Y/Y seen=True
+   ladder8 F1.5 inj 0.0900 rise +0.0911 (1.01x) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 n/Y/Y seen=True
+   ladder8 F2 inj 0.1200 rise +0.1257 (1.05x) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder8: R = 0.06
+   ladder16 F0.5 inj 0.0525 rise +0.0545 (1.04x) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder16 F1 inj 0.1050 rise +0.1139 (1.09x) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder16 F1.5 inj 0.1575 rise +0.1599 (1.02x) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder16 F2 inj 0.2100 rise +0.2146 (1.02x) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder16: R = 0.0525
+   JA-ladder16 F1 inj 0.1050 rise +0.1095 (1.04x) pooled n/Y/Y p0 n/n/n p1 Y/Y/Y p2 Y/Y/Y seen=False
+   JA-ladder16: R = None
+
+===== window [0..100) , SELECTED =====
+C1-JT: A 1.9740 [1.9632-2.0034] IQR 0.0086 SE 0.0063 K=9 | B 2.3317 [2.3240-2.3552] IQR 0.0024 SE 0.0036 K=9
+   pooled B/A 1.1812 (B-A +0.3576 ms) Y/Y/Y bars r 4.87 i 0.90 s 0.71 %
+   p0: A 1.9676 B 2.3330 K=3/3 B/A 1.1857 (+0.3654) Y/Y/Y bars r 2.40 i 1.20 s 0.94 %
+   p1: A 1.9740 B 2.3311 K=3/3 B/A 1.1809 (+0.3571) Y/Y/Y bars r 1.01 i 0.51 s 0.39 %
+   p2: A 2.0019 B 2.3317 K=3/3 B/A 1.1647 (+0.3298) Y/Y/Y bars r 4.02 i 2.01 s 1.65 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 2.01 % = 0.0397 ms of A
+   VERDICT: FAILS (B claimed slower)
+C1-JA: A 5.4386 [5.4165-5.4734] IQR 0.0110 SE 0.0068 K=9 | B 5.9839 [5.9606-6.0614] IQR 0.0120 SE 0.0121 K=9
+   pooled B/A 1.1003 (B-A +0.5453 ms) Y/Y/Y bars r 3.97 i 0.57 s 0.47 %
+   p0: A 5.4336 B 5.9812 K=3/3 B/A 1.1008 (+0.5476) Y/Y/Y bars r 0.86 i 0.43 s 0.33 %
+   p1: A 5.4386 B 5.9845 K=3/3 B/A 1.1004 (+0.5459) Y/Y/Y bars r 2.15 i 1.07 s 0.79 %
+   p2: A 5.4407 B 5.9853 K=3/3 B/A 1.1001 (+0.5446) Y/Y/Y bars r 3.13 i 1.56 s 1.21 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 1.56 % = 0.0850 ms of A
+   VERDICT: FAILS (B claimed slower)
+C2-JT: A 1.9829 [1.9579-2.0197] IQR 0.0276 SE 0.0084 K=9 | B 1.9740 [1.9632-2.0034] IQR 0.0086 SE 0.0063 K=9
+   pooled B/A 0.9955 (B-A -0.0089 ms) n/n/n bars r 7.45 i 2.92 s 1.06 %
+   p0: A 1.9807 B 1.9676 K=3/3 B/A 0.9934 (-0.0132) n/n/n bars r 3.19 i 1.59 s 1.21 %
+   p1: A 1.9829 B 1.9740 K=3/3 B/A 0.9955 (-0.0089) n/n/n bars r 2.88 i 1.44 s 1.14 %
+   p2: A 2.0143 B 2.0019 K=3/3 B/A 0.9939 (-0.0124) n/n/n bars r 5.79 i 2.90 s 2.33 %
+   CLAIMED(i&s every pass+pooled, one sign)=False STRONG(r every pass+pooled)=False STRONG(r pooled)=False pooled-only i&s=False binding max(i,s) bar 2.92 % = 0.0578 ms of A
+   VERDICT: HOLDS (no resolved difference)
+C2-JA: A 5.4397 [5.4085-5.4594] IQR 0.0115 SE 0.0060 K=9 | B 5.4386 [5.4165-5.4734] IQR 0.0110 SE 0.0068 K=9
+   pooled B/A 0.9998 (B-A -0.0011 ms) n/n/n bars r 2.81 i 0.59 s 0.33 %
+   p0: A 5.4396 B 5.4336 K=3/3 B/A 0.9989 (-0.0060) n/n/n bars r 0.69 i 0.35 s 0.26 %
+   p1: A 5.4328 B 5.4386 K=3/3 B/A 1.0011 (+0.0058) n/n/n bars r 2.39 i 1.19 s 0.88 %
+   p2: A 5.4467 B 5.4407 K=3/3 B/A 0.9989 (-0.0060) n/n/n bars r 1.04 i 0.52 s 0.38 %
+   CLAIMED(i&s every pass+pooled, one sign)=False STRONG(r every pass+pooled)=False STRONG(r pooled)=False pooled-only i&s=False binding max(i,s) bar 1.19 % = 0.0650 ms of A
+   VERDICT: HOLDS (no resolved difference)
+C3-JT: A 2.2008 [2.1875-2.2137] IQR 0.0057 SE 0.0032 K=9 | B 2.3317 [2.3240-2.3552] IQR 0.0024 SE 0.0036 K=9
+   pooled B/A 1.0595 (B-A +0.1308 ms) Y/Y/Y bars r 3.58 i 0.55 s 0.42 %
+   p0: A 2.1987 B 2.3330 K=3/3 B/A 1.0611 (+0.1343) Y/Y/Y bars r 2.39 i 1.20 s 0.93 %
+   p1: A 2.2063 B 2.3311 K=3/3 B/A 1.0566 (+0.1248) Y/Y/Y bars r 1.17 i 0.58 s 0.45 %
+   p2: A 2.1976 B 2.3317 K=3/3 B/A 1.0610 (+0.1340) Y/Y/Y bars r 1.22 i 0.61 s 0.46 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 1.20 % = 0.0263 ms of A
+   VERDICT: REFUTED: T16 claimed SLOWER than P16 by 0.1308 ms
+PH-P16vsP8-JT: A 1.9829 [1.9579-2.0197] IQR 0.0276 SE 0.0084 K=9 | B 2.2008 [2.1875-2.2137] IQR 0.0057 SE 0.0032 K=9
+   pooled B/A 1.1099 (B-A +0.2179 ms) Y/Y/Y bars r 6.67 i 2.83 s 0.89 %
+   p0: A 1.9807 B 2.1987 K=3/3 B/A 1.1101 (+0.2180) Y/Y/Y bars r 3.18 i 1.59 s 1.20 %
+   p1: A 1.9829 B 2.2063 K=3/3 B/A 1.1127 (+0.2234) Y/Y/Y bars r 2.94 i 1.47 s 1.16 %
+   p2: A 2.0143 B 2.1976 K=3/3 B/A 1.0910 (+0.1834) Y/Y/Y bars r 4.35 i 2.17 s 1.71 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 2.83 % = 0.0561 ms of A
+   VERDICT: post hoc: claimed
+PH-P16vsP8-JA: A 5.4397 [5.4085-5.4594] IQR 0.0115 SE 0.0060 K=9 | B 5.3484 [5.3414-5.4622] IQR 0.0274 SE 0.0190 K=9
+   pooled B/A 0.9832 (B-A -0.0913 ms) n/Y/Y bars r 4.89 i 1.11 s 0.75 %
+   p0: A 5.4396 B 5.4381 K=3/3 B/A 0.9997 (-0.0015) n/n/n bars r 4.25 i 2.12 s 1.62 %
+   p1: A 5.4328 B 5.3484 K=3/3 B/A 0.9845 (-0.0844) n/Y/Y bars r 1.62 i 0.81 s 0.61 %
+   p2: A 5.4467 B 5.3445 K=3/3 B/A 0.9812 (-0.1022) Y/Y/Y bars r 0.65 i 0.32 s 0.25 %
+   CLAIMED(i&s every pass+pooled, one sign)=False STRONG(r every pass+pooled)=False STRONG(r pooled)=False pooled-only i&s=True binding max(i,s) bar 2.12 % = 0.1155 ms of A
+   VERDICT: post hoc: not claimed
+PH-JA-P16vsT16: A 5.3484 [5.3414-5.4622] IQR 0.0274 SE 0.0190 K=9 | B 5.9839 [5.9606-6.0614] IQR 0.0120 SE 0.0121 K=9
+   pooled B/A 1.1188 (B-A +0.6355 ms) Y/Y/Y bars r 5.63 i 1.10 s 0.82 %
+   p0: A 5.4381 B 5.9812 K=3/3 B/A 1.0999 (+0.5431) Y/Y/Y bars r 4.28 i 2.14 s 1.63 %
+   p1: A 5.3484 B 5.9845 K=3/3 B/A 1.1189 (+0.6361) Y/Y/Y bars r 1.24 i 0.62 s 0.47 %
+   p2: A 5.3445 B 5.9853 K=3/3 B/A 1.1199 (+0.6408) Y/Y/Y bars r 3.02 i 1.51 s 1.18 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 2.14 % = 0.1143 ms of A
+   VERDICT: post hoc: claimed
+PH-W1-PvsT: A 5.3374 [5.2911-5.5668] IQR 0.1075 SE 0.0388 K=9 | B 5.3754 [5.3065-5.4661] IQR 0.0786 SE 0.0247 K=9
+   pooled B/A 1.0071 (B-A +0.0380 ms) n/n/n bars r 11.92 i 4.98 s 1.72 %
+   p0: A 5.4806 B 5.3172 K=3/3 B/A 0.9702 (-0.1634) n/n/n bars r 10.84 i 5.42 s 4.09 %
+   p1: A 5.3374 B 5.3904 K=3/3 B/A 1.0099 (+0.0529) n/n/n bars r 5.06 i 2.53 s 1.86 %
+   p2: A 5.3333 B 5.3754 K=3/3 B/A 1.0079 (+0.0421) n/n/n bars r 5.97 i 2.99 s 2.17 %
+   CLAIMED(i&s every pass+pooled, one sign)=False STRONG(r every pass+pooled)=False STRONG(r pooled)=False pooled-only i&s=False binding max(i,s) bar 5.42 % = 0.2893 ms of A
+   VERDICT: post hoc: not claimed
+  -- ladders [0..100) SELECTED --
+   ladder8 F0.5 inj 0.0300 rise +0.0379 (1.26x) pooled n/n/Y p0 n/Y/Y p1 n/Y/Y p2 n/n/n seen=False
+   ladder8 F1 inj 0.0600 rise +0.0705 (1.17x) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/n/n seen=False
+   ladder8 F1.5 inj 0.0900 rise +0.0943 (1.05x) pooled n/Y/Y p0 n/n/Y p1 Y/Y/Y p2 n/Y/Y seen=False
+   ladder8 F2 inj 0.1200 rise +0.1284 (1.07x) pooled n/Y/Y p0 Y/Y/Y p1 n/n/Y p2 Y/Y/Y seen=False
+   ladder8: R = None
+   ladder16 F0.5 inj 0.0525 rise +0.0591 (1.13x) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/Y/Y seen=True
+   ladder16 F1 inj 0.1050 rise +0.1273 (1.21x) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder16 F1.5 inj 0.1575 rise +0.1683 (1.07x) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder16 F2 inj 0.2100 rise +0.2197 (1.05x) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder16: R = 0.0525
+   JA-ladder16 F1 inj 0.1050 rise +0.1008 (0.96x) pooled n/Y/Y p0 n/n/n p1 Y/Y/Y p2 Y/Y/Y seen=False
+   JA-ladder16: R = None
+
+===== window [100..500) , SELECTED =====
+C1-JT: A 1.7638 [1.7589-1.8165] IQR 0.0111 SE 0.0098 K=9 | B 2.1552 [2.1458-2.2038] IQR 0.0124 SE 0.0075 K=9
+   pooled B/A 1.2219 (B-A +0.3914 ms) Y/Y/Y bars r 8.47 i 1.70 s 1.31 %
+   p0: A 1.7707 B 2.1540 K=3/3 B/A 1.2165 (+0.3834) Y/Y/Y bars r 7.97 i 3.99 s 3.12 %
+   p1: A 1.7595 B 2.1469 K=3/3 B/A 1.2201 (+0.3874) Y/Y/Y bars r 1.57 i 0.79 s 0.63 %
+   p2: A 1.7638 B 2.1593 K=3/3 B/A 1.2242 (+0.3955) Y/Y/Y bars r 6.48 i 3.24 s 2.61 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 3.99 % = 0.0703 ms of A
+   VERDICT: FAILS (B claimed slower)
+C1-JA: A 5.2713 [5.2617-5.3960] IQR 0.0158 SE 0.0173 K=9 | B 5.8369 [5.8124-5.9404] IQR 0.0143 SE 0.0155 K=9
+   pooled B/A 1.1073 (B-A +0.5656 ms) Y/Y/Y bars r 6.72 i 0.78 s 0.84 %
+   p0: A 5.2700 B 5.8369 K=3/3 B/A 1.1076 (+0.5670) Y/Y/Y bars r 5.18 i 2.59 s 2.10 %
+   p1: A 5.2713 B 5.8288 K=3/3 B/A 1.1058 (+0.5575) Y/Y/Y bars r 1.03 i 0.51 s 0.41 %
+   p2: A 5.2836 B 5.8431 K=3/3 B/A 1.1059 (+0.5596) Y/Y/Y bars r 3.73 i 1.87 s 1.49 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 2.59 % = 0.1364 ms of A
+   VERDICT: FAILS (B claimed slower)
+C2-JT: A 1.7746 [1.7583-1.8064] IQR 0.0138 SE 0.0062 K=9 | B 1.7638 [1.7589-1.8165] IQR 0.0111 SE 0.0098 K=9
+   pooled B/A 0.9939 (B-A -0.0108 ms) n/n/n bars r 8.49 i 2.00 s 1.31 %
+   p0: A 1.7727 B 1.7707 K=3/3 B/A 0.9989 (-0.0020) n/n/n bars r 6.61 i 3.30 s 2.54 %
+   p1: A 1.7696 B 1.7595 K=3/3 B/A 0.9943 (-0.0101) n/n/n bars r 3.08 i 1.54 s 1.14 %
+   p2: A 1.7834 B 1.7638 K=3/3 B/A 0.9890 (-0.0196) n/n/n bars r 7.38 i 3.69 s 2.92 %
+   CLAIMED(i&s every pass+pooled, one sign)=False STRONG(r every pass+pooled)=False STRONG(r pooled)=False pooled-only i&s=False binding max(i,s) bar 3.69 % = 0.0654 ms of A
+   VERDICT: HOLDS (no resolved difference)
+C2-JA: A 5.2737 [5.2417-5.2891] IQR 0.0171 SE 0.0061 K=9 | B 5.2713 [5.2617-5.3960] IQR 0.0158 SE 0.0173 K=9
+   pooled B/A 0.9995 (B-A -0.0024 ms) n/n/n bars r 5.40 i 0.88 s 0.69 %
+   p0: A 5.2815 B 5.2700 K=3/3 B/A 0.9978 (-0.0116) n/n/n bars r 5.14 i 2.57 s 2.08 %
+   p1: A 5.2597 B 5.2713 K=3/3 B/A 1.0022 (+0.0116) n/n/n bars r 1.54 i 0.77 s 0.58 %
+   p2: A 5.2737 B 5.2836 K=3/3 B/A 1.0019 (+0.0099) n/n/n bars r 0.97 i 0.49 s 0.36 %
+   CLAIMED(i&s every pass+pooled, one sign)=False STRONG(r every pass+pooled)=False STRONG(r pooled)=False pooled-only i&s=False binding max(i,s) bar 2.57 % = 0.1355 ms of A
+   VERDICT: HOLDS (no resolved difference)
+C3-JT: A 2.0115 [2.0022-2.0327] IQR 0.0120 SE 0.0040 K=9 | B 2.1552 [2.1458-2.2038] IQR 0.0124 SE 0.0075 K=9
+   pooled B/A 1.0714 (B-A +0.1437 ms) Y/Y/Y bars r 6.18 i 1.66 s 0.80 %
+   p0: A 2.0173 B 2.1540 K=3/3 B/A 1.0678 (+0.1368) Y/Y/Y bars r 6.10 i 3.05 s 2.35 %
+   p1: A 2.0155 B 2.1469 K=3/3 B/A 1.0652 (+0.1314) Y/Y/Y bars r 1.32 i 0.66 s 0.51 %
+   p2: A 2.0052 B 2.1593 K=3/3 B/A 1.0768 (+0.1541) Y/Y/Y bars r 1.07 i 0.54 s 0.40 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 3.05 % = 0.0613 ms of A
+   VERDICT: REFUTED: T16 claimed SLOWER than P16 by 0.1437 ms
+PH-P16vsP8-JT: A 1.7746 [1.7583-1.8064] IQR 0.0138 SE 0.0062 K=9 | B 2.0115 [2.0022-2.0327] IQR 0.0120 SE 0.0040 K=9
+   pooled B/A 1.1335 (B-A +0.2369 ms) Y/Y/Y bars r 6.21 i 1.96 s 0.80 %
+   p0: A 1.7727 B 2.0173 K=3/3 B/A 1.1380 (+0.2446) Y/Y/Y bars r 4.16 i 2.08 s 1.50 %
+   p1: A 1.7696 B 2.0155 K=3/3 B/A 1.1390 (+0.2459) Y/Y/Y bars r 2.96 i 1.48 s 1.08 %
+   p2: A 1.7834 B 2.0052 K=3/3 B/A 1.1244 (+0.2218) Y/Y/Y bars r 3.69 i 1.84 s 1.38 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 2.08 % = 0.0369 ms of A
+   VERDICT: post hoc: claimed
+PH-P16vsP8-JA: A 5.2737 [5.2417-5.2891] IQR 0.0171 SE 0.0061 K=9 | B 5.1745 [5.1554-5.2850] IQR 0.0193 SE 0.0163 K=9
+   pooled B/A 0.9812 (B-A -0.0992 ms) n/Y/Y bars r 5.33 i 0.99 s 0.67 %
+   p0: A 5.2815 B 5.2113 K=3/3 B/A 0.9867 (-0.0702) n/n/n bars r 4.60 i 2.30 s 1.68 %
+   p1: A 5.2597 B 5.1745 K=3/3 B/A 0.9838 (-0.0852) Y/Y/Y bars r 1.41 i 0.71 s 0.52 %
+   p2: A 5.2737 B 5.1705 K=3/3 B/A 0.9804 (-0.1032) Y/Y/Y bars r 1.54 i 0.77 s 0.56 %
+   CLAIMED(i&s every pass+pooled, one sign)=False STRONG(r every pass+pooled)=False STRONG(r pooled)=False pooled-only i&s=True binding max(i,s) bar 2.30 % = 0.1213 ms of A
+   VERDICT: post hoc: not claimed
+PH-JA-P16vsT16: A 5.1745 [5.1554-5.2850] IQR 0.0193 SE 0.0163 K=9 | B 5.8369 [5.8124-5.9404] IQR 0.0143 SE 0.0155 K=9
+   pooled B/A 1.1280 (B-A +0.6624 ms) Y/Y/Y bars r 6.66 i 0.89 s 0.82 %
+   p0: A 5.2113 B 5.8369 K=3/3 B/A 1.1200 (+0.6256) Y/Y/Y bars r 4.64 i 2.32 s 1.70 %
+   p1: A 5.1745 B 5.8288 K=3/3 B/A 1.1264 (+0.6543) Y/Y/Y bars r 0.82 i 0.41 s 0.32 %
+   p2: A 5.1705 B 5.8431 K=3/3 B/A 1.1301 (+0.6726) Y/Y/Y bars r 3.92 i 1.96 s 1.55 %
+   CLAIMED(i&s every pass+pooled, one sign)=True STRONG(r every pass+pooled)=True STRONG(r pooled)=True pooled-only i&s=True binding max(i,s) bar 2.32 % = 0.1201 ms of A
+   VERDICT: post hoc: claimed
+PH-W1-PvsT: A 4.1817 [4.1647-4.3254] IQR 0.0327 SE 0.0207 K=9 | B 4.2213 [4.1753-4.3332] IQR 0.0614 SE 0.0240 K=9
+   pooled B/A 1.0095 (B-A +0.0396 ms) n/n/n bars r 10.73 i 3.30 s 1.51 %
+   p0: A 4.2046 B 4.1841 K=3/3 B/A 0.9951 (-0.0205) n/n/n bars r 9.86 i 4.93 s 3.92 %
+   p1: A 4.1817 B 4.2335 K=3/3 B/A 1.0124 (+0.0518) n/Y/Y bars r 2.31 i 1.16 s 0.86 %
+   p2: A 4.1710 B 4.2207 K=3/3 B/A 1.0119 (+0.0497) n/n/n bars r 7.03 i 3.51 s 2.66 %
+   CLAIMED(i&s every pass+pooled, one sign)=False STRONG(r every pass+pooled)=False STRONG(r pooled)=False pooled-only i&s=False binding max(i,s) bar 4.93 % = 0.2062 ms of A
+   VERDICT: post hoc: not claimed
+  -- ladders [100..500) SELECTED --
+   ladder8 F0.5 inj 0.0300 rise +0.0274 (0.91x) pooled n/n/Y p0 n/Y/Y p1 n/n/n p2 n/n/n seen=False
+   ladder8 F1 inj 0.0600 rise +0.0590 (0.98x) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 n/Y/Y seen=True
+   ladder8 F1.5 inj 0.0900 rise +0.0898 (1.00x) pooled n/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder8 F2 inj 0.1200 rise +0.1188 (0.99x) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder8: R = 0.06
+   ladder16 F0.5 inj 0.0525 rise +0.0540 (1.03x) pooled n/Y/Y p0 n/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder16 F1 inj 0.1050 rise +0.1116 (1.06x) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder16 F1.5 inj 0.1575 rise +0.1588 (1.01x) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder16 F2 inj 0.2100 rise +0.2144 (1.02x) pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y seen=True
+   ladder16: R = 0.0525
+   JA-ladder16 F1 inj 0.1050 rise +0.1083 (1.03x) pooled n/Y/Y p0 n/n/Y p1 n/Y/Y p2 Y/Y/Y seen=False
+   JA-ladder16: R = None

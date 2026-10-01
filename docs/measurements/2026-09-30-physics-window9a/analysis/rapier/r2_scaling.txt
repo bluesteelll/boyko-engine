@@ -1,0 +1,92 @@
+=== T(W) ms (pooled median, n) and T(1)/T(W), window [100,500) ===
+  engine                                       W1               W2               W4               W8              W16   best W   T16/T8
+  ours (J-T 1/8/16, J-D 2/4)      4.3622(n7) 1.00x  2.9392(n8) 1.48x  2.1605(n7) 2.02x  1.8102(n7) 2.41x  2.0181(n7) 2.16x   W8     1.115
+  ours J-D all W (post hoc)       4.3504(n7) 1.00x  2.9392(n8) 1.48x  2.1605(n7) 2.01x  1.7878(n7) 2.43x  2.0486(n9) 2.12x   W8     1.146
+  Rapier RP-D rs8                 4.9213(n9) 1.00x  2.9767(n9) 1.65x  2.0129(n9) 2.44x  1.4127(n9) 3.48x  1.5780(n9) 3.12x   W8     1.117
+  Rapier RP-D rs4                 5.7490(n9) 1.00x  3.4049(n9) 1.69x  2.2866(n9) 2.51x  1.5701(n9) 3.66x  1.7000(n9) 3.38x   W8     1.083
+  Rapier RP-M rs8                 7.7172(n9) 1.00x  4.4683(n9) 1.73x  3.1927(n9) 2.42x  2.5494(n9) 3.03x  2.7958(n9) 2.76x   W8     1.097
+  Rapier RP-M rs4                10.0586(n9) 1.00x  5.6107(n9) 1.79x  3.7311(n9) 2.70x  2.7357(n9) 3.68x  2.9559(n9) 3.40x   W8     1.080
+  Jolt 5.6                       10.0044(n8) 1.00x  5.8123(n8) 1.72x  3.6881(n7) 2.71x  2.5702(n6) 3.89x  2.5056(n9) 3.99x   W16    0.975
+
+=== T(W) ms (pooled median, n) and T(1)/T(W), window [0,500) ===
+  engine                                       W1               W2               W4               W8              W16   best W   T16/T8
+  ours (J-T 1/8/16, J-D 2/4)      4.5930(n7) 1.00x  3.0706(n8) 1.50x  2.2356(n7) 2.05x  1.8502(n7) 2.48x  2.0597(n7) 2.23x   W8     1.113
+  ours J-D all W (post hoc)       4.5692(n7) 1.00x  3.0706(n8) 1.49x  2.2356(n7) 2.04x  1.8277(n7) 2.50x  2.0887(n9) 2.19x   W8     1.143
+  Rapier RP-D rs8                 4.8228(n9) 1.00x  2.9137(n9) 1.66x  1.9850(n9) 2.43x  1.4091(n9) 3.42x  1.5896(n9) 3.03x   W8     1.128
+  Rapier RP-D rs4                 5.6190(n9) 1.00x  3.3271(n9) 1.69x  2.2353(n9) 2.51x  1.5663(n9) 3.59x  1.6881(n9) 3.33x   W8     1.078
+  Rapier RP-M rs8                 7.9267(n9) 1.00x  4.6416(n9) 1.71x  3.2943(n9) 2.41x  2.6293(n9) 3.01x  2.8517(n9) 2.78x   W8     1.085
+  Rapier RP-M rs4                10.2521(n9) 1.00x  5.7119(n9) 1.79x  3.7919(n9) 2.70x  2.7664(n9) 3.71x  2.9830(n9) 3.44x   W8     1.078
+  Jolt 5.6                       10.1435(n8) 1.00x  5.8263(n8) 1.74x  3.6547(n7) 2.78x  2.5311(n6) 4.01x  2.4535(n9) 4.13x   W16    0.969
+
+=== T(W) ms (pooled median, n) and T(1)/T(W), window [0,100) ===
+  engine                                       W1               W2               W4               W8              W16   best W   T16/T8
+  ours (J-T 1/8/16, J-D 2/4)      5.5164(n7) 1.00x  3.5855(n8) 1.54x  2.5360(n7) 2.18x  2.0022(n7) 2.76x  2.2264(n7) 2.48x   W8     1.112
+  ours J-D all W (post hoc)       5.5295(n7) 1.00x  3.5855(n8) 1.54x  2.5360(n7) 2.18x  2.0064(n7) 2.76x  2.2302(n9) 2.48x   W8     1.111
+  Rapier RP-D rs8                 4.3484(n9) 1.00x  2.7219(n9) 1.60x  1.8640(n9) 2.33x  1.4350(n9) 3.03x  1.6227(n9) 2.68x   W8     1.131
+  Rapier RP-D rs4                 5.1136(n9) 1.00x  3.0162(n9) 1.70x  2.0304(n9) 2.52x  1.5106(n9) 3.39x  1.6135(n9) 3.17x   W8     1.068
+  Rapier RP-M rs8                 8.7647(n9) 1.00x  5.1997(n9) 1.69x  3.5926(n9) 2.44x  2.9307(n9) 2.99x  3.0750(n9) 2.85x   W8     1.049
+  Rapier RP-M rs4                10.7658(n9) 1.00x  6.0898(n9) 1.77x  4.0010(n9) 2.69x  2.9364(n9) 3.67x  3.1458(n9) 3.42x   W8     1.071
+  Jolt 5.6                       10.6344(n8) 1.00x  5.8793(n8) 1.81x  3.5455(n7) 3.00x  2.3747(n6) 4.48x  2.2492(n9) 4.73x   W16    0.947
+
+=== ns per row-iteration (pooled median wall / rows of the window), [100,500) and [0,100) ===
+--- [100,500) (rows: ours 595,935; RP-D 354,674; RP-M 1,071,107) ---
+  W1  ours 7.320  RP-D rs8 13.876  RP-D rs4 16.209  RP-M rs8 7.205  RP-M rs4 9.391
+  W2  ours 4.932  RP-D rs8 8.393  RP-D rs4 9.600  RP-M rs8 4.172  RP-M rs4 5.238
+  W4  ours 3.625  RP-D rs8 5.675  RP-D rs4 6.447  RP-M rs8 2.981  RP-M rs4 3.483
+  W8  ours 3.038  RP-D rs8 3.983  RP-D rs4 4.427  RP-M rs8 2.380  RP-M rs4 2.554
+  W16 ours 3.386  RP-D rs8 4.449  RP-D rs4 4.793  RP-M rs8 2.610  RP-M rs4 2.760
+--- [0,100) (rows: ours 588,765; RP-D 303,003; RP-M 935,729) ---
+  W1  ours 9.369  RP-D rs8 14.351  RP-D rs4 16.876  RP-M rs8 9.367  RP-M rs4 11.505
+  W2  ours 6.090  RP-D rs8 8.983  RP-D rs4 9.954  RP-M rs8 5.557  RP-M rs4 6.508
+  W4  ours 4.307  RP-D rs8 6.152  RP-D rs4 6.701  RP-M rs8 3.839  RP-M rs4 4.276
+  W8  ours 3.401  RP-D rs8 4.736  RP-D rs4 4.986  RP-M rs8 3.132  RP-M rs4 3.138
+  W16 ours 3.781  RP-D rs8 5.355  RP-D rs4 5.325  RP-M rs8 3.286  RP-M rs4 3.362
+
+=== Rapier vs Jolt 5.6 (REPORTED, NOT CLAIMED; cross-block): Rapier median / Jolt median ===
+--- [100,500) ---
+  W1  Jolt 10.0044 ms; RP-D rs8 0.492  RP-D rs4 0.575  RP-M rs8 0.771  RP-M rs4 1.005   | ours/Jolt 0.436
+  W2  Jolt 5.8123 ms; RP-D rs8 0.512  RP-D rs4 0.586  RP-M rs8 0.769  RP-M rs4 0.965   | ours/Jolt 0.506
+  W4  Jolt 3.6881 ms; RP-D rs8 0.546  RP-D rs4 0.620  RP-M rs8 0.866  RP-M rs4 1.012   | ours/Jolt 0.586
+  W8  Jolt 2.5702 ms; RP-D rs8 0.550  RP-D rs4 0.611  RP-M rs8 0.992  RP-M rs4 1.064   | ours/Jolt 0.704
+  W16 Jolt 2.5056 ms; RP-D rs8 0.630  RP-D rs4 0.678  RP-M rs8 1.116  RP-M rs4 1.180   | ours/Jolt 0.805
+--- [0,500) ---
+  W1  Jolt 10.1435 ms; RP-D rs8 0.475  RP-D rs4 0.554  RP-M rs8 0.781  RP-M rs4 1.011   | ours/Jolt 0.453
+  W2  Jolt 5.8263 ms; RP-D rs8 0.500  RP-D rs4 0.571  RP-M rs8 0.797  RP-M rs4 0.980   | ours/Jolt 0.527
+  W4  Jolt 3.6547 ms; RP-D rs8 0.543  RP-D rs4 0.612  RP-M rs8 0.901  RP-M rs4 1.038   | ours/Jolt 0.612
+  W8  Jolt 2.5311 ms; RP-D rs8 0.557  RP-D rs4 0.619  RP-M rs8 1.039  RP-M rs4 1.093   | ours/Jolt 0.731
+  W16 Jolt 2.4535 ms; RP-D rs8 0.648  RP-D rs4 0.688  RP-M rs8 1.162  RP-M rs4 1.216   | ours/Jolt 0.839
+
+=== V2 ARITHMETIC (NOT A MEASUREMENT): ours after V2 if our ns/row stayed at this window value ===
+  rows_V2 per audit.md section 3: F0 S20 1.676x ours = 998,787; with K3 (+~7 %) ~1,068,700. Rapier RP-M 1,071,107.
+  W1  ours now 4.3622 ms -> V2 7.3110-7.8228 ms; best RP-M 7.7172 (ours_V2/RP-M 0.947-1.014); best RP-D 4.9213 (ours_V2/RP-D 1.486-1.590)
+  W2  ours now 2.9392 ms -> V2 4.9261-5.2709 ms; best RP-M 4.4683 (ours_V2/RP-M 1.102-1.180); best RP-D 2.9767 (ours_V2/RP-D 1.655-1.771)
+  W4  ours now 2.1605 ms -> V2 3.6211-3.8745 ms; best RP-M 3.1927 (ours_V2/RP-M 1.134-1.214); best RP-D 2.0129 (ours_V2/RP-D 1.799-1.925)
+  W8  ours now 1.8102 ms -> V2 3.0339-3.2463 ms; best RP-M 2.5494 (ours_V2/RP-M 1.190-1.273); best RP-D 1.4127 (ours_V2/RP-D 2.148-2.298)
+  W16 ours now 2.0181 ms -> V2 3.3823-3.6190 ms; best RP-M 2.7958 (ours_V2/RP-M 1.210-1.294); best RP-D 1.5780 (ours_V2/RP-D 2.143-2.293)
+
+=== pass-to-pass drift inside each block: per-pass median / pooled median, [100,500) ===
+  C4-RAPIER-p0: cells 20, median ratio 1.0086, range 0.9936-1.1067; largest RP-D#rs8@W1 1.1067 (K3)
+  C4-RAPIER-p1: cells 20, median ratio 1.0124, range 0.9734-1.0387; largest RP-D#rs4@W8 1.0387 (K3)
+  C4-RAPIER-p2: cells 20, median ratio 0.9863, range 0.9471-1.0019; largest RP-M#rs8@W8 0.9471 (K3)
+  C4-AB-p0: cells 12, median ratio 1.0327, range 0.9978-1.1743; largest C4-jolt56#j56@W16 1.1743 (K3)
+  C4-AB-p1: cells 13, median ratio 0.9972, range 0.9427-1.0024; largest C4-jolt56#j56@W1 0.9427 (K3)
+  C4-AB-p2: cells 13, median ratio 1.0000, range 0.9601-1.0250; largest C4-jolt56#j56@W16 0.9601 (K3)
+
+=== C4-RAPIER p0, W1 group (the last group of the reversed pass): process means [100,500) ms and receipts ===
+  20:49:31 RP-M#rs4 r0: 10.1742  before 0.66 after 0.59 witness 0.49
+  20:49:41 RP-M#rs8 r0: 7.9329  before 0.59 after 0.66 witness 1.74
+  20:49:50 RP-D#rs4 r0: 5.9415  before 0.66 after 1.11 witness 1.05
+  20:49:58 RP-D#rs8 r0: 5.0006  before 1.11 after 0.69 witness 0.20
+  20:53:06 RP-M#rs4 r1: 10.0442  before 2.72 after 1.68 witness 0.37
+  20:53:17 RP-M#rs8 r1: 8.3237  before 1.68 after 2.03 witness 0.60
+  20:53:26 RP-D#rs4 r1: 6.1101  before 2.03 after 2.21 witness 0.59
+  20:53:34 RP-D#rs8 r1: 5.4465  before 2.21 after 1.84 witness 0.44
+  20:56:21 RP-M#rs4 r2: 10.0866  before 1.60 after 1.70 witness 1.05
+  20:56:41 RP-D#rs4 r2: 6.6849  before 1.99 after 1.47 witness 1.49
+  20:56:49 RP-D#rs8 r2: 5.4518  before 1.47 after 0.82 witness 1.44
+  20:59:52 RP-M#rs8 r2: 8.0151  before 2.32 after 1.82 witness 1.24
+
+=== row ratios (the R-WALL-M equal-work band is [0.90, 1.10]) ===
+  [100,500): rows RP-M / ours 1.7974 (in band: False); rows RP-D / ours 0.5952
+  [0,100): rows RP-M / ours 1.5893 (in band: False); rows RP-D / ours 0.5146
+  V2 projection (audit.md s3): 998,787 / 595,935 = 1.6760 ; 1,068,700 / 595,935 = 1.7933 ; RP-M / V2 = 1.0023-1.0724

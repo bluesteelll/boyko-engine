@@ -1,0 +1,1015 @@
+2026-09-29T17:21:02.508+03:00 WINDOW START cutoff 2026-09-29T21:36:00 blocks ['S4-AB', 'S7-AB', 'SPLIT', 'omega-v2', 'F3', 'F3-G4', 'J-Son-T', 'DM1', 'omega-v1-cont'] test False resume False
+2026-09-29T17:21:02.749+03:00 S4-AB-p0: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T17:23:13.204+03:00 S4-AB-p0: idle reached; {'time': '2026-09-29T17:23:13.204+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T17:23:23.270+03:00 S4-AB-p0: opening receipt 0.98% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T17:23:29.270+03:00   S4-AB-p0 warm-up S4-JT#tip W=8 (untimed): pose 0x30c5438bc6ad9ffa expect match rb 0.98% ra 0.45% others 0.11% exit 0 waited 0.0s
+2026-09-29T17:23:35.531+03:00   S4-AB-p0 r0 [  1] S4-JT-a#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.45% ra 0.53% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:23:41.894+03:00   S4-AB-p0 r0 [  2] S4-JT-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.53% ra 1.09% others 0.48% exit 0 waited 0.0s
+2026-09-29T17:23:48.016+03:00   S4-AB-p0 r0 [  3] S4-JT#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.09% ra 0.43% others 0.19% exit 0 waited 0.0s
+2026-09-29T17:23:54.228+03:00   S4-AB-p0 r0 [  4] S4-JT#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.43% ra 2.67% others 0.18% exit 0 waited 0.0s
+2026-09-29T17:24:00.398+03:00   S4-AB-p0 r0 [  5] S4-zone-N60000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.67% ra 0.39% others 0.29% exit 0 waited 0.0s
+2026-09-29T17:24:06.558+03:00   S4-AB-p0 r0 [  6] S4-zone-N30000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.39% ra 0.69% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:24:12.591+03:00   S4-AB-p0 r0 [  7] S4-rung#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.69% ra 1.19% others 0.11% exit 0 waited 0.0s
+2026-09-29T17:24:18.738+03:00   S4-AB-p0 r0 [  8] S4-JT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.19% ra 0.43% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:24:24.972+03:00   S4-AB-p0 r0 [  9] S4-JT-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.43% ra 0.51% others 0.8% exit 0 waited 0.0s
+2026-09-29T17:24:30.972+03:00   S4-AB-p0 r0 [ 10] S4-JT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.51% ra 0.34% others 0.22% exit 0 waited 0.0s
+2026-09-29T17:24:37.065+03:00   S4-AB-p0 r0 [ 11] S4-JT#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.34% ra 0.83% others 0.1% exit 0 waited 0.0s
+2026-09-29T17:24:43.268+03:00   S4-AB-p0 r0 [ 12] S4-JT#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.83% ra 0.95% others 0.62% exit 0 waited 0.0s
+2026-09-29T17:24:49.549+03:00   S4-AB-p0 r0 [ 13] S4-JT#parent W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.95% ra 1.79% others 0.33% exit 0 waited 0.0s
+2026-09-29T17:24:56.132+03:00   S4-AB-p0 r0 [ 14] S4-JT#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.79% ra 0.82% others 0.26% exit 0 waited 0.0s
+2026-09-29T17:25:02.761+03:00   S4-AB-p0 r0 [ 15] S4-JT#parent W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.82% ra 0.46% others 0.19% exit 0 waited 0.0s
+2026-09-29T17:25:10.086+03:00   S4-AB-p0 r0 [ 16] S4-JT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.46% ra 0.94% others 0.31% exit 0 waited 0.0s
+2026-09-29T17:25:17.401+03:00   S4-AB-p0 r0 [ 17] S4-JT#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.94% ra 0.45% others 0.57% exit 0 waited 0.0s
+2026-09-29T17:25:23.674+03:00   S4-AB-p0 r1 [ 18] S4-JT-a#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.45% ra 0.41% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:25:30.031+03:00   S4-AB-p0 r1 [ 19] S4-JT-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.41% ra 0.53% others 0.16% exit 0 waited 0.0s
+2026-09-29T17:25:36.162+03:00   S4-AB-p0 r1 [ 20] S4-JT#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.53% ra 1.2% others 0.1% exit 0 waited 0.0s
+2026-09-29T17:25:42.378+03:00   S4-AB-p0 r1 [ 21] S4-JT#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.2% ra 0.38% others 0.27% exit 0 waited 0.0s
+2026-09-29T17:25:48.556+03:00   S4-AB-p0 r1 [ 22] S4-zone-N60000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.38% ra 0.66% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:25:54.715+03:00   S4-AB-p0 r1 [ 23] S4-zone-N30000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.66% ra 0.53% others 0.29% exit 0 waited 0.0s
+2026-09-29T17:26:00.750+03:00   S4-AB-p0 r1 [ 24] S4-rung#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.53% ra 0.9% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:26:06.906+03:00   S4-AB-p0 r1 [ 25] S4-JT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.9% ra 0.53% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:26:13.139+03:00   S4-AB-p0 r1 [ 26] S4-JT-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.53% ra 0.75% others 0.54% exit 0 waited 0.0s
+2026-09-29T17:26:19.152+03:00   S4-AB-p0 r1 [ 27] S4-JT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.75% ra 0.75% others 0.22% exit 0 waited 0.0s
+2026-09-29T17:26:25.248+03:00   S4-AB-p0 r1 [ 28] S4-JT#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.75% ra 0.67% others 2.16% exit 0 waited 0.0s OTHERS-BUSY(2.16%)
+2026-09-29T17:26:31.452+03:00   S4-AB-p0 r1 [ 29] S4-JT#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.67% ra 1.33% others 0.36% exit 0 waited 0.0s
+2026-09-29T17:26:37.720+03:00   S4-AB-p0 r1 [ 30] S4-JT#parent W=4: pose 0x30c5438bc6ad9ffa expect match rb 1.33% ra 0.42% others 0.34% exit 0 waited 0.0s
+2026-09-29T17:26:44.320+03:00   S4-AB-p0 r1 [ 31] S4-JT#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.42% ra 0.42% others 0.19% exit 0 waited 0.0s
+2026-09-29T17:26:50.961+03:00   S4-AB-p0 r1 [ 32] S4-JT#parent W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.42% ra 0.57% others 0.06% exit 0 waited 0.0s
+2026-09-29T17:26:58.291+03:00   S4-AB-p0 r1 [ 33] S4-JT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.57% ra 0.98% others 0.35% exit 0 waited 0.0s
+2026-09-29T17:27:05.607+03:00   S4-AB-p0 r1 [ 34] S4-JT#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.98% ra 0.91% others 0.27% exit 0 waited 0.0s
+2026-09-29T17:27:11.875+03:00   S4-AB-p0 r2 [ 35] S4-JT-a#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.91% ra 0.97% others 0.6% exit 0 waited 0.0s
+2026-09-29T17:27:18.243+03:00   S4-AB-p0 r2 [ 36] S4-JT-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.97% ra 0.3% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:27:24.372+03:00   S4-AB-p0 r2 [ 37] S4-JT#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.3% ra 1.31% others 0.19% exit 0 waited 0.0s
+2026-09-29T17:27:30.583+03:00   S4-AB-p0 r2 [ 38] S4-JT#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.31% ra 0.62% others 0.35% exit 0 waited 0.0s
+2026-09-29T17:27:36.758+03:00   S4-AB-p0 r2 [ 39] S4-zone-N60000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.62% ra 0.31% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:27:42.917+03:00   S4-AB-p0 r2 [ 40] S4-zone-N30000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.31% ra 0.53% others 0.48% exit 0 waited 0.0s
+2026-09-29T17:27:48.954+03:00   S4-AB-p0 r2 [ 41] S4-rung#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.53% ra 0.78% others 0.94% exit 0 waited 0.0s
+2026-09-29T17:27:55.100+03:00   S4-AB-p0 r2 [ 42] S4-JT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.78% ra 1.11% others 0.29% exit 0 waited 0.0s
+2026-09-29T17:28:01.340+03:00   S4-AB-p0 r2 [ 43] S4-JT-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.11% ra 0.59% others 0.18% exit 0 waited 0.0s
+2026-09-29T17:28:07.366+03:00   S4-AB-p0 r2 [ 44] S4-JT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.59% ra 0.41% others 0.83% exit 0 waited 0.0s
+2026-09-29T17:28:13.462+03:00   S4-AB-p0 r2 [ 45] S4-JT#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.41% ra 0.85% others 0.1% exit 0 waited 0.0s
+2026-09-29T17:28:19.664+03:00   S4-AB-p0 r2 [ 46] S4-JT#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.85% ra 0.56% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:28:25.941+03:00   S4-AB-p0 r2 [ 47] S4-JT#parent W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.56% ra 0.92% others 0.08% exit 0 waited 0.0s
+2026-09-29T17:28:32.552+03:00   S4-AB-p0 r2 [ 48] S4-JT#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.92% ra 0.47% others 0.07% exit 0 waited 0.0s
+2026-09-29T17:28:39.205+03:00   S4-AB-p0 r2 [ 49] S4-JT#parent W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.47% ra 0.69% others 0.06% exit 0 waited 0.0s
+2026-09-29T17:28:46.502+03:00   S4-AB-p0 r2 [ 50] S4-JT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.69% ra 0.48% others 0.44% exit 0 waited 0.0s
+2026-09-29T17:28:53.812+03:00   S4-AB-p0 r2 [ 51] S4-JT#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.48% ra 0.9% others 0.45% exit 0 waited 0.0s
+2026-09-29T17:28:53.812+03:00 S4-AB-p0: re-running 1 process(es) at the end of the pass: [(28, 1, 'S4-JT', 'parent', 8, 'contaminated')]
+2026-09-29T17:28:59.907+03:00   S4-AB-p0 r1 [ 28] S4-JT#parent W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 0.9% ra 0.31% others 0.88% exit 0 waited 0.0s
+2026-09-29T17:28:59.907+03:00 S4-AB-p0: done
+2026-09-29T17:28:59.910+03:00 S4-AB-p1: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T17:31:10.400+03:00 S4-AB-p1: idle reached; {'time': '2026-09-29T17:31:10.400+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T17:31:20.466+03:00 S4-AB-p1: opening receipt 0.59% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T17:31:26.474+03:00   S4-AB-p1 warm-up S4-JT#tip W=8 (untimed): pose 0x30c5438bc6ad9ffa expect match rb 0.59% ra 0.34% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:31:33.770+03:00   S4-AB-p1 r0 [  1] S4-JT#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.34% ra 0.34% others 0.27% exit 0 waited 0.0s
+2026-09-29T17:31:41.135+03:00   S4-AB-p1 r0 [  2] S4-JT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.34% ra 1.0% others 0.22% exit 0 waited 0.0s
+2026-09-29T17:31:47.771+03:00   S4-AB-p1 r0 [  3] S4-JT#parent W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.0% ra 0.43% others 0.45% exit 0 waited 0.0s
+2026-09-29T17:31:54.376+03:00   S4-AB-p1 r0 [  4] S4-JT#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.43% ra 0.67% others 0.13% exit 0 waited 0.0s
+2026-09-29T17:32:00.646+03:00   S4-AB-p1 r0 [  5] S4-JT#parent W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.67% ra 0.48% others 0.42% exit 0 waited 0.0s
+2026-09-29T17:32:06.839+03:00   S4-AB-p1 r0 [  6] S4-JT#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.48% ra 0.97% others 0.18% exit 0 waited 0.0s
+2026-09-29T17:32:12.932+03:00   S4-AB-p1 r0 [  7] S4-JT#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.97% ra 0.77% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:32:18.942+03:00   S4-AB-p1 r0 [  8] S4-JT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.77% ra 1.55% others 0.64% exit 0 waited 0.0s
+2026-09-29T17:32:25.211+03:00   S4-AB-p1 r0 [  9] S4-JT-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.55% ra 0.43% others 0.6% exit 0 waited 0.0s
+2026-09-29T17:32:31.372+03:00   S4-AB-p1 r0 [ 10] S4-JT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.43% ra 0.59% others 0.47% exit 0 waited 0.0s
+2026-09-29T17:32:37.406+03:00   S4-AB-p1 r0 [ 11] S4-rung#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.59% ra 1.04% others 0.2% exit 0 waited 0.0s
+2026-09-29T17:32:43.563+03:00   S4-AB-p1 r0 [ 12] S4-zone-N30000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.04% ra 0.43% others 0.19% exit 0 waited 0.0s
+2026-09-29T17:32:49.733+03:00   S4-AB-p1 r0 [ 13] S4-zone-N60000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.43% ra 0.7% others 0.1% exit 0 waited 0.0s
+2026-09-29T17:32:55.964+03:00   S4-AB-p1 r0 [ 14] S4-JT#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.7% ra 0.28% others 0.95% exit 0 waited 0.0s
+2026-09-29T17:33:02.089+03:00   S4-AB-p1 r0 [ 15] S4-JT#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.28% ra 1.74% others 0.19% exit 0 waited 0.0s
+2026-09-29T17:33:08.453+03:00   S4-AB-p1 r0 [ 16] S4-JT-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.74% ra 0.84% others 1.11% exit 0 waited 0.0s
+2026-09-29T17:33:14.739+03:00   S4-AB-p1 r0 [ 17] S4-JT-a#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.84% ra 0.75% others 0.17% exit 0 waited 0.0s
+2026-09-29T17:33:22.037+03:00   S4-AB-p1 r1 [ 18] S4-JT#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.75% ra 0.59% others 0.05% exit 0 waited 0.0s
+2026-09-29T17:33:29.369+03:00   S4-AB-p1 r1 [ 19] S4-JT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.59% ra 0.63% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:33:36.014+03:00   S4-AB-p1 r1 [ 20] S4-JT#parent W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.63% ra 0.59% others 0.38% exit 0 waited 0.0s
+2026-09-29T17:33:42.604+03:00   S4-AB-p1 r1 [ 21] S4-JT#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.59% ra 0.33% others 0.07% exit 0 waited 0.0s
+2026-09-29T17:33:48.889+03:00   S4-AB-p1 r1 [ 22] S4-JT#parent W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.33% ra 0.42% others 0.08% exit 0 waited 0.0s
+2026-09-29T17:33:55.086+03:00   S4-AB-p1 r1 [ 23] S4-JT#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.42% ra 0.67% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:34:01.187+03:00   S4-AB-p1 r1 [ 24] S4-JT#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.67% ra 1.01% others 0.2% exit 0 waited 0.0s
+2026-09-29T17:34:07.202+03:00   S4-AB-p1 r1 [ 25] S4-JT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.01% ra 0.49% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:34:13.436+03:00   S4-AB-p1 r1 [ 26] S4-JT-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.49% ra 0.71% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:34:19.581+03:00   S4-AB-p1 r1 [ 27] S4-JT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.71% ra 0.57% others 0.97% exit 0 waited 0.0s
+2026-09-29T17:34:25.630+03:00   S4-AB-p1 r1 [ 28] S4-rung#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.57% ra 0.73% others 0.51% exit 0 waited 0.0s
+2026-09-29T17:34:31.801+03:00   S4-AB-p1 r1 [ 29] S4-zone-N30000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.73% ra 0.66% others 0.29% exit 0 waited 0.0s
+2026-09-29T17:34:37.979+03:00   S4-AB-p1 r1 [ 30] S4-zone-N60000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.66% ra 0.76% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:34:44.200+03:00   S4-AB-p1 r1 [ 31] S4-JT#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.76% ra 0.21% others 0.53% exit 0 waited 0.0s
+2026-09-29T17:34:50.345+03:00   S4-AB-p1 r1 [ 32] S4-JT#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.21% ra 0.52% others 0.47% exit 0 waited 0.0s
+2026-09-29T17:34:56.764+03:00   S4-AB-p1 r1 [ 33] S4-JT-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.52% ra 1.08% others 3.08% exit 0 waited 0.0s OTHERS-BUSY(3.08%)
+2026-09-29T17:35:03.030+03:00   S4-AB-p1 r1 [ 34] S4-JT-a#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.08% ra 0.37% others 0.17% exit 0 waited 0.0s
+2026-09-29T17:35:10.335+03:00   S4-AB-p1 r2 [ 35] S4-JT#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.37% ra 0.27% others 0.58% exit 0 waited 0.0s
+2026-09-29T17:35:17.650+03:00   S4-AB-p1 r2 [ 36] S4-JT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.27% ra 0.36% others 0.66% exit 0 waited 0.0s
+2026-09-29T17:35:24.300+03:00   S4-AB-p1 r2 [ 37] S4-JT#parent W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.36% ra 1.48% others 0.45% exit 0 waited 0.0s
+2026-09-29T17:35:30.909+03:00   S4-AB-p1 r2 [ 38] S4-JT#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.48% ra 0.54% others 0.58% exit 0 waited 0.0s
+2026-09-29T17:35:37.179+03:00   S4-AB-p1 r2 [ 39] S4-JT#parent W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.54% ra 0.56% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:35:43.378+03:00   S4-AB-p1 r2 [ 40] S4-JT#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.56% ra 0.39% others 0.27% exit 0 waited 0.0s
+2026-09-29T17:35:49.471+03:00   S4-AB-p1 r2 [ 41] S4-JT#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.39% ra 0.56% others 0.2% exit 0 waited 0.0s
+2026-09-29T17:35:55.476+03:00   S4-AB-p1 r2 [ 42] S4-JT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.56% ra 1.28% others 0.32% exit 0 waited 0.0s
+2026-09-29T17:36:01.725+03:00   S4-AB-p1 r2 [ 43] S4-JT-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.28% ra 0.35% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:36:07.877+03:00   S4-AB-p1 r2 [ 44] S4-JT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.35% ra 0.57% others 0.38% exit 0 waited 0.0s
+2026-09-29T17:36:13.918+03:00   S4-AB-p1 r2 [ 45] S4-rung#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.57% ra 0.5% others 0.21% exit 0 waited 0.0s
+2026-09-29T17:36:20.087+03:00   S4-AB-p1 r2 [ 46] S4-zone-N30000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.5% ra 1.09% others 0.38% exit 0 waited 0.0s
+2026-09-29T17:36:26.265+03:00   S4-AB-p1 r2 [ 47] S4-zone-N60000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.09% ra 0.45% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:36:32.473+03:00   S4-AB-p1 r2 [ 48] S4-JT#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.45% ra 0.55% others 0.44% exit 0 waited 0.0s
+2026-09-29T17:36:38.596+03:00   S4-AB-p1 r2 [ 49] S4-JT#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.55% ra 0.27% others 0.1% exit 0 waited 0.0s
+2026-09-29T17:36:44.966+03:00   S4-AB-p1 r2 [ 50] S4-JT-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.27% ra 0.57% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:36:51.239+03:00   S4-AB-p1 r2 [ 51] S4-JT-a#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.57% ra 0.72% others 0.77% exit 0 waited 0.0s
+2026-09-29T17:36:51.239+03:00 S4-AB-p1: re-running 1 process(es) at the end of the pass: [(33, 1, 'S4-JT-a', 'parent', 16, 'contaminated')]
+2026-09-29T17:36:57.657+03:00   S4-AB-p1 r1 [ 33] S4-JT-a#parent W=16 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 0.72% ra 0.37% others 0.23% exit 0 waited 0.0s
+2026-09-29T17:36:57.658+03:00 S4-AB-p1: done
+2026-09-29T17:36:57.660+03:00 S4-AB-p2: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T17:39:08.159+03:00 S4-AB-p2: idle reached; {'time': '2026-09-29T17:39:08.159+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T17:39:18.228+03:00 S4-AB-p2: opening receipt 0.51% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T17:39:24.238+03:00   S4-AB-p2 warm-up S4-JT#tip W=8 (untimed): pose 0x30c5438bc6ad9ffa expect match rb 0.51% ra 0.51% others 0.11% exit 0 waited 0.0s
+2026-09-29T17:39:30.511+03:00   S4-AB-p2 r0 [  1] S4-JT-a#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.51% ra 0.36% others 0.17% exit 0 waited 0.0s
+2026-09-29T17:39:36.962+03:00   S4-AB-p2 r0 [  2] S4-JT-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.36% ra 1.14% others 0.37% exit 0 waited 0.0s
+2026-09-29T17:39:43.093+03:00   S4-AB-p2 r0 [  3] S4-JT#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.14% ra 0.3% others 0.57% exit 0 waited 0.0s
+2026-09-29T17:39:49.311+03:00   S4-AB-p2 r0 [  4] S4-JT#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.3% ra 4.08% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:39:55.499+03:00   S4-AB-p2 r0 [  5] S4-zone-N60000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 4.08% ra 1.02% others 0.55% exit 0 waited 0.0s
+2026-09-29T17:40:01.671+03:00   S4-AB-p2 r0 [  6] S4-zone-N30000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.02% ra 0.94% others 0.29% exit 0 waited 0.0s
+2026-09-29T17:40:07.708+03:00   S4-AB-p2 r0 [  7] S4-rung#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.94% ra 1.13% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:40:13.862+03:00   S4-AB-p2 r0 [  8] S4-JT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.13% ra 0.7% others 0.19% exit 0 waited 0.0s
+2026-09-29T17:40:20.100+03:00   S4-AB-p2 r0 [  9] S4-JT-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.7% ra 0.62% others 0.71% exit 0 waited 0.0s
+2026-09-29T17:40:26.108+03:00   S4-AB-p2 r0 [ 10] S4-JT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.62% ra 1.14% others 0.65% exit 0 waited 0.0s
+2026-09-29T17:40:32.204+03:00   S4-AB-p2 r0 [ 11] S4-JT#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.14% ra 1.02% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:40:38.400+03:00   S4-AB-p2 r0 [ 12] S4-JT#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 1.02% ra 0.38% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:40:44.695+03:00   S4-AB-p2 r0 [ 13] S4-JT#parent W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.38% ra 0.43% others 0.33% exit 0 waited 0.0s
+2026-09-29T17:40:51.293+03:00   S4-AB-p2 r0 [ 14] S4-JT#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.43% ra 0.57% others 0.13% exit 0 waited 0.0s
+2026-09-29T17:40:58.007+03:00   S4-AB-p2 r0 [ 15] S4-JT#parent W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.57% ra 0.51% others 0.18% exit 0 waited 0.0s
+2026-09-29T17:41:05.322+03:00   S4-AB-p2 r0 [ 16] S4-JT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.51% ra 0.49% others 0.44% exit 0 waited 0.0s
+2026-09-29T17:41:12.694+03:00   S4-AB-p2 r0 [ 17] S4-JT#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.49% ra 0.65% others 0.26% exit 0 waited 0.0s
+2026-09-29T17:41:18.968+03:00   S4-AB-p2 r1 [ 18] S4-JT-a#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.65% ra 0.59% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:41:25.329+03:00   S4-AB-p2 r1 [ 19] S4-JT-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.59% ra 1.11% others 0.71% exit 0 waited 0.0s
+2026-09-29T17:41:31.462+03:00   S4-AB-p2 r1 [ 20] S4-JT#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.11% ra 0.91% others 0.66% exit 0 waited 0.0s
+2026-09-29T17:41:37.786+03:00   S4-AB-p2 r1 [ 21] S4-JT#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.91% ra 0.41% others 0.88% exit 0 waited 0.0s
+2026-09-29T17:41:43.963+03:00   S4-AB-p2 r1 [ 22] S4-zone-N60000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.41% ra 0.55% others 1.22% exit 0 waited 0.0s
+2026-09-29T17:41:50.137+03:00   S4-AB-p2 r1 [ 23] S4-zone-N30000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.55% ra 0.42% others 0.28% exit 0 waited 0.0s
+2026-09-29T17:41:56.172+03:00   S4-AB-p2 r1 [ 24] S4-rung#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.42% ra 0.87% others 0.42% exit 0 waited 0.0s
+2026-09-29T17:42:02.322+03:00   S4-AB-p2 r1 [ 25] S4-JT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.87% ra 0.44% others 0.19% exit 0 waited 0.0s
+2026-09-29T17:42:08.564+03:00   S4-AB-p2 r1 [ 26] S4-JT-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.44% ra 0.51% others 0.27% exit 0 waited 0.0s
+2026-09-29T17:42:14.590+03:00   S4-AB-p2 r1 [ 27] S4-JT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.51% ra 0.64% others 0.53% exit 0 waited 0.0s
+2026-09-29T17:42:20.704+03:00   S4-AB-p2 r1 [ 28] S4-JT#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.64% ra 2.64% others 0.1% exit 0 waited 0.0s
+2026-09-29T17:42:26.913+03:00   S4-AB-p2 r1 [ 29] S4-JT#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 2.64% ra 1.02% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:42:33.196+03:00   S4-AB-p2 r1 [ 30] S4-JT#parent W=4: pose 0x30c5438bc6ad9ffa expect match rb 1.02% ra 0.59% others 0.66% exit 0 waited 0.0s
+2026-09-29T17:42:39.795+03:00   S4-AB-p2 r1 [ 31] S4-JT#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.59% ra 0.41% others 0.26% exit 0 waited 0.0s
+2026-09-29T17:42:46.483+03:00   S4-AB-p2 r1 [ 32] S4-JT#parent W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.41% ra 0.42% others 0.06% exit 0 waited 0.0s
+2026-09-29T17:42:53.835+03:00   S4-AB-p2 r1 [ 33] S4-JT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.42% ra 1.4% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:43:01.187+03:00   S4-AB-p2 r1 [ 34] S4-JT#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.4% ra 0.34% others 0.22% exit 0 waited 0.0s
+2026-09-29T17:43:07.481+03:00   S4-AB-p2 r2 [ 35] S4-JT-a#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.34% ra 0.71% others 0.26% exit 0 waited 0.0s
+2026-09-29T17:43:13.843+03:00   S4-AB-p2 r2 [ 36] S4-JT-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.71% ra 0.76% others 0.95% exit 0 waited 0.0s
+2026-09-29T17:43:19.977+03:00   S4-AB-p2 r2 [ 37] S4-JT#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.76% ra 0.91% others 0.38% exit 0 waited 0.0s
+2026-09-29T17:43:26.214+03:00   S4-AB-p2 r2 [ 38] S4-JT#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.91% ra 0.5% others 0.69% exit 0 waited 0.0s
+2026-09-29T17:43:32.395+03:00   S4-AB-p2 r2 [ 39] S4-zone-N60000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.5% ra 0.4% others 0.47% exit 0 waited 0.0s
+2026-09-29T17:43:38.560+03:00   S4-AB-p2 r2 [ 40] S4-zone-N30000#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.4% ra 0.39% others 0.1% exit 0 waited 0.0s
+2026-09-29T17:43:44.601+03:00   S4-AB-p2 r2 [ 41] S4-rung#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.39% ra 0.78% others 0.31% exit 0 waited 0.0s
+2026-09-29T17:43:50.747+03:00   S4-AB-p2 r2 [ 42] S4-JT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.78% ra 1.17% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:43:56.992+03:00   S4-AB-p2 r2 [ 43] S4-JT-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.17% ra 0.49% others 0.18% exit 0 waited 0.0s
+2026-09-29T17:44:03.012+03:00   S4-AB-p2 r2 [ 44] S4-JT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.49% ra 0.34% others 0.21% exit 0 waited 0.0s
+2026-09-29T17:44:09.121+03:00   S4-AB-p2 r2 [ 45] S4-JT#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.34% ra 0.66% others 0.1% exit 0 waited 0.0s
+2026-09-29T17:44:15.331+03:00   S4-AB-p2 r2 [ 46] S4-JT#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.66% ra 0.8% others 0.36% exit 0 waited 0.0s
+2026-09-29T17:44:21.640+03:00   S4-AB-p2 r2 [ 47] S4-JT#parent W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.8% ra 0.7% others 0.4% exit 0 waited 0.0s
+2026-09-29T17:44:28.244+03:00   S4-AB-p2 r2 [ 48] S4-JT#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.7% ra 0.78% others 0.13% exit 0 waited 0.0s
+2026-09-29T17:44:34.879+03:00   S4-AB-p2 r2 [ 49] S4-JT#parent W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.78% ra 0.36% others 0.06% exit 0 waited 0.0s
+2026-09-29T17:44:42.216+03:00   S4-AB-p2 r2 [ 50] S4-JT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.36% ra 0.75% others 0.48% exit 0 waited 0.0s
+2026-09-29T17:44:49.565+03:00   S4-AB-p2 r2 [ 51] S4-JT#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.75% ra 0.51% others 0.04% exit 0 waited 0.0s
+2026-09-29T17:44:49.566+03:00 S4-AB-p2: done
+2026-09-29T17:44:49.569+03:00 S7-AB-p0: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T17:47:00.039+03:00 S7-AB-p0: idle reached; {'time': '2026-09-29T17:47:00.039+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T17:47:10.105+03:00 S7-AB-p0: opening receipt 0.76% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T17:47:16.119+03:00   S7-AB-p0 warm-up S7-JT#s7t W=8 (untimed): pose 0x30c5438bc6ad9ffa expect match rb 0.76% ra 0.69% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:47:23.915+03:00   S7-AB-p0 r0 [  1] S7-JA-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.69% ra 1.45% others 0.4% exit 0 waited 0.0s
+2026-09-29T17:47:30.143+03:00   S7-AB-p0 r0 [  2] S7-ladder16-F2#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.45% ra 0.57% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:47:36.350+03:00   S7-AB-p0 r0 [  3] S7-ladder16-F1.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.57% ra 1.08% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:47:42.549+03:00   S7-AB-p0 r0 [  4] S7-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.08% ra 0.45% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:47:48.709+03:00   S7-AB-p0 r0 [  5] S7-ladder16-F0.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.45% ra 0.22% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:47:56.734+03:00   S7-AB-p0 r0 [  6] S7-JA#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.22% ra 0.57% others 0.4% exit 0 waited 0.0s
+2026-09-29T17:48:04.438+03:00   S7-AB-p0 r0 [  7] S7-JA#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.57% ra 0.87% others 0.27% exit 0 waited 0.0s
+2026-09-29T17:48:10.637+03:00   S7-AB-p0 r0 [  8] S7-JT#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.87% ra 0.37% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:48:16.771+03:00   S7-AB-p0 r0 [  9] S7-JT#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.37% ra 1.51% others 0.66% exit 0 waited 0.0s
+2026-09-29T17:48:22.843+03:00   S7-AB-p0 r0 [ 10] S7-ladder8-F2#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.51% ra 0.51% others 0.1% exit 0 waited 0.0s
+2026-09-29T17:48:28.894+03:00   S7-AB-p0 r0 [ 11] S7-ladder8-F1.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.51% ra 0.92% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:48:34.939+03:00   S7-AB-p0 r0 [ 12] S7-ladder8-F1#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.92% ra 0.25% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:48:40.973+03:00   S7-AB-p0 r0 [ 13] S7-ladder8-F0.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.25% ra 0.5% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:48:48.725+03:00   S7-AB-p0 r0 [ 14] S7-JA#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.5% ra 0.42% others 0.37% exit 0 waited 0.0s
+2026-09-29T17:48:56.481+03:00   S7-AB-p0 r0 [ 15] S7-JA#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.42% ra 0.87% others 0.26% exit 0 waited 0.0s
+2026-09-29T17:49:02.492+03:00   S7-AB-p0 r0 [ 16] S7-JT#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.87% ra 0.86% others 0.43% exit 0 waited 0.0s
+2026-09-29T17:49:08.502+03:00   S7-AB-p0 r0 [ 17] S7-JT#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.86% ra 0.37% others 1.62% exit 0 waited 0.0s
+2026-09-29T17:49:15.880+03:00   S7-AB-p0 r0 [ 18] S7-JT-W1#s7t W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.37% ra 0.62% others 0.13% exit 0 waited 0.0s
+2026-09-29T17:49:23.257+03:00   S7-AB-p0 r0 [ 19] S7-JT-W1#s7p W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.62% ra 0.83% others 0.35% exit 0 waited 0.0s
+2026-09-29T17:49:31.031+03:00   S7-AB-p0 r1 [ 20] S7-JA-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.83% ra 0.48% others 0.15% exit 0 waited 0.0s
+2026-09-29T17:49:37.269+03:00   S7-AB-p0 r1 [ 21] S7-ladder16-F2#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.48% ra 0.19% others 0.87% exit 0 waited 0.0s
+2026-09-29T17:49:43.482+03:00   S7-AB-p0 r1 [ 22] S7-ladder16-F1.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.19% ra 0.6% others 0.17% exit 0 waited 0.0s
+2026-09-29T17:49:49.664+03:00   S7-AB-p0 r1 [ 23] S7-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.6% ra 0.48% others 0.36% exit 0 waited 0.0s
+2026-09-29T17:49:55.825+03:00   S7-AB-p0 r1 [ 24] S7-ladder16-F0.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.48% ra 0.83% others 0.37% exit 0 waited 0.0s
+2026-09-29T17:50:03.862+03:00   S7-AB-p0 r1 [ 25] S7-JA#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.83% ra 0.96% others 0.2% exit 0 waited 0.0s
+2026-09-29T17:50:11.624+03:00   S7-AB-p0 r1 [ 26] S7-JA#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.96% ra 0.92% others 0.52% exit 0 waited 0.0s
+2026-09-29T17:50:17.826+03:00   S7-AB-p0 r1 [ 27] S7-JT#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.92% ra 0.25% others 0.18% exit 0 waited 0.0s
+2026-09-29T17:50:23.951+03:00   S7-AB-p0 r1 [ 28] S7-JT#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.25% ra 0.89% others 0.1% exit 0 waited 0.0s
+2026-09-29T17:50:30.016+03:00   S7-AB-p0 r1 [ 29] S7-ladder8-F2#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.89% ra 0.58% others 0.1% exit 0 waited 0.0s
+2026-09-29T17:50:36.080+03:00   S7-AB-p0 r1 [ 30] S7-ladder8-F1.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.58% ra 0.44% others 0.5% exit 0 waited 0.0s
+2026-09-29T17:50:42.122+03:00   S7-AB-p0 r1 [ 31] S7-ladder8-F1#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.44% ra 0.39% others 0.41% exit 0 waited 0.0s
+2026-09-29T17:50:48.149+03:00   S7-AB-p0 r1 [ 32] S7-ladder8-F0.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.39% ra 0.8% others 0.21% exit 0 waited 0.0s
+2026-09-29T17:50:55.905+03:00   S7-AB-p0 r1 [ 33] S7-JA#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.8% ra 0.34% others 0.26% exit 0 waited 0.0s
+2026-09-29T17:51:03.669+03:00   S7-AB-p0 r1 [ 34] S7-JA#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.34% ra 0.59% others 0.15% exit 0 waited 0.0s
+2026-09-29T17:51:09.674+03:00   S7-AB-p0 r1 [ 35] S7-JT#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.59% ra 0.5% others 0.0% exit 0 waited 0.0s
+2026-09-29T17:51:15.676+03:00   S7-AB-p0 r1 [ 36] S7-JT#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.5% ra 1.29% others 0.43% exit 0 waited 0.0s
+2026-09-29T17:51:22.981+03:00   S7-AB-p0 r1 [ 37] S7-JT-W1#s7t W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.29% ra 0.58% others 0.14% exit 0 waited 0.0s
+2026-09-29T17:51:30.322+03:00   S7-AB-p0 r1 [ 38] S7-JT-W1#s7p W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.58% ra 0.85% others 0.13% exit 0 waited 0.0s
+2026-09-29T17:51:38.089+03:00   S7-AB-p0 r2 [ 39] S7-JA-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.85% ra 0.71% others 0.07% exit 0 waited 0.0s
+2026-09-29T17:51:44.326+03:00   S7-AB-p0 r2 [ 40] S7-ladder16-F2#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.71% ra 0.8% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:51:50.536+03:00   S7-AB-p0 r2 [ 41] S7-ladder16-F1.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.8% ra 0.69% others 0.36% exit 0 waited 0.0s
+2026-09-29T17:51:56.722+03:00   S7-AB-p0 r2 [ 42] S7-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.69% ra 0.37% others 0.45% exit 0 waited 0.0s
+2026-09-29T17:52:02.872+03:00   S7-AB-p0 r2 [ 43] S7-ladder16-F0.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.37% ra 1.0% others 0.28% exit 0 waited 0.0s
+2026-09-29T17:52:10.915+03:00   S7-AB-p0 r2 [ 44] S7-JA#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.0% ra 0.6% others 0.23% exit 0 waited 0.0s
+2026-09-29T17:52:18.648+03:00   S7-AB-p0 r2 [ 45] S7-JA#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.6% ra 1.24% others 0.67% exit 0 waited 0.0s
+2026-09-29T17:52:24.867+03:00   S7-AB-p0 r2 [ 46] S7-JT#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.24% ra 0.47% others 0.18% exit 0 waited 0.0s
+2026-09-29T17:52:30.996+03:00   S7-AB-p0 r2 [ 47] S7-JT#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.47% ra 0.38% others 0.19% exit 0 waited 0.0s
+2026-09-29T17:52:37.069+03:00   S7-AB-p0 r2 [ 48] S7-ladder8-F2#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.38% ra 0.27% others 0.1% exit 0 waited 0.0s
+2026-09-29T17:52:43.150+03:00   S7-AB-p0 r2 [ 49] S7-ladder8-F1.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.27% ra 1.14% others 1.0% exit 0 waited 0.0s
+2026-09-29T17:52:49.201+03:00   S7-AB-p0 r2 [ 50] S7-ladder8-F1#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.14% ra 0.57% others 0.1% exit 0 waited 0.0s
+2026-09-29T17:52:55.232+03:00   S7-AB-p0 r2 [ 51] S7-ladder8-F0.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.57% ra 0.41% others 0.11% exit 0 waited 0.0s
+2026-09-29T17:53:03.037+03:00   S7-AB-p0 r2 [ 52] S7-JA#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.41% ra 0.58% others 1.15% exit 0 waited 0.0s
+2026-09-29T17:53:10.790+03:00   S7-AB-p0 r2 [ 53] S7-JA#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.58% ra 0.98% others 0.52% exit 0 waited 0.0s
+2026-09-29T17:53:16.816+03:00   S7-AB-p0 r2 [ 54] S7-JT#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.98% ra 0.21% others 0.21% exit 0 waited 0.0s
+2026-09-29T17:53:22.830+03:00   S7-AB-p0 r2 [ 55] S7-JT#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.21% ra 0.6% others 0.32% exit 0 waited 0.0s
+2026-09-29T17:53:30.135+03:00   S7-AB-p0 r2 [ 56] S7-JT-W1#s7t W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.6% ra 0.95% others 0.22% exit 0 waited 0.0s
+2026-09-29T17:53:37.438+03:00   S7-AB-p0 r2 [ 57] S7-JT-W1#s7p W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.95% ra 0.78% others 0.49% exit 0 waited 0.0s
+2026-09-29T17:53:37.438+03:00 S7-AB-p0: done
+2026-09-29T17:53:37.443+03:00 S7-AB-p1: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T17:57:47.933+03:00 S7-AB-p1: idle reached; {'time': '2026-09-29T17:57:47.933+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T17:57:58.001+03:00 S7-AB-p1: opening receipt 0.61% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T17:58:04.007+03:00   S7-AB-p1 warm-up S7-JT#s7t W=8 (untimed): pose 0x30c5438bc6ad9ffa expect match rb 0.61% ra 0.66% others 0.11% exit 0 waited 0.0s
+2026-09-29T17:58:11.306+03:00   S7-AB-p1 r0 [  1] S7-JT-W1#s7p W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.66% ra 0.66% others 0.18% exit 0 waited 0.0s
+2026-09-29T17:58:18.640+03:00   S7-AB-p1 r0 [  2] S7-JT-W1#s7t W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.66% ra 1.08% others 0.18% exit 0 waited 0.0s
+2026-09-29T17:58:24.642+03:00   S7-AB-p1 r0 [  3] S7-JT#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.08% ra 0.3% others 0.22% exit 0 waited 0.0s
+2026-09-29T17:58:30.646+03:00   S7-AB-p1 r0 [  4] S7-JT#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.3% ra 0.45% others 0.11% exit 0 waited 0.0s
+2026-09-29T17:58:38.384+03:00   S7-AB-p1 r0 [  5] S7-JA#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.45% ra 0.85% others 0.11% exit 0 waited 0.0s
+2026-09-29T17:58:46.158+03:00   S7-AB-p1 r0 [  6] S7-JA#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.85% ra 0.96% others 2.29% exit 0 waited 0.0s OTHERS-BUSY(2.29%)
+2026-09-29T17:58:52.179+03:00   S7-AB-p1 r0 [  7] S7-ladder8-F0.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.96% ra 1.03% others 0.21% exit 0 waited 0.0s
+2026-09-29T17:58:58.223+03:00   S7-AB-p1 r0 [  8] S7-ladder8-F1#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.03% ra 0.26% others 0.42% exit 0 waited 0.0s
+2026-09-29T17:59:04.270+03:00   S7-AB-p1 r0 [  9] S7-ladder8-F1.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.26% ra 0.62% others 0.1% exit 0 waited 0.0s
+2026-09-29T17:59:10.335+03:00   S7-AB-p1 r0 [ 10] S7-ladder8-F2#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.62% ra 1.3% others 0.1% exit 0 waited 0.0s
+2026-09-29T17:59:16.470+03:00   S7-AB-p1 r0 [ 11] S7-JT#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.3% ra 1.03% others 0.19% exit 0 waited 0.0s
+2026-09-29T17:59:22.668+03:00   S7-AB-p1 r0 [ 12] S7-JT#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.03% ra 0.4% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:59:30.380+03:00   S7-AB-p1 r0 [ 13] S7-JA#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.4% ra 0.42% others 0.27% exit 0 waited 0.0s
+2026-09-29T17:59:38.412+03:00   S7-AB-p1 r0 [ 14] S7-JA#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.42% ra 0.61% others 0.3% exit 0 waited 0.0s
+2026-09-29T17:59:44.566+03:00   S7-AB-p1 r0 [ 15] S7-ladder16-F0.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.61% ra 1.24% others 0.09% exit 0 waited 0.0s
+2026-09-29T17:59:50.752+03:00   S7-AB-p1 r0 [ 16] S7-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.24% ra 0.41% others 0.45% exit 0 waited 0.0s
+2026-09-29T17:59:56.958+03:00   S7-AB-p1 r0 [ 17] S7-ladder16-F1.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.41% ra 0.28% others 0.09% exit 0 waited 0.0s
+2026-09-29T18:00:03.191+03:00   S7-AB-p1 r0 [ 18] S7-ladder16-F2#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.28% ra 0.46% others 0.6% exit 0 waited 0.0s
+2026-09-29T18:00:10.945+03:00   S7-AB-p1 r0 [ 19] S7-JA-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.46% ra 1.13% others 0.15% exit 0 waited 0.0s
+2026-09-29T18:00:18.265+03:00   S7-AB-p1 r1 [ 20] S7-JT-W1#s7p W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.13% ra 0.57% others 0.66% exit 0 waited 0.0s
+2026-09-29T18:00:25.607+03:00   S7-AB-p1 r1 [ 21] S7-JT-W1#s7t W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.57% ra 0.49% others 0.22% exit 0 waited 0.0s
+2026-09-29T18:00:31.616+03:00   S7-AB-p1 r1 [ 22] S7-JT#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.49% ra 0.59% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:00:37.624+03:00   S7-AB-p1 r1 [ 23] S7-JT#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.59% ra 0.74% others 0.11% exit 0 waited 0.0s
+2026-09-29T18:00:45.373+03:00   S7-AB-p1 r1 [ 24] S7-JA#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.74% ra 0.43% others 0.15% exit 0 waited 0.0s
+2026-09-29T18:00:53.126+03:00   S7-AB-p1 r1 [ 25] S7-JA#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.43% ra 0.53% others 0.19% exit 0 waited 0.0s
+2026-09-29T18:00:59.154+03:00   S7-AB-p1 r1 [ 26] S7-ladder8-F0.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.53% ra 0.35% others 0.43% exit 0 waited 0.0s
+2026-09-29T18:01:05.201+03:00   S7-AB-p1 r1 [ 27] S7-ladder8-F1#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.35% ra 1.01% others 0.31% exit 0 waited 0.0s
+2026-09-29T18:01:11.262+03:00   S7-AB-p1 r1 [ 28] S7-ladder8-F1.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.01% ra 0.55% others 0.21% exit 0 waited 0.0s
+2026-09-29T18:01:17.352+03:00   S7-AB-p1 r1 [ 29] S7-ladder8-F2#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.55% ra 0.53% others 0.2% exit 0 waited 0.0s
+2026-09-29T18:01:23.481+03:00   S7-AB-p1 r1 [ 30] S7-JT#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.53% ra 0.39% others 0.38% exit 0 waited 0.0s
+2026-09-29T18:01:29.680+03:00   S7-AB-p1 r1 [ 31] S7-JT#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.39% ra 0.43% others 0.36% exit 0 waited 0.0s
+2026-09-29T18:01:37.390+03:00   S7-AB-p1 r1 [ 32] S7-JA#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.43% ra 1.14% others 0.23% exit 0 waited 0.0s
+2026-09-29T18:01:45.425+03:00   S7-AB-p1 r1 [ 33] S7-JA#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.14% ra 0.6% others 0.23% exit 0 waited 0.0s
+2026-09-29T18:01:51.583+03:00   S7-AB-p1 r1 [ 34] S7-ladder16-F0.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.6% ra 0.55% others 0.09% exit 0 waited 0.0s
+2026-09-29T18:01:57.762+03:00   S7-AB-p1 r1 [ 35] S7-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.55% ra 0.35% others 0.54% exit 0 waited 0.0s
+2026-09-29T18:02:03.979+03:00   S7-AB-p1 r1 [ 36] S7-ladder16-F1.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.35% ra 1.06% others 0.61% exit 0 waited 0.0s
+2026-09-29T18:02:10.215+03:00   S7-AB-p1 r1 [ 37] S7-ladder16-F2#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.06% ra 0.5% others 0.09% exit 0 waited 0.0s
+2026-09-29T18:02:17.999+03:00   S7-AB-p1 r1 [ 38] S7-JA-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.5% ra 0.68% others 0.22% exit 0 waited 0.0s
+2026-09-29T18:02:25.318+03:00   S7-AB-p1 r2 [ 39] S7-JT-W1#s7p W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.68% ra 0.96% others 0.31% exit 0 waited 0.0s
+2026-09-29T18:02:32.651+03:00   S7-AB-p1 r2 [ 40] S7-JT-W1#s7t W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.96% ra 1.33% others 0.31% exit 0 waited 0.0s
+2026-09-29T18:02:38.666+03:00   S7-AB-p1 r2 [ 41] S7-JT#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.33% ra 0.62% others 0.22% exit 0 waited 0.0s
+2026-09-29T18:02:44.673+03:00   S7-AB-p1 r2 [ 42] S7-JT#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.62% ra 0.65% others 0.22% exit 0 waited 0.0s
+2026-09-29T18:02:52.428+03:00   S7-AB-p1 r2 [ 43] S7-JA#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.65% ra 0.82% others 0.15% exit 0 waited 0.0s
+2026-09-29T18:03:00.199+03:00   S7-AB-p1 r2 [ 44] S7-JA#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.82% ra 1.48% others 0.22% exit 0 waited 0.0s
+2026-09-29T18:03:06.213+03:00   S7-AB-p1 r2 [ 45] S7-ladder8-F0.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.48% ra 0.41% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:03:12.255+03:00   S7-AB-p1 r2 [ 46] S7-ladder8-F1#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.41% ra 0.78% others 0.92% exit 0 waited 0.0s
+2026-09-29T18:03:18.313+03:00   S7-AB-p1 r2 [ 47] S7-ladder8-F1.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.78% ra 0.39% others 0.2% exit 0 waited 0.0s
+2026-09-29T18:03:24.396+03:00   S7-AB-p1 r2 [ 48] S7-ladder8-F2#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.39% ra 0.68% others 0.7% exit 0 waited 0.0s
+2026-09-29T18:03:30.528+03:00   S7-AB-p1 r2 [ 49] S7-JT#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.68% ra 1.2% others 0.77% exit 0 waited 0.0s
+2026-09-29T18:03:36.728+03:00   S7-AB-p1 r2 [ 50] S7-JT#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.2% ra 0.32% others 0.17% exit 0 waited 0.0s
+2026-09-29T18:03:44.441+03:00   S7-AB-p1 r2 [ 51] S7-JA#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.32% ra 0.47% others 0.49% exit 0 waited 0.0s
+2026-09-29T18:03:52.483+03:00   S7-AB-p1 r2 [ 52] S7-JA#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.47% ra 0.65% others 0.17% exit 0 waited 0.0s
+2026-09-29T18:03:58.643+03:00   S7-AB-p1 r2 [ 53] S7-ladder16-F0.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.65% ra 0.87% others 0.09% exit 0 waited 0.0s
+2026-09-29T18:04:04.824+03:00   S7-AB-p1 r2 [ 54] S7-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.87% ra 0.36% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:04:11.034+03:00   S7-AB-p1 r2 [ 55] S7-ladder16-F1.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.36% ra 0.64% others 1.23% exit 0 waited 0.0s
+2026-09-29T18:04:17.286+03:00   S7-AB-p1 r2 [ 56] S7-ladder16-F2#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.64% ra 0.25% others 0.68% exit 0 waited 0.0s
+2026-09-29T18:04:25.043+03:00   S7-AB-p1 r2 [ 57] S7-JA-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.25% ra 1.18% others 0.55% exit 0 waited 0.0s
+2026-09-29T18:04:25.043+03:00 S7-AB-p1: re-running 1 process(es) at the end of the pass: [(6, 0, 'S7-JA', 's7t', 8, 'contaminated')]
+2026-09-29T18:04:32.796+03:00   S7-AB-p1 r0 [  6] S7-JA#s7t W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 1.18% ra 0.56% others 0.07% exit 0 waited 0.0s
+2026-09-29T18:04:32.796+03:00 S7-AB-p1: done
+2026-09-29T18:04:32.800+03:00 S7-AB-p2: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T18:06:43.246+03:00 S7-AB-p2: idle reached; {'time': '2026-09-29T18:06:43.246+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T18:06:53.311+03:00 S7-AB-p2: opening receipt 0.54% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T18:06:59.323+03:00   S7-AB-p2 warm-up S7-JT#s7t W=8 (untimed): pose 0x30c5438bc6ad9ffa expect match rb 0.54% ra 0.6% others 0.32% exit 0 waited 0.0s
+2026-09-29T18:07:07.081+03:00   S7-AB-p2 r0 [  1] S7-JA-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.6% ra 2.06% others 0.18% exit 0 waited 0.0s
+2026-09-29T18:07:13.322+03:00   S7-AB-p2 r0 [  2] S7-ladder16-F2#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 2.06% ra 1.61% others 0.34% exit 0 waited 0.0s
+2026-09-29T18:07:19.527+03:00   S7-AB-p2 r0 [  3] S7-ladder16-F1.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.61% ra 2.18% others 0.71% exit 0 waited 0.0s
+2026-09-29T18:07:25.728+03:00   S7-AB-p2 r0 [  4] S7-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 2.18% ra 0.22% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:07:31.886+03:00   S7-AB-p2 r0 [  5] S7-ladder16-F0.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.22% ra 0.52% others 0.09% exit 0 waited 0.0s
+2026-09-29T18:07:39.926+03:00   S7-AB-p2 r0 [  6] S7-JA#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.52% ra 1.08% others 0.3% exit 0 waited 0.0s
+2026-09-29T18:07:47.636+03:00   S7-AB-p2 r0 [  7] S7-JA#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.08% ra 0.45% others 0.15% exit 0 waited 0.0s
+2026-09-29T18:07:53.841+03:00   S7-AB-p2 r0 [  8] S7-JT#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.45% ra 0.51% others 0.27% exit 0 waited 0.0s
+2026-09-29T18:07:59.969+03:00   S7-AB-p2 r0 [  9] S7-JT#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.51% ra 0.47% others 0.95% exit 0 waited 0.0s
+2026-09-29T18:08:06.040+03:00   S7-AB-p2 r0 [ 10] S7-ladder8-F2#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.47% ra 0.57% others 0.4% exit 0 waited 0.0s
+2026-09-29T18:08:12.093+03:00   S7-AB-p2 r0 [ 11] S7-ladder8-F1.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.57% ra 1.06% others 0.2% exit 0 waited 0.0s
+2026-09-29T18:08:18.134+03:00   S7-AB-p2 r0 [ 12] S7-ladder8-F1#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.06% ra 0.35% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:08:24.151+03:00   S7-AB-p2 r0 [ 13] S7-ladder8-F0.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.35% ra 0.48% others 0.32% exit 0 waited 0.0s
+2026-09-29T18:08:31.913+03:00   S7-AB-p2 r0 [ 14] S7-JA#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.48% ra 0.61% others 0.07% exit 0 waited 0.0s
+2026-09-29T18:08:39.669+03:00   S7-AB-p2 r0 [ 15] S7-JA#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.61% ra 1.14% others 0.37% exit 0 waited 0.0s
+2026-09-29T18:08:45.699+03:00   S7-AB-p2 r0 [ 16] S7-JT#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.14% ra 1.51% others 0.21% exit 0 waited 0.0s
+2026-09-29T18:08:51.730+03:00   S7-AB-p2 r0 [ 17] S7-JT#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.51% ra 0.57% others 0.31% exit 0 waited 0.0s
+2026-09-29T18:08:59.442+03:00   S7-AB-p2 r0 [ 18] S7-JT-W1#s7t W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.57% ra 6.5% others 3.95% exit 0 waited 0.0s CONTAMINATED-after(6.5%) OTHERS-BUSY(3.95%)
+2026-09-29T18:09:31.783+03:00   S7-AB-p2 r0 [ 19] S7-JT-W1#s7p W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.8% ra 1.05% others 0.14% exit 0 waited 25.0s
+2026-09-29T18:09:39.539+03:00   S7-AB-p2 r1 [ 20] S7-JA-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.05% ra 0.62% others 0.08% exit 0 waited 0.0s
+2026-09-29T18:09:45.775+03:00   S7-AB-p2 r1 [ 21] S7-ladder16-F2#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.62% ra 0.58% others 0.09% exit 0 waited 0.0s
+2026-09-29T18:09:51.987+03:00   S7-AB-p2 r1 [ 22] S7-ladder16-F1.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.58% ra 1.58% others 0.09% exit 0 waited 0.0s
+2026-09-29T18:09:58.191+03:00   S7-AB-p2 r1 [ 23] S7-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.58% ra 0.92% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:10:04.348+03:00   S7-AB-p2 r1 [ 24] S7-ladder16-F0.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.92% ra 0.71% others 0.55% exit 0 waited 0.0s
+2026-09-29T18:10:12.385+03:00   S7-AB-p2 r1 [ 25] S7-JA#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.71% ra 1.28% others 0.33% exit 0 waited 0.0s
+2026-09-29T18:10:20.094+03:00   S7-AB-p2 r1 [ 26] S7-JA#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.28% ra 0.67% others 0.3% exit 0 waited 0.0s
+2026-09-29T18:10:26.297+03:00   S7-AB-p2 r1 [ 27] S7-JT#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.67% ra 0.62% others 0.27% exit 0 waited 0.0s
+2026-09-29T18:10:32.421+03:00   S7-AB-p2 r1 [ 28] S7-JT#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.62% ra 1.0% others 0.1% exit 0 waited 0.0s
+2026-09-29T18:10:38.495+03:00   S7-AB-p2 r1 [ 29] S7-ladder8-F2#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.0% ra 0.38% others 0.51% exit 0 waited 0.0s
+2026-09-29T18:10:44.551+03:00   S7-AB-p2 r1 [ 30] S7-ladder8-F1.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.38% ra 0.45% others 0.21% exit 0 waited 0.0s
+2026-09-29T18:10:50.593+03:00   S7-AB-p2 r1 [ 31] S7-ladder8-F1#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.45% ra 0.29% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:10:56.623+03:00   S7-AB-p2 r1 [ 32] S7-ladder8-F0.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.29% ra 1.24% others 0.63% exit 0 waited 0.0s
+2026-09-29T18:11:04.385+03:00   S7-AB-p2 r1 [ 33] S7-JA#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.24% ra 0.53% others 0.15% exit 0 waited 0.0s
+2026-09-29T18:11:12.145+03:00   S7-AB-p2 r1 [ 34] S7-JA#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.53% ra 0.65% others 0.26% exit 0 waited 0.0s
+2026-09-29T18:11:18.154+03:00   S7-AB-p2 r1 [ 35] S7-JT#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.65% ra 0.78% others 0.96% exit 0 waited 0.0s
+2026-09-29T18:11:24.170+03:00   S7-AB-p2 r1 [ 36] S7-JT#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.78% ra 0.96% others 0.32% exit 0 waited 0.0s
+2026-09-29T18:11:31.500+03:00   S7-AB-p2 r1 [ 37] S7-JT-W1#s7t W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.96% ra 0.66% others 0.31% exit 0 waited 0.0s
+2026-09-29T18:11:38.804+03:00   S7-AB-p2 r1 [ 38] S7-JT-W1#s7p W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.66% ra 0.95% others 0.27% exit 0 waited 0.0s
+2026-09-29T18:11:46.567+03:00   S7-AB-p2 r2 [ 39] S7-JA-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.95% ra 0.38% others 0.33% exit 0 waited 0.0s
+2026-09-29T18:11:52.800+03:00   S7-AB-p2 r2 [ 40] S7-ladder16-F2#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.38% ra 1.23% others 0.26% exit 0 waited 0.0s
+2026-09-29T18:11:59.009+03:00   S7-AB-p2 r2 [ 41] S7-ladder16-F1.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.23% ra 0.44% others 0.44% exit 0 waited 0.0s
+2026-09-29T18:12:05.194+03:00   S7-AB-p2 r2 [ 42] S7-ladder16-F1#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.44% ra 0.49% others 0.81% exit 0 waited 0.0s
+2026-09-29T18:12:11.357+03:00   S7-AB-p2 r2 [ 43] S7-ladder16-F0.5#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.49% ra 3.63% others 0.55% exit 0 waited 0.0s
+2026-09-29T18:12:19.448+03:00   S7-AB-p2 r2 [ 44] S7-JA#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 3.63% ra 2.37% others 0.95% exit 0 waited 0.0s
+2026-09-29T18:12:27.148+03:00   S7-AB-p2 r2 [ 45] S7-JA#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 2.37% ra 1.54% others 0.23% exit 0 waited 0.0s
+2026-09-29T18:12:33.349+03:00   S7-AB-p2 r2 [ 46] S7-JT#s7t W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.54% ra 0.56% others 0.71% exit 0 waited 0.0s
+2026-09-29T18:12:39.474+03:00   S7-AB-p2 r2 [ 47] S7-JT#s7p W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.56% ra 0.46% others 0.19% exit 0 waited 0.0s
+2026-09-29T18:12:45.548+03:00   S7-AB-p2 r2 [ 48] S7-ladder8-F2#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.46% ra 0.55% others 0.1% exit 0 waited 0.0s
+2026-09-29T18:12:51.595+03:00   S7-AB-p2 r2 [ 49] S7-ladder8-F1.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.55% ra 1.2% others 0.84% exit 0 waited 0.0s
+2026-09-29T18:12:57.638+03:00   S7-AB-p2 r2 [ 50] S7-ladder8-F1#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.2% ra 0.43% others 0.1% exit 0 waited 0.0s
+2026-09-29T18:13:03.677+03:00   S7-AB-p2 r2 [ 51] S7-ladder8-F0.5#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.43% ra 0.39% others 1.64% exit 0 waited 0.0s
+2026-09-29T18:13:11.430+03:00   S7-AB-p2 r2 [ 52] S7-JA#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.39% ra 1.0% others 0.22% exit 0 waited 0.0s
+2026-09-29T18:13:19.186+03:00   S7-AB-p2 r2 [ 53] S7-JA#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.0% ra 1.3% others 0.3% exit 0 waited 0.0s
+2026-09-29T18:13:25.191+03:00   S7-AB-p2 r2 [ 54] S7-JT#s7t W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.3% ra 0.68% others 0.11% exit 0 waited 0.0s
+2026-09-29T18:13:31.208+03:00   S7-AB-p2 r2 [ 55] S7-JT#s7p W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.68% ra 0.62% others 0.22% exit 0 waited 0.0s
+2026-09-29T18:13:38.516+03:00   S7-AB-p2 r2 [ 56] S7-JT-W1#s7t W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.62% ra 0.66% others 0.05% exit 0 waited 0.0s
+2026-09-29T18:13:45.825+03:00   S7-AB-p2 r2 [ 57] S7-JT-W1#s7p W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.66% ra 1.31% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:13:45.825+03:00 S7-AB-p2: re-running 1 process(es) at the end of the pass: [(18, 0, 'S7-JT-W1', 's7t', 1, 'contaminated')]
+2026-09-29T18:13:53.209+03:00   S7-AB-p2 r0 [ 18] S7-JT-W1#s7t W=1 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 1.31% ra 0.45% others 0.26% exit 0 waited 0.0s
+2026-09-29T18:13:53.209+03:00 S7-AB-p2: done
+2026-09-29T18:13:53.214+03:00 SPLIT-p0: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T18:16:03.677+03:00 SPLIT-p0: idle reached; {'time': '2026-09-29T18:16:03.677+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T18:16:13.743+03:00 SPLIT-p0: opening receipt 1.02% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T18:16:19.832+03:00   SPLIT-p0 warm-up SPLIT-J-T#parent W=8 (untimed): pose 0x30c5438bc6ad9ffa expect match rb 1.02% ra 0.2% others 0.2% exit 0 waited 0.0s
+2026-09-29T18:16:26.184+03:00   SPLIT-p0 r0 [  1] SPLIT-J-T-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.2% ra 0.32% others 0.24% exit 0 waited 0.0s
+2026-09-29T18:16:32.402+03:00   SPLIT-p0 r0 [  2] SPLIT-J-T#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.32% ra 0.72% others 0.09% exit 0 waited 0.0s
+2026-09-29T18:16:38.640+03:00   SPLIT-p0 r0 [  3] SPLIT-J-T-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.72% ra 0.48% others 0.09% exit 0 waited 0.0s
+2026-09-29T18:16:44.753+03:00   SPLIT-p0 r0 [  4] SPLIT-J-T#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.48% ra 0.41% others 0.1% exit 0 waited 0.0s
+2026-09-29T18:16:52.159+03:00   SPLIT-p0 r0 [  5] SPLIT-J-T-a#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.41% ra 0.76% others 0.13% exit 0 waited 0.0s
+2026-09-29T18:16:59.463+03:00   SPLIT-p0 r0 [  6] SPLIT-J-T#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.76% ra 1.03% others 0.31% exit 0 waited 0.0s
+2026-09-29T18:17:05.822+03:00   SPLIT-p0 r1 [  7] SPLIT-J-T-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.03% ra 0.63% others 0.24% exit 0 waited 0.0s
+2026-09-29T18:17:12.031+03:00   SPLIT-p0 r1 [  8] SPLIT-J-T#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.63% ra 2.36% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:17:18.267+03:00   SPLIT-p0 r1 [  9] SPLIT-J-T-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.36% ra 0.29% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:17:24.371+03:00   SPLIT-p0 r1 [ 10] SPLIT-J-T#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.29% ra 0.3% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:17:31.781+03:00   SPLIT-p0 r1 [ 11] SPLIT-J-T-a#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.3% ra 1.04% others 0.31% exit 0 waited 0.0s
+2026-09-29T18:17:39.078+03:00   SPLIT-p0 r1 [ 12] SPLIT-J-T#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.04% ra 0.68% others 0.71% exit 0 waited 0.0s
+2026-09-29T18:17:45.442+03:00   SPLIT-p0 r2 [ 13] SPLIT-J-T-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.68% ra 0.74% others 0.16% exit 0 waited 0.0s
+2026-09-29T18:17:51.662+03:00   SPLIT-p0 r2 [ 14] SPLIT-J-T#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.74% ra 0.43% others 0.26% exit 0 waited 0.0s
+2026-09-29T18:17:57.902+03:00   SPLIT-p0 r2 [ 15] SPLIT-J-T-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.43% ra 1.08% others 0.18% exit 0 waited 0.0s
+2026-09-29T18:18:04.004+03:00   SPLIT-p0 r2 [ 16] SPLIT-J-T#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.08% ra 1.43% others 0.39% exit 0 waited 0.0s
+2026-09-29T18:18:11.427+03:00   SPLIT-p0 r2 [ 17] SPLIT-J-T-a#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.43% ra 0.67% others 0.34% exit 0 waited 0.0s
+2026-09-29T18:18:18.757+03:00   SPLIT-p0 r2 [ 18] SPLIT-J-T#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.67% ra 0.49% others 0.31% exit 0 waited 0.0s
+2026-09-29T18:18:18.757+03:00 SPLIT-p0: done
+2026-09-29T18:18:18.759+03:00 SPLIT-p1: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T18:20:29.248+03:00 SPLIT-p1: idle reached; {'time': '2026-09-29T18:20:29.248+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T18:20:39.314+03:00 SPLIT-p1: opening receipt 0.53% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T18:20:45.406+03:00   SPLIT-p1 warm-up SPLIT-J-T#parent W=8 (untimed): pose 0x30c5438bc6ad9ffa expect match rb 0.53% ra 0.98% others 0.3% exit 0 waited 0.0s
+2026-09-29T18:20:52.700+03:00   SPLIT-p1 r0 [  1] SPLIT-J-T#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.98% ra 0.7% others 0.05% exit 0 waited 0.0s
+2026-09-29T18:21:00.118+03:00   SPLIT-p1 r0 [  2] SPLIT-J-T-a#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.7% ra 0.8% others 0.3% exit 0 waited 0.0s
+2026-09-29T18:21:06.212+03:00   SPLIT-p1 r0 [  3] SPLIT-J-T#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.8% ra 0.38% others 0.2% exit 0 waited 0.0s
+2026-09-29T18:21:12.453+03:00   SPLIT-p1 r0 [  4] SPLIT-J-T-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.38% ra 1.15% others 0.44% exit 0 waited 0.0s
+2026-09-29T18:21:18.673+03:00   SPLIT-p1 r0 [  5] SPLIT-J-T#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.15% ra 0.46% others 0.53% exit 0 waited 0.0s
+2026-09-29T18:21:25.038+03:00   SPLIT-p1 r0 [  6] SPLIT-J-T-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.46% ra 0.23% others 0.16% exit 0 waited 0.0s
+2026-09-29T18:21:32.338+03:00   SPLIT-p1 r1 [  7] SPLIT-J-T#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.23% ra 0.83% others 0.27% exit 0 waited 0.0s
+2026-09-29T18:21:39.754+03:00   SPLIT-p1 r1 [  8] SPLIT-J-T-a#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.83% ra 0.66% others 0.34% exit 0 waited 0.0s
+2026-09-29T18:21:45.850+03:00   SPLIT-p1 r1 [  9] SPLIT-J-T#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.66% ra 0.66% others 0.29% exit 0 waited 0.0s
+2026-09-29T18:21:52.086+03:00   SPLIT-p1 r1 [ 10] SPLIT-J-T-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.66% ra 0.34% others 0.35% exit 0 waited 0.0s
+2026-09-29T18:21:58.301+03:00   SPLIT-p1 r1 [ 11] SPLIT-J-T#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.34% ra 0.55% others 0.27% exit 0 waited 0.0s
+2026-09-29T18:22:04.660+03:00   SPLIT-p1 r1 [ 12] SPLIT-J-T-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.55% ra 0.38% others 0.39% exit 0 waited 0.0s
+2026-09-29T18:22:11.956+03:00   SPLIT-p1 r2 [ 13] SPLIT-J-T#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.38% ra 3.11% others 0.36% exit 0 waited 0.0s
+2026-09-29T18:22:19.385+03:00   SPLIT-p1 r2 [ 14] SPLIT-J-T-a#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 3.11% ra 0.58% others 0.72% exit 0 waited 0.0s
+2026-09-29T18:22:25.478+03:00   SPLIT-p1 r2 [ 15] SPLIT-J-T#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.58% ra 0.57% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:22:31.715+03:00   SPLIT-p1 r2 [ 16] SPLIT-J-T-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.57% ra 0.3% others 0.26% exit 0 waited 0.0s
+2026-09-29T18:22:37.941+03:00   SPLIT-p1 r2 [ 17] SPLIT-J-T#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.3% ra 1.09% others 0.26% exit 0 waited 0.0s
+2026-09-29T18:22:44.304+03:00   SPLIT-p1 r2 [ 18] SPLIT-J-T-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.09% ra 0.54% others 0.48% exit 0 waited 0.0s
+2026-09-29T18:22:44.304+03:00 SPLIT-p1: done
+2026-09-29T18:22:44.306+03:00 SPLIT-p2: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T18:24:54.800+03:00 SPLIT-p2: idle reached; {'time': '2026-09-29T18:24:54.800+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T18:25:04.864+03:00 SPLIT-p2: opening receipt 1.6% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T18:25:10.952+03:00   SPLIT-p2 warm-up SPLIT-J-T#parent W=8 (untimed): pose 0x30c5438bc6ad9ffa expect match rb 1.6% ra 0.43% others 0.1% exit 0 waited 0.0s
+2026-09-29T18:25:17.327+03:00   SPLIT-p2 r0 [  1] SPLIT-J-T-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.43% ra 0.72% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:25:23.536+03:00   SPLIT-p2 r0 [  2] SPLIT-J-T#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.72% ra 0.6% others 0.18% exit 0 waited 0.0s
+2026-09-29T18:25:29.769+03:00   SPLIT-p2 r0 [  3] SPLIT-J-T-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.6% ra 0.97% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:25:35.871+03:00   SPLIT-p2 r0 [  4] SPLIT-J-T#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.97% ra 0.57% others 0.1% exit 0 waited 0.0s
+2026-09-29T18:25:43.314+03:00   SPLIT-p2 r0 [  5] SPLIT-J-T-a#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.57% ra 0.47% others 0.47% exit 0 waited 0.0s
+2026-09-29T18:25:50.606+03:00   SPLIT-p2 r0 [  6] SPLIT-J-T#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.47% ra 0.42% others 0.4% exit 0 waited 0.0s
+2026-09-29T18:25:56.963+03:00   SPLIT-p2 r1 [  7] SPLIT-J-T-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.42% ra 0.92% others 0.16% exit 0 waited 0.0s
+2026-09-29T18:26:03.177+03:00   SPLIT-p2 r1 [  8] SPLIT-J-T#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.92% ra 0.55% others 0.27% exit 0 waited 0.0s
+2026-09-29T18:26:09.405+03:00   SPLIT-p2 r1 [  9] SPLIT-J-T-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.55% ra 0.37% others 0.81% exit 0 waited 0.0s
+2026-09-29T18:26:15.500+03:00   SPLIT-p2 r1 [ 10] SPLIT-J-T#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.37% ra 0.62% others 0.19% exit 0 waited 0.0s
+2026-09-29T18:26:22.954+03:00   SPLIT-p2 r1 [ 11] SPLIT-J-T-a#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.62% ra 1.16% others 0.26% exit 0 waited 0.0s
+2026-09-29T18:26:30.279+03:00   SPLIT-p2 r1 [ 12] SPLIT-J-T#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.16% ra 0.49% others 0.13% exit 0 waited 0.0s
+2026-09-29T18:26:36.638+03:00   SPLIT-p2 r2 [ 13] SPLIT-J-T-a#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.49% ra 0.35% others 0.16% exit 0 waited 0.0s
+2026-09-29T18:26:42.845+03:00   SPLIT-p2 r2 [ 14] SPLIT-J-T#parent W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.35% ra 0.43% others 0.09% exit 0 waited 0.0s
+2026-09-29T18:26:49.073+03:00   SPLIT-p2 r2 [ 15] SPLIT-J-T-a#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.43% ra 1.17% others 0.09% exit 0 waited 0.0s
+2026-09-29T18:26:55.169+03:00   SPLIT-p2 r2 [ 16] SPLIT-J-T#parent W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.17% ra 0.59% others 0.2% exit 0 waited 0.0s
+2026-09-29T18:27:02.621+03:00   SPLIT-p2 r2 [ 17] SPLIT-J-T-a#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.59% ra 0.66% others 0.13% exit 0 waited 0.0s
+2026-09-29T18:27:09.936+03:00   SPLIT-p2 r2 [ 18] SPLIT-J-T#parent W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.66% ra 0.39% others 0.35% exit 0 waited 0.0s
+2026-09-29T18:27:09.937+03:00 SPLIT-p2: done
+2026-09-29T18:27:09.940+03:00 omega-v2-p0: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T18:30:20.483+03:00 omega-v2-p0: idle reached; {'time': '2026-09-29T18:30:20.483+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T18:30:30.550+03:00 omega-v2-p0: opening receipt 1.21% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T18:30:39.437+03:00   omega-v2-p0 warm-up omega2-worker#omega2 W=0 (untimed): summaries 36 rb 1.21% ra 2.55% others 2.17% exit 0 waited 0.0s OTHERS-BUSY(2.17%)
+2026-09-29T18:30:45.138+03:00   omega-v2-p0 r0 [  1] omega-wgap-external#omega2 W=0: summaries 8 rb 2.55% ra 1.72% others 1.6% exit 0 waited 0.0s
+2026-09-29T18:30:50.841+03:00   omega-v2-p0 r0 [  2] omega-wgap-worker#omega2 W=0: summaries 8 rb 1.72% ra 2.03% others 1.28% exit 0 waited 0.0s
+2026-09-29T18:31:20.312+03:00   omega-v2-p0 r0 [  3] omega2-gap-external#omega2 W=0: summaries 8 rb 2.03% ra 2.09% others 0.59% exit 0 waited 0.0s
+2026-09-29T18:31:49.895+03:00   omega-v2-p0 r0 [  4] omega2-gap-worker#omega2 W=0: summaries 8 rb 2.09% ra 2.59% others 0.68% exit 0 waited 0.0s
+2026-09-29T18:31:58.469+03:00   omega-v2-p0 r0 [  5] omega2-external#omega2 W=0: summaries 36 rb 2.59% ra 1.9% others 1.32% exit 0 waited 0.0s
+2026-09-29T18:32:07.391+03:00   omega-v2-p0 r0 [  6] omega2-worker#omega2 W=0: summaries 36 rb 1.9% ra 7.46% others 2.17% exit 0 waited 0.0s CONTAMINATED-after(7.46%) OTHERS-BUSY(2.17%)
+2026-09-29T18:32:38.118+03:00   omega-v2-p0 r1 [  7] omega-wgap-external#omega2 W=0: summaries 8 rb 2.89% ra 1.67% others 1.12% exit 0 waited 25.0s
+2026-09-29T18:32:43.827+03:00   omega-v2-p0 r1 [  8] omega-wgap-worker#omega2 W=0: summaries 8 rb 1.67% ra 3.37% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:33:13.455+03:00   omega-v2-p0 r1 [  9] omega2-gap-external#omega2 W=0: summaries 8 rb 3.37% ra 3.14% others 4.03% exit 0 waited 0.0s OTHERS-BUSY(4.03%)
+2026-09-29T18:33:43.096+03:00   omega-v2-p0 r1 [ 10] omega2-gap-worker#omega2 W=0: summaries 8 rb 3.14% ra 3.61% others 1.25% exit 0 waited 0.0s
+2026-09-29T18:33:51.879+03:00   omega-v2-p0 r1 [ 11] omega2-external#omega2 W=0: summaries 36 rb 3.61% ra 10.51% others 3.21% exit 0 waited 0.0s CONTAMINATED-after(10.51%) OTHERS-BUSY(3.21%)
+2026-09-29T18:34:25.729+03:00   omega-v2-p0 r1 [ 12] omega2-worker#omega2 W=0: summaries 36 rb 2.62% ra 1.35% others 0.71% exit 0 waited 25.0s
+2026-09-29T18:34:31.439+03:00   omega-v2-p0 r2 [ 13] omega-wgap-external#omega2 W=0: summaries 8 rb 1.35% ra 1.33% others 0.16% exit 0 waited 0.0s
+2026-09-29T18:34:37.158+03:00   omega-v2-p0 r2 [ 14] omega-wgap-worker#omega2 W=0: summaries 8 rb 1.33% ra 4.92% others 4.68% exit 0 waited 0.0s OTHERS-BUSY(4.68%)
+2026-09-29T18:35:06.684+03:00   omega-v2-p0 r2 [ 15] omega2-gap-external#omega2 W=0: summaries 8 rb 4.92% ra 3.98% others 1.58% exit 0 waited 0.0s
+2026-09-29T18:35:36.517+03:00   omega-v2-p0 r2 [ 16] omega2-gap-worker#omega2 W=0: summaries 8 rb 3.98% ra 7.27% others 5.97% exit 0 waited 0.0s CONTAMINATED-after(7.27%) OTHERS-BUSY(5.97%)
+2026-09-29T18:36:10.165+03:00   omega-v2-p0 r2 [ 17] omega2-external#omega2 W=0: summaries 36 rb 2.61% ra 5.25% others 0.69% exit 0 waited 25.0s CONTAMINATED-after(5.25%)
+2026-09-29T18:36:44.038+03:00   omega-v2-p0 r2 [ 18] omega2-worker#omega2 W=0: summaries 36 rb 2.45% ra 5.23% others 1.72% exit 0 waited 25.0s CONTAMINATED-after(5.23%)
+2026-09-29T18:36:44.038+03:00 omega-v2-p0: re-running 7 process(es) at the end of the pass: [(6, 0, 'omega2-worker', 'omega2', 0, 'contaminated'), (9, 1, 'omega2-gap-external', 'omega2', 0, 'contaminated'), (11, 1, 'omega2-external', 'omega2', 0, 'contaminated'), (14, 2, 'omega-wgap-worker', 'omega2', 0, 'contaminated'), (16, 2, 'omega2-gap-worker', 'omega2', 0, 'contaminated'), (17, 2, 'omega2-external', 'omega2', 0, 'contaminated'), (18, 2, 'omega2-worker', 'omega2', 0, 'contaminated')]
+2026-09-29T18:37:17.983+03:00   omega-v2-p0 r0 [  6] omega2-worker#omega2 W=0 RERUN (contaminated): summaries 36 rb 1.84% ra 1.32% others 0.59% exit 0 waited 25.0s
+2026-09-29T18:37:47.555+03:00   omega-v2-p0 r1 [  9] omega2-gap-external#omega2 W=0 RERUN (contaminated): summaries 8 rb 1.32% ra 7.54% others 2.33% exit 0 waited 0.0s CONTAMINATED-after(7.54%) OTHERS-BUSY(2.33%)
+2026-09-29T18:38:46.266+03:00   omega-v2-p0 r1 [ 11] omega2-external#omega2 W=0 RERUN (contaminated): summaries 36 rb 3.34% ra 3.38% others 1.05% exit 0 waited 50.1s
+2026-09-29T18:38:51.973+03:00   omega-v2-p0 r2 [ 14] omega-wgap-worker#omega2 W=0 RERUN (contaminated): summaries 8 rb 3.38% ra 3.89% others 0.8% exit 0 waited 0.0s
+2026-09-29T18:39:21.681+03:00   omega-v2-p0 r2 [ 16] omega2-gap-worker#omega2 W=0 RERUN (contaminated): summaries 8 rb 3.89% ra 3.64% others 2.79% exit 0 waited 0.0s OTHERS-BUSY(2.79%)
+2026-09-29T18:39:30.352+03:00   omega-v2-p0 r2 [ 17] omega2-external#omega2 W=0 RERUN (contaminated): summaries 36 rb 3.64% ra 1.64% others 0.96% exit 0 waited 0.0s
+2026-09-29T18:39:39.211+03:00   omega-v2-p0 r2 [ 18] omega2-worker#omega2 W=0 RERUN (contaminated): summaries 36 rb 1.64% ra 1.89% others 0.83% exit 0 waited 0.0s
+2026-09-29T18:39:39.212+03:00 omega-v2-p0: done
+2026-09-29T18:39:39.214+03:00 omega-v2-p1: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T18:41:49.747+03:00 omega-v2-p1: idle reached; {'time': '2026-09-29T18:41:49.747+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T18:41:59.814+03:00 omega-v2-p1: opening receipt 1.23% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T18:42:08.636+03:00   omega-v2-p1 warm-up omega2-worker#omega2 W=0 (untimed): summaries 36 rb 1.23% ra 0.96% others 0.39% exit 0 waited 0.0s
+2026-09-29T18:42:17.559+03:00   omega-v2-p1 r0 [  1] omega2-worker#omega2 W=0: summaries 36 rb 0.96% ra 1.75% others 0.52% exit 0 waited 0.0s
+2026-09-29T18:42:26.195+03:00   omega-v2-p1 r0 [  2] omega2-external#omega2 W=0: summaries 36 rb 1.75% ra 1.26% others 1.22% exit 0 waited 0.0s
+2026-09-29T18:42:55.766+03:00   omega-v2-p1 r0 [  3] omega2-gap-worker#omega2 W=0: summaries 8 rb 1.26% ra 2.39% others 1.33% exit 0 waited 0.0s
+2026-09-29T18:43:25.361+03:00   omega-v2-p1 r0 [  4] omega2-gap-external#omega2 W=0: summaries 8 rb 2.39% ra 13.76% others 2.19% exit 0 waited 0.0s CONTAMINATED-after(13.76%) OTHERS-BUSY(2.19%)
+2026-09-29T18:43:56.124+03:00   omega-v2-p1 r0 [  5] omega-wgap-worker#omega2 W=0: summaries 8 rb 2.91% ra 3.56% others 0.8% exit 0 waited 25.0s
+2026-09-29T18:44:01.853+03:00   omega-v2-p1 r0 [  6] omega-wgap-external#omega2 W=0: summaries 8 rb 3.56% ra 2.17% others 1.25% exit 0 waited 0.0s
+2026-09-29T18:44:10.810+03:00   omega-v2-p1 r1 [  7] omega2-worker#omega2 W=0: summaries 36 rb 2.17% ra 12.27% others 2.51% exit 0 waited 0.0s CONTAMINATED-after(12.27%) OTHERS-BUSY(2.51%)
+2026-09-29T18:45:59.804+03:00   omega-v2-p1 r1 [  8] omega2-external#omega2 W=0: summaries 36 rb 4.95% ra 7.46% others 6.69% exit 0 waited 100.2s CONTAMINATED-after(7.46%) OTHERS-BUSY(6.69%)
+2026-09-29T18:46:54.424+03:00   omega-v2-p1 r1 [  9] omega2-gap-worker#omega2 W=0: summaries 8 rb 2.65% ra 3.96% others 1.85% exit 0 waited 25.0s
+2026-09-29T18:47:24.243+03:00   omega-v2-p1 r1 [ 10] omega2-gap-external#omega2 W=0: summaries 8 rb 3.96% ra 11.65% others 5.32% exit 0 waited 0.0s CONTAMINATED-after(11.65%) OTHERS-BUSY(5.32%)
+2026-09-29T18:48:45.072+03:00   omega-v2-p1 r1 [ 11] omega-wgap-worker#omega2 W=0: summaries 8 rb 1.81% ra 3.53% others 0.47% exit 0 waited 75.1s
+2026-09-29T18:48:50.808+03:00   omega-v2-p1 r1 [ 12] omega-wgap-external#omega2 W=0: summaries 8 rb 3.53% ra 14.23% others 7.14% exit 0 waited 0.0s CONTAMINATED-after(14.23%) OTHERS-BUSY(7.14%)
+2026-09-29T18:49:24.615+03:00   omega-v2-p1 r2 [ 13] omega2-worker#omega2 W=0: summaries 36 rb 3.95% ra 1.54% others 1.01% exit 0 waited 25.0s
+2026-09-29T18:49:33.270+03:00   omega-v2-p1 r2 [ 14] omega2-external#omega2 W=0: summaries 36 rb 1.54% ra 5.79% others 1.92% exit 0 waited 0.0s CONTAMINATED-after(5.79%)
+2026-09-29T18:50:27.976+03:00   omega-v2-p1 r2 [ 15] omega2-gap-worker#omega2 W=0: summaries 8 rb 2.39% ra 2.81% others 2.03% exit 0 waited 25.0s OTHERS-BUSY(2.03%)
+2026-09-29T18:50:57.534+03:00   omega-v2-p1 r2 [ 16] omega2-gap-external#omega2 W=0: summaries 8 rb 2.81% ra 1.79% others 1.43% exit 0 waited 0.0s
+2026-09-29T18:51:03.242+03:00   omega-v2-p1 r2 [ 17] omega-wgap-worker#omega2 W=0: summaries 8 rb 1.79% ra 7.5% others 1.9% exit 0 waited 0.0s CONTAMINATED-after(7.5%)
+2026-09-29T18:51:33.969+03:00   omega-v2-p1 r2 [ 18] omega-wgap-external#omega2 W=0: summaries 8 rb 1.72% ra 7.84% others 0.49% exit 0 waited 25.0s CONTAMINATED-after(7.84%)
+2026-09-29T18:51:33.969+03:00 omega-v2-p1: re-running 9 process(es) at the end of the pass: [(4, 0, 'omega2-gap-external', 'omega2', 0, 'contaminated'), (7, 1, 'omega2-worker', 'omega2', 0, 'contaminated'), (8, 1, 'omega2-external', 'omega2', 0, 'contaminated'), (10, 1, 'omega2-gap-external', 'omega2', 0, 'contaminated'), (12, 1, 'omega-wgap-external', 'omega2', 0, 'contaminated'), (14, 2, 'omega2-external', 'omega2', 0, 'contaminated'), (15, 2, 'omega2-gap-worker', 'omega2', 0, 'contaminated'), (17, 2, 'omega-wgap-worker', 'omega2', 0, 'contaminated'), (18, 2, 'omega-wgap-external', 'omega2', 0, 'contaminated')]
+2026-09-29T18:53:18.523+03:00   omega-v2-p1 r0 [  4] omega2-gap-external#omega2 W=0 RERUN (contaminated): summaries 8 rb 0.41% ra 0.91% others 0.36% exit 0 waited 75.1s
+2026-09-29T18:53:27.312+03:00   omega-v2-p1 r1 [  7] omega2-worker#omega2 W=0 RERUN (contaminated): summaries 36 rb 0.91% ra 0.89% others 0.4% exit 0 waited 0.0s
+2026-09-29T18:53:35.932+03:00   omega-v2-p1 r1 [  8] omega2-external#omega2 W=0 RERUN (contaminated): summaries 36 rb 0.89% ra 0.64% others 0.25% exit 0 waited 0.0s
+2026-09-29T18:54:05.397+03:00   omega-v2-p1 r1 [ 10] omega2-gap-external#omega2 W=0 RERUN (contaminated): summaries 8 rb 0.64% ra 1.1% others 0.37% exit 0 waited 0.0s
+2026-09-29T18:54:11.093+03:00   omega-v2-p1 r1 [ 12] omega-wgap-external#omega2 W=0 RERUN (contaminated): summaries 8 rb 1.1% ra 0.81% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:54:19.695+03:00   omega-v2-p1 r2 [ 14] omega2-external#omega2 W=0 RERUN (contaminated): summaries 36 rb 0.81% ra 0.78% others 0.34% exit 0 waited 0.0s
+2026-09-29T18:54:49.223+03:00   omega-v2-p1 r2 [ 15] omega2-gap-worker#omega2 W=0 RERUN (contaminated): summaries 8 rb 0.78% ra 1.08% others 0.24% exit 0 waited 0.0s
+2026-09-29T18:54:54.934+03:00   omega-v2-p1 r2 [ 17] omega-wgap-worker#omega2 W=0 RERUN (contaminated): summaries 8 rb 1.08% ra 2.55% others 0.16% exit 0 waited 0.0s
+2026-09-29T18:55:00.630+03:00   omega-v2-p1 r2 [ 18] omega-wgap-external#omega2 W=0 RERUN (contaminated): summaries 8 rb 2.55% ra 0.53% others 0.0% exit 0 waited 0.0s
+2026-09-29T18:55:00.630+03:00 omega-v2-p1: done
+2026-09-29T18:55:00.633+03:00 omega-v2-p2: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T19:03:11.181+03:00 omega-v2-p2: idle reached; {'time': '2026-09-29T19:03:11.181+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T19:03:21.245+03:00 omega-v2-p2: opening receipt 2.92% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T19:03:30.051+03:00   omega-v2-p2 warm-up omega2-worker#omega2 W=0 (untimed): summaries 36 rb 2.92% ra 0.96% others 0.11% exit 0 waited 0.0s
+2026-09-29T19:03:35.739+03:00   omega-v2-p2 r0 [  1] omega-wgap-external#omega2 W=0: summaries 8 rb 0.96% ra 1.11% others 0.16% exit 0 waited 0.0s
+2026-09-29T19:03:41.431+03:00   omega-v2-p2 r0 [  2] omega-wgap-worker#omega2 W=0: summaries 8 rb 1.11% ra 1.09% others 0.32% exit 0 waited 0.0s
+2026-09-29T19:04:10.903+03:00   omega-v2-p2 r0 [  3] omega2-gap-external#omega2 W=0: summaries 8 rb 1.09% ra 2.47% others 1.23% exit 0 waited 0.0s
+2026-09-29T19:04:40.440+03:00   omega-v2-p2 r0 [  4] omega2-gap-worker#omega2 W=0: summaries 8 rb 2.47% ra 6.45% others 0.3% exit 0 waited 0.0s CONTAMINATED-after(6.45%)
+2026-09-29T19:05:14.094+03:00   omega-v2-p2 r0 [  5] omega2-external#omega2 W=0: summaries 36 rb 1.27% ra 2.36% others 0.22% exit 0 waited 25.0s
+2026-09-29T19:05:22.936+03:00   omega-v2-p2 r0 [  6] omega2-worker#omega2 W=0: summaries 36 rb 2.36% ra 3.82% others 0.03% exit 0 waited 0.0s
+2026-09-29T19:05:28.626+03:00   omega-v2-p2 r1 [  7] omega-wgap-external#omega2 W=0: summaries 8 rb 3.82% ra 2.38% others 2.06% exit 0 waited 0.0s OTHERS-BUSY(2.06%)
+2026-09-29T19:05:34.316+03:00   omega-v2-p2 r1 [  8] omega-wgap-worker#omega2 W=0: summaries 8 rb 2.38% ra 2.1% others 2.37% exit 0 waited 0.0s OTHERS-BUSY(2.37%)
+2026-09-29T19:06:03.791+03:00   omega-v2-p2 r1 [  9] omega2-gap-external#omega2 W=0: summaries 8 rb 2.1% ra 0.79% others 0.3% exit 0 waited 0.0s
+2026-09-29T19:06:33.312+03:00   omega-v2-p2 r1 [ 10] omega2-gap-worker#omega2 W=0: summaries 8 rb 0.79% ra 1.03% others 1.13% exit 0 waited 0.0s
+2026-09-29T19:06:41.948+03:00   omega-v2-p2 r1 [ 11] omega2-external#omega2 W=0: summaries 36 rb 1.03% ra 1.82% others 0.11% exit 0 waited 0.0s
+2026-09-29T19:06:50.796+03:00   omega-v2-p2 r1 [ 12] omega2-worker#omega2 W=0: summaries 36 rb 1.82% ra 0.79% others 0.13% exit 0 waited 0.0s
+2026-09-29T19:06:56.486+03:00   omega-v2-p2 r2 [ 13] omega-wgap-external#omega2 W=0: summaries 8 rb 0.79% ra 2.56% others 3.01% exit 0 waited 0.0s OTHERS-BUSY(3.01%)
+2026-09-29T19:07:02.181+03:00   omega-v2-p2 r2 [ 14] omega-wgap-worker#omega2 W=0: summaries 8 rb 2.56% ra 3.45% others 2.23% exit 0 waited 0.0s OTHERS-BUSY(2.23%)
+2026-09-29T19:07:31.664+03:00   omega-v2-p2 r2 [ 15] omega2-gap-external#omega2 W=0: summaries 8 rb 3.45% ra 1.25% others 0.41% exit 0 waited 0.0s
+2026-09-29T19:08:01.212+03:00   omega-v2-p2 r2 [ 16] omega2-gap-worker#omega2 W=0: summaries 8 rb 1.25% ra 2.19% others 1.19% exit 0 waited 0.0s
+2026-09-29T19:08:09.747+03:00   omega-v2-p2 r2 [ 17] omega2-external#omega2 W=0: summaries 36 rb 2.19% ra 1.25% others 1.18% exit 0 waited 0.0s
+2026-09-29T19:08:18.580+03:00   omega-v2-p2 r2 [ 18] omega2-worker#omega2 W=0: summaries 36 rb 1.25% ra 0.72% others 0.21% exit 0 waited 0.0s
+2026-09-29T19:08:18.580+03:00 omega-v2-p2: re-running 5 process(es) at the end of the pass: [(4, 0, 'omega2-gap-worker', 'omega2', 0, 'contaminated'), (7, 1, 'omega-wgap-external', 'omega2', 0, 'contaminated'), (8, 1, 'omega-wgap-worker', 'omega2', 0, 'contaminated'), (13, 2, 'omega-wgap-external', 'omega2', 0, 'contaminated'), (14, 2, 'omega-wgap-worker', 'omega2', 0, 'contaminated')]
+2026-09-29T19:08:48.124+03:00   omega-v2-p2 r0 [  4] omega2-gap-worker#omega2 W=0 RERUN (contaminated): summaries 8 rb 0.72% ra 1.22% others 1.28% exit 0 waited 0.0s
+2026-09-29T19:08:53.818+03:00   omega-v2-p2 r1 [  7] omega-wgap-external#omega2 W=0 RERUN (contaminated): summaries 8 rb 1.22% ra 1.78% others 0.16% exit 0 waited 0.0s
+2026-09-29T19:08:59.517+03:00   omega-v2-p2 r1 [  8] omega-wgap-worker#omega2 W=0 RERUN (contaminated): summaries 8 rb 1.78% ra 1.82% others 0.95% exit 0 waited 0.0s
+2026-09-29T19:09:05.205+03:00   omega-v2-p2 r2 [ 13] omega-wgap-external#omega2 W=0 RERUN (contaminated): summaries 8 rb 1.82% ra 1.05% others 0.8% exit 0 waited 0.0s
+2026-09-29T19:09:10.900+03:00   omega-v2-p2 r2 [ 14] omega-wgap-worker#omega2 W=0 RERUN (contaminated): summaries 8 rb 1.05% ra 2.75% others 0.62% exit 0 waited 0.0s
+2026-09-29T19:09:10.901+03:00 omega-v2-p2: done
+2026-09-29T19:09:10.903+03:00 F3-p0: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T19:11:21.379+03:00 F3-p0: idle reached; {'time': '2026-09-29T19:11:21.379+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T19:11:31.443+03:00 F3-p0: opening receipt 2.35% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T19:11:37.572+03:00   F3-p0 warm-up F3-JT-leaflist#tip W=8 (untimed): pose 0x30c5438bc6ad9ffa expect match rb 2.35% ra 1.91% others 2.23% exit 0 waited 0.0s OTHERS-BUSY(2.23%)
+2026-09-29T19:11:44.469+03:00   F3-p0 r0 [  1] F3-RT-kd#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 1.91% ra 2.95% others 2.7% exit 0 waited 0.0s OTHERS-BUSY(2.7%)
+2026-09-29T19:11:51.278+03:00   F3-p0 r0 [  2] F3-RT-leaflist#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 2.95% ra 1.17% others 1.58% exit 0 waited 0.0s
+2026-09-29T19:11:57.505+03:00   F3-p0 r0 [  3] F3-JT-kd#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.17% ra 1.39% others 0.09% exit 0 waited 0.0s
+2026-09-29T19:12:03.736+03:00   F3-p0 r0 [  4] F3-JT-leaflist#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.39% ra 0.76% others 0.35% exit 0 waited 0.0s
+2026-09-29T19:12:10.248+03:00   F3-p0 r0 [  5] F3-RT-kd#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 0.76% ra 1.84% others 0.2% exit 0 waited 0.0s
+2026-09-29T19:12:16.854+03:00   F3-p0 r0 [  6] F3-RT-leaflist#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 1.84% ra 6.04% others 2.37% exit 0 waited 0.0s CONTAMINATED-after(6.04%) OTHERS-BUSY(2.37%)
+2026-09-29T19:12:47.991+03:00   F3-p0 r0 [  7] F3-JT-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.15% ra 0.78% others 0.0% exit 0 waited 25.0s
+2026-09-29T19:12:54.091+03:00   F3-p0 r0 [  8] F3-JT-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.78% ra 0.86% others 0.1% exit 0 waited 0.0s
+2026-09-29T19:13:00.329+03:00   F3-p0 r0 [  9] F3-TD-armed-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.86% ra 2.61% others 3.41% exit 0 waited 0.0s OTHERS-BUSY(3.41%)
+2026-09-29T19:13:06.544+03:00   F3-p0 r0 [ 10] F3-TD-armed-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.61% ra 2.71% others 2.05% exit 0 waited 0.0s OTHERS-BUSY(2.05%)
+2026-09-29T19:13:13.273+03:00   F3-p0 r0 [ 11] F3-RT-kd#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 2.71% ra 2.66% others 1.25% exit 0 waited 0.0s
+2026-09-29T19:13:20.040+03:00   F3-p0 r0 [ 12] F3-RT-leaflist#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 2.66% ra 1.19% others 1.51% exit 0 waited 0.0s
+2026-09-29T19:13:26.315+03:00   F3-p0 r0 [ 13] F3-JT-kd#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 1.19% ra 1.67% others 0.17% exit 0 waited 0.0s
+2026-09-29T19:13:32.597+03:00   F3-p0 r0 [ 14] F3-JT-leaflist#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 1.67% ra 0.96% others 0.25% exit 0 waited 0.0s
+2026-09-29T19:13:39.933+03:00   F3-p0 r0 [ 15] F3-RT-kd#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 0.96% ra 1.86% others 0.09% exit 0 waited 0.0s
+2026-09-29T19:13:47.258+03:00   F3-p0 r0 [ 16] F3-RT-leaflist#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 1.86% ra 2.09% others 2.92% exit 0 waited 0.0s OTHERS-BUSY(2.92%)
+2026-09-29T19:13:53.942+03:00   F3-p0 r0 [ 17] F3-JT-kd#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 2.09% ra 1.89% others 3.05% exit 0 waited 0.0s OTHERS-BUSY(3.05%)
+2026-09-29T19:14:00.595+03:00   F3-p0 r0 [ 18] F3-JT-leaflist#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.89% ra 2.74% others 1.43% exit 0 waited 0.0s
+2026-09-29T19:14:08.962+03:00   F3-p0 r0 [ 19] F3-RT-kd#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 2.74% ra 1.69% others 0.48% exit 0 waited 0.0s
+2026-09-29T19:14:17.459+03:00   F3-p0 r0 [ 20] F3-RT-leaflist#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 1.69% ra 1.24% others 0.09% exit 0 waited 0.0s
+2026-09-29T19:14:24.830+03:00   F3-p0 r0 [ 21] F3-JT-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.24% ra 1.01% others 0.04% exit 0 waited 0.0s
+2026-09-29T19:14:32.298+03:00   F3-p0 r0 [ 22] F3-JT-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.01% ra 2.48% others 2.25% exit 0 waited 0.0s OTHERS-BUSY(2.25%)
+2026-09-29T19:14:39.968+03:00   F3-p0 r0 [ 23] F3-TR-armed#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.48% ra 2.54% others 2.71% exit 0 waited 0.0s OTHERS-BUSY(2.71%)
+2026-09-29T19:14:52.635+03:00   F3-p0 r0 [ 24] F3-TA-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.54% ra 0.96% others 1.2% exit 0 waited 0.0s
+2026-09-29T19:15:05.309+03:00   F3-p0 r0 [ 25] F3-TA-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.96% ra 1.33% others 0.3% exit 0 waited 0.0s
+2026-09-29T19:15:13.008+03:00   F3-p0 r0 [ 26] F3-TD-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.33% ra 2.65% others 0.12% exit 0 waited 0.0s
+2026-09-29T19:15:20.596+03:00   F3-p0 r0 [ 27] F3-TD-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.65% ra 3.97% others 1.62% exit 0 waited 0.0s
+2026-09-29T19:15:27.293+03:00   F3-p0 r1 [ 28] F3-RT-kd#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 3.97% ra 3.16% others 2.18% exit 0 waited 0.0s OTHERS-BUSY(2.18%)
+2026-09-29T19:15:33.938+03:00   F3-p0 r1 [ 29] F3-RT-leaflist#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 3.16% ra 1.85% others 1.37% exit 0 waited 0.0s
+2026-09-29T19:15:40.102+03:00   F3-p0 r1 [ 30] F3-JT-kd#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.85% ra 0.84% others 0.27% exit 0 waited 0.0s
+2026-09-29T19:15:46.295+03:00   F3-p0 r1 [ 31] F3-JT-leaflist#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.84% ra 1.31% others 0.35% exit 0 waited 0.0s
+2026-09-29T19:15:52.792+03:00   F3-p0 r1 [ 32] F3-RT-kd#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 1.31% ra 0.47% others 0.28% exit 0 waited 0.0s
+2026-09-29T19:15:59.335+03:00   F3-p0 r1 [ 33] F3-RT-leaflist#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 0.47% ra 3.16% others 0.47% exit 0 waited 0.0s
+2026-09-29T19:16:05.459+03:00   F3-p0 r1 [ 34] F3-JT-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 3.16% ra 3.06% others 1.88% exit 0 waited 0.0s
+2026-09-29T19:16:11.586+03:00   F3-p0 r1 [ 35] F3-JT-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 3.06% ra 3.03% others 2.99% exit 0 waited 0.0s OTHERS-BUSY(2.99%)
+2026-09-29T19:16:17.857+03:00   F3-p0 r1 [ 36] F3-TD-armed-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 3.03% ra 1.74% others 1.95% exit 0 waited 0.0s
+2026-09-29T19:16:24.119+03:00   F3-p0 r1 [ 37] F3-TD-armed-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.74% ra 1.21% others 0.68% exit 0 waited 0.0s
+2026-09-29T19:16:30.867+03:00   F3-p0 r1 [ 38] F3-RT-kd#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 1.21% ra 1.17% others 0.3% exit 0 waited 0.0s
+2026-09-29T19:16:37.622+03:00   F3-p0 r1 [ 39] F3-RT-leaflist#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 1.17% ra 0.75% others 0.29% exit 0 waited 0.0s
+2026-09-29T19:16:43.896+03:00   F3-p0 r1 [ 40] F3-JT-kd#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.75% ra 2.05% others 0.08% exit 0 waited 0.0s
+2026-09-29T19:16:50.186+03:00   F3-p0 r1 [ 41] F3-JT-leaflist#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 2.05% ra 3.34% others 1.77% exit 0 waited 0.0s
+2026-09-29T19:16:57.521+03:00   F3-p0 r1 [ 42] F3-RT-kd#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 3.34% ra 2.74% others 2.12% exit 0 waited 0.0s OTHERS-BUSY(2.12%)
+2026-09-29T19:17:04.833+03:00   F3-p0 r1 [ 43] F3-RT-leaflist#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 2.74% ra 1.45% others 1.14% exit 0 waited 0.0s
+2026-09-29T19:17:11.522+03:00   F3-p0 r1 [ 44] F3-JT-kd#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.45% ra 1.73% others 0.55% exit 0 waited 0.0s
+2026-09-29T19:17:18.234+03:00   F3-p0 r1 [ 45] F3-JT-leaflist#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.73% ra 1.15% others 0.12% exit 0 waited 0.0s
+2026-09-29T19:17:26.733+03:00   F3-p0 r1 [ 46] F3-RT-kd#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 1.15% ra 1.38% others 0.09% exit 0 waited 0.0s
+2026-09-29T19:17:35.136+03:00   F3-p0 r1 [ 47] F3-RT-leaflist#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 1.38% ra 2.7% others 2.53% exit 0 waited 0.0s OTHERS-BUSY(2.53%)
+2026-09-29T19:17:42.538+03:00   F3-p0 r1 [ 48] F3-JT-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.7% ra 2.17% others 1.98% exit 0 waited 0.0s
+2026-09-29T19:17:49.918+03:00   F3-p0 r1 [ 49] F3-JT-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.17% ra 1.92% others 1.74% exit 0 waited 0.0s
+2026-09-29T19:17:57.679+03:00   F3-p0 r1 [ 50] F3-TR-armed#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.92% ra 1.57% others 0.18% exit 0 waited 0.0s
+2026-09-29T19:18:10.363+03:00   F3-p0 r1 [ 51] F3-TA-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.57% ra 0.72% others 0.23% exit 0 waited 0.0s
+2026-09-29T19:18:23.072+03:00   F3-p0 r1 [ 52] F3-TA-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.72% ra 3.48% others 1.95% exit 0 waited 0.0s
+2026-09-29T19:18:30.617+03:00   F3-p0 r1 [ 53] F3-TD-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 3.48% ra 2.1% others 1.65% exit 0 waited 0.0s
+2026-09-29T19:18:38.365+03:00   F3-p0 r1 [ 54] F3-TD-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.1% ra 1.15% others 0.93% exit 0 waited 0.0s
+2026-09-29T19:18:45.107+03:00   F3-p0 r2 [ 55] F3-RT-kd#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 1.15% ra 1.36% others 1.0% exit 0 waited 0.0s
+2026-09-29T19:18:51.763+03:00   F3-p0 r2 [ 56] F3-RT-leaflist#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 1.36% ra 0.94% others 0.38% exit 0 waited 0.0s
+2026-09-29T19:18:57.958+03:00   F3-p0 r2 [ 57] F3-JT-kd#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.94% ra 1.11% others 0.18% exit 0 waited 0.0s
+2026-09-29T19:19:04.145+03:00   F3-p0 r2 [ 58] F3-JT-leaflist#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.11% ra 2.68% others 2.47% exit 0 waited 0.0s OTHERS-BUSY(2.47%)
+2026-09-29T19:19:10.639+03:00   F3-p0 r2 [ 59] F3-RT-kd#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 2.68% ra 3.01% others 2.21% exit 0 waited 0.0s OTHERS-BUSY(2.21%)
+2026-09-29T19:19:17.311+03:00   F3-p0 r2 [ 60] F3-RT-leaflist#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 3.01% ra 3.07% others 3.26% exit 0 waited 0.0s OTHERS-BUSY(3.26%)
+2026-09-29T19:19:23.462+03:00   F3-p0 r2 [ 61] F3-JT-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 3.07% ra 0.84% others 2.19% exit 0 waited 0.0s OTHERS-BUSY(2.19%)
+2026-09-29T19:19:29.598+03:00   F3-p0 r2 [ 62] F3-JT-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.84% ra 2.27% others 0.0% exit 0 waited 0.0s
+2026-09-29T19:19:35.904+03:00   F3-p0 r2 [ 63] F3-TD-armed-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.27% ra 0.96% others 0.17% exit 0 waited 0.0s
+2026-09-29T19:19:42.158+03:00   F3-p0 r2 [ 64] F3-TD-armed-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.96% ra 1.47% others 0.18% exit 0 waited 0.0s
+2026-09-29T19:19:48.942+03:00   F3-p0 r2 [ 65] F3-RT-kd#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 1.47% ra 1.8% others 2.01% exit 0 waited 0.0s OTHERS-BUSY(2.01%)
+2026-09-29T19:19:55.703+03:00   F3-p0 r2 [ 66] F3-RT-leaflist#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 1.8% ra 2.02% others 1.75% exit 0 waited 0.0s
+2026-09-29T19:20:01.984+03:00   F3-p0 r2 [ 67] F3-JT-kd#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 2.02% ra 2.3% others 1.62% exit 0 waited 0.0s
+2026-09-29T19:20:08.286+03:00   F3-p0 r2 [ 68] F3-JT-leaflist#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 2.3% ra 1.02% others 2.16% exit 0 waited 0.0s OTHERS-BUSY(2.16%)
+2026-09-29T19:20:15.646+03:00   F3-p0 r2 [ 69] F3-RT-kd#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 1.02% ra 1.99% others 0.26% exit 0 waited 0.0s
+2026-09-29T19:20:23.081+03:00   F3-p0 r2 [ 70] F3-RT-leaflist#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 1.99% ra 0.78% others 0.33% exit 0 waited 0.0s
+2026-09-29T19:20:29.863+03:00   F3-p0 r2 [ 71] F3-JT-kd#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.78% ra 1.8% others 0.11% exit 0 waited 0.0s
+2026-09-29T19:20:36.521+03:00   F3-p0 r2 [ 72] F3-JT-leaflist#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.8% ra 2.92% others 1.79% exit 0 waited 0.0s
+2026-09-29T19:20:44.963+03:00   F3-p0 r2 [ 73] F3-RT-kd#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 2.92% ra 2.16% others 2.47% exit 0 waited 0.0s OTHERS-BUSY(2.47%)
+2026-09-29T19:20:53.366+03:00   F3-p0 r2 [ 74] F3-RT-leaflist#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 2.16% ra 1.36% others 1.97% exit 0 waited 0.0s
+2026-09-29T19:21:00.760+03:00   F3-p0 r2 [ 75] F3-JT-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.36% ra 1.9% others 0.17% exit 0 waited 0.0s
+2026-09-29T19:21:08.191+03:00   F3-p0 r2 [ 76] F3-JT-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.9% ra 1.63% others 0.25% exit 0 waited 0.0s
+2026-09-29T19:21:15.783+03:00   F3-p0 r2 [ 77] F3-TR-armed#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.63% ra 2.31% others 0.24% exit 0 waited 0.0s
+2026-09-29T19:21:28.530+03:00   F3-p0 r2 [ 78] F3-TA-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.31% ra 1.7% others 1.87% exit 0 waited 0.0s
+2026-09-29T19:21:41.257+03:00   F3-p0 r2 [ 79] F3-TA-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.7% ra 1.08% others 1.13% exit 0 waited 0.0s
+2026-09-29T19:21:48.849+03:00   F3-p0 r2 [ 80] F3-TD-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.08% ra 1.6% others 0.59% exit 0 waited 0.0s
+2026-09-29T19:21:56.426+03:00   F3-p0 r2 [ 81] F3-TD-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.6% ra 0.65% others 0.2% exit 0 waited 0.0s
+2026-09-29T19:21:56.433+03:00 F3-p0: re-running 19 process(es) at the end of the pass: [(1, 0, 'F3-RT-kd', 'tip', 16, 'contaminated'), (6, 0, 'F3-RT-leaflist', 'tip', 8, 'contaminated'), (9, 0, 'F3-TD-armed-kd', 'tip', 8, 'contaminated'), (10, 0, 'F3-TD-armed-leaflist', 'tip', 8, 'contaminated'), (16, 0, 'F3-RT-leaflist', 'tip', 2, 'contaminated'), (17, 0, 'F3-JT-kd', 'tip', 2, 'contaminated'), (22, 0, 'F3-JT-leaflist', 'tip', 1, 'contaminated'), (23, 0, 'F3-TR-armed', 'tip', 1, 'contaminated'), (28, 1, 'F3-RT-kd', 'tip', 16, 'contaminated'), (35, 1, 'F3-JT-leaflist', 'tip', 8, 'contaminated'), (42, 1, 'F3-RT-kd', 'tip', 2, 'contaminated'), (47, 1, 'F3-RT-leaflist', 'tip', 1, 'contaminated'), (58, 2, 'F3-JT-leaflist', 'tip', 16, 'contaminated'), (59, 2, 'F3-RT-kd', 'tip', 8, 'contaminated'), (60, 2, 'F3-RT-leaflist', 'tip', 8, 'contaminated'), (61, 2, 'F3-JT-kd', 'tip', 8, 'contaminated'), (65, 2, 'F3-RT-kd', 'tip', 4, 'contaminated'), (68, 2, 'F3-JT-leaflist', 'tip', 4, 'contaminated'), (73, 2, 'F3-RT-kd', 'tip', 1, 'contaminated')]
+2026-09-29T19:22:03.165+03:00   F3-p0 r0 [  1] F3-RT-kd#tip W=16 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 0.65% ra 3.11% others 0.24% exit 0 waited 0.0s
+2026-09-29T19:22:09.654+03:00   F3-p0 r0 [  6] F3-RT-leaflist#tip W=8 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 3.11% ra 3.31% others 1.26% exit 0 waited 0.0s
+2026-09-29T19:22:15.835+03:00   F3-p0 r0 [  9] F3-TD-armed-kd#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 3.31% ra 2.7% others 1.01% exit 0 waited 0.0s
+2026-09-29T19:22:22.063+03:00   F3-p0 r0 [ 10] F3-TD-armed-leaflist#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 2.7% ra 1.33% others 0.7% exit 0 waited 0.0s
+2026-09-29T19:22:29.437+03:00   F3-p0 r0 [ 16] F3-RT-leaflist#tip W=2 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 1.33% ra 1.75% others 0.6% exit 0 waited 0.0s
+2026-09-29T19:22:36.141+03:00   F3-p0 r0 [ 17] F3-JT-kd#tip W=2 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 1.75% ra 1.15% others 0.06% exit 0 waited 0.0s
+2026-09-29T19:22:43.705+03:00   F3-p0 r0 [ 22] F3-JT-leaflist#tip W=1 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 1.15% ra 0.88% others 0.43% exit 0 waited 0.0s
+2026-09-29T19:22:51.363+03:00   F3-p0 r0 [ 23] F3-TR-armed#tip W=1 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 0.88% ra 2.3% others 2.49% exit 0 waited 0.0s OTHERS-BUSY(2.49%)
+2026-09-29T19:22:58.045+03:00   F3-p0 r1 [ 28] F3-RT-kd#tip W=16 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 2.3% ra 9.02% others 1.29% exit 0 waited 0.0s CONTAMINATED-after(9.02%)
+2026-09-29T19:23:29.201+03:00   F3-p0 r1 [ 35] F3-JT-leaflist#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 0.79% ra 1.43% others 0.19% exit 0 waited 25.0s
+2026-09-29T19:23:36.590+03:00   F3-p0 r1 [ 42] F3-RT-kd#tip W=2 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 1.43% ra 2.29% others 2.24% exit 0 waited 0.0s OTHERS-BUSY(2.24%)
+2026-09-29T19:23:44.982+03:00   F3-p0 r1 [ 47] F3-RT-leaflist#tip W=1 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 2.29% ra 2.04% others 2.27% exit 0 waited 0.0s OTHERS-BUSY(2.27%)
+2026-09-29T19:23:51.224+03:00   F3-p0 r2 [ 58] F3-JT-leaflist#tip W=16 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 2.04% ra 2.04% others 1.51% exit 0 waited 0.0s
+2026-09-29T19:23:57.688+03:00   F3-p0 r2 [ 59] F3-RT-kd#tip W=8 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 2.04% ra 16.83% others 0.99% exit 0 waited 0.0s CONTAMINATED-after(16.83%)
+2026-09-29T19:24:29.263+03:00   F3-p0 r2 [ 60] F3-RT-leaflist#tip W=8 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 2.77% ra 2.21% others 2.74% exit 0 waited 25.0s OTHERS-BUSY(2.74%)
+2026-09-29T19:24:35.386+03:00   F3-p0 r2 [ 61] F3-JT-kd#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 2.21% ra 1.89% others 1.97% exit 0 waited 0.0s
+2026-09-29T19:24:42.161+03:00   F3-p0 r2 [ 65] F3-RT-kd#tip W=4 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 1.89% ra 1.0% others 2.08% exit 0 waited 0.0s OTHERS-BUSY(2.08%)
+2026-09-29T19:24:48.411+03:00   F3-p0 r2 [ 68] F3-JT-leaflist#tip W=4 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 1.0% ra 1.67% others 0.84% exit 0 waited 0.0s
+2026-09-29T19:24:56.859+03:00   F3-p0 r2 [ 73] F3-RT-kd#tip W=1 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 1.67% ra 0.7% others 0.14% exit 0 waited 0.0s
+2026-09-29T19:24:56.859+03:00 F3-p0: done
+2026-09-29T19:24:56.863+03:00 F3-p1: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T19:27:07.325+03:00 F3-p1: idle reached; {'time': '2026-09-29T19:27:07.325+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T19:27:17.386+03:00 F3-p1: opening receipt 2.94% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T19:27:23.498+03:00   F3-p1 warm-up F3-JT-leaflist#tip W=8 (untimed): pose 0x30c5438bc6ad9ffa expect match rb 2.94% ra 2.36% others 2.37% exit 0 waited 0.0s OTHERS-BUSY(2.37%)
+2026-09-29T19:27:31.068+03:00   F3-p1 r0 [  1] F3-TD-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.36% ra 2.6% others 2.15% exit 0 waited 0.0s OTHERS-BUSY(2.15%)
+2026-09-29T19:27:38.649+03:00   F3-p1 r0 [  2] F3-TD-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.6% ra 2.17% others 1.82% exit 0 waited 0.0s
+2026-09-29T19:27:51.330+03:00   F3-p1 r0 [  3] F3-TA-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.17% ra 1.43% others 0.12% exit 0 waited 0.0s
+2026-09-29T19:28:03.992+03:00   F3-p1 r0 [  4] F3-TA-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.43% ra 2.12% others 0.21% exit 0 waited 0.0s
+2026-09-29T19:28:11.642+03:00   F3-p1 r0 [  5] F3-TR-armed#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.12% ra 2.38% others 0.96% exit 0 waited 0.0s
+2026-09-29T19:28:19.013+03:00   F3-p1 r0 [  6] F3-JT-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.38% ra 2.56% others 1.83% exit 0 waited 0.0s
+2026-09-29T19:28:26.473+03:00   F3-p1 r0 [  7] F3-JT-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.56% ra 0.72% others 1.72% exit 0 waited 0.0s
+2026-09-29T19:28:34.859+03:00   F3-p1 r0 [  8] F3-RT-leaflist#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 0.72% ra 2.02% others 0.06% exit 0 waited 0.0s
+2026-09-29T19:28:43.289+03:00   F3-p1 r0 [  9] F3-RT-kd#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 2.02% ra 0.94% others 0.18% exit 0 waited 0.0s
+2026-09-29T19:28:49.971+03:00   F3-p1 r0 [ 10] F3-JT-leaflist#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 0.94% ra 2.79% others 0.18% exit 0 waited 0.0s
+2026-09-29T19:28:56.652+03:00   F3-p1 r0 [ 11] F3-JT-kd#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 2.79% ra 2.63% others 1.83% exit 0 waited 0.0s
+2026-09-29T19:29:03.995+03:00   F3-p1 r0 [ 12] F3-RT-leaflist#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 2.63% ra 3.14% others 1.82% exit 0 waited 0.0s
+2026-09-29T19:29:11.371+03:00   F3-p1 r0 [ 13] F3-RT-kd#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 3.14% ra 1.25% others 1.62% exit 0 waited 0.0s
+2026-09-29T19:29:17.663+03:00   F3-p1 r0 [ 14] F3-JT-leaflist#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 1.25% ra 0.62% others 0.65% exit 0 waited 0.0s
+2026-09-29T19:29:23.957+03:00   F3-p1 r0 [ 15] F3-JT-kd#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.62% ra 1.16% others 0.32% exit 0 waited 0.0s
+2026-09-29T19:29:30.744+03:00   F3-p1 r0 [ 16] F3-RT-leaflist#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 1.16% ra 1.03% others 2.29% exit 0 waited 0.0s OTHERS-BUSY(2.29%)
+2026-09-29T19:29:37.480+03:00   F3-p1 r0 [ 17] F3-RT-kd#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 1.03% ra 3.92% others 0.47% exit 0 waited 0.0s
+2026-09-29T19:29:43.767+03:00   F3-p1 r0 [ 18] F3-TD-armed-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 3.92% ra 3.32% others 2.43% exit 0 waited 0.0s OTHERS-BUSY(2.43%)
+2026-09-29T19:29:50.044+03:00   F3-p1 r0 [ 19] F3-TD-armed-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 3.32% ra 2.15% others 2.8% exit 0 waited 0.0s OTHERS-BUSY(2.8%)
+2026-09-29T19:29:56.161+03:00   F3-p1 r0 [ 20] F3-JT-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.15% ra 1.37% others 3.11% exit 0 waited 0.0s OTHERS-BUSY(3.11%)
+2026-09-29T19:30:02.269+03:00   F3-p1 r0 [ 21] F3-JT-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.37% ra 4.91% others 0.19% exit 0 waited 0.0s
+2026-09-29T19:30:08.808+03:00   F3-p1 r0 [ 22] F3-RT-leaflist#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 4.91% ra 1.61% others 0.47% exit 0 waited 0.0s
+2026-09-29T19:30:15.298+03:00   F3-p1 r0 [ 23] F3-RT-kd#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 1.61% ra 2.93% others 0.28% exit 0 waited 0.0s
+2026-09-29T19:30:21.505+03:00   F3-p1 r0 [ 24] F3-JT-leaflist#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 2.93% ra 3.01% others 0.27% exit 0 waited 0.0s
+2026-09-29T19:30:27.692+03:00   F3-p1 r0 [ 25] F3-JT-kd#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 3.01% ra 3.38% others 1.41% exit 0 waited 0.0s
+2026-09-29T19:30:34.336+03:00   F3-p1 r0 [ 26] F3-RT-leaflist#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 3.38% ra 2.81% others 2.38% exit 0 waited 0.0s OTHERS-BUSY(2.38%)
+2026-09-29T19:30:41.032+03:00   F3-p1 r0 [ 27] F3-RT-kd#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 2.81% ra 0.86% others 1.76% exit 0 waited 0.0s
+2026-09-29T19:30:48.594+03:00   F3-p1 r1 [ 28] F3-TD-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.86% ra 1.58% others 0.48% exit 0 waited 0.0s
+2026-09-29T19:30:56.097+03:00   F3-p1 r1 [ 29] F3-TD-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.58% ra 1.76% others 0.0% exit 0 waited 0.0s
+2026-09-29T19:31:08.832+03:00   F3-p1 r1 [ 30] F3-TA-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.76% ra 2.8% others 0.55% exit 0 waited 0.0s
+2026-09-29T19:31:21.523+03:00   F3-p1 r1 [ 31] F3-TA-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.8% ra 2.93% others 2.15% exit 0 waited 0.0s OTHERS-BUSY(2.15%)
+2026-09-29T19:31:29.192+03:00   F3-p1 r1 [ 32] F3-TR-armed#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.93% ra 1.4% others 1.15% exit 0 waited 0.0s
+2026-09-29T19:31:36.623+03:00   F3-p1 r1 [ 33] F3-JT-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.4% ra 1.78% others 0.17% exit 0 waited 0.0s
+2026-09-29T19:31:44.049+03:00   F3-p1 r1 [ 34] F3-JT-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.78% ra 0.79% others 0.04% exit 0 waited 0.0s
+2026-09-29T19:31:52.478+03:00   F3-p1 r1 [ 35] F3-RT-leaflist#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 0.79% ra 3.52% others 0.06% exit 0 waited 0.0s
+2026-09-29T19:32:00.811+03:00   F3-p1 r1 [ 36] F3-RT-kd#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 3.52% ra 3.06% others 1.59% exit 0 waited 0.0s
+2026-09-29T19:32:07.483+03:00   F3-p1 r1 [ 37] F3-JT-leaflist#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 3.06% ra 2.49% others 0.99% exit 0 waited 0.0s
+2026-09-29T19:32:14.140+03:00   F3-p1 r1 [ 38] F3-JT-kd#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 2.49% ra 1.25% others 1.3% exit 0 waited 0.0s
+2026-09-29T19:32:21.530+03:00   F3-p1 r1 [ 39] F3-RT-leaflist#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 1.25% ra 2.06% others 0.38% exit 0 waited 0.0s
+2026-09-29T19:32:28.898+03:00   F3-p1 r1 [ 40] F3-RT-kd#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 2.06% ra 0.99% others 0.17% exit 0 waited 0.0s
+2026-09-29T19:32:35.179+03:00   F3-p1 r1 [ 41] F3-JT-leaflist#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 0.99% ra 1.53% others 0.17% exit 0 waited 0.0s
+2026-09-29T19:32:41.448+03:00   F3-p1 r1 [ 42] F3-JT-kd#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 1.53% ra 1.71% others 2.13% exit 0 waited 0.0s OTHERS-BUSY(2.13%)
+2026-09-29T19:32:48.250+03:00   F3-p1 r1 [ 43] F3-RT-leaflist#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 1.71% ra 3.01% others 2.21% exit 0 waited 0.0s OTHERS-BUSY(2.21%)
+2026-09-29T19:32:54.993+03:00   F3-p1 r1 [ 44] F3-RT-kd#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 3.01% ra 2.44% others 1.23% exit 0 waited 0.0s
+2026-09-29T19:33:01.189+03:00   F3-p1 r1 [ 45] F3-TD-armed-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.44% ra 0.96% others 0.63% exit 0 waited 0.0s
+2026-09-29T19:33:07.503+03:00   F3-p1 r1 [ 46] F3-TD-armed-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.96% ra 1.75% others 5.04% exit 0 waited 0.0s OTHERS-BUSY(5.04%)
+2026-09-29T19:33:13.592+03:00   F3-p1 r1 [ 47] F3-JT-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.75% ra 1.22% others 0.1% exit 0 waited 0.0s
+2026-09-29T19:33:19.768+03:00   F3-p1 r1 [ 48] F3-JT-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.22% ra 1.7% others 4.9% exit 0 waited 0.0s OTHERS-BUSY(4.9%)
+2026-09-29T19:33:26.298+03:00   F3-p1 r1 [ 49] F3-RT-leaflist#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 1.7% ra 2.72% others 3.44% exit 0 waited 0.0s OTHERS-BUSY(3.44%)
+2026-09-29T19:33:32.847+03:00   F3-p1 r1 [ 50] F3-RT-kd#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 2.72% ra 3.36% others 4.4% exit 0 waited 0.0s OTHERS-BUSY(4.4%)
+2026-09-29T19:33:39.095+03:00   F3-p1 r1 [ 51] F3-JT-leaflist#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 3.36% ra 2.15% others 2.26% exit 0 waited 0.0s OTHERS-BUSY(2.26%)
+2026-09-29T19:33:45.316+03:00   F3-p1 r1 [ 52] F3-JT-kd#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 2.15% ra 1.72% others 2.15% exit 0 waited 0.0s OTHERS-BUSY(2.15%)
+2026-09-29T19:33:51.958+03:00   F3-p1 r1 [ 53] F3-RT-leaflist#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 1.72% ra 1.23% others 0.44% exit 0 waited 0.0s
+2026-09-29T19:33:58.597+03:00   F3-p1 r1 [ 54] F3-RT-kd#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 1.23% ra 0.51% others 0.12% exit 0 waited 0.0s
+2026-09-29T19:34:06.131+03:00   F3-p1 r2 [ 55] F3-TD-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.51% ra 1.87% others 0.25% exit 0 waited 0.0s
+2026-09-29T19:34:13.645+03:00   F3-p1 r2 [ 56] F3-TD-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.87% ra 2.93% others 1.87% exit 0 waited 0.0s
+2026-09-29T19:34:26.349+03:00   F3-p1 r2 [ 57] F3-TA-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.93% ra 1.88% others 1.71% exit 0 waited 0.0s
+2026-09-29T19:34:39.044+03:00   F3-p1 r2 [ 58] F3-TA-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.88% ra 1.88% others 0.27% exit 0 waited 0.0s
+2026-09-29T19:34:46.758+03:00   F3-p1 r2 [ 59] F3-TR-armed#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.88% ra 0.57% others 0.49% exit 0 waited 0.0s
+2026-09-29T19:34:54.174+03:00   F3-p1 r2 [ 60] F3-JT-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.57% ra 2.99% others 0.17% exit 0 waited 0.0s
+2026-09-29T19:35:01.583+03:00   F3-p1 r2 [ 61] F3-JT-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.99% ra 4.4% others 1.72% exit 0 waited 0.0s
+2026-09-29T19:35:10.032+03:00   F3-p1 r2 [ 62] F3-RT-leaflist#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 4.4% ra 4.05% others 1.83% exit 0 waited 0.0s
+2026-09-29T19:35:18.687+03:00   F3-p1 r2 [ 63] F3-RT-kd#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 4.05% ra 1.11% others 0.93% exit 0 waited 0.0s
+2026-09-29T19:35:25.345+03:00   F3-p1 r2 [ 64] F3-JT-leaflist#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.11% ra 1.32% others 0.31% exit 0 waited 0.0s
+2026-09-29T19:35:31.985+03:00   F3-p1 r2 [ 65] F3-JT-kd#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.32% ra 0.72% others 0.25% exit 0 waited 0.0s
+2026-09-29T19:35:39.401+03:00   F3-p1 r2 [ 66] F3-RT-leaflist#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 0.72% ra 3.37% others 0.17% exit 0 waited 0.0s
+2026-09-29T19:35:46.731+03:00   F3-p1 r2 [ 67] F3-RT-kd#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 3.37% ra 2.88% others 1.56% exit 0 waited 0.0s
+2026-09-29T19:35:53.018+03:00   F3-p1 r2 [ 68] F3-JT-leaflist#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 2.88% ra 2.19% others 2.68% exit 0 waited 0.0s OTHERS-BUSY(2.68%)
+2026-09-29T19:35:59.298+03:00   F3-p1 r2 [ 69] F3-JT-kd#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 2.19% ra 0.93% others 2.36% exit 0 waited 0.0s OTHERS-BUSY(2.36%)
+2026-09-29T19:36:06.108+03:00   F3-p1 r2 [ 70] F3-RT-leaflist#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 0.93% ra 1.97% others 1.64% exit 0 waited 0.0s
+2026-09-29T19:36:12.830+03:00   F3-p1 r2 [ 71] F3-RT-kd#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 1.97% ra 1.84% others 0.41% exit 0 waited 0.0s
+2026-09-29T19:36:19.024+03:00   F3-p1 r2 [ 72] F3-TD-armed-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.84% ra 0.34% others 0.19% exit 0 waited 0.0s
+2026-09-29T19:36:25.229+03:00   F3-p1 r2 [ 73] F3-TD-armed-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.34% ra 2.8% others 0.09% exit 0 waited 0.0s
+2026-09-29T19:36:31.306+03:00   F3-p1 r2 [ 74] F3-JT-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.8% ra 3.52% others 2.16% exit 0 waited 0.0s OTHERS-BUSY(2.16%)
+2026-09-29T19:36:37.382+03:00   F3-p1 r2 [ 75] F3-JT-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 3.52% ra 2.75% others 1.75% exit 0 waited 0.0s
+2026-09-29T19:36:43.873+03:00   F3-p1 r2 [ 76] F3-RT-leaflist#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 2.75% ra 2.14% others 1.38% exit 0 waited 0.0s
+2026-09-29T19:36:50.401+03:00   F3-p1 r2 [ 77] F3-RT-kd#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 2.14% ra 1.5% others 0.88% exit 0 waited 0.0s
+2026-09-29T19:36:56.674+03:00   F3-p1 r2 [ 78] F3-JT-leaflist#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.5% ra 1.42% others 0.25% exit 0 waited 0.0s
+2026-09-29T19:37:02.935+03:00   F3-p1 r2 [ 79] F3-JT-kd#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.42% ra 1.2% others 0.17% exit 0 waited 0.0s
+2026-09-29T19:37:09.591+03:00   F3-p1 r2 [ 80] F3-RT-leaflist#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 1.2% ra 2.39% others 0.31% exit 0 waited 0.0s
+2026-09-29T19:37:16.239+03:00   F3-p1 r2 [ 81] F3-RT-kd#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 2.39% ra 3.1% others 1.44% exit 0 waited 0.0s
+2026-09-29T19:37:16.246+03:00 F3-p1: re-running 18 process(es) at the end of the pass: [(1, 0, 'F3-TD-armed-leaflist', 'tip', 1, 'contaminated'), (16, 0, 'F3-RT-leaflist', 'tip', 4, 'contaminated'), (18, 0, 'F3-TD-armed-leaflist', 'tip', 8, 'contaminated'), (19, 0, 'F3-TD-armed-kd', 'tip', 8, 'contaminated'), (20, 0, 'F3-JT-leaflist', 'tip', 8, 'contaminated'), (26, 0, 'F3-RT-leaflist', 'tip', 16, 'contaminated'), (31, 1, 'F3-TA-armed-kd', 'tip', 1, 'contaminated'), (42, 1, 'F3-JT-kd', 'tip', 4, 'contaminated'), (43, 1, 'F3-RT-leaflist', 'tip', 4, 'contaminated'), (46, 1, 'F3-TD-armed-kd', 'tip', 8, 'contaminated'), (48, 1, 'F3-JT-kd', 'tip', 8, 'contaminated'), (49, 1, 'F3-RT-leaflist', 'tip', 8, 'contaminated'), (50, 1, 'F3-RT-kd', 'tip', 8, 'contaminated'), (51, 1, 'F3-JT-leaflist', 'tip', 16, 'contaminated'), (52, 1, 'F3-JT-kd', 'tip', 16, 'contaminated'), (68, 2, 'F3-JT-leaflist', 'tip', 4, 'contaminated'), (69, 2, 'F3-JT-kd', 'tip', 4, 'contaminated'), (74, 2, 'F3-JT-leaflist', 'tip', 8, 'contaminated')]
+2026-09-29T19:37:23.767+03:00   F3-p1 r0 [  1] F3-TD-armed-leaflist#tip W=1 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 3.1% ra 2.48% others 2.11% exit 0 waited 0.0s OTHERS-BUSY(2.11%)
+2026-09-29T19:37:30.535+03:00   F3-p1 r0 [ 16] F3-RT-leaflist#tip W=4 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 2.48% ra 2.21% others 1.28% exit 0 waited 0.0s
+2026-09-29T19:37:36.727+03:00   F3-p1 r0 [ 18] F3-TD-armed-leaflist#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 2.21% ra 0.96% others 0.09% exit 0 waited 0.0s
+2026-09-29T19:37:42.889+03:00   F3-p1 r0 [ 19] F3-TD-armed-kd#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 0.96% ra 1.25% others 0.29% exit 0 waited 0.0s
+2026-09-29T19:37:48.929+03:00   F3-p1 r0 [ 20] F3-JT-leaflist#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 1.25% ra 0.41% others 0.31% exit 0 waited 0.0s
+2026-09-29T19:37:55.575+03:00   F3-p1 r0 [ 26] F3-RT-leaflist#tip W=16 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 0.41% ra 3.29% others 0.12% exit 0 waited 0.0s
+2026-09-29T19:38:08.321+03:00   F3-p1 r1 [ 31] F3-TA-armed-kd#tip W=1 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 3.29% ra 1.96% others 2.21% exit 0 waited 0.0s OTHERS-BUSY(2.21%)
+2026-09-29T19:38:14.610+03:00   F3-p1 r1 [ 42] F3-JT-kd#tip W=4 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 1.96% ra 1.43% others 1.94% exit 0 waited 0.0s
+2026-09-29T19:38:21.383+03:00   F3-p1 r1 [ 43] F3-RT-leaflist#tip W=4 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 1.43% ra 1.35% others 0.98% exit 0 waited 0.0s
+2026-09-29T19:38:27.602+03:00   F3-p1 r1 [ 46] F3-TD-armed-kd#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 1.35% ra 1.93% others 0.0% exit 0 waited 0.0s
+2026-09-29T19:38:33.652+03:00   F3-p1 r1 [ 48] F3-JT-kd#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 1.93% ra 0.37% others 0.1% exit 0 waited 0.0s
+2026-09-29T19:38:40.096+03:00   F3-p1 r1 [ 49] F3-RT-leaflist#tip W=8 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 0.37% ra 2.12% others 0.14% exit 0 waited 0.0s
+2026-09-29T19:38:46.577+03:00   F3-p1 r1 [ 50] F3-RT-kd#tip W=8 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 2.12% ra 3.63% others 1.18% exit 0 waited 0.0s
+2026-09-29T19:38:52.822+03:00   F3-p1 r1 [ 51] F3-JT-leaflist#tip W=16 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 3.63% ra 3.85% others 2.44% exit 0 waited 0.0s OTHERS-BUSY(2.44%)
+2026-09-29T19:38:59.149+03:00   F3-p1 r1 [ 52] F3-JT-kd#tip W=16 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 3.85% ra 1.94% others 5.17% exit 0 waited 0.0s OTHERS-BUSY(5.17%)
+2026-09-29T19:39:05.435+03:00   F3-p1 r2 [ 68] F3-JT-leaflist#tip W=4 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 1.94% ra 1.29% others 1.38% exit 0 waited 0.0s
+2026-09-29T19:39:11.715+03:00   F3-p1 r2 [ 69] F3-JT-kd#tip W=4 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 1.29% ra 1.78% others 0.24% exit 0 waited 0.0s
+2026-09-29T19:39:17.873+03:00   F3-p1 r2 [ 74] F3-JT-leaflist#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 1.78% ra 0.74% others 5.53% exit 0 waited 0.0s OTHERS-BUSY(5.53%)
+2026-09-29T19:39:17.873+03:00 F3-p1: done
+2026-09-29T19:39:17.878+03:00 F3-p2: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T19:41:28.351+03:00 F3-p2: idle reached; {'time': '2026-09-29T19:41:28.351+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T19:41:38.415+03:00 F3-p2: opening receipt 0.71% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T19:41:44.532+03:00   F3-p2 warm-up F3-JT-leaflist#tip W=8 (untimed): pose 0x30c5438bc6ad9ffa expect match rb 0.71% ra 2.67% others 3.02% exit 0 waited 0.0s OTHERS-BUSY(3.02%)
+2026-09-29T19:41:51.243+03:00   F3-p2 r0 [  1] F3-RT-kd#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 2.67% ra 2.29% others 2.21% exit 0 waited 0.0s OTHERS-BUSY(2.21%)
+2026-09-29T19:41:57.910+03:00   F3-p2 r0 [  2] F3-RT-leaflist#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 2.29% ra 2.58% others 1.17% exit 0 waited 0.0s
+2026-09-29T19:42:04.093+03:00   F3-p2 r0 [  3] F3-JT-kd#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 2.58% ra 1.1% others 1.07% exit 0 waited 0.0s
+2026-09-29T19:42:10.295+03:00   F3-p2 r0 [  4] F3-JT-leaflist#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.1% ra 1.99% others 0.27% exit 0 waited 0.0s
+2026-09-29T19:42:16.806+03:00   F3-p2 r0 [  5] F3-RT-kd#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 1.99% ra 1.18% others 0.07% exit 0 waited 0.0s
+2026-09-29T19:42:23.445+03:00   F3-p2 r0 [  6] F3-RT-leaflist#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 1.18% ra 1.72% others 0.63% exit 0 waited 0.0s
+2026-09-29T19:42:29.559+03:00   F3-p2 r0 [  7] F3-JT-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.72% ra 2.23% others 3.31% exit 0 waited 0.0s OTHERS-BUSY(3.31%)
+2026-09-29T19:42:35.676+03:00   F3-p2 r0 [  8] F3-JT-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.23% ra 3.03% others 3.97% exit 0 waited 0.0s OTHERS-BUSY(3.97%)
+2026-09-29T19:42:41.946+03:00   F3-p2 r0 [  9] F3-TD-armed-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 3.03% ra 3.02% others 2.2% exit 0 waited 0.0s OTHERS-BUSY(2.2%)
+2026-09-29T19:42:48.201+03:00   F3-p2 r0 [ 10] F3-TD-armed-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 3.02% ra 0.88% others 2.07% exit 0 waited 0.0s OTHERS-BUSY(2.07%)
+2026-09-29T19:42:54.928+03:00   F3-p2 r0 [ 11] F3-RT-kd#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 0.88% ra 1.59% others 0.89% exit 0 waited 0.0s
+2026-09-29T19:43:01.671+03:00   F3-p2 r0 [ 12] F3-RT-leaflist#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 1.59% ra 1.31% others 0.0% exit 0 waited 0.0s
+2026-09-29T19:43:07.940+03:00   F3-p2 r0 [ 13] F3-JT-kd#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 1.31% ra 1.13% others 0.0% exit 0 waited 0.0s
+2026-09-29T19:43:14.231+03:00   F3-p2 r0 [ 14] F3-JT-leaflist#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 1.13% ra 3.04% others 1.29% exit 0 waited 0.0s
+2026-09-29T19:43:21.571+03:00   F3-p2 r0 [ 15] F3-RT-kd#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 3.04% ra 2.96% others 1.77% exit 0 waited 0.0s
+2026-09-29T19:43:28.923+03:00   F3-p2 r0 [ 16] F3-RT-leaflist#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 2.96% ra 2.62% others 1.72% exit 0 waited 0.0s
+2026-09-29T19:43:35.658+03:00   F3-p2 r0 [ 17] F3-JT-kd#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 2.62% ra 1.31% others 1.59% exit 0 waited 0.0s
+2026-09-29T19:43:42.357+03:00   F3-p2 r0 [ 18] F3-JT-leaflist#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.31% ra 1.06% others 0.54% exit 0 waited 0.0s
+2026-09-29T19:43:50.741+03:00   F3-p2 r0 [ 19] F3-RT-kd#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 1.06% ra 0.41% others 0.18% exit 0 waited 0.0s
+2026-09-29T19:43:59.240+03:00   F3-p2 r0 [ 20] F3-RT-leaflist#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 0.41% ra 2.35% others 0.12% exit 0 waited 0.0s
+2026-09-29T19:44:06.650+03:00   F3-p2 r0 [ 21] F3-JT-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.35% ra 2.66% others 2.01% exit 0 waited 0.0s OTHERS-BUSY(2.01%)
+2026-09-29T19:44:14.034+03:00   F3-p2 r0 [ 22] F3-JT-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.66% ra 3.14% others 1.27% exit 0 waited 0.0s
+2026-09-29T19:44:21.680+03:00   F3-p2 r0 [ 23] F3-TR-armed#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 3.14% ra 1.23% others 0.85% exit 0 waited 0.0s
+2026-09-29T19:44:34.351+03:00   F3-p2 r0 [ 24] F3-TA-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.23% ra 1.4% others 0.12% exit 0 waited 0.0s
+2026-09-29T19:44:47.050+03:00   F3-p2 r0 [ 25] F3-TA-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.4% ra 2.31% others 0.93% exit 0 waited 0.0s
+2026-09-29T19:44:54.618+03:00   F3-p2 r0 [ 26] F3-TD-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.31% ra 2.61% others 2.55% exit 0 waited 0.0s OTHERS-BUSY(2.55%)
+2026-09-29T19:45:02.150+03:00   F3-p2 r0 [ 27] F3-TD-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.61% ra 2.13% others 1.66% exit 0 waited 0.0s
+2026-09-29T19:45:08.886+03:00   F3-p2 r1 [ 28] F3-RT-kd#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 2.13% ra 0.97% others 2.31% exit 0 waited 0.0s OTHERS-BUSY(2.31%)
+2026-09-29T19:45:15.541+03:00   F3-p2 r1 [ 29] F3-RT-leaflist#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 0.97% ra 1.88% others 0.44% exit 0 waited 0.0s
+2026-09-29T19:45:21.722+03:00   F3-p2 r1 [ 30] F3-JT-kd#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 1.88% ra 0.74% others 0.18% exit 0 waited 0.0s
+2026-09-29T19:45:27.886+03:00   F3-p2 r1 [ 31] F3-JT-leaflist#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 0.74% ra 3.3% others 0.09% exit 0 waited 0.0s
+2026-09-29T19:45:34.356+03:00   F3-p2 r1 [ 32] F3-RT-kd#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 3.3% ra 1.98% others 1.47% exit 0 waited 0.0s
+2026-09-29T19:45:40.855+03:00   F3-p2 r1 [ 33] F3-RT-leaflist#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 1.98% ra 2.48% others 2.83% exit 0 waited 0.0s OTHERS-BUSY(2.83%)
+2026-09-29T19:45:46.969+03:00   F3-p2 r1 [ 34] F3-JT-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.48% ra 1.63% others 2.08% exit 0 waited 0.0s OTHERS-BUSY(2.08%)
+2026-09-29T19:45:53.093+03:00   F3-p2 r1 [ 35] F3-JT-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.63% ra 1.69% others 0.84% exit 0 waited 0.0s
+2026-09-29T19:45:59.361+03:00   F3-p2 r1 [ 36] F3-TD-armed-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.69% ra 1.41% others 0.09% exit 0 waited 0.0s
+2026-09-29T19:46:05.625+03:00   F3-p2 r1 [ 37] F3-TD-armed-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.41% ra 0.59% others 0.17% exit 0 waited 0.0s
+2026-09-29T19:46:12.428+03:00   F3-p2 r1 [ 38] F3-RT-kd#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 0.59% ra 2.6% others 0.34% exit 0 waited 0.0s
+2026-09-29T19:46:19.157+03:00   F3-p2 r1 [ 39] F3-RT-leaflist#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 2.6% ra 3.63% others 1.77% exit 0 waited 0.0s
+2026-09-29T19:46:25.420+03:00   F3-p2 r1 [ 40] F3-JT-kd#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 3.63% ra 3.71% others 2.07% exit 0 waited 0.0s OTHERS-BUSY(2.07%)
+2026-09-29T19:46:31.689+03:00   F3-p2 r1 [ 41] F3-JT-leaflist#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 3.71% ra 2.89% others 2.38% exit 0 waited 0.0s OTHERS-BUSY(2.38%)
+2026-09-29T19:46:39.121+03:00   F3-p2 r1 [ 42] F3-RT-kd#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 2.89% ra 1.37% others 2.82% exit 0 waited 0.0s OTHERS-BUSY(2.82%)
+2026-09-29T19:46:46.479+03:00   F3-p2 r1 [ 43] F3-RT-leaflist#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 1.37% ra 1.56% others 0.69% exit 0 waited 0.0s
+2026-09-29T19:46:53.136+03:00   F3-p2 r1 [ 44] F3-JT-kd#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.56% ra 1.02% others 0.06% exit 0 waited 0.0s
+2026-09-29T19:46:59.817+03:00   F3-p2 r1 [ 45] F3-JT-leaflist#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 1.02% ra 2.67% others 0.12% exit 0 waited 0.0s
+2026-09-29T19:47:08.269+03:00   F3-p2 r1 [ 46] F3-RT-kd#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 2.67% ra 2.27% others 2.35% exit 0 waited 0.0s OTHERS-BUSY(2.35%)
+2026-09-29T19:47:16.769+03:00   F3-p2 r1 [ 47] F3-RT-leaflist#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 2.27% ra 2.76% others 1.69% exit 0 waited 0.0s
+2026-09-29T19:47:24.184+03:00   F3-p2 r1 [ 48] F3-JT-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.76% ra 0.97% others 1.17% exit 0 waited 0.0s
+2026-09-29T19:47:31.551+03:00   F3-p2 r1 [ 49] F3-JT-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.97% ra 1.37% others 0.26% exit 0 waited 0.0s
+2026-09-29T19:47:39.305+03:00   F3-p2 r1 [ 50] F3-TR-armed#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.37% ra 0.68% others 0.19% exit 0 waited 0.0s
+2026-09-29T19:47:51.962+03:00   F3-p2 r1 [ 51] F3-TA-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.68% ra 3.46% others 1.69% exit 0 waited 0.0s
+2026-09-29T19:48:04.635+03:00   F3-p2 r1 [ 52] F3-TA-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 3.46% ra 1.48% others 1.62% exit 0 waited 0.0s
+2026-09-29T19:48:12.157+03:00   F3-p2 r1 [ 53] F3-TD-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.48% ra 2.07% others 0.4% exit 0 waited 0.0s
+2026-09-29T19:48:19.652+03:00   F3-p2 r1 [ 54] F3-TD-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.07% ra 1.61% others 0.17% exit 0 waited 0.0s
+2026-09-29T19:48:26.399+03:00   F3-p2 r2 [ 55] F3-RT-kd#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 1.61% ra 0.85% others 0.41% exit 0 waited 0.0s
+2026-09-29T19:48:33.124+03:00   F3-p2 r2 [ 56] F3-RT-leaflist#tip W=16: pose 0x6cbe24bf8fafda26 expect match rb 0.85% ra 2.22% others 2.97% exit 0 waited 0.0s OTHERS-BUSY(2.97%)
+2026-09-29T19:48:39.333+03:00   F3-p2 r2 [ 57] F3-JT-kd#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 2.22% ra 3.02% others 1.73% exit 0 waited 0.0s
+2026-09-29T19:48:45.535+03:00   F3-p2 r2 [ 58] F3-JT-leaflist#tip W=16: pose 0x30c5438bc6ad9ffa expect match rb 3.02% ra 2.59% others 1.04% exit 0 waited 0.0s
+2026-09-29T19:48:51.970+03:00   F3-p2 r2 [ 59] F3-RT-kd#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 2.59% ra 1.02% others 1.16% exit 0 waited 0.0s
+2026-09-29T19:48:58.428+03:00   F3-p2 r2 [ 60] F3-RT-leaflist#tip W=8: pose 0x6cbe24bf8fafda26 expect match rb 1.02% ra 1.37% others 0.28% exit 0 waited 0.0s
+2026-09-29T19:49:04.513+03:00   F3-p2 r2 [ 61] F3-JT-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.37% ra 1.37% others 0.0% exit 0 waited 0.0s
+2026-09-29T19:49:10.615+03:00   F3-p2 r2 [ 62] F3-JT-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.37% ra 0.94% others 0.1% exit 0 waited 0.0s
+2026-09-29T19:49:16.892+03:00   F3-p2 r2 [ 63] F3-TD-armed-kd#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 0.94% ra 3.79% others 0.17% exit 0 waited 0.0s
+2026-09-29T19:49:23.164+03:00   F3-p2 r2 [ 64] F3-TD-armed-leaflist#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 3.79% ra 2.44% others 2.45% exit 0 waited 0.0s OTHERS-BUSY(2.45%)
+2026-09-29T19:49:29.982+03:00   F3-p2 r2 [ 65] F3-RT-kd#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 2.44% ra 1.9% others 2.7% exit 0 waited 0.0s OTHERS-BUSY(2.7%)
+2026-09-29T19:49:36.727+03:00   F3-p2 r2 [ 66] F3-RT-leaflist#tip W=4: pose 0x6cbe24bf8fafda26 expect match rb 1.9% ra 1.24% others 1.0% exit 0 waited 0.0s
+2026-09-29T19:49:42.956+03:00   F3-p2 r2 [ 67] F3-JT-kd#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 1.24% ra 2.09% others 0.34% exit 0 waited 0.0s
+2026-09-29T19:49:49.184+03:00   F3-p2 r2 [ 68] F3-JT-leaflist#tip W=4: pose 0x30c5438bc6ad9ffa expect match rb 2.09% ra 1.02% others 0.09% exit 0 waited 0.0s
+2026-09-29T19:49:56.554+03:00   F3-p2 r2 [ 69] F3-RT-kd#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 1.02% ra 0.67% others 0.13% exit 0 waited 0.0s
+2026-09-29T19:50:03.926+03:00   F3-p2 r2 [ 70] F3-RT-leaflist#tip W=2: pose 0x6cbe24bf8fafda26 expect match rb 0.67% ra 3.58% others 1.8% exit 0 waited 0.0s
+2026-09-29T19:50:10.579+03:00   F3-p2 r2 [ 71] F3-JT-kd#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 3.58% ra 2.63% others 1.56% exit 0 waited 0.0s
+2026-09-29T19:50:17.284+03:00   F3-p2 r2 [ 72] F3-JT-leaflist#tip W=2: pose 0x30c5438bc6ad9ffa expect match rb 2.63% ra 2.04% others 2.17% exit 0 waited 0.0s OTHERS-BUSY(2.17%)
+2026-09-29T19:50:25.726+03:00   F3-p2 r2 [ 73] F3-RT-kd#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 2.04% ra 0.84% others 0.75% exit 0 waited 0.0s
+2026-09-29T19:50:34.148+03:00   F3-p2 r2 [ 74] F3-RT-leaflist#tip W=1: pose 0x6cbe24bf8fafda26 expect match rb 0.84% ra 1.73% others 0.5% exit 0 waited 0.0s
+2026-09-29T19:50:41.582+03:00   F3-p2 r2 [ 75] F3-JT-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.73% ra 0.68% others 0.17% exit 0 waited 0.0s
+2026-09-29T19:50:49.085+03:00   F3-p2 r2 [ 76] F3-JT-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.68% ra 2.8% others 1.78% exit 0 waited 0.0s
+2026-09-29T19:50:56.899+03:00   F3-p2 r2 [ 77] F3-TR-armed#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.8% ra 2.63% others 2.25% exit 0 waited 0.0s OTHERS-BUSY(2.25%)
+2026-09-29T19:51:09.585+03:00   F3-p2 r2 [ 78] F3-TA-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.63% ra 1.17% others 1.15% exit 0 waited 0.0s
+2026-09-29T19:51:22.234+03:00   F3-p2 r2 [ 79] F3-TA-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.17% ra 1.2% others 0.23% exit 0 waited 0.0s
+2026-09-29T19:51:29.745+03:00   F3-p2 r2 [ 80] F3-TD-armed-kd#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.2% ra 2.44% others 0.53% exit 0 waited 0.0s
+2026-09-29T19:51:37.287+03:00   F3-p2 r2 [ 81] F3-TD-armed-leaflist#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.44% ra 2.58% others 1.41% exit 0 waited 0.0s
+2026-09-29T19:51:37.293+03:00 F3-p2: re-running 19 process(es) at the end of the pass: [(1, 0, 'F3-RT-kd', 'tip', 16, 'contaminated'), (7, 0, 'F3-JT-kd', 'tip', 8, 'contaminated'), (8, 0, 'F3-JT-leaflist', 'tip', 8, 'contaminated'), (9, 0, 'F3-TD-armed-kd', 'tip', 8, 'contaminated'), (10, 0, 'F3-TD-armed-leaflist', 'tip', 8, 'contaminated'), (21, 0, 'F3-JT-kd', 'tip', 1, 'contaminated'), (26, 0, 'F3-TD-armed-kd', 'tip', 1, 'contaminated'), (28, 1, 'F3-RT-kd', 'tip', 16, 'contaminated'), (33, 1, 'F3-RT-leaflist', 'tip', 8, 'contaminated'), (34, 1, 'F3-JT-kd', 'tip', 8, 'contaminated'), (40, 1, 'F3-JT-kd', 'tip', 4, 'contaminated'), (41, 1, 'F3-JT-leaflist', 'tip', 4, 'contaminated'), (42, 1, 'F3-RT-kd', 'tip', 2, 'contaminated'), (46, 1, 'F3-RT-kd', 'tip', 1, 'contaminated'), (56, 2, 'F3-RT-leaflist', 'tip', 16, 'contaminated'), (64, 2, 'F3-TD-armed-leaflist', 'tip', 8, 'contaminated'), (65, 2, 'F3-RT-kd', 'tip', 4, 'contaminated'), (72, 2, 'F3-JT-leaflist', 'tip', 2, 'contaminated'), (77, 2, 'F3-TR-armed', 'tip', 1, 'contaminated')]
+2026-09-29T19:51:43.992+03:00   F3-p2 r0 [  1] F3-RT-kd#tip W=16 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 2.58% ra 6.67% others 2.49% exit 0 waited 0.0s CONTAMINATED-after(6.67%) OTHERS-BUSY(2.49%)
+2026-09-29T19:52:15.119+03:00   F3-p2 r0 [  7] F3-JT-kd#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 0.69% ra 1.91% others 0.2% exit 0 waited 25.0s
+2026-09-29T19:52:21.208+03:00   F3-p2 r0 [  8] F3-JT-leaflist#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 1.91% ra 2.33% others 1.17% exit 0 waited 0.0s
+2026-09-29T19:52:27.437+03:00   F3-p2 r0 [  9] F3-TD-armed-kd#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 2.33% ra 3.15% others 1.58% exit 0 waited 0.0s
+2026-09-29T19:52:33.630+03:00   F3-p2 r0 [ 10] F3-TD-armed-leaflist#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 3.15% ra 2.36% others 0.82% exit 0 waited 0.0s
+2026-09-29T19:52:40.992+03:00   F3-p2 r0 [ 21] F3-JT-kd#tip W=1 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 2.36% ra 1.33% others 0.35% exit 0 waited 0.0s
+2026-09-29T19:52:48.510+03:00   F3-p2 r0 [ 26] F3-TD-armed-kd#tip W=1 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 1.33% ra 1.57% others 0.25% exit 0 waited 0.0s
+2026-09-29T19:52:55.161+03:00   F3-p2 r1 [ 28] F3-RT-kd#tip W=16 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 1.57% ra 1.34% others 0.32% exit 0 waited 0.0s
+2026-09-29T19:53:01.679+03:00   F3-p2 r1 [ 33] F3-RT-leaflist#tip W=8 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 1.34% ra 2.93% others 0.34% exit 0 waited 0.0s
+2026-09-29T19:53:07.799+03:00   F3-p2 r1 [ 34] F3-JT-kd#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 2.93% ra 2.15% others 1.6% exit 0 waited 0.0s
+2026-09-29T19:53:14.082+03:00   F3-p2 r1 [ 40] F3-JT-kd#tip W=4 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 2.15% ra 2.39% others 3.26% exit 0 waited 0.0s OTHERS-BUSY(3.26%)
+2026-09-29T19:53:20.376+03:00   F3-p2 r1 [ 41] F3-JT-leaflist#tip W=4 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 2.39% ra 2.03% others 2.02% exit 0 waited 0.0s OTHERS-BUSY(2.02%)
+2026-09-29T19:53:27.720+03:00   F3-p2 r1 [ 42] F3-RT-kd#tip W=2 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 2.03% ra 1.49% others 1.82% exit 0 waited 0.0s
+2026-09-29T19:53:36.058+03:00   F3-p2 r1 [ 46] F3-RT-kd#tip W=1 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 1.49% ra 1.09% others 0.42% exit 0 waited 0.0s
+2026-09-29T19:53:42.709+03:00   F3-p2 r2 [ 56] F3-RT-leaflist#tip W=16 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 1.09% ra 0.56% others 0.13% exit 0 waited 0.0s
+2026-09-29T19:53:48.888+03:00   F3-p2 r2 [ 64] F3-TD-armed-leaflist#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 0.56% ra 3.19% others 0.64% exit 0 waited 0.0s
+2026-09-29T19:53:55.642+03:00   F3-p2 r2 [ 65] F3-RT-kd#tip W=4 RERUN (contaminated): pose 0x6cbe24bf8fafda26 expect match rb 3.19% ra 3.63% others 1.17% exit 0 waited 0.0s
+2026-09-29T19:54:02.324+03:00   F3-p2 r2 [ 72] F3-JT-leaflist#tip W=2 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 3.63% ra 2.42% others 2.5% exit 0 waited 0.0s OTHERS-BUSY(2.5%)
+2026-09-29T19:54:10.043+03:00   F3-p2 r2 [ 77] F3-TR-armed#tip W=1 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 2.42% ra 1.08% others 1.69% exit 0 waited 0.0s
+2026-09-29T19:54:10.044+03:00 F3-p2: done
+2026-09-29T19:54:10.048+03:00 F3-G4-p0: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T19:56:20.507+03:00 F3-G4-p0: idle reached; {'time': '2026-09-29T19:56:20.507+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T19:56:30.572+03:00 F3-G4-p0: opening receipt 1.03% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T20:07:28.538+03:00   F3-G4-p0 r0 [  1] G4#g4ref W=0: criterion ids stdout 60 on disk 60 rb 1.03% ra 2.5% others 0.99% exit 0 waited 0.0s
+2026-09-29T20:18:41.816+03:00   F3-G4-p0 r1 [  2] G4#g4ref W=0: criterion ids stdout 60 on disk 60 rb 2.5% ra 2.16% others 1.04% exit 0 waited 0.0s
+2026-09-29T20:29:44.642+03:00   F3-G4-p0 r2 [  3] G4#g4ref W=0: criterion ids stdout 60 on disk 60 rb 2.16% ra 1.5% others 1.06% exit 0 waited 0.0s
+2026-09-29T20:29:44.643+03:00 F3-G4-p0: done
+2026-09-29T20:29:44.644+03:00 J-Son-T-p0: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T20:31:55.092+03:00 J-Son-T-p0: idle reached; {'time': '2026-09-29T20:31:55.092+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T20:32:05.155+03:00 J-Son-T-p0: opening receipt 1.33% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T20:32:11.391+03:00   J-Son-T-p0 warm-up JSonT#tip W=8 (untimed): pose 0x3db47fae414b655c expect match rb 1.33% ra 1.73% others 0.26% exit 0 waited 0.0s
+2026-09-29T20:32:18.596+03:00   J-Son-T-p0 r0 [  1] JSoffT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.73% ra 1.78% others 0.38% exit 0 waited 0.0s
+2026-09-29T20:32:25.606+03:00   J-Son-T-p0 r0 [  2] JSoffT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.78% ra 2.39% others 2.73% exit 0 waited 0.0s OTHERS-BUSY(2.73%)
+2026-09-29T20:32:31.972+03:00   J-Son-T-p0 r0 [  3] JSonT-a#tip W=8: pose 0x3db47fae414b655c expect match rb 2.39% ra 2.22% others 2.91% exit 0 waited 0.0s OTHERS-BUSY(2.91%)
+2026-09-29T20:32:38.208+03:00   J-Son-T-p0 r0 [  4] JSonT#tip W=8: pose 0x3db47fae414b655c expect match rb 2.22% ra 2.97% others 2.22% exit 0 waited 0.0s OTHERS-BUSY(2.22%)
+2026-09-29T20:32:51.028+03:00   J-Son-T-p0 r0 [  5] JSoffT-a#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.97% ra 1.43% others 0.36% exit 0 waited 0.0s
+2026-09-29T20:33:03.596+03:00   J-Son-T-p0 r0 [  6] JSoffT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.43% ra 14.77% others 0.16% exit 0 waited 0.0s CONTAMINATED-after(14.77%)
+2026-09-29T20:33:38.042+03:00   J-Son-T-p0 r0 [  7] JSonT-a#tip W=1: pose 0x3db47fae414b655c expect match rb 0.8% ra 2.32% others 0.75% exit 0 waited 25.0s
+2026-09-29T20:33:47.338+03:00   J-Son-T-p0 r0 [  8] JSonT#tip W=1: pose 0x3db47fae414b655c expect match rb 2.32% ra 1.64% others 0.21% exit 0 waited 0.0s
+2026-09-29T20:33:54.550+03:00   J-Son-T-p0 r1 [  9] JSoffT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.64% ra 2.2% others 1.36% exit 0 waited 0.0s
+2026-09-29T20:34:01.552+03:00   J-Son-T-p0 r1 [ 10] JSoffT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.2% ra 4.02% others 1.88% exit 0 waited 0.0s
+2026-09-29T20:34:07.911+03:00   J-Son-T-p0 r1 [ 11] JSonT-a#tip W=8: pose 0x3db47fae414b655c expect match rb 4.02% ra 3.32% others 1.66% exit 0 waited 0.0s
+2026-09-29T20:34:14.146+03:00   J-Son-T-p0 r1 [ 12] JSonT#tip W=8: pose 0x3db47fae414b655c expect match rb 3.32% ra 1.29% others 1.61% exit 0 waited 0.0s
+2026-09-29T20:34:26.861+03:00   J-Son-T-p0 r1 [ 13] JSoffT-a#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.29% ra 1.58% others 0.26% exit 0 waited 0.0s
+2026-09-29T20:34:39.426+03:00   J-Son-T-p0 r1 [ 14] JSoffT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.58% ra 2.77% others 0.38% exit 0 waited 0.0s
+2026-09-29T20:34:48.824+03:00   J-Son-T-p0 r1 [ 15] JSonT-a#tip W=1: pose 0x3db47fae414b655c expect match rb 2.77% ra 2.54% others 2.47% exit 0 waited 0.0s OTHERS-BUSY(2.47%)
+2026-09-29T20:34:58.105+03:00   J-Son-T-p0 r1 [ 16] JSonT#tip W=1: pose 0x3db47fae414b655c expect match rb 2.54% ra 1.5% others 1.32% exit 0 waited 0.0s
+2026-09-29T20:35:05.314+03:00   J-Son-T-p0 r2 [ 17] JSoffT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.5% ra 1.47% others 0.57% exit 0 waited 0.0s
+2026-09-29T20:35:12.366+03:00   J-Son-T-p0 r2 [ 18] JSoffT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.47% ra 1.75% others 0.1% exit 0 waited 0.0s
+2026-09-29T20:35:18.673+03:00   J-Son-T-p0 r2 [ 19] JSonT-a#tip W=8: pose 0x3db47fae414b655c expect match rb 1.75% ra 1.02% others 0.25% exit 0 waited 0.0s
+2026-09-29T20:35:24.841+03:00   J-Son-T-p0 r2 [ 20] JSonT#tip W=8: pose 0x3db47fae414b655c expect match rb 1.02% ra 2.4% others 3.06% exit 0 waited 0.0s OTHERS-BUSY(3.06%)
+2026-09-29T20:35:37.541+03:00   J-Son-T-p0 r2 [ 21] JSoffT-a#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.4% ra 2.46% others 1.93% exit 0 waited 0.0s
+2026-09-29T20:35:50.230+03:00   J-Son-T-p0 r2 [ 22] JSoffT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.46% ra 1.09% others 0.64% exit 0 waited 0.0s
+2026-09-29T20:35:59.662+03:00   J-Son-T-p0 r2 [ 23] JSonT-a#tip W=1: pose 0x3db47fae414b655c expect match rb 1.09% ra 2.01% others 0.25% exit 0 waited 0.0s
+2026-09-29T20:36:08.959+03:00   J-Son-T-p0 r2 [ 24] JSonT#tip W=1: pose 0x3db47fae414b655c expect match rb 2.01% ra 3.25% others 0.19% exit 0 waited 0.0s
+2026-09-29T20:36:08.959+03:00 J-Son-T-p0: re-running 6 process(es) at the end of the pass: [(2, 0, 'JSoffT', 'tip', 8, 'contaminated'), (3, 0, 'JSonT-a', 'tip', 8, 'contaminated'), (4, 0, 'JSonT', 'tip', 8, 'contaminated'), (6, 0, 'JSoffT', 'tip', 1, 'contaminated'), (15, 1, 'JSonT-a', 'tip', 1, 'contaminated'), (20, 2, 'JSonT', 'tip', 8, 'contaminated')]
+2026-09-29T20:36:15.972+03:00   J-Son-T-p0 r0 [  2] JSoffT#tip W=8 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 3.25% ra 5.51% others 1.57% exit 0 waited 0.0s CONTAMINATED-after(5.51%)
+2026-09-29T20:36:47.367+03:00   J-Son-T-p0 r0 [  3] JSonT-a#tip W=8 RERUN (contaminated): pose 0x3db47fae414b655c expect match rb 1.41% ra 0.76% others 0.16% exit 0 waited 25.0s
+2026-09-29T20:36:53.602+03:00   J-Son-T-p0 r0 [  4] JSonT#tip W=8 RERUN (contaminated): pose 0x3db47fae414b655c expect match rb 0.76% ra 3.67% others 0.17% exit 0 waited 0.0s
+2026-09-29T20:37:06.169+03:00   J-Son-T-p0 r0 [  6] JSoffT#tip W=1 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 3.67% ra 2.43% others 2.01% exit 0 waited 0.0s OTHERS-BUSY(2.01%)
+2026-09-29T20:37:15.573+03:00   J-Son-T-p0 r1 [ 15] JSonT-a#tip W=1 RERUN (contaminated): pose 0x3db47fae414b655c expect match rb 2.43% ra 1.36% others 0.91% exit 0 waited 0.0s
+2026-09-29T20:37:21.736+03:00   J-Son-T-p0 r2 [ 20] JSonT#tip W=8 RERUN (contaminated): pose 0x3db47fae414b655c expect match rb 1.36% ra 1.84% others 0.09% exit 0 waited 0.0s
+2026-09-29T20:37:21.737+03:00 J-Son-T-p0: done
+2026-09-29T20:37:21.739+03:00 J-Son-T-p1: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T20:39:32.230+03:00 J-Son-T-p1: idle reached; {'time': '2026-09-29T20:39:32.230+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T20:39:42.293+03:00 J-Son-T-p1: opening receipt 1.66% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T20:39:48.478+03:00   J-Son-T-p1 warm-up JSonT#tip W=8 (untimed): pose 0x3db47fae414b655c expect match rb 1.66% ra 1.12% others 0.09% exit 0 waited 0.0s
+2026-09-29T20:39:57.754+03:00   J-Son-T-p1 r0 [  1] JSonT#tip W=1: pose 0x3db47fae414b655c expect match rb 1.12% ra 2.71% others 0.98% exit 0 waited 0.0s
+2026-09-29T20:40:07.232+03:00   J-Son-T-p1 r0 [  2] JSonT-a#tip W=1: pose 0x3db47fae414b655c expect match rb 2.71% ra 2.37% others 2.29% exit 0 waited 0.0s OTHERS-BUSY(2.29%)
+2026-09-29T20:40:19.809+03:00   J-Son-T-p1 r0 [  3] JSoffT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.37% ra 1.3% others 1.07% exit 0 waited 0.0s
+2026-09-29T20:40:32.528+03:00   J-Son-T-p1 r0 [  4] JSoffT-a#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.3% ra 0.89% others 0.23% exit 0 waited 0.0s
+2026-09-29T20:40:38.757+03:00   J-Son-T-p1 r0 [  5] JSonT#tip W=8: pose 0x3db47fae414b655c expect match rb 0.89% ra 2.13% others 0.26% exit 0 waited 0.0s
+2026-09-29T20:40:45.113+03:00   J-Son-T-p1 r0 [  6] JSonT-a#tip W=8: pose 0x3db47fae414b655c expect match rb 2.13% ra 2.72% others 1.82% exit 0 waited 0.0s
+2026-09-29T20:40:52.120+03:00   J-Son-T-p1 r0 [  7] JSoffT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.72% ra 2.59% others 1.78% exit 0 waited 0.0s
+2026-09-29T20:40:59.327+03:00   J-Son-T-p1 r0 [  8] JSoffT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.59% ra 1.69% others 1.69% exit 0 waited 0.0s
+2026-09-29T20:41:08.634+03:00   J-Son-T-p1 r1 [  9] JSonT#tip W=1: pose 0x3db47fae414b655c expect match rb 1.69% ra 2.06% others 0.39% exit 0 waited 0.0s
+2026-09-29T20:41:18.054+03:00   J-Son-T-p1 r1 [ 10] JSonT-a#tip W=1: pose 0x3db47fae414b655c expect match rb 2.06% ra 1.33% others 0.25% exit 0 waited 0.0s
+2026-09-29T20:41:30.621+03:00   J-Son-T-p1 r1 [ 11] JSoffT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.33% ra 2.85% others 1.06% exit 0 waited 0.0s
+2026-09-29T20:41:43.349+03:00   J-Son-T-p1 r1 [ 12] JSoffT-a#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.85% ra 2.2% others 1.63% exit 0 waited 0.0s
+2026-09-29T20:41:49.560+03:00   J-Son-T-p1 r1 [ 13] JSonT#tip W=8: pose 0x3db47fae414b655c expect match rb 2.2% ra 0.84% others 1.3% exit 0 waited 0.0s
+2026-09-29T20:41:55.918+03:00   J-Son-T-p1 r1 [ 14] JSonT-a#tip W=8: pose 0x3db47fae414b655c expect match rb 0.84% ra 1.35% others 0.08% exit 0 waited 0.0s
+2026-09-29T20:42:02.985+03:00   J-Son-T-p1 r1 [ 15] JSoffT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.35% ra 1.5% others 0.19% exit 0 waited 0.0s
+2026-09-29T20:42:10.162+03:00   J-Son-T-p1 r1 [ 16] JSoffT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.5% ra 2.34% others 0.43% exit 0 waited 0.0s
+2026-09-29T20:42:19.443+03:00   J-Son-T-p1 r2 [ 17] JSonT#tip W=1: pose 0x3db47fae414b655c expect match rb 2.34% ra 2.78% others 1.91% exit 0 waited 0.0s
+2026-09-29T20:42:28.869+03:00   J-Son-T-p1 r2 [ 18] JSonT-a#tip W=1: pose 0x3db47fae414b655c expect match rb 2.78% ra 4.79% others 2.54% exit 0 waited 0.0s OTHERS-BUSY(2.54%)
+2026-09-29T20:42:41.463+03:00   J-Son-T-p1 r2 [ 19] JSoffT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 4.79% ra 1.47% others 0.86% exit 0 waited 0.0s
+2026-09-29T20:42:54.176+03:00   J-Son-T-p1 r2 [ 20] JSoffT-a#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.47% ra 2.31% others 0.19% exit 0 waited 0.0s
+2026-09-29T20:43:00.372+03:00   J-Son-T-p1 r2 [ 21] JSonT#tip W=8: pose 0x3db47fae414b655c expect match rb 2.31% ra 2.91% others 1.85% exit 0 waited 0.0s
+2026-09-29T20:43:06.670+03:00   J-Son-T-p1 r2 [ 22] JSonT-a#tip W=8: pose 0x3db47fae414b655c expect match rb 2.91% ra 2.58% others 3.15% exit 0 waited 0.0s OTHERS-BUSY(3.15%)
+2026-09-29T20:43:13.683+03:00   J-Son-T-p1 r2 [ 23] JSoffT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.58% ra 2.62% others 1.31% exit 0 waited 0.0s
+2026-09-29T20:43:20.925+03:00   J-Son-T-p1 r2 [ 24] JSoffT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.62% ra 1.2% others 1.52% exit 0 waited 0.0s
+2026-09-29T20:43:20.925+03:00 J-Son-T-p1: re-running 3 process(es) at the end of the pass: [(2, 0, 'JSonT-a', 'tip', 1, 'contaminated'), (18, 2, 'JSonT-a', 'tip', 1, 'contaminated'), (22, 2, 'JSonT-a', 'tip', 8, 'contaminated')]
+2026-09-29T20:43:30.322+03:00   J-Son-T-p1 r0 [  2] JSonT-a#tip W=1 RERUN (contaminated): pose 0x3db47fae414b655c expect match rb 1.2% ra 1.38% others 0.18% exit 0 waited 0.0s
+2026-09-29T20:43:39.721+03:00   J-Son-T-p1 r2 [ 18] JSonT-a#tip W=1 RERUN (contaminated): pose 0x3db47fae414b655c expect match rb 1.38% ra 2.31% others 0.21% exit 0 waited 0.0s
+2026-09-29T20:43:46.008+03:00   J-Son-T-p1 r2 [ 22] JSonT-a#tip W=8 RERUN (contaminated): pose 0x3db47fae414b655c expect match rb 2.31% ra 2.4% others 0.84% exit 0 waited 0.0s
+2026-09-29T20:43:46.008+03:00 J-Son-T-p1: done
+2026-09-29T20:43:46.011+03:00 J-Son-T-p2: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T20:45:56.473+03:00 J-Son-T-p2: idle reached; {'time': '2026-09-29T20:45:56.473+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T20:46:06.535+03:00 J-Son-T-p2: opening receipt 2.72% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T20:46:12.702+03:00   J-Son-T-p2 warm-up JSonT#tip W=8 (untimed): pose 0x3db47fae414b655c expect match rb 2.72% ra 3.44% others 0.81% exit 0 waited 0.0s
+2026-09-29T20:46:19.889+03:00   J-Son-T-p2 r0 [  1] JSoffT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 3.44% ra 1.55% others 1.57% exit 0 waited 0.0s
+2026-09-29T20:46:26.963+03:00   J-Son-T-p2 r0 [  2] JSoffT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.55% ra 1.6% others 0.15% exit 0 waited 0.0s
+2026-09-29T20:46:33.292+03:00   J-Son-T-p2 r0 [  3] JSonT-a#tip W=8: pose 0x3db47fae414b655c expect match rb 1.6% ra 1.44% others 0.08% exit 0 waited 0.0s
+2026-09-29T20:46:39.477+03:00   J-Son-T-p2 r0 [  4] JSonT#tip W=8: pose 0x3db47fae414b655c expect match rb 1.44% ra 1.29% others 0.18% exit 0 waited 0.0s
+2026-09-29T20:46:52.304+03:00   J-Son-T-p2 r0 [  5] JSoffT-a#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 1.29% ra 3.76% others 1.81% exit 0 waited 0.0s
+2026-09-29T20:47:04.888+03:00   J-Son-T-p2 r0 [  6] JSoffT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 3.76% ra 1.51% others 1.4% exit 0 waited 0.0s
+2026-09-29T20:47:14.289+03:00   J-Son-T-p2 r0 [  7] JSonT-a#tip W=1: pose 0x3db47fae414b655c expect match rb 1.51% ra 2.23% others 0.14% exit 0 waited 0.0s
+2026-09-29T20:47:23.575+03:00   J-Son-T-p2 r0 [  8] JSonT#tip W=1: pose 0x3db47fae414b655c expect match rb 2.23% ra 1.1% others 0.09% exit 0 waited 0.0s
+2026-09-29T20:47:30.758+03:00   J-Son-T-p2 r1 [  9] JSoffT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.1% ra 2.9% others 1.24% exit 0 waited 0.0s
+2026-09-29T20:47:37.786+03:00   J-Son-T-p2 r1 [ 10] JSoffT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 2.9% ra 3.69% others 1.6% exit 0 waited 0.0s
+2026-09-29T20:47:44.152+03:00   J-Son-T-p2 r1 [ 11] JSonT-a#tip W=8: pose 0x3db47fae414b655c expect match rb 3.69% ra 2.55% others 2.28% exit 0 waited 0.0s OTHERS-BUSY(2.28%)
+2026-09-29T20:47:50.388+03:00   J-Son-T-p2 r1 [ 12] JSonT#tip W=8: pose 0x3db47fae414b655c expect match rb 2.55% ra 0.89% others 2.2% exit 0 waited 0.0s OTHERS-BUSY(2.2%)
+2026-09-29T20:48:03.103+03:00   J-Son-T-p2 r1 [ 13] JSoffT-a#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 0.89% ra 2.25% others 0.33% exit 0 waited 0.0s
+2026-09-29T20:48:15.833+03:00   J-Son-T-p2 r1 [ 14] JSoffT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.25% ra 3.06% others 0.45% exit 0 waited 0.0s
+2026-09-29T20:48:25.316+03:00   J-Son-T-p2 r1 [ 15] JSonT-a#tip W=1: pose 0x3db47fae414b655c expect match rb 3.06% ra 3.52% others 1.88% exit 0 waited 0.0s
+2026-09-29T20:48:34.617+03:00   J-Son-T-p2 r1 [ 16] JSonT#tip W=1: pose 0x3db47fae414b655c expect match rb 3.52% ra 1.74% others 1.48% exit 0 waited 0.0s
+2026-09-29T20:48:41.896+03:00   J-Son-T-p2 r2 [ 17] JSoffT-a#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.74% ra 1.62% others 0.54% exit 0 waited 0.0s
+2026-09-29T20:48:48.903+03:00   J-Son-T-p2 r2 [ 18] JSoffT#tip W=8: pose 0x30c5438bc6ad9ffa expect match rb 1.62% ra 1.8% others 0.26% exit 0 waited 0.0s
+2026-09-29T20:48:55.198+03:00   J-Son-T-p2 r2 [ 19] JSonT-a#tip W=8: pose 0x3db47fae414b655c expect match rb 1.8% ra 1.44% others 0.34% exit 0 waited 0.0s
+2026-09-29T20:49:01.400+03:00   J-Son-T-p2 r2 [ 20] JSonT#tip W=8: pose 0x3db47fae414b655c expect match rb 1.44% ra 2.75% others 2.97% exit 0 waited 0.0s OTHERS-BUSY(2.97%)
+2026-09-29T20:49:14.088+03:00   J-Son-T-p2 r2 [ 21] JSoffT-a#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.75% ra 2.9% others 2.14% exit 0 waited 0.0s OTHERS-BUSY(2.14%)
+2026-09-29T20:49:26.652+03:00   J-Son-T-p2 r2 [ 22] JSoffT#tip W=1: pose 0x30c5438bc6ad9ffa expect match rb 2.9% ra 1.39% others 0.59% exit 0 waited 0.0s
+2026-09-29T20:49:36.059+03:00   J-Son-T-p2 r2 [ 23] JSonT-a#tip W=1: pose 0x3db47fae414b655c expect match rb 1.39% ra 1.46% others 0.16% exit 0 waited 0.0s
+2026-09-29T20:49:45.349+03:00   J-Son-T-p2 r2 [ 24] JSonT#tip W=1: pose 0x3db47fae414b655c expect match rb 1.46% ra 3.02% others 0.26% exit 0 waited 0.0s
+2026-09-29T20:49:45.349+03:00 J-Son-T-p2: re-running 4 process(es) at the end of the pass: [(11, 1, 'JSonT-a', 'tip', 8, 'contaminated'), (12, 1, 'JSonT', 'tip', 8, 'contaminated'), (20, 2, 'JSonT', 'tip', 8, 'contaminated'), (21, 2, 'JSoffT-a', 'tip', 1, 'contaminated')]
+2026-09-29T20:49:51.653+03:00   J-Son-T-p2 r1 [ 11] JSonT-a#tip W=8 RERUN (contaminated): pose 0x3db47fae414b655c expect match rb 3.02% ra 2.59% others 1.08% exit 0 waited 0.0s
+2026-09-29T20:49:57.814+03:00   J-Son-T-p2 r1 [ 12] JSonT#tip W=8 RERUN (contaminated): pose 0x3db47fae414b655c expect match rb 2.59% ra 2.87% others 1.01% exit 0 waited 0.0s
+2026-09-29T20:50:03.976+03:00   J-Son-T-p2 r2 [ 20] JSonT#tip W=8 RERUN (contaminated): pose 0x3db47fae414b655c expect match rb 2.87% ra 2.69% others 1.0% exit 0 waited 0.0s
+2026-09-29T20:50:16.668+03:00   J-Son-T-p2 r2 [ 21] JSoffT-a#tip W=1 RERUN (contaminated): pose 0x30c5438bc6ad9ffa expect match rb 2.69% ra 1.51% others 0.32% exit 0 waited 0.0s
+2026-09-29T20:50:16.669+03:00 J-Son-T-p2: done
+2026-09-29T20:50:16.671+03:00 DM1-p0: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T20:52:27.145+03:00 DM1-p0: idle reached; {'time': '2026-09-29T20:52:27.145+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T20:52:37.207+03:00 DM1-p0: opening receipt 1.28% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T20:52:48.904+03:00   DM1-p0 warm-up dm-vb-1920x1080-idle#dmA W=0 (untimed): DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 2680 B present fifo rb 1.28% ra 4.53% others 1.77% exit 0 waited 0.0s
+2026-09-29T20:52:58.741+03:00   DM1-p0 r0 [  1] dm-vb-1920x1080-idle#dmA W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 2682 B present fifo rb 4.53% ra 4.15% others 2.24% exit 0 waited 0.0s OTHERS-BUSY(2.24%)
+2026-09-29T20:53:14.235+03:00   DM1-p0 r0 [  2] dm-vb-1920x1080-idle#dmB W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 2683 B present fifo rb 4.15% ra 2.17% others 1.37% exit 0 waited 0.0s
+2026-09-29T20:53:29.694+03:00   DM1-p0 r0 [  3] dm-vb-1920x1080-idle#dmB W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 2680 B present fifo rb 2.17% ra 2.42% others 0.35% exit 0 waited 0.0s
+2026-09-29T20:53:39.550+03:00   DM1-p0 r0 [  4] dm-vb-1920x1080-idle#dmA W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 2682 B present fifo rb 2.42% ra 3.84% others 1.74% exit 0 waited 0.0s
+2026-09-29T20:53:49.386+03:00   DM1-p0 r0 [  5] dm-vb-1920x1080-idle#dmA W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 2685 B present fifo rb 3.84% ra 3.88% others 1.46% exit 0 waited 0.0s
+2026-09-29T20:54:04.874+03:00   DM1-p0 r0 [  6] dm-vb-1920x1080-idle#dmB W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 2680 B present fifo rb 3.88% ra 1.41% others 0.91% exit 0 waited 0.0s
+2026-09-29T20:54:20.459+03:00   DM1-p0 r0 [  7] dm-vb-1920x1080-idle#dmB W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 2684 B present fifo rb 1.41% ra 3.0% others 1.16% exit 0 waited 0.0s
+2026-09-29T20:54:30.322+03:00   DM1-p0 r0 [  8] dm-vb-1920x1080-idle#dmA W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 2684 B present fifo rb 3.0% ra 3.13% others 2.08% exit 0 waited 0.0s OTHERS-BUSY(2.08%)
+2026-09-29T20:54:39.969+03:00   DM1-p0 r0 [  9] dm-deferred-1920x1080-idle#dmA W=0: DM1 timing: path=Deferred res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 921 B present fifo rb 3.13% ra 2.55% others 1.24% exit 0 waited 0.0s
+2026-09-29T20:54:54.500+03:00   DM1-p0 r0 [ 10] dm-deferred-1920x1080-idle#dmB W=0: DM1 timing: path=Deferred res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 918 B present fifo rb 2.55% ra 2.27% others 0.55% exit 0 waited 0.0s
+2026-09-29T20:55:09.030+03:00   DM1-p0 r0 [ 11] dm-deferred-1920x1080-idle#dmB W=0: DM1 timing: path=Deferred res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 921 B present fifo rb 2.27% ra 5.06% others 1.6% exit 0 waited 0.0s CONTAMINATED-after(5.06%)
+2026-09-29T20:55:44.377+03:00   DM1-p0 r0 [ 12] dm-deferred-1920x1080-idle#dmA W=0: DM1 timing: path=Deferred res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 919 B present fifo rb 1.26% ra 1.59% others 0.32% exit 0 waited 25.0s
+2026-09-29T20:55:53.998+03:00   DM1-p0 r0 [ 13] dm-deferred-1920x1080-idle#dmA W=0: DM1 timing: path=Deferred res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 920 B present fifo rb 1.59% ra 4.14% others 2.32% exit 0 waited 0.0s OTHERS-BUSY(2.32%)
+2026-09-29T20:56:08.527+03:00   DM1-p0 r0 [ 14] dm-deferred-1920x1080-idle#dmB W=0: DM1 timing: path=Deferred res=1920x1080 edit_rows=0 grow_at=None frames=240 artifact 923 B present fifo rb 4.14% ra 2.57% others 1.84% exit 0 waited 0.0s
+2026-09-29T20:56:23.118+03:00   DM1-p0 r0 [ 15] dm-deferred-1920x1080-idle#dmB W=0: DM1 timing: path=Deferred res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 921 B present fifo rb 2.57% ra 1.13% others 0.46% exit 0 waited 0.0s
+2026-09-29T20:56:32.737+03:00   DM1-p0 r0 [ 16] dm-deferred-1920x1080-idle#dmA W=0: DM1 timing: path=Deferred res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 920 B present fifo rb 1.13% ra 3.52% others 0.58% exit 0 waited 0.0s
+2026-09-29T20:56:42.572+03:00   DM1-p0 r0 [ 17] dm-vb-1920x1080-edit100#dmA W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 2680 B present fifo rb 3.52% ra 3.58% others 1.79% exit 0 waited 0.0s
+2026-09-29T20:56:58.086+03:00   DM1-p0 r0 [ 18] dm-vb-1920x1080-edit100#dmB W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 2679 B present fifo rb 3.58% ra 3.44% others 1.56% exit 0 waited 0.0s
+2026-09-29T20:57:13.501+03:00   DM1-p0 r0 [ 19] dm-vb-1920x1080-edit100#dmB W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 2682 B present fifo rb 3.44% ra 1.35% others 0.48% exit 0 waited 0.0s
+2026-09-29T20:57:23.348+03:00   DM1-p0 r0 [ 20] dm-vb-1920x1080-edit100#dmA W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 2682 B present fifo rb 1.35% ra 5.26% others 2.15% exit 0 waited 0.0s CONTAMINATED-after(5.26%) OTHERS-BUSY(2.15%)
+2026-09-29T20:57:58.947+03:00   DM1-p0 r0 [ 21] dm-vb-1920x1080-edit100#dmA W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 2682 B present fifo rb 1.19% ra 2.79% others 0.5% exit 0 waited 25.0s
+2026-09-29T20:58:14.398+03:00   DM1-p0 r0 [ 22] dm-vb-1920x1080-edit100#dmB W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 2680 B present fifo rb 2.79% ra 3.3% others 2.1% exit 0 waited 0.0s OTHERS-BUSY(2.1%)
+2026-09-29T20:58:29.861+03:00   DM1-p0 r0 [ 23] dm-vb-1920x1080-edit100#dmB W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 2678 B present fifo rb 3.3% ra 2.42% others 1.7% exit 0 waited 0.0s
+2026-09-29T20:58:39.704+03:00   DM1-p0 r0 [ 24] dm-vb-1920x1080-edit100#dmA W=0: DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 2685 B present fifo rb 2.42% ra 1.06% others 0.37% exit 0 waited 0.0s
+2026-09-29T20:58:39.704+03:00 DM1-p0: re-running 6 process(es) at the end of the pass: [(1, 0, 'dm-vb-1920x1080-idle', 'dmA', 0, 'contaminated'), (8, 0, 'dm-vb-1920x1080-idle', 'dmA', 0, 'contaminated'), (11, 0, 'dm-deferred-1920x1080-idle', 'dmB', 0, 'contaminated'), (13, 0, 'dm-deferred-1920x1080-idle', 'dmA', 0, 'contaminated'), (20, 0, 'dm-vb-1920x1080-edit100', 'dmA', 0, 'contaminated'), (22, 0, 'dm-vb-1920x1080-edit100', 'dmB', 0, 'contaminated')]
+2026-09-29T20:58:49.540+03:00   DM1-p0 r0 [  1] dm-vb-1920x1080-idle#dmA W=0 RERUN (contaminated): DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 2679 B present fifo rb 1.06% ra 3.89% others 0.76% exit 0 waited 0.0s
+2026-09-29T20:58:59.365+03:00   DM1-p0 r0 [  8] dm-vb-1920x1080-idle#dmA W=0 RERUN (contaminated): DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 2680 B present fifo rb 3.89% ra 4.05% others 2.1% exit 0 waited 0.0s OTHERS-BUSY(2.1%)
+2026-09-29T20:59:13.935+03:00   DM1-p0 r0 [ 11] dm-deferred-1920x1080-idle#dmB W=0 RERUN (contaminated): DM1 timing: path=Deferred res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 920 B present fifo rb 4.05% ra 3.46% others 1.55% exit 0 waited 0.0s
+2026-09-29T20:59:23.545+03:00   DM1-p0 r0 [ 13] dm-deferred-1920x1080-idle#dmA W=0 RERUN (contaminated): DM1 timing: path=Deferred res=1920x1080 edit_rows=0 grow_at=None frames=241 artifact 921 B present fifo rb 3.46% ra 2.59% others 0.54% exit 0 waited 0.0s
+2026-09-29T20:59:33.401+03:00   DM1-p0 r0 [ 20] dm-vb-1920x1080-edit100#dmA W=0 RERUN (contaminated): DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 2682 B present fifo rb 2.59% ra 2.61% others 0.88% exit 0 waited 0.0s
+2026-09-29T20:59:48.866+03:00   DM1-p0 r0 [ 22] dm-vb-1920x1080-edit100#dmB W=0 RERUN (contaminated): DM1 timing: path=VisibilityBuffer res=1920x1080 edit_rows=100 grow_at=None frames=241 artifact 2682 B present fifo rb 2.61% ra 5.36% others 1.83% exit 0 waited 0.0s CONTAMINATED-after(5.36%)
+2026-09-29T20:59:48.867+03:00 DM1-p0: done
+2026-09-29T20:59:48.868+03:00 omega-v1-cont-p0: idle rule (wait_idle8b.ps1, up to 30 polls)
+2026-09-29T21:01:59.361+03:00 omega-v1-cont-p0: idle reached; {'time': '2026-09-29T21:01:59.361+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-09-29T21:02:09.461+03:00 omega-v1-cont-p0: opening receipt 4.14% (build procs busy [], presence {'build': [], 'lane': []})
+2026-09-29T21:02:15.869+03:00   omega-v1-cont-p0 warm-up omega1-s36-worker#omega2 W=0 (untimed): summaries 4 rb 4.14% ra 44.45% others 41.99% exit 0 waited 0.0s CONTAMINATED-after(44.45%) OTHERS-BUSY(41.99%)
+2026-09-29T21:03:37.578+03:00   omega-v1-cont-p0 r0 [  1] omega1-s72-external#omega2 W=0: summaries 4 rb 4.77% ra 5.8% others 6.25% exit 0 waited 75.1s CONTAMINATED-after(5.8%) OTHERS-BUSY(6.25%)
+2026-09-29T21:04:09.312+03:00   omega-v1-cont-p0 r0 [  2] omega1-s72-worker#omega2 W=0: summaries 4 rb 3.16% ra 2.03% others 1.15% exit 0 waited 25.0s
+2026-09-29T21:04:15.203+03:00   omega-v1-cont-p0 r0 [  3] omega1-s36-external#omega2 W=0: summaries 4 rb 2.03% ra 10.01% others 7.34% exit 0 waited 0.0s CONTAMINATED-after(10.01%) OTHERS-BUSY(7.34%)
+2026-09-29T21:04:46.169+03:00   omega-v1-cont-p0 r0 [  4] omega1-s36-worker#omega2 W=0: summaries 4 rb 2.97% ra 4.36% others 2.32% exit 0 waited 25.0s OTHERS-BUSY(2.32%)
+2026-09-29T21:04:52.745+03:00   omega-v1-cont-p0 r1 [  5] omega1-s72-external#omega2 W=0: summaries 4 rb 4.36% ra 4.22% others 1.63% exit 0 waited 0.0s
+2026-09-29T21:04:59.384+03:00   omega-v1-cont-p0 r1 [  6] omega1-s72-worker#omega2 W=0: summaries 4 rb 4.22% ra 6.3% others 2.89% exit 0 waited 0.0s CONTAMINATED-after(6.3%) OTHERS-BUSY(2.89%)
+2026-09-29T21:05:30.292+03:00   omega-v1-cont-p0 r1 [  7] omega1-s36-external#omega2 W=0: summaries 4 rb 3.46% ra 4.02% others 1.84% exit 0 waited 25.0s
+2026-09-29T21:05:36.211+03:00   omega-v1-cont-p0 r1 [  8] omega1-s36-worker#omega2 W=0: summaries 4 rb 4.02% ra 7.87% others 11.44% exit 0 waited 0.0s CONTAMINATED-after(7.87%) OTHERS-BUSY(11.44%)
+2026-09-29T21:06:07.895+03:00   omega-v1-cont-p0 r2 [  9] omega1-s72-external#omega2 W=0: summaries 4 rb 2.02% ra 1.49% others 0.56% exit 0 waited 25.0s
+2026-09-29T21:06:14.611+03:00   omega-v1-cont-p0 r2 [ 10] omega1-s72-worker#omega2 W=0: summaries 4 rb 1.49% ra 6.21% others 2.87% exit 0 waited 0.0s CONTAMINATED-after(6.21%) OTHERS-BUSY(2.87%)
+2026-09-29T21:07:10.534+03:00   omega-v1-cont-p0 r2 [ 11] omega1-s36-external#omega2 W=0: summaries 4 rb 1.37% ra 3.07% others 6.23% exit 0 waited 50.1s OTHERS-BUSY(6.23%)
+2026-09-29T21:07:16.418+03:00   omega-v1-cont-p0 r2 [ 12] omega1-s36-worker#omega2 W=0: summaries 4 rb 3.07% ra 8.02% others 0.61% exit 0 waited 0.0s CONTAMINATED-after(8.02%)
+2026-09-29T21:07:16.419+03:00 omega-v1-cont-p0: re-running 8 process(es) at the end of the pass: [(1, 0, 'omega1-s72-external', 'omega2', 0, 'contaminated'), (3, 0, 'omega1-s36-external', 'omega2', 0, 'contaminated'), (4, 0, 'omega1-s36-worker', 'omega2', 0, 'contaminated'), (6, 1, 'omega1-s72-worker', 'omega2', 0, 'contaminated'), (8, 1, 'omega1-s36-worker', 'omega2', 0, 'contaminated'), (10, 2, 'omega1-s72-worker', 'omega2', 0, 'contaminated'), (11, 2, 'omega1-s36-external', 'omega2', 0, 'contaminated'), (12, 2, 'omega1-s36-worker', 'omega2', 0, 'contaminated')]
+2026-09-29T21:07:48.011+03:00   omega-v1-cont-p0 r0 [  1] omega1-s72-external#omega2 W=0 RERUN (contaminated): summaries 4 rb 3.52% ra 7.6% others 7.7% exit 0 waited 25.0s CONTAMINATED-after(7.6%) OTHERS-BUSY(7.7%)
+2026-09-29T21:08:18.913+03:00   omega-v1-cont-p0 r0 [  3] omega1-s36-external#omega2 W=0 RERUN (contaminated): summaries 4 rb 3.62% ra 2.95% others 0.99% exit 0 waited 25.0s
+2026-09-29T21:08:24.795+03:00   omega-v1-cont-p0 r0 [  4] omega1-s36-worker#omega2 W=0 RERUN (contaminated): summaries 4 rb 2.95% ra 2.55% others 0.37% exit 0 waited 0.0s
+2026-09-29T21:08:31.400+03:00   omega-v1-cont-p0 r1 [  6] omega1-s72-worker#omega2 W=0 RERUN (contaminated): summaries 4 rb 2.55% ra 3.92% others 1.8% exit 0 waited 0.0s
+2026-09-29T21:08:37.300+03:00   omega-v1-cont-p0 r1 [  8] omega1-s36-worker#omega2 W=0 RERUN (contaminated): summaries 4 rb 3.92% ra 3.97% others 1.55% exit 0 waited 0.0s
+2026-09-29T21:08:43.941+03:00   omega-v1-cont-p0 r2 [ 10] omega1-s72-worker#omega2 W=0 RERUN (contaminated): summaries 4 rb 3.97% ra 7.83% others 5.57% exit 0 waited 0.0s CONTAMINATED-after(7.83%) OTHERS-BUSY(5.57%)
+2026-09-29T21:09:14.904+03:00   omega-v1-cont-p0 r2 [ 11] omega1-s36-external#omega2 W=0 RERUN (contaminated): summaries 4 rb 4.64% ra 2.77% others 2.79% exit 0 waited 25.0s OTHERS-BUSY(2.79%)
+2026-09-29T21:09:20.758+03:00   omega-v1-cont-p0 r2 [ 12] omega1-s36-worker#omega2 W=0 RERUN (contaminated): summaries 4 rb 2.77% ra 5.21% others 2.03% exit 0 waited 0.0s CONTAMINATED-after(5.21%) OTHERS-BUSY(2.03%)
+2026-09-29T21:09:20.758+03:00 omega-v1-cont-p0: done
+2026-09-29T21:09:20.793+03:00 WINDOW END exit 0: complete; counters {'timed': 894, 'rerun': 108, 'warm': 20, 'voided_processes': 0, 'r4_differ': 0}; binaries after all match

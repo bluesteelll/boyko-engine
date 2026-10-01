@@ -1,0 +1,27 @@
+comparison | B/A pooled | n A/B | K per pass A | K per pass B | flags r/i/s per pass (K>=3 rule) | LETTER | K2 | CLEAN
+TD t_q W1 kd/leaflist | 0.8312 (-16.88 %) | 8/9 | 3/2/3 | 3/3/3 | p0 YYY p1 nnn p2 YYY pooled YYY | NOT CLAIMED | STRONG CLAIMED lower | STRONG CLAIMED lower
+TD t_q W8 kd/leaflist | 0.8439 (-15.61 %) | 9/9 | 3/3/3 | 3/3/3 | p0 YYY p1 YYY p2 YYY pooled YYY | STRONG CLAIMED lower | STRONG CLAIMED lower | STRONG CLAIMED lower
+TA t_q W1 kd/leaflist | 0.8246 (-17.54 %) | 9/8 | 3/3/3 | 3/2/3 | p0 YYY p1 nnn p2 YYY pooled nYY | NOT CLAIMED | CLAIMED lower | CLAIMED lower
+TD t_b W1 kd/leaflist | 2.2263 (+122.63 %) | 8/9 | 3/2/3 | 3/3/3 | p0 YYY p1 nnn p2 YYY pooled YYY | NOT CLAIMED | STRONG CLAIMED higher | STRONG CLAIMED higher
+TD t_b W8 kd/leaflist | 2.4388 (+143.88 %) | 9/9 | 3/3/3 | 3/3/3 | p0 YYY p1 YYY p2 YYY pooled YYY | STRONG CLAIMED higher | STRONG CLAIMED higher | STRONG CLAIMED higher
+TA t_b W1 kd/leaflist | 2.1236 (+112.36 %) | 9/8 | 3/3/3 | 3/2/3 | p0 YYY p1 nnn p2 YYY pooled YYY | NOT CLAIMED | STRONG CLAIMED higher | STRONG CLAIMED higher
+TD t_qb W1 kd/leaflist | 0.9714 (-2.86 %) | 8/9 | 3/2/3 | 3/3/3 | p0 nnY p1 nnn p2 nnn pooled nnY | NOT CLAIMED | NOT CLAIMED | NOT CLAIMED
+TD t_qb W8 kd/leaflist | 0.9940 (-0.60 %) | 9/9 | 3/3/3 | 3/3/3 | p0 nnn p1 nnn p2 nnn pooled nnn | NOT CLAIMED | NOT CLAIMED | NOT CLAIMED
+TA t_qb W1 kd/leaflist | 0.9683 (-3.17 %) | 9/8 | 3/3/3 | 3/2/3 | p0 nYY p1 nnn p2 nYY pooled nYn | NOT CLAIMED | NOT CLAIMED | NOT CLAIMED
+TD four W1 kd/leaflist | 0.9757 (-2.43 %) | 8/9 | 3/2/3 | 3/3/3 | p0 nnY p1 nnn p2 nnn pooled nnY | NOT CLAIMED | NOT CLAIMED | NOT CLAIMED
+TD four W8 kd/leaflist | 0.9990 (-0.10 %) | 9/9 | 3/3/3 | 3/3/3 | p0 nnn p1 nnn p2 nnn pooled nnn | NOT CLAIMED | NOT CLAIMED | NOT CLAIMED
+TA four W1 kd/leaflist | 0.9705 (-2.95 %) | 9/8 | 3/3/3 | 3/2/3 | p0 nYY p1 nnn p2 nYY pooled nYn | NOT CLAIMED | NOT CLAIMED | NOT CLAIMED
+TR t_q W1 leaflist/rowwalk | 0.4986 (-50.14 %) | 8/8 | 2/3/3 | 3/2/3 | p0 nnn p1 nnn p2 YYY pooled YYY | NOT CLAIMED | STRONG CLAIMED lower | STRONG CLAIMED lower
+TR t_q W1 kd/rowwalk | 0.4144 (-58.56 %) | 8/9 | 2/3/3 | 3/3/3 | p0 nnn p1 YYY p2 YYY pooled YYY | NOT CLAIMED | STRONG CLAIMED lower | STRONG CLAIMED lower
+JT wall W1 kd/leaflist | 0.9981 (-0.19 %) | 9/9 | 3/3/3 | 3/3/3 | p0 nnn p1 nnn p2 nnn pooled nnn | NOT CLAIMED | NOT CLAIMED | NOT CLAIMED
+JT wall W2 kd/leaflist | 1.0022 (+0.22 %) | 8/9 | 3/3/2 | 3/3/3 | p0 nnn p1 nnn p2 nnn pooled nnn | NOT CLAIMED | NOT CLAIMED | NOT CLAIMED
+JT wall W4 kd/leaflist | 0.9942 (-0.58 %) | 8/8 | 3/3/2 | 3/3/2 | p0 nnn p1 nnn p2 nnn pooled nnn | NOT CLAIMED | NOT CLAIMED | NOT CLAIMED
+JT wall W8 kd/leaflist | 1.0078 (+0.78 %) | 8/9 | 3/2/3 | 3/3/3 | p0 nnn p1 nnn p2 nnn pooled nnn | NOT CLAIMED | NOT CLAIMED | NOT CLAIMED
+JT wall W16 kd/leaflist | 0.9879 (-1.21 %) | 8/8 | 3/2/3 | 3/2/3 | p0 nnn p1 nnn p2 nnn pooled nnn | NOT CLAIMED | NOT CLAIMED | NOT CLAIMED
+RT wall W1 kd/leaflist | 0.9968 (-0.32 %) | 8/9 | 2/3/3 | 3/3/3 | p0 nnn p1 nnn p2 nnY pooled nnn | NOT CLAIMED | NOT CLAIMED | NOT CLAIMED
+RT wall W2 kd/leaflist | 0.9914 (-0.86 %) | 9/8 | 3/3/3 | 2/3/3 | p0 nnn p1 nnn p2 nnn pooled nnn | NOT CLAIMED | NOT CLAIMED | NOT CLAIMED
+RT wall W4 kd/leaflist | 0.9884 (-1.16 %) | 9/8 | 3/3/3 | 2/3/3 | p0 nnn p1 nnY p2 nnn pooled nnn | NOT CLAIMED | NOT CLAIMED | NOT CLAIMED
+RT wall W8 kd/leaflist | 0.9927 (-0.73 %) | 8/8 | 2/3/3 | 2/3/3 | p0 nnn p1 nnn p2 nnn pooled nnn | NOT CLAIMED | NOT CLAIMED | NOT CLAIMED
+RT wall W16 kd/leaflist | 1.0246 (+2.46 %) | 9/7 | 3/3/3 | 2/3/2 | p0 nnn p1 nnn p2 nnn pooled nnn | NOT CLAIMED | NOT CLAIMED | NOT CLAIMED
+
+comparisons where the readings differ: 6: ['TD t_q W1 kd/leaflist', 'TA t_q W1 kd/leaflist', 'TD t_b W1 kd/leaflist', 'TA t_b W1 kd/leaflist', 'TR t_q W1 leaflist/rowwalk', 'TR t_q W1 kd/rowwalk']

@@ -1,0 +1,161 @@
+
+==== window [0..500) ====
+S4-W8 wall             [0..500) wall_ns n 9/9
+   A 1.9859 [1.9780-2.0244] IQR 0.0071 SE 0.0069 | B 1.8154 [1.7937-1.8472] IQR 0.0230 SE 0.0070
+   B-A -0.1705 ms (-8.58 %); bars r 7.52 i 2.64 s 1.04 %; pooled Y/Y/Y; passes Y/Y/Y Y/Y/Y Y/Y/Y; pass B-A -0.1550 / -0.1741 / -0.1810
+   pass bars i/s: p0 2.94/2.14 (e 7.82); p1 0.60/0.44 (e 8.77); p2 2.13/1.66 (e 8.98)
+   -> CLAIMED STRONG (direction B faster)
+S4-W8 span             [0..500) phys_solve_build_ns n 9/9
+   A 0.3038 [0.2999-0.3119] IQR 0.0014 SE 0.0014 | B 0.1144 [0.1137-0.1155] IQR 0.0006 SE 0.0002
+   B-A -0.1894 ms (-62.34 %); bars r 8.55 i 1.35 s 0.97 %; pooled Y/Y/Y; passes Y/Y/Y Y/Y/Y Y/Y/Y; pass B-A -0.1900 / -0.1885 / -0.1891
+   pass bars i/s: p0 0.72/0.52 (e 62.49); p1 4.01/3.01 (e 62.20); p2 1.26/0.94 (e 62.25)
+   -> CLAIMED STRONG (direction B faster)
+R_8 rung               [0..500) wall_ns n 9/9
+   A 1.8154 [1.7937-1.8472] IQR 0.0230 SE 0.0070 | B 1.8629 [1.8588-1.8876] IQR 0.0138 SE 0.0042
+   B-A +0.0475 ms (+2.62 %); bars r 6.65 i 2.94 s 0.90 %; pooled n/n/Y; passes n/n/n Y/Y/Y n/Y/Y; pass B-A +0.0330 / +0.0622 / +0.0341
+   pass bars i/s: p0 2.93/2.13 (e 1.81); p1 1.43/1.04 (e 3.43); p2 1.51/1.21 (e 1.86)
+   -> NOT CLAIMED (direction B slower)
+zone N30000 span       [0..500) phys_solve_build_ns n 9/9
+   A 0.1144 [0.1137-0.1155] IQR 0.0006 SE 0.0002 | B 0.1447 [0.1439-0.1473] IQR 0.0016 SE 0.0005
+   B-A +0.0303 ms (+26.48 %); bars r 5.67 i 2.38 s 0.78 %; pooled Y/Y/Y; passes Y/Y/Y Y/Y/Y Y/Y/Y; pass B-A +0.0305 / +0.0306 / +0.0314
+   pass bars i/s: p0 0.80/0.61 (e 26.76); p1 1.76/1.30 (e 26.72); p2 1.99/1.46 (e 27.42)
+   -> CLAIMED STRONG (direction B slower)
+zone N60000 span       [0..500) phys_solve_build_ns n 9/9
+   A 0.1144 [0.1137-0.1155] IQR 0.0006 SE 0.0002 | B 0.1749 [0.1733-0.1759] IQR 0.0015 SE 0.0004
+   B-A +0.0604 ms (+52.83 %); bars r 4.33 i 2.01 s 0.59 %; pooled Y/Y/Y; passes Y/Y/Y Y/Y/Y Y/Y/Y; pass B-A +0.0612 / +0.0594 / +0.0608
+   pass bars i/s: p0 1.37/1.02 (e 53.71); p1 1.03/0.78 (e 51.84); p2 1.16/0.87 (e 53.03)
+   -> CLAIMED STRONG (direction B slower)
+no-slower W1           [0..500) wall_ns n 9/9
+   A 4.4217 [4.3833-4.5336] IQR 0.0920 SE 0.0235 | B 4.4500 [4.3918-4.5231] IQR 0.0349 SE 0.0166
+   B-A +0.0283 ms (+0.64 %); bars r 9.00 i 4.45 s 1.30 %; pooled n/n/n; passes n/n/n n/n/n n/n/n; pass B-A +0.0159 / +0.0664 / -0.0413
+   pass bars i/s: p0 1.48/1.10 (e 0.36); p1 2.18/1.66 (e 1.51); p2 1.79/1.30 (e 0.92)
+   -> NOT CLAIMED (direction B slower)
+no-slower W2           [0..500) wall_ns n 9/9
+   A 3.0807 [3.0534-3.2259] IQR 0.0369 SE 0.0234 | B 2.9998 [2.9650-3.0208] IQR 0.0130 SE 0.0075
+   B-A -0.0808 ms (-2.62 %); bars r 11.80 i 2.55 s 1.60 %; pooled n/Y/Y; passes n/Y/Y n/Y/Y n/Y/Y; pass B-A -0.0826 / -0.0808 / -0.1663
+   pass bars i/s: p0 2.58/1.87 (e 2.68); p1 1.61/1.18 (e 2.62); p2 4.90/3.59 (e 5.25)
+   -> CLAIMED (direction B faster)
+no-slower W4           [0..500) wall_ns n 9/9
+   A 2.3529 [2.3376-2.4170] IQR 0.0234 SE 0.0111 | B 2.1981 [2.1857-2.2100] IQR 0.0159 SE 0.0039
+   B-A -0.1549 ms (-6.58 %); bars r 7.10 i 2.46 s 1.01 %; pooled n/Y/Y; passes Y/Y/Y Y/Y/Y Y/Y/Y; pass B-A -0.1399 / -0.1558 / -0.1783
+   pass bars i/s: p0 0.84/0.64 (e 5.98); p1 1.17/0.91 (e 6.65); p2 2.52/1.87 (e 7.47)
+   -> CLAIMED (direction B faster)
+no-slower W16          [0..500) wall_ns n 9/9
+   A 2.2203 [2.2104-2.4401] IQR 0.0332 SE 0.0305 | B 2.0502 [2.0357-2.0744] IQR 0.0154 SE 0.0049
+   B-A -0.1700 ms (-7.66 %); bars r 21.03 i 3.34 s 2.79 %; pooled n/Y/Y; passes Y/Y/Y Y/Y/Y n/n/Y; pass B-A -0.1696 / -0.1822 / -0.2082
+   pass bars i/s: p0 0.90/0.70 (e 7.64); p1 2.34/1.75 (e 8.17); p2 9.98/7.56 (e 9.18)
+   -> NOT CLAIMED (direction B faster)
+W16 armed wall         [0..500) wall_ns n 9/9
+   A 2.3339 [2.3160-2.5028] IQR 0.0205 SE 0.0278 | B 2.1529 [2.1367-2.1889] IQR 0.0132 SE 0.0066
+   B-A -0.1810 ms (-7.75 %); bars r 16.73 i 2.14 s 2.46 %; pooled n/Y/Y; passes Y/Y/Y n/Y/Y n/n/Y; pass B-A -0.1776 / -0.1937 / -0.1721
+   pass bars i/s: p0 1.20/0.98 (e 7.67); p1 4.97/3.93 (e 8.25); p2 7.77/6.45 (e 7.39)
+   -> NOT CLAIMED (direction B faster)
+W16 span               [0..500) phys_solve_build_ns n 9/9
+   A 0.3110 [0.3067-0.4428] IQR 0.0130 SE 0.0229 | B 0.1161 [0.1157-0.1196] IQR 0.0011 SE 0.0005
+   B-A -0.1949 ms (-62.67 %); bars r 87.79 i 8.53 s 14.75 %; pooled n/Y/Y; passes Y/Y/Y n/Y/Y n/Y/Y; pass B-A -0.1929 / -0.1972 / -0.1927
+   pass bars i/s: p0 4.83/3.80 (e 62.48); p1 36.81/30.35 (e 62.77); p2 43.97/36.48 (e 62.33)
+   -> CLAIMED (direction B faster)
+W8 armed wall          [0..500) wall_ns n 9/9
+   A 2.0806 [2.0746-2.1475] IQR 0.0103 SE 0.0095 | B 1.9025 [1.8925-1.9318] IQR 0.0171 SE 0.0058
+   B-A -0.1781 ms (-8.56 %); bars r 8.14 i 2.05 s 1.09 %; pooled Y/Y/Y; passes Y/Y/Y Y/Y/Y Y/Y/Y; pass B-A -0.1841 / -0.1929 / -0.1747
+   pass bars i/s: p0 1.69/1.37 (e 8.86); p1 3.75/2.95 (e 9.22); p2 0.83/0.63 (e 8.40)
+   -> CLAIMED STRONG (direction B faster)
+zone N30000 wall       [0..500) wall_ns n 9/9
+   A 1.9025 [1.8925-1.9318] IQR 0.0171 SE 0.0058 | B 1.9402 [1.9175-1.9485] IQR 0.0232 SE 0.0053
+   B-A +0.0377 ms (+1.98 %); bars r 5.22 i 2.99 s 0.82 %; pooled n/n/Y; passes n/n/Y n/Y/Y Y/Y/Y; pass B-A +0.0275 / +0.0490 / +0.0417
+   pass bars i/s: p0 1.78/1.43 (e 1.45); p1 2.16/1.79 (e 2.58); p2 0.78/0.60 (e 2.19)
+   -> NOT CLAIMED (direction B slower)
+zone N60000 wall       [0..500) wall_ns n 9/9
+   A 1.9025 [1.8925-1.9318] IQR 0.0171 SE 0.0058 | B 1.9651 [1.9427-1.9812] IQR 0.0059 SE 0.0046
+   B-A +0.0626 ms (+3.29 %); bars r 5.69 i 1.90 s 0.77 %; pooled n/Y/Y; passes n/Y/Y n/Y/Y Y/Y/Y; pass B-A +0.0654 / +0.0671 / +0.0594
+   pass bars i/s: p0 1.88/1.53 (e 3.45); p1 2.01/1.65 (e 3.53); p2 1.06/0.85 (e 3.12)
+   -> CLAIMED (direction B slower)
+P-c (sb_pc) W8         [0..500) phys_sb_pc_ns n 9/9
+   A 0.2615 [0.2580-0.2698] IQR 0.0013 SE 0.0013 | B 0.0706 [0.0703-0.0713] IQR 0.0003 SE 0.0001
+   B-A -0.1909 ms (-72.99 %); bars r 9.51 i 1.34 s 1.09 %; pooled Y/Y/Y; passes Y/Y/Y Y/Y/Y Y/Y/Y; pass B-A -0.1910 / -0.1908 / -0.1907
+   pass bars i/s: p0 0.72/0.54 (e 73.04); p1 4.61/3.42 (e 72.94); p2 1.31/0.96 (e 72.92)
+   -> CLAIMED STRONG (direction B faster)
+
+==== window [100..500) ====
+S4-W8 wall             [100..500) wall_ns n 9/9
+   A 1.9428 [1.9356-1.9853] IQR 0.0063 SE 0.0075 | B 1.7737 [1.7522-1.8004] IQR 0.0191 SE 0.0064
+   B-A -0.1691 ms (-8.71 %); bars r 7.46 i 2.25 s 1.06 %; pooled Y/Y/Y; passes Y/Y/Y Y/Y/Y Y/Y/Y; pass B-A -0.1540 / -0.1711 / -0.1860
+   pass bars i/s: p0 2.71/2.00 (e 7.95); p1 0.58/0.44 (e 8.81); p2 2.32/1.78 (e 9.41)
+   -> CLAIMED STRONG (direction B faster)
+S4-W8 span             [100..500) phys_solve_build_ns n 9/9
+   A 0.2992 [0.2962-0.3093] IQR 0.0012 SE 0.0016 | B 0.1127 [0.1121-0.1135] IQR 0.0007 SE 0.0002
+   B-A -0.1865 ms (-62.34 %); bars r 9.13 i 1.42 s 1.11 %; pooled Y/Y/Y; passes Y/Y/Y Y/Y/Y Y/Y/Y; pass B-A -0.1873 / -0.1861 / -0.1854
+   pass bars i/s: p0 0.31/0.25 (e 62.56); p1 4.45/3.39 (e 62.27); p2 1.14/0.84 (e 62.16)
+   -> CLAIMED STRONG (direction B faster)
+R_8 rung               [100..500) wall_ns n 9/9
+   A 1.7737 [1.7522-1.8004] IQR 0.0191 SE 0.0064 | B 1.8205 [1.8120-1.8373] IQR 0.0153 SE 0.0037
+   B-A +0.0468 ms (+2.64 %); bars r 6.10 i 2.73 s 0.83 %; pooled n/n/Y; passes n/n/n Y/Y/Y n/Y/Y; pass B-A +0.0332 / +0.0610 / +0.0372
+   pass bars i/s: p0 2.72/2.00 (e 1.86); p1 0.90/0.72 (e 3.45); p2 1.54/1.18 (e 2.08)
+   -> NOT CLAIMED (direction B slower)
+zone N30000 span       [100..500) phys_solve_build_ns n 9/9
+   A 0.1127 [0.1121-0.1135] IQR 0.0007 SE 0.0002 | B 0.1430 [0.1421-0.1456] IQR 0.0016 SE 0.0005
+   B-A +0.0304 ms (+26.94 %); bars r 5.45 i 2.54 s 0.81 %; pooled Y/Y/Y; passes Y/Y/Y Y/Y/Y Y/Y/Y; pass B-A +0.0303 / +0.0311 / +0.0312
+   pass bars i/s: p0 0.45/0.34 (e 27.03); p1 1.94/1.41 (e 27.58); p2 1.92/1.40 (e 27.61)
+   -> CLAIMED STRONG (direction B slower)
+zone N60000 span       [100..500) phys_solve_build_ns n 9/9
+   A 0.1127 [0.1121-0.1135] IQR 0.0007 SE 0.0002 | B 0.1731 [0.1714-0.1740] IQR 0.0014 SE 0.0004
+   B-A +0.0604 ms (+53.59 %); bars r 3.95 i 2.00 s 0.58 %; pooled Y/Y/Y; passes Y/Y/Y Y/Y/Y Y/Y/Y; pass B-A +0.0614 / +0.0595 / +0.0608
+   pass bars i/s: p0 1.29/0.99 (e 54.78); p1 0.97/0.72 (e 52.77); p2 0.96/0.71 (e 53.83)
+   -> CLAIMED STRONG (direction B slower)
+no-slower W1           [100..500) wall_ns n 9/9
+   A 4.1994 [4.1565-4.3054] IQR 0.0818 SE 0.0222 | B 4.2159 [4.1636-4.2971] IQR 0.0323 SE 0.0166
+   B-A +0.0165 ms (+0.39 %); bars r 9.51 i 4.19 s 1.32 %; pooled n/n/n; passes n/n/n n/n/n n/n/n; pass B-A +0.0092 / +0.0588 / -0.0299
+   pass bars i/s: p0 1.49/1.11 (e 0.22); p1 2.31/1.82 (e 1.42); p2 1.80/1.33 (e 0.70)
+   -> NOT CLAIMED (direction B slower)
+no-slower W2           [100..500) wall_ns n 9/9
+   A 2.9584 [2.9283-3.0948] IQR 0.0324 SE 0.0230 | B 2.8747 [2.8384-2.8987] IQR 0.0125 SE 0.0079
+   B-A -0.0837 ms (-2.83 %); bars r 12.02 i 2.36 s 1.65 %; pooled n/Y/Y; passes n/n/Y n/Y/Y n/Y/Y; pass B-A -0.0782 / -0.0837 / -0.1717
+   pass bars i/s: p0 2.76/2.01 (e 2.65); p1 1.77/1.29 (e 2.83); p2 4.81/3.55 (e 5.64)
+   -> NOT CLAIMED (direction B faster)
+no-slower W4           [100..500) wall_ns n 9/9
+   A 2.2828 [2.2559-2.3418] IQR 0.0214 SE 0.0114 | B 2.1280 [2.1137-2.1395] IQR 0.0108 SE 0.0039
+   B-A -0.1547 ms (-6.78 %); bars r 7.90 i 2.13 s 1.07 %; pooled n/Y/Y; passes Y/Y/Y Y/Y/Y Y/Y/Y; pass B-A -0.1412 / -0.1495 / -0.1808
+   pass bars i/s: p0 1.26/0.91 (e 6.22); p1 1.26/0.98 (e 6.59); p2 2.63/1.95 (e 7.80)
+   -> CLAIMED (direction B faster)
+no-slower W16          [100..500) wall_ns n 9/9
+   A 2.1831 [2.1702-2.3903] IQR 0.0172 SE 0.0293 | B 2.0124 [1.9982-2.0411] IQR 0.0180 SE 0.0056
+   B-A -0.1707 ms (-7.82 %); bars r 20.61 i 2.38 s 2.74 %; pooled n/Y/Y; passes Y/Y/Y Y/Y/Y n/n/Y; pass B-A -0.1670 / -0.1838 / -0.2092
+   pass bars i/s: p0 1.11/0.82 (e 7.66); p1 2.23/1.76 (e 8.39); p2 9.72/7.32 (e 9.38)
+   -> NOT CLAIMED (direction B faster)
+W16 armed wall         [100..500) wall_ns n 9/9
+   A 2.2918 [2.2747-2.4581] IQR 0.0181 SE 0.0269 | B 2.1108 [2.0982-2.1461] IQR 0.0109 SE 0.0062
+   B-A -0.1810 ms (-7.90 %); bars r 16.63 i 1.89 s 2.42 %; pooled n/Y/Y; passes Y/Y/Y n/Y/Y n/n/Y; pass B-A -0.1763 / -0.1901 / -0.1718
+   pass bars i/s: p0 1.10/0.90 (e 7.75); p1 4.64/3.71 (e 8.26); p2 7.85/6.52 (e 7.52)
+   -> NOT CLAIMED (direction B faster)
+W16 span               [100..500) phys_solve_build_ns n 9/9
+   A 0.3069 [0.3022-0.4349] IQR 0.0122 SE 0.0220 | B 0.1145 [0.1141-0.1177] IQR 0.0009 SE 0.0005
+   B-A -0.1925 ms (-62.71 %); bars r 86.73 i 8.14 s 14.39 %; pooled n/Y/Y; passes Y/Y/Y n/Y/Y n/Y/Y; pass B-A -0.1908 / -0.1940 / -0.1903
+   pass bars i/s: p0 4.79/3.72 (e 62.55); p1 35.43/29.30 (e 62.75); p2 43.62/36.06 (e 62.37)
+   -> CLAIMED (direction B faster)
+W8 armed wall          [100..500) wall_ns n 9/9
+   A 2.0339 [2.0296-2.0832] IQR 0.0046 SE 0.0071 | B 1.8548 [1.8436-1.8990] IQR 0.0132 SE 0.0079
+   B-A -0.1790 ms (-8.80 %); bars r 7.97 i 1.49 s 1.10 %; pooled Y/Y/Y; passes Y/Y/Y Y/Y/Y Y/Y/Y; pass B-A -0.1842 / -0.1959 / -0.1706
+   pass bars i/s: p0 2.52/2.00 (e 9.06); p1 3.40/2.67 (e 9.55); p2 0.74/0.54 (e 8.39)
+   -> CLAIMED STRONG (direction B faster)
+zone N30000 wall       [100..500) wall_ns n 9/9
+   A 1.8548 [1.8436-1.8990] IQR 0.0132 SE 0.0079 | B 1.8925 [1.8748-1.9091] IQR 0.0232 SE 0.0054
+   B-A +0.0377 ms (+2.03 %); bars r 6.99 i 2.83 s 1.02 %; pooled n/n/Y; passes n/n/n n/n/Y n/Y/Y; pass B-A +0.0310 / +0.0490 / +0.0343
+   pass bars i/s: p0 2.53/2.02 (e 1.67); p1 2.83/2.31 (e 2.64); p2 0.97/0.71 (e 1.84)
+   -> NOT CLAIMED (direction B slower)
+zone N60000 wall       [100..500) wall_ns n 9/9
+   A 1.8548 [1.8436-1.8990] IQR 0.0132 SE 0.0079 | B 1.9183 [1.8948-1.9361] IQR 0.0059 SE 0.0049
+   B-A +0.0635 ms (+3.42 %); bars r 7.36 i 1.55 s 0.99 %; pooled n/Y/Y; passes n/Y/Y n/Y/Y Y/Y/Y; pass B-A +0.0690 / +0.0620 / +0.0594
+   pass bars i/s: p0 2.79/2.23 (e 3.73); p1 2.61/2.13 (e 3.34); p2 1.01/0.79 (e 3.19)
+   -> CLAIMED (direction B slower)
+P-c (sb_pc) W8         [100..500) phys_sb_pc_ns n 9/9
+   A 0.2585 [0.2554-0.2684] IQR 0.0014 SE 0.0016 | B 0.0701 [0.0698-0.0706] IQR 0.0004 SE 0.0001
+   B-A -0.1884 ms (-72.87 %); bars r 10.29 i 1.55 s 1.26 %; pooled Y/Y/Y; passes Y/Y/Y Y/Y/Y Y/Y/Y; pass B-A -0.1889 / -0.1882 / -0.1872
+   pass bars i/s: p0 0.70/0.53 (e 72.97); p1 5.12/3.87 (e 72.80); p2 1.23/0.89 (e 72.69)
+   -> CLAIMED STRONG (direction B faster)
+
+==== derived (window [0,500) unless stated) ====
+wall gain 0.1705 ms = 2.84x the 0.060 bar; span gain 0.1894; wall/span 0.900
+wall gain minus pooled i-bar (ms, relative bar x A): 0.1181; span: 0.1853
+below window-8 arithmetic low 0.19: 0.0195
+per manifold W8 [100,500) parent: wall 1.9428 ms, manifolds per step [4467.665] -> 434.9 ns/manifold
+per manifold W8 [100,500) tip: wall 1.7737 ms, manifolds per step [4467.665] -> 397.0 ns/manifold

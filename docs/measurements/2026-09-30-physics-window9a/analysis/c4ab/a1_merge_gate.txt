@@ -1,0 +1,535 @@
+C4-AB: used 260 slots, dropped 46
+
+## Pre-registered: the merge gate (C4-JD not claimed slower than C4-JDap nor C4-JDpar at any W)
+
+### G-ap W1: C4-JD#tip vs C4-JDap#tip (same binary, row of record)  [0..500] (not_slower)
+  A ('C4-JDap', 'tip', 1): 6.1501 [6.0101-6.6297] n=7 (IQR 2.26 %, SE 1.59 %, range 10.07 %)
+  B ('C4-JD', 'tip', 1): 4.5692 [4.4430-4.9939] n=7 (IQR 7.65 %, SE 2.32 %, range 12.05 %)
+    p0: A 6.2270 [6.2270-6.2270] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 4.9397 [4.9397-4.9397] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 6.1501 [6.0101-6.2047] n=3 (IQR 1.58 %, SE 1.18 %, range 3.16 %) | B 4.5338 [4.5034-4.7965] n=3 (IQR 3.23 %, SE 2.57 %, range 6.47 %)
+    p2: A 6.0894 [6.0640-6.6297] n=3 (IQR 4.64 %, SE 3.80 %, range 9.29 %) | B 4.5692 [4.4430-4.9939] n=3 (IQR 6.03 %, SE 4.57 %, range 12.05 %)
+  LETTER     : B/A 0.7429 (-25.71 %, B-A -1.5809) pooled YYn (bars i 15.96 / s 5.62 / r 31.42 %); passes p0:nnn(K1/1 0.7933,sep) p1:YYY(K3/3 0.7372,sep) p2:YYn(K3/3 0.7503,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => HOLDS (not claimed)
+  GATING-ONLY: B/A 0.7429 (-25.71 %, B-A -1.5809) pooled YYn (bars i 15.96 / s 5.62 / r 31.42 %); passes p0:nnn(K1/1 0.7933,sep) p1:YYY(K3/3 0.7372,sep) p2:YYn(K3/3 0.7503,sep) gates [1, 2] -> CLAIMED [B<A] => HOLDS (B claimed faster)
+
+### G-par W1: C4-JD#tip vs C4-JDpar#parent (literal parent default)  [0..500] (not_slower)
+  A ('C4-JDpar', 'parent', 1): 6.2008 [6.0390-6.3550] n=8 (IQR 1.03 %, SE 0.71 %, range 5.10 %)
+  B ('C4-JD', 'tip', 1): 4.5692 [4.4430-4.9939] n=7 (IQR 7.65 %, SE 2.32 %, range 12.05 %)
+    p0: A 6.2182 [6.2018-6.2346] n=2 (IQR 0.26 %, SE 0.33 %, range 0.53 %) | B 4.9397 [4.9397-4.9397] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 6.1949 [6.0606-6.2224] n=3 (IQR 1.31 %, SE 1.01 %, range 2.61 %) | B 4.5338 [4.5034-4.7965] n=3 (IQR 3.23 %, SE 2.57 %, range 6.47 %)
+    p2: A 6.1998 [6.0390-6.3550] n=3 (IQR 2.55 %, SE 1.84 %, range 5.10 %) | B 4.5692 [4.4430-4.9939] n=3 (IQR 6.03 %, SE 4.57 %, range 12.05 %)
+  LETTER     : B/A 0.7369 (-26.31 %, B-A -1.6316) pooled YYY (bars i 15.44 / s 4.86 / r 26.18 %); passes p0:nnn(K2/1 0.7944,sep) p1:YYY(K3/3 0.7319,sep) p2:YYY(K3/3 0.7370,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => HOLDS (not claimed)
+  GATING-ONLY: B/A 0.7369 (-26.31 %, B-A -1.6316) pooled YYY (bars i 15.44 / s 4.86 / r 26.18 %); passes p0:nnn(K2/1 0.7944,sep) p1:YYY(K3/3 0.7319,sep) p2:YYY(K3/3 0.7370,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => HOLDS (B claimed faster STRONG)
+
+### G-ap W2: C4-JD#tip vs C4-JDap#tip (same binary, row of record)  [0..500] (not_slower)
+  A ('C4-JDap', 'tip', 2): 4.7129 [4.6224-4.7774] n=8 (IQR 1.04 %, SE 0.45 %, range 3.29 %)
+  B ('C4-JD', 'tip', 2): 3.0706 [2.9863-3.1163] n=8 (IQR 1.90 %, SE 0.68 %, range 4.23 %)
+    p0: A 4.7697 [4.7620-4.7774] n=2 (IQR 0.16 %, SE 0.20 %, range 0.32 %) | B 3.1082 [3.1001-3.1163] n=2 (IQR 0.26 %, SE 0.33 %, range 0.52 %)
+    p1: A 4.7089 [4.6885-4.7169] n=3 (IQR 0.30 %, SE 0.23 %, range 0.60 %) | B 3.0428 [2.9863-3.0859] n=3 (IQR 1.64 %, SE 1.19 %, range 3.27 %)
+    p2: A 4.6954 [4.6224-4.7362] n=3 (IQR 1.21 %, SE 0.89 %, range 2.42 %) | B 3.0609 [2.9967-3.0803] n=3 (IQR 1.36 %, SE 1.03 %, range 2.73 %)
+  LETTER     : B/A 0.6515 (-34.85 %, B-A -1.6423) pooled YYY (bars i 4.32 / s 1.64 / r 10.72 %); passes p0:nnn(K2/2 0.6516,sep) p1:YYY(K3/3 0.6462,sep) p2:YYY(K3/3 0.6519,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => HOLDS (not claimed)
+  GATING-ONLY: B/A 0.6515 (-34.85 %, B-A -1.6423) pooled YYY (bars i 4.32 / s 1.64 / r 10.72 %); passes p0:nnn(K2/2 0.6516,sep) p1:YYY(K3/3 0.6462,sep) p2:YYY(K3/3 0.6519,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => HOLDS (B claimed faster STRONG)
+
+### G-par W2: C4-JD#tip vs C4-JDpar#parent (literal parent default)  [0..500] (not_slower)
+  A ('C4-JDpar', 'parent', 2): 4.6971 [4.6364-4.7735] n=8 (IQR 1.72 %, SE 0.50 %, range 2.92 %)
+  B ('C4-JD', 'tip', 2): 3.0706 [2.9863-3.1163] n=8 (IQR 1.90 %, SE 0.68 %, range 4.23 %)
+    p0: A 4.7531 [4.7326-4.7735] n=2 (IQR 0.43 %, SE 0.54 %, range 0.86 %) | B 3.1082 [3.1001-3.1163] n=2 (IQR 0.26 %, SE 0.33 %, range 0.52 %)
+    p1: A 4.6625 [4.6519-4.6745] n=3 (IQR 0.24 %, SE 0.18 %, range 0.48 %) | B 3.0428 [2.9863-3.0859] n=3 (IQR 1.64 %, SE 1.19 %, range 3.27 %)
+    p2: A 4.7197 [4.6364-4.7641] n=3 (IQR 1.35 %, SE 0.99 %, range 2.71 %) | B 3.0609 [2.9967-3.0803] n=3 (IQR 1.36 %, SE 1.03 %, range 2.73 %)
+  LETTER     : B/A 0.6537 (-34.63 %, B-A -1.6265) pooled YYY (bars i 5.12 / s 1.68 / r 10.28 %); passes p0:nnn(K2/2 0.6539,sep) p1:YYY(K3/3 0.6526,sep) p2:YYY(K3/3 0.6485,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => HOLDS (not claimed)
+  GATING-ONLY: B/A 0.6537 (-34.63 %, B-A -1.6265) pooled YYY (bars i 5.12 / s 1.68 / r 10.28 %); passes p0:nnn(K2/2 0.6539,sep) p1:YYY(K3/3 0.6526,sep) p2:YYY(K3/3 0.6485,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => HOLDS (B claimed faster STRONG)
+
+### G-ap W4: C4-JD#tip vs C4-JDap#tip (same binary, row of record)  [0..500] (not_slower)
+  A ('C4-JDap', 'tip', 4): 3.9106 [3.8587-4.0755] n=7 (IQR 2.26 %, SE 1.02 %, range 5.54 %)
+  B ('C4-JD', 'tip', 4): 2.2356 [2.1959-2.3091] n=7 (IQR 3.40 %, SE 1.02 %, range 5.06 %)
+    p0: A 4.0755 [4.0755-4.0755] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 2.3091 [2.3091-2.3091] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 3.9021 [3.8735-3.9106] n=3 (IQR 0.48 %, SE 0.36 %, range 0.95 %) | B 2.2356 [2.1985-2.2585] n=3 (IQR 1.34 %, SE 0.98 %, range 2.68 %)
+    p2: A 3.9107 [3.8587-4.0417] n=3 (IQR 2.34 %, SE 1.75 %, range 4.68 %) | B 2.2168 [2.1959-2.3090] n=3 (IQR 2.55 %, SE 1.96 %, range 5.10 %)
+  LETTER     : B/A 0.5717 (-42.83 %, B-A -1.6750) pooled YYY (bars i 8.17 / s 2.89 / r 15.02 %); passes p0:nnn(K1/1 0.5666,sep) p1:YYY(K3/3 0.5729,sep) p2:YYY(K3/3 0.5669,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => HOLDS (not claimed)
+  GATING-ONLY: B/A 0.5717 (-42.83 %, B-A -1.6750) pooled YYY (bars i 8.17 / s 2.89 / r 15.02 %); passes p0:nnn(K1/1 0.5666,sep) p1:YYY(K3/3 0.5729,sep) p2:YYY(K3/3 0.5669,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => HOLDS (B claimed faster STRONG)
+
+### G-par W4: C4-JD#tip vs C4-JDpar#parent (literal parent default)  [0..500] (not_slower)
+  A ('C4-JDpar', 'parent', 4): 3.8845 [3.8567-3.9813] n=7 (IQR 1.42 %, SE 0.58 %, range 3.21 %)
+  B ('C4-JD', 'tip', 4): 2.2356 [2.1959-2.3091] n=7 (IQR 3.40 %, SE 1.02 %, range 5.06 %)
+    p0: A 3.9510 [3.9510-3.9510] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 2.3091 [2.3091-2.3091] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 3.8632 [3.8567-3.8845] n=3 (IQR 0.36 %, SE 0.27 %, range 0.72 %) | B 2.2356 [2.1985-2.2585] n=3 (IQR 1.34 %, SE 0.98 %, range 2.68 %)
+    p2: A 3.8916 [3.8692-3.9813] n=3 (IQR 1.44 %, SE 1.10 %, range 2.88 %) | B 2.2168 [2.1959-2.3090] n=3 (IQR 2.55 %, SE 1.96 %, range 5.10 %)
+  LETTER     : B/A 0.5755 (-42.45 %, B-A -1.6489) pooled YYY (bars i 7.37 / s 2.34 / r 11.99 %); passes p0:nnn(K1/1 0.5844,sep) p1:YYY(K3/3 0.5787,sep) p2:YYY(K3/3 0.5697,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => HOLDS (not claimed)
+  GATING-ONLY: B/A 0.5755 (-42.45 %, B-A -1.6489) pooled YYY (bars i 7.37 / s 2.34 / r 11.99 %); passes p0:nnn(K1/1 0.5844,sep) p1:YYY(K3/3 0.5787,sep) p2:YYY(K3/3 0.5697,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => HOLDS (B claimed faster STRONG)
+
+### G-ap W8: C4-JD#tip vs C4-JDap#tip (same binary, row of record)  [0..500] (not_slower)
+  A ('C4-JDap', 'tip', 8): 3.4851 [3.4581-3.5862] n=7 (IQR 1.31 %, SE 0.60 %, range 3.68 %)
+  B ('C4-JD', 'tip', 8): 1.8277 [1.8135-2.0274] n=7 (IQR 4.33 %, SE 2.02 %, range 11.70 %)
+    p0: A 3.4747 [3.4747-3.4747] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 1.8967 [1.8967-1.8967] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 3.4677 [3.4581-3.5185] n=3 (IQR 0.87 %, SE 0.68 %, range 1.74 %) | B 1.8263 [1.8139-1.8277] n=3 (IQR 0.38 %, SE 0.30 %, range 0.75 %)
+    p2: A 3.5153 [3.4851-3.5862] n=3 (IQR 1.44 %, SE 1.07 %, range 2.88 %) | B 1.9019 [1.8135-2.0274] n=3 (IQR 5.62 %, SE 4.09 %, range 11.24 %)
+  LETTER     : B/A 0.5244 (-47.56 %, B-A -1.6574) pooled YYY (bars i 9.06 / s 4.22 / r 24.53 %); passes p0:nnn(K1/1 0.5459,sep) p1:YYY(K3/3 0.5267,sep) p2:YYY(K3/3 0.5410,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => HOLDS (not claimed)
+  GATING-ONLY: B/A 0.5244 (-47.56 %, B-A -1.6574) pooled YYY (bars i 9.06 / s 4.22 / r 24.53 %); passes p0:nnn(K1/1 0.5459,sep) p1:YYY(K3/3 0.5267,sep) p2:YYY(K3/3 0.5410,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => HOLDS (B claimed faster STRONG)
+
+### G-par W8: C4-JD#tip vs C4-JDpar#parent (literal parent default)  [0..500] (not_slower)
+  A ('C4-JDpar', 'parent', 8): 3.5206 [3.4741-3.7428] n=7 (IQR 2.72 %, SE 1.29 %, range 7.63 %)
+  B ('C4-JD', 'tip', 8): 1.8277 [1.8135-2.0274] n=7 (IQR 4.33 %, SE 2.02 %, range 11.70 %)
+    p0: A 3.7428 [3.7428-3.7428] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 1.8967 [1.8967-1.8967] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 3.4854 [3.4741-3.5206] n=3 (IQR 0.67 %, SE 0.50 %, range 1.33 %) | B 1.8263 [1.8139-1.8277] n=3 (IQR 0.38 %, SE 0.30 %, range 0.75 %)
+    p2: A 3.5607 [3.4766-3.5932] n=3 (IQR 1.64 %, SE 1.22 %, range 3.27 %) | B 1.9019 [1.8135-2.0274] n=3 (IQR 5.62 %, SE 4.09 %, range 11.24 %)
+  LETTER     : B/A 0.5191 (-48.09 %, B-A -1.6929) pooled YYY (bars i 10.24 / s 4.80 / r 27.94 %); passes p0:nnn(K1/1 0.5068,sep) p1:YYY(K3/3 0.5240,sep) p2:YYY(K3/3 0.5341,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => HOLDS (not claimed)
+  GATING-ONLY: B/A 0.5191 (-48.09 %, B-A -1.6929) pooled YYY (bars i 10.24 / s 4.80 / r 27.94 %); passes p0:nnn(K1/1 0.5068,sep) p1:YYY(K3/3 0.5240,sep) p2:YYY(K3/3 0.5341,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => HOLDS (B claimed faster STRONG)
+
+### G-ap W16: C4-JD#tip vs C4-JDap#tip (same binary, row of record)  [0..500] (not_slower)
+  A ('C4-JDap', 'tip', 16): 3.7003 [3.6462-3.8975] n=8 (IQR 1.49 %, SE 0.96 %, range 6.79 %)
+  B ('C4-JD', 'tip', 16): 2.0887 [2.0503-2.2770] n=9 (IQR 4.35 %, SE 1.62 %, range 10.85 %)
+    p0: A 3.8357 [3.7739-3.8975] n=2 (IQR 1.61 %, SE 2.02 %, range 3.22 %) | B 2.2310 [2.0887-2.2770] n=3 (IQR 4.22 %, SE 3.18 %, range 8.44 %)
+    p1: A 3.6860 [3.6650-3.6925] n=3 (IQR 0.37 %, SE 0.28 %, range 0.75 %) | B 2.0553 [2.0503-2.1619] n=3 (IQR 2.71 %, SE 2.22 %, range 5.43 %)
+    p2: A 3.7081 [3.6462-3.7231] n=3 (IQR 1.04 %, SE 0.79 %, range 2.07 %) | B 2.0811 [2.0711-2.1093] n=3 (IQR 0.92 %, SE 0.69 %, range 1.84 %)
+  LETTER     : B/A 0.5645 (-43.55 %, B-A -1.6116) pooled YYY (bars i 9.19 / s 3.77 / r 25.60 %); passes p0:nnn(K2/3 0.5816,sep) p1:YYY(K3/3 0.5576,sep) p2:YYY(K3/3 0.5612,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => HOLDS (not claimed)
+  GATING-ONLY: B/A 0.5645 (-43.55 %, B-A -1.6116) pooled YYY (bars i 9.19 / s 3.77 / r 25.60 %); passes p0:nnn(K2/3 0.5816,sep) p1:YYY(K3/3 0.5576,sep) p2:YYY(K3/3 0.5612,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => HOLDS (B claimed faster STRONG)
+
+### G-par W16: C4-JD#tip vs C4-JDpar#parent (literal parent default)  [0..500] (not_slower)
+  A ('C4-JDpar', 'parent', 16): 3.7023 [3.6391-3.8934] n=8 (IQR 3.90 %, SE 1.13 %, range 6.87 %)
+  B ('C4-JD', 'tip', 16): 2.0887 [2.0503-2.2770] n=9 (IQR 4.35 %, SE 1.62 %, range 10.85 %)
+    p0: A 3.8503 [3.8073-3.8934] n=2 (IQR 1.12 %, SE 1.40 %, range 2.23 %) | B 2.2310 [2.0887-2.2770] n=3 (IQR 4.22 %, SE 3.18 %, range 8.44 %)
+    p1: A 3.6763 [3.6630-3.6952] n=3 (IQR 0.44 %, SE 0.32 %, range 0.87 %) | B 2.0553 [2.0503-2.1619] n=3 (IQR 2.71 %, SE 2.22 %, range 5.43 %)
+    p2: A 3.7094 [3.6391-3.8474] n=3 (IQR 2.81 %, SE 2.07 %, range 5.62 %) | B 2.0811 [2.0711-2.1093] n=3 (IQR 0.92 %, SE 0.69 %, range 1.84 %)
+  LETTER     : B/A 0.5642 (-43.58 %, B-A -1.6136) pooled YYY (bars i 11.68 / s 3.95 / r 25.69 %); passes p0:nnn(K2/3 0.5794,sep) p1:YYY(K3/3 0.5591,sep) p2:YYY(K3/3 0.5610,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => HOLDS (not claimed)
+  GATING-ONLY: B/A 0.5642 (-43.58 %, B-A -1.6136) pooled YYY (bars i 11.68 / s 3.95 / r 25.69 %); passes p0:nnn(K2/3 0.5794,sep) p1:YYY(K3/3 0.5591,sep) p2:YYY(K3/3 0.5610,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => HOLDS (B claimed faster STRONG)
+
+## The same pairs as "claimed faster" (plan B1 arith. delta: W1 ~ -1.7, W8 -1.70, W16 ~ -1.69 ms; no bar)
+
+### F-ap W1: C4-JD#tip faster than C4-JDap#tip  [0..500] (faster)
+  A ('C4-JDap', 'tip', 1): 6.1501 [6.0101-6.6297] n=7 (IQR 2.26 %, SE 1.59 %, range 10.07 %)
+  B ('C4-JD', 'tip', 1): 4.5692 [4.4430-4.9939] n=7 (IQR 7.65 %, SE 2.32 %, range 12.05 %)
+    p0: A 6.2270 [6.2270-6.2270] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 4.9397 [4.9397-4.9397] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 6.1501 [6.0101-6.2047] n=3 (IQR 1.58 %, SE 1.18 %, range 3.16 %) | B 4.5338 [4.5034-4.7965] n=3 (IQR 3.23 %, SE 2.57 %, range 6.47 %)
+    p2: A 6.0894 [6.0640-6.6297] n=3 (IQR 4.64 %, SE 3.80 %, range 9.29 %) | B 4.5692 [4.4430-4.9939] n=3 (IQR 6.03 %, SE 4.57 %, range 12.05 %)
+  LETTER     : B/A 0.7429 (-25.71 %, B-A -1.5809) pooled YYn (bars i 15.96 / s 5.62 / r 31.42 %); passes p0:nnn(K1/1 0.7933,sep) p1:YYY(K3/3 0.7372,sep) p2:YYn(K3/3 0.7503,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.7429 (-25.71 %, B-A -1.5809) pooled YYn (bars i 15.96 / s 5.62 / r 31.42 %); passes p0:nnn(K1/1 0.7933,sep) p1:YYY(K3/3 0.7372,sep) p2:YYn(K3/3 0.7503,sep) gates [1, 2] -> CLAIMED [B<A] => CLAIMED
+
+### F-ap W1: C4-JD#tip faster than C4-JDap#tip  [100..500] (faster)
+  A ('C4-JDap', 'tip', 1): 5.9153 [5.7829-6.3914] n=7 (IQR 1.99 %, SE 1.60 %, range 10.29 %)
+  B ('C4-JD', 'tip', 1): 4.3504 [4.2115-4.7890] n=7 (IQR 7.94 %, SE 2.50 %, range 13.27 %)
+    p0: A 5.9794 [5.9794-5.9794] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 4.7135 [4.7135-4.7135] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 5.9153 [5.7829-5.9837] n=3 (IQR 1.70 %, SE 1.25 %, range 3.39 %) | B 4.2849 [4.2797-4.5416] n=3 (IQR 3.06 %, SE 2.53 %, range 6.11 %)
+    p2: A 5.8651 [5.8622-6.3914] n=3 (IQR 4.51 %, SE 3.76 %, range 9.02 %) | B 4.3504 [4.2115-4.7890] n=3 (IQR 6.64 %, SE 5.01 %, range 13.27 %)
+  LETTER     : B/A 0.7354 (-26.46 %, B-A -1.5649) pooled YYn (bars i 16.36 / s 5.93 / r 33.59 %); passes p0:nnn(K1/1 0.7883,sep) p1:YYY(K3/3 0.7244,sep) p2:YYn(K3/3 0.7417,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.7354 (-26.46 %, B-A -1.5649) pooled YYn (bars i 16.36 / s 5.93 / r 33.59 %); passes p0:nnn(K1/1 0.7883,sep) p1:YYY(K3/3 0.7244,sep) p2:YYn(K3/3 0.7417,sep) gates [1, 2] -> CLAIMED [B<A] => CLAIMED
+
+### F-ap W1: C4-JD#tip faster than C4-JDap#tip  [0..100] (faster)
+  A ('C4-JDap', 'tip', 1): 7.0887 [6.8598-7.5832] n=7 (IQR 2.75 %, SE 1.61 %, range 10.21 %)
+  B ('C4-JD', 'tip', 1): 5.5295 [5.3693-5.8448] n=7 (IQR 7.12 %, SE 1.84 %, range 8.60 %)
+    p0: A 7.2177 [7.2177-7.2177] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 5.8448 [5.8448-5.8448] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 7.0887 [6.9191-7.0895] n=3 (IQR 1.20 %, SE 1.00 %, range 2.40 %) | B 5.5295 [5.3979-5.8164] n=3 (IQR 3.78 %, SE 2.80 %, range 7.57 %)
+    p2: A 6.9985 [6.8598-7.5832] n=3 (IQR 5.17 %, SE 3.97 %, range 10.34 %) | B 5.4445 [5.3693-5.8134] n=3 (IQR 4.08 %, SE 3.16 %, range 8.16 %)
+  LETTER     : B/A 0.7800 (-22.00 %, B-A -1.5592) pooled YYn (bars i 15.27 / s 4.88 / r 26.69 %); passes p0:nnn(K1/1 0.8098,sep) p1:YYY(K3/3 0.7800,sep) p2:YYn(K3/3 0.7780,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.7800 (-22.00 %, B-A -1.5592) pooled YYn (bars i 15.27 / s 4.88 / r 26.69 %); passes p0:nnn(K1/1 0.8098,sep) p1:YYY(K3/3 0.7800,sep) p2:YYn(K3/3 0.7780,sep) gates [1, 2] -> CLAIMED [B<A] => CLAIMED
+
+### F-par W1: C4-JD#tip faster than C4-JDpar#parent  [0..500] (faster)
+  A ('C4-JDpar', 'parent', 1): 6.2008 [6.0390-6.3550] n=8 (IQR 1.03 %, SE 0.71 %, range 5.10 %)
+  B ('C4-JD', 'tip', 1): 4.5692 [4.4430-4.9939] n=7 (IQR 7.65 %, SE 2.32 %, range 12.05 %)
+    p0: A 6.2182 [6.2018-6.2346] n=2 (IQR 0.26 %, SE 0.33 %, range 0.53 %) | B 4.9397 [4.9397-4.9397] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 6.1949 [6.0606-6.2224] n=3 (IQR 1.31 %, SE 1.01 %, range 2.61 %) | B 4.5338 [4.5034-4.7965] n=3 (IQR 3.23 %, SE 2.57 %, range 6.47 %)
+    p2: A 6.1998 [6.0390-6.3550] n=3 (IQR 2.55 %, SE 1.84 %, range 5.10 %) | B 4.5692 [4.4430-4.9939] n=3 (IQR 6.03 %, SE 4.57 %, range 12.05 %)
+  LETTER     : B/A 0.7369 (-26.31 %, B-A -1.6316) pooled YYY (bars i 15.44 / s 4.86 / r 26.18 %); passes p0:nnn(K2/1 0.7944,sep) p1:YYY(K3/3 0.7319,sep) p2:YYY(K3/3 0.7370,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.7369 (-26.31 %, B-A -1.6316) pooled YYY (bars i 15.44 / s 4.86 / r 26.18 %); passes p0:nnn(K2/1 0.7944,sep) p1:YYY(K3/3 0.7319,sep) p2:YYY(K3/3 0.7370,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-par W1: C4-JD#tip faster than C4-JDpar#parent  [100..500] (faster)
+  A ('C4-JDpar', 'parent', 1): 5.9797 [5.8276-6.1114] n=8 (IQR 1.11 %, SE 0.69 %, range 4.75 %)
+  B ('C4-JD', 'tip', 1): 4.3504 [4.2115-4.7890] n=7 (IQR 7.94 %, SE 2.50 %, range 13.27 %)
+    p0: A 5.9892 [5.9760-6.0024] n=2 (IQR 0.22 %, SE 0.28 %, range 0.44 %) | B 4.7135 [4.7135-4.7135] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 5.9673 [5.8344-5.9996] n=3 (IQR 1.38 %, SE 1.06 %, range 2.77 %) | B 4.2849 [4.2797-4.5416] n=3 (IQR 3.06 %, SE 2.53 %, range 6.11 %)
+    p2: A 5.9835 [5.8276-6.1114] n=3 (IQR 2.37 %, SE 1.72 %, range 4.74 %) | B 4.3504 [4.2115-4.7890] n=3 (IQR 6.64 %, SE 5.01 %, range 13.27 %)
+  LETTER     : B/A 0.7275 (-27.25 %, B-A -1.6294) pooled YYn (bars i 16.03 / s 5.18 / r 28.19 %); passes p0:nnn(K2/1 0.7870,sep) p1:YYY(K3/3 0.7181,sep) p2:YYn(K3/3 0.7271,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.7275 (-27.25 %, B-A -1.6294) pooled YYn (bars i 16.03 / s 5.18 / r 28.19 %); passes p0:nnn(K2/1 0.7870,sep) p1:YYY(K3/3 0.7181,sep) p2:YYn(K3/3 0.7271,sep) gates [1, 2] -> CLAIMED [B<A] => CLAIMED
+
+### F-par W1: C4-JD#tip faster than C4-JDpar#parent  [0..100] (faster)
+  A ('C4-JDpar', 'parent', 1): 7.1053 [6.8845-7.3293] n=8 (IQR 1.21 %, SE 0.82 %, range 6.26 %)
+  B ('C4-JD', 'tip', 1): 5.5295 [5.3693-5.8448] n=7 (IQR 7.12 %, SE 1.84 %, range 8.60 %)
+    p0: A 7.1343 [7.1051-7.1636] n=2 (IQR 0.41 %, SE 0.51 %, range 0.82 %) | B 5.8448 [5.8448-5.8448] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 7.1055 [6.9655-7.1134] n=3 (IQR 1.04 %, SE 0.85 %, range 2.08 %) | B 5.5295 [5.3979-5.8164] n=3 (IQR 3.78 %, SE 2.80 %, range 7.57 %)
+    p2: A 7.0648 [6.8845-7.3293] n=3 (IQR 3.15 %, SE 2.29 %, range 6.30 %) | B 5.4445 [5.3693-5.8134] n=3 (IQR 4.08 %, SE 3.16 %, range 8.16 %)
+  LETTER     : B/A 0.7782 (-22.18 %, B-A -1.5758) pooled YYY (bars i 14.45 / s 4.02 / r 21.27 %); passes p0:nnn(K2/1 0.8192,sep) p1:YYY(K3/3 0.7782,sep) p2:YYY(K3/3 0.7707,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.7782 (-22.18 %, B-A -1.5758) pooled YYY (bars i 14.45 / s 4.02 / r 21.27 %); passes p0:nnn(K2/1 0.8192,sep) p1:YYY(K3/3 0.7782,sep) p2:YYY(K3/3 0.7707,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-ap W2: C4-JD#tip faster than C4-JDap#tip  [0..500] (faster)
+  A ('C4-JDap', 'tip', 2): 4.7129 [4.6224-4.7774] n=8 (IQR 1.04 %, SE 0.45 %, range 3.29 %)
+  B ('C4-JD', 'tip', 2): 3.0706 [2.9863-3.1163] n=8 (IQR 1.90 %, SE 0.68 %, range 4.23 %)
+    p0: A 4.7697 [4.7620-4.7774] n=2 (IQR 0.16 %, SE 0.20 %, range 0.32 %) | B 3.1082 [3.1001-3.1163] n=2 (IQR 0.26 %, SE 0.33 %, range 0.52 %)
+    p1: A 4.7089 [4.6885-4.7169] n=3 (IQR 0.30 %, SE 0.23 %, range 0.60 %) | B 3.0428 [2.9863-3.0859] n=3 (IQR 1.64 %, SE 1.19 %, range 3.27 %)
+    p2: A 4.6954 [4.6224-4.7362] n=3 (IQR 1.21 %, SE 0.89 %, range 2.42 %) | B 3.0609 [2.9967-3.0803] n=3 (IQR 1.36 %, SE 1.03 %, range 2.73 %)
+  LETTER     : B/A 0.6515 (-34.85 %, B-A -1.6423) pooled YYY (bars i 4.32 / s 1.64 / r 10.72 %); passes p0:nnn(K2/2 0.6516,sep) p1:YYY(K3/3 0.6462,sep) p2:YYY(K3/3 0.6519,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.6515 (-34.85 %, B-A -1.6423) pooled YYY (bars i 4.32 / s 1.64 / r 10.72 %); passes p0:nnn(K2/2 0.6516,sep) p1:YYY(K3/3 0.6462,sep) p2:YYY(K3/3 0.6519,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-ap W2: C4-JD#tip faster than C4-JDap#tip  [100..500] (faster)
+  A ('C4-JDap', 'tip', 2): 4.5791 [4.4977-4.6434] n=8 (IQR 0.43 %, SE 0.39 %, range 3.18 %)
+  B ('C4-JD', 'tip', 2): 2.9392 [2.8604-2.9761] n=8 (IQR 1.79 %, SE 0.66 %, range 3.94 %)
+    p0: A 4.6185 [4.5937-4.6434] n=2 (IQR 0.54 %, SE 0.67 %, range 1.08 %) | B 2.9724 [2.9687-2.9761] n=2 (IQR 0.13 %, SE 0.16 %, range 0.25 %)
+    p1: A 4.5783 [4.5760-4.5798] n=3 (IQR 0.04 %, SE 0.03 %, range 0.08 %) | B 2.9223 [2.8604-2.9598] n=3 (IQR 1.70 %, SE 1.24 %, range 3.40 %)
+    p2: A 4.5726 [4.4977-4.5980] n=3 (IQR 1.10 %, SE 0.83 %, range 2.19 %) | B 2.9232 [2.8711-2.9552] n=3 (IQR 1.44 %, SE 1.05 %, range 2.88 %)
+  LETTER     : B/A 0.6419 (-35.81 %, B-A -1.6399) pooled YYY (bars i 3.67 / s 1.54 / r 10.13 %); passes p0:nnn(K2/2 0.6436,sep) p1:YYY(K3/3 0.6383,sep) p2:YYY(K3/3 0.6393,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.6419 (-35.81 %, B-A -1.6399) pooled YYY (bars i 3.67 / s 1.54 / r 10.13 %); passes p0:nnn(K2/2 0.6436,sep) p1:YYY(K3/3 0.6383,sep) p2:YYY(K3/3 0.6393,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-ap W2: C4-JD#tip faster than C4-JDap#tip  [0..100] (faster)
+  A ('C4-JDap', 'tip', 2): 5.2482 [5.1212-5.4350] n=8 (IQR 2.29 %, SE 0.87 %, range 5.98 %)
+  B ('C4-JD', 'tip', 2): 3.5855 [3.4901-3.7066] n=8 (IQR 2.28 %, SE 0.87 %, range 6.04 %)
+    p0: A 5.3743 [5.3136-5.4350] n=2 (IQR 1.13 %, SE 1.42 %, range 2.26 %) | B 3.6512 [3.5957-3.7066] n=2 (IQR 1.52 %, SE 1.90 %, range 3.04 %)
+    p1: A 5.2253 [5.1385-5.2712] n=3 (IQR 1.27 %, SE 0.93 %, range 2.54 %) | B 3.5245 [3.4901-3.5905] n=3 (IQR 1.42 %, SE 1.05 %, range 2.85 %)
+    p2: A 5.1870 [5.1212-5.2889] n=3 (IQR 1.62 %, SE 1.18 %, range 3.23 %) | B 3.5805 [3.4993-3.6120] n=3 (IQR 1.57 %, SE 1.18 %, range 3.15 %)
+  LETTER     : B/A 0.6832 (-31.68 %, B-A -1.6627) pooled YYY (bars i 6.46 / s 2.46 / r 17.00 %); passes p0:nnn(K2/2 0.6794,sep) p1:YYY(K3/3 0.6745,sep) p2:YYY(K3/3 0.6903,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.6832 (-31.68 %, B-A -1.6627) pooled YYY (bars i 6.46 / s 2.46 / r 17.00 %); passes p0:nnn(K2/2 0.6794,sep) p1:YYY(K3/3 0.6745,sep) p2:YYY(K3/3 0.6903,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-par W2: C4-JD#tip faster than C4-JDpar#parent  [0..500] (faster)
+  A ('C4-JDpar', 'parent', 2): 4.6971 [4.6364-4.7735] n=8 (IQR 1.72 %, SE 0.50 %, range 2.92 %)
+  B ('C4-JD', 'tip', 2): 3.0706 [2.9863-3.1163] n=8 (IQR 1.90 %, SE 0.68 %, range 4.23 %)
+    p0: A 4.7531 [4.7326-4.7735] n=2 (IQR 0.43 %, SE 0.54 %, range 0.86 %) | B 3.1082 [3.1001-3.1163] n=2 (IQR 0.26 %, SE 0.33 %, range 0.52 %)
+    p1: A 4.6625 [4.6519-4.6745] n=3 (IQR 0.24 %, SE 0.18 %, range 0.48 %) | B 3.0428 [2.9863-3.0859] n=3 (IQR 1.64 %, SE 1.19 %, range 3.27 %)
+    p2: A 4.7197 [4.6364-4.7641] n=3 (IQR 1.35 %, SE 0.99 %, range 2.71 %) | B 3.0609 [2.9967-3.0803] n=3 (IQR 1.36 %, SE 1.03 %, range 2.73 %)
+  LETTER     : B/A 0.6537 (-34.63 %, B-A -1.6265) pooled YYY (bars i 5.12 / s 1.68 / r 10.28 %); passes p0:nnn(K2/2 0.6539,sep) p1:YYY(K3/3 0.6526,sep) p2:YYY(K3/3 0.6485,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.6537 (-34.63 %, B-A -1.6265) pooled YYY (bars i 5.12 / s 1.68 / r 10.28 %); passes p0:nnn(K2/2 0.6539,sep) p1:YYY(K3/3 0.6526,sep) p2:YYY(K3/3 0.6485,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-par W2: C4-JD#tip faster than C4-JDpar#parent  [100..500] (faster)
+  A ('C4-JDpar', 'parent', 2): 4.5677 [4.5087-4.6555] n=8 (IQR 1.36 %, SE 0.48 %, range 3.21 %)
+  B ('C4-JD', 'tip', 2): 2.9392 [2.8604-2.9761] n=8 (IQR 1.79 %, SE 0.66 %, range 3.94 %)
+    p0: A 4.6254 [4.5952-4.6555] n=2 (IQR 0.65 %, SE 0.82 %, range 1.30 %) | B 2.9724 [2.9687-2.9761] n=2 (IQR 0.13 %, SE 0.16 %, range 0.25 %)
+    p1: A 4.5435 [4.5250-4.5490] n=3 (IQR 0.26 %, SE 0.20 %, range 0.53 %) | B 2.9223 [2.8604-2.9598] n=3 (IQR 1.70 %, SE 1.24 %, range 3.40 %)
+    p2: A 4.5864 [4.5087-4.6191] n=3 (IQR 1.20 %, SE 0.89 %, range 2.41 %) | B 2.9232 [2.8711-2.9552] n=3 (IQR 1.44 %, SE 1.05 %, range 2.88 %)
+  LETTER     : B/A 0.6435 (-35.65 %, B-A -1.6285) pooled YYY (bars i 4.49 / s 1.64 / r 10.17 %); passes p0:nnn(K2/2 0.6426,sep) p1:YYY(K3/3 0.6432,sep) p2:YYY(K3/3 0.6374,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.6435 (-35.65 %, B-A -1.6285) pooled YYY (bars i 4.49 / s 1.64 / r 10.17 %); passes p0:nnn(K2/2 0.6426,sep) p1:YYY(K3/3 0.6432,sep) p2:YYY(K3/3 0.6374,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-par W2: C4-JD#tip faster than C4-JDpar#parent  [0..100] (faster)
+  A ('C4-JDpar', 'parent', 2): 5.2109 [5.1383-5.3442] n=8 (IQR 1.99 %, SE 0.63 %, range 3.95 %)
+  B ('C4-JD', 'tip', 2): 3.5855 [3.4901-3.7066] n=8 (IQR 2.28 %, SE 0.87 %, range 6.04 %)
+    p0: A 5.2639 [5.2454-5.2824] n=2 (IQR 0.35 %, SE 0.44 %, range 0.70 %) | B 3.6512 [3.5957-3.7066] n=2 (IQR 1.52 %, SE 1.90 %, range 3.04 %)
+    p1: A 5.1597 [5.1383-5.1763] n=3 (IQR 0.37 %, SE 0.27 %, range 0.74 %) | B 3.5245 [3.4901-3.5905] n=3 (IQR 1.42 %, SE 1.05 %, range 2.85 %)
+    p2: A 5.2531 [5.1473-5.3442] n=3 (IQR 1.87 %, SE 1.36 %, range 3.75 %) | B 3.5805 [3.4993-3.6120] n=3 (IQR 1.57 %, SE 1.18 %, range 3.15 %)
+  LETTER     : B/A 0.6881 (-31.19 %, B-A -1.6254) pooled YYY (bars i 6.05 / s 2.15 / r 14.43 %); passes p0:nnn(K2/2 0.6936,sep) p1:YYY(K3/3 0.6831,sep) p2:YYY(K3/3 0.6816,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.6881 (-31.19 %, B-A -1.6254) pooled YYY (bars i 6.05 / s 2.15 / r 14.43 %); passes p0:nnn(K2/2 0.6936,sep) p1:YYY(K3/3 0.6831,sep) p2:YYY(K3/3 0.6816,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-ap W4: C4-JD#tip faster than C4-JDap#tip  [0..500] (faster)
+  A ('C4-JDap', 'tip', 4): 3.9106 [3.8587-4.0755] n=7 (IQR 2.26 %, SE 1.02 %, range 5.54 %)
+  B ('C4-JD', 'tip', 4): 2.2356 [2.1959-2.3091] n=7 (IQR 3.40 %, SE 1.02 %, range 5.06 %)
+    p0: A 4.0755 [4.0755-4.0755] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 2.3091 [2.3091-2.3091] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 3.9021 [3.8735-3.9106] n=3 (IQR 0.48 %, SE 0.36 %, range 0.95 %) | B 2.2356 [2.1985-2.2585] n=3 (IQR 1.34 %, SE 0.98 %, range 2.68 %)
+    p2: A 3.9107 [3.8587-4.0417] n=3 (IQR 2.34 %, SE 1.75 %, range 4.68 %) | B 2.2168 [2.1959-2.3090] n=3 (IQR 2.55 %, SE 1.96 %, range 5.10 %)
+  LETTER     : B/A 0.5717 (-42.83 %, B-A -1.6750) pooled YYY (bars i 8.17 / s 2.89 / r 15.02 %); passes p0:nnn(K1/1 0.5666,sep) p1:YYY(K3/3 0.5729,sep) p2:YYY(K3/3 0.5669,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.5717 (-42.83 %, B-A -1.6750) pooled YYY (bars i 8.17 / s 2.89 / r 15.02 %); passes p0:nnn(K1/1 0.5666,sep) p1:YYY(K3/3 0.5729,sep) p2:YYY(K3/3 0.5669,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-ap W4: C4-JD#tip faster than C4-JDap#tip  [100..500] (faster)
+  A ('C4-JDap', 'tip', 4): 3.8285 [3.7833-4.0098] n=7 (IQR 2.65 %, SE 1.11 %, range 5.92 %)
+  B ('C4-JD', 'tip', 4): 2.1605 [2.1266-2.2431] n=7 (IQR 3.24 %, SE 1.04 %, range 5.39 %)
+    p0: A 4.0098 [4.0098-4.0098] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 2.2338 [2.2338-2.2338] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 3.8285 [3.8024-3.8353] n=3 (IQR 0.43 %, SE 0.33 %, range 0.86 %) | B 2.1605 [2.1291-2.1874] n=3 (IQR 1.35 %, SE 0.98 %, range 2.70 %)
+    p2: A 3.7968 [3.7833-3.9666] n=3 (IQR 2.41 %, SE 1.95 %, range 4.83 %) | B 2.1522 [2.1266-2.2431] n=3 (IQR 2.71 %, SE 2.06 %, range 5.41 %)
+  LETTER     : B/A 0.5643 (-43.57 %, B-A -1.6679) pooled YYY (bars i 8.36 / s 3.04 / r 16.01 %); passes p0:nnn(K1/1 0.5571,sep) p1:YYY(K3/3 0.5643,sep) p2:YYY(K3/3 0.5669,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.5643 (-43.57 %, B-A -1.6679) pooled YYY (bars i 8.36 / s 3.04 / r 16.01 %); passes p0:nnn(K1/1 0.5571,sep) p1:YYY(K3/3 0.5643,sep) p2:YYY(K3/3 0.5669,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-ap W4: C4-JD#tip faster than C4-JDap#tip  [0..100] (faster)
+  A ('C4-JDap', 'tip', 4): 4.2116 [4.1578-4.3664] n=7 (IQR 3.84 %, SE 1.03 %, range 4.95 %)
+  B ('C4-JD', 'tip', 4): 2.5360 [2.4728-2.6103] n=7 (IQR 3.23 %, SE 1.01 %, range 5.42 %)
+    p0: A 4.3383 [4.3383-4.3383] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 2.6103 [2.6103-2.6103] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 4.1969 [4.1578-4.2116] n=3 (IQR 0.64 %, SE 0.48 %, range 1.28 %) | B 2.5360 [2.4763-2.5428] n=3 (IQR 1.31 %, SE 1.04 %, range 2.62 %)
+    p2: A 4.3423 [4.1603-4.3664] n=3 (IQR 2.37 %, SE 1.88 %, range 4.75 %) | B 2.4753 [2.4728-2.5726] n=3 (IQR 2.02 %, SE 1.66 %, range 4.03 %)
+  LETTER     : B/A 0.6021 (-39.79 %, B-A -1.6756) pooled YYY (bars i 10.03 / s 2.89 / r 14.69 %); passes p0:nnn(K1/1 0.6017,sep) p1:YYY(K3/3 0.6043,sep) p2:YYY(K3/3 0.5700,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.6021 (-39.79 %, B-A -1.6756) pooled YYY (bars i 10.03 / s 2.89 / r 14.69 %); passes p0:nnn(K1/1 0.6017,sep) p1:YYY(K3/3 0.6043,sep) p2:YYY(K3/3 0.5700,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-par W4: C4-JD#tip faster than C4-JDpar#parent  [0..500] (faster)
+  A ('C4-JDpar', 'parent', 4): 3.8845 [3.8567-3.9813] n=7 (IQR 1.42 %, SE 0.58 %, range 3.21 %)
+  B ('C4-JD', 'tip', 4): 2.2356 [2.1959-2.3091] n=7 (IQR 3.40 %, SE 1.02 %, range 5.06 %)
+    p0: A 3.9510 [3.9510-3.9510] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 2.3091 [2.3091-2.3091] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 3.8632 [3.8567-3.8845] n=3 (IQR 0.36 %, SE 0.27 %, range 0.72 %) | B 2.2356 [2.1985-2.2585] n=3 (IQR 1.34 %, SE 0.98 %, range 2.68 %)
+    p2: A 3.8916 [3.8692-3.9813] n=3 (IQR 1.44 %, SE 1.10 %, range 2.88 %) | B 2.2168 [2.1959-2.3090] n=3 (IQR 2.55 %, SE 1.96 %, range 5.10 %)
+  LETTER     : B/A 0.5755 (-42.45 %, B-A -1.6489) pooled YYY (bars i 7.37 / s 2.34 / r 11.99 %); passes p0:nnn(K1/1 0.5844,sep) p1:YYY(K3/3 0.5787,sep) p2:YYY(K3/3 0.5697,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.5755 (-42.45 %, B-A -1.6489) pooled YYY (bars i 7.37 / s 2.34 / r 11.99 %); passes p0:nnn(K1/1 0.5844,sep) p1:YYY(K3/3 0.5787,sep) p2:YYY(K3/3 0.5697,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-par W4: C4-JD#tip faster than C4-JDpar#parent  [100..500] (faster)
+  A ('C4-JDpar', 'parent', 4): 3.8092 [3.7827-3.9081] n=7 (IQR 1.29 %, SE 0.58 %, range 3.29 %)
+  B ('C4-JD', 'tip', 4): 2.1605 [2.1266-2.2431] n=7 (IQR 3.24 %, SE 1.04 %, range 5.39 %)
+    p0: A 3.8686 [3.8686-3.8686] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 2.2338 [2.2338-2.2338] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 3.7868 [3.7827-3.8142] n=3 (IQR 0.42 %, SE 0.33 %, range 0.83 %) | B 2.1605 [2.1291-2.1874] n=3 (IQR 1.35 %, SE 0.98 %, range 2.70 %)
+    p2: A 3.8092 [3.7981-3.9081] n=3 (IQR 1.44 %, SE 1.15 %, range 2.89 %) | B 2.1522 [2.1266-2.2431] n=3 (IQR 2.71 %, SE 2.06 %, range 5.41 %)
+  LETTER     : B/A 0.5672 (-43.28 %, B-A -1.6487) pooled YYY (bars i 6.96 / s 2.38 / r 12.63 %); passes p0:nnn(K1/1 0.5774,sep) p1:YYY(K3/3 0.5705,sep) p2:YYY(K3/3 0.5650,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.5672 (-43.28 %, B-A -1.6487) pooled YYY (bars i 6.96 / s 2.38 / r 12.63 %); passes p0:nnn(K1/1 0.5774,sep) p1:YYY(K3/3 0.5705,sep) p2:YYY(K3/3 0.5650,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-par W4: C4-JD#tip faster than C4-JDpar#parent  [0..100] (faster)
+  A ('C4-JDpar', 'parent', 4): 4.1691 [4.1528-4.2805] n=7 (IQR 2.11 %, SE 0.64 %, range 3.06 %)
+  B ('C4-JD', 'tip', 4): 2.5360 [2.4728-2.6103] n=7 (IQR 3.23 %, SE 1.01 %, range 5.42 %)
+    p0: A 4.2805 [4.2805-4.2805] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 2.6103 [2.6103-2.6103] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 4.1658 [4.1528-4.1691] n=3 (IQR 0.20 %, SE 0.15 %, range 0.39 %) | B 2.5360 [2.4763-2.5428] n=3 (IQR 1.31 %, SE 1.04 %, range 2.62 %)
+    p2: A 4.2209 [4.1535-4.2744] n=3 (IQR 1.43 %, SE 1.04 %, range 2.86 %) | B 2.4753 [2.4728-2.5726] n=3 (IQR 2.02 %, SE 1.66 %, range 4.03 %)
+  LETTER     : B/A 0.6083 (-39.17 %, B-A -1.6330) pooled YYY (bars i 7.72 / s 2.39 / r 12.46 %); passes p0:nnn(K1/1 0.6098,sep) p1:YYY(K3/3 0.6088,sep) p2:YYY(K3/3 0.5864,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.6083 (-39.17 %, B-A -1.6330) pooled YYY (bars i 7.72 / s 2.39 / r 12.46 %); passes p0:nnn(K1/1 0.6098,sep) p1:YYY(K3/3 0.6088,sep) p2:YYY(K3/3 0.5864,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-ap W8: C4-JD#tip faster than C4-JDap#tip  [0..500] (faster)
+  A ('C4-JDap', 'tip', 8): 3.4851 [3.4581-3.5862] n=7 (IQR 1.31 %, SE 0.60 %, range 3.68 %)
+  B ('C4-JD', 'tip', 8): 1.8277 [1.8135-2.0274] n=7 (IQR 4.33 %, SE 2.02 %, range 11.70 %)
+    p0: A 3.4747 [3.4747-3.4747] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 1.8967 [1.8967-1.8967] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 3.4677 [3.4581-3.5185] n=3 (IQR 0.87 %, SE 0.68 %, range 1.74 %) | B 1.8263 [1.8139-1.8277] n=3 (IQR 0.38 %, SE 0.30 %, range 0.75 %)
+    p2: A 3.5153 [3.4851-3.5862] n=3 (IQR 1.44 %, SE 1.07 %, range 2.88 %) | B 1.9019 [1.8135-2.0274] n=3 (IQR 5.62 %, SE 4.09 %, range 11.24 %)
+  LETTER     : B/A 0.5244 (-47.56 %, B-A -1.6574) pooled YYY (bars i 9.06 / s 4.22 / r 24.53 %); passes p0:nnn(K1/1 0.5459,sep) p1:YYY(K3/3 0.5267,sep) p2:YYY(K3/3 0.5410,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.5244 (-47.56 %, B-A -1.6574) pooled YYY (bars i 9.06 / s 4.22 / r 24.53 %); passes p0:nnn(K1/1 0.5459,sep) p1:YYY(K3/3 0.5267,sep) p2:YYY(K3/3 0.5410,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-ap W8: C4-JD#tip faster than C4-JDap#tip  [100..500] (faster)
+  A ('C4-JDap', 'tip', 8): 3.4380 [3.4173-3.5248] n=7 (IQR 1.27 %, SE 0.52 %, range 3.13 %)
+  B ('C4-JD', 'tip', 8): 1.7878 [1.7707-1.9758] n=7 (IQR 3.59 %, SE 1.95 %, range 11.47 %)
+    p0: A 3.4327 [3.4327-3.4327] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 1.8501 [1.8501-1.8501] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 3.4281 [3.4173-3.4724] n=3 (IQR 0.80 %, SE 0.62 %, range 1.61 %) | B 1.7830 [1.7707-1.7878] n=3 (IQR 0.48 %, SE 0.36 %, range 0.96 %)
+    p2: A 3.4758 [3.4380-3.5248] n=3 (IQR 1.25 %, SE 0.91 %, range 2.50 %) | B 1.8325 [1.7713-1.9758] n=3 (IQR 5.58 %, SE 4.14 %, range 11.16 %)
+  LETTER     : B/A 0.5200 (-48.00 %, B-A -1.6502) pooled YYY (bars i 7.62 / s 4.03 / r 23.78 %); passes p0:nnn(K1/1 0.5390,sep) p1:YYY(K3/3 0.5201,sep) p2:YYY(K3/3 0.5272,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.5200 (-48.00 %, B-A -1.6502) pooled YYY (bars i 7.62 / s 4.03 / r 23.78 %); passes p0:nnn(K1/1 0.5390,sep) p1:YYY(K3/3 0.5201,sep) p2:YYY(K3/3 0.5272,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-ap W8: C4-JD#tip faster than C4-JDap#tip  [0..100] (faster)
+  A ('C4-JDap', 'tip', 8): 3.6732 [3.6211-3.8319] n=7 (IQR 1.46 %, SE 0.93 %, range 5.74 %)
+  B ('C4-JD', 'tip', 8): 2.0064 [1.9803-2.2338] n=7 (IQR 7.31 %, SE 2.47 %, range 12.64 %)
+    p0: A 3.6430 [3.6430-3.6430] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 2.0833 [2.0833-2.0833] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 3.6263 [3.6211-3.7031] n=3 (IQR 1.13 %, SE 0.92 %, range 2.26 %) | B 1.9866 [1.9803-2.0064] n=3 (IQR 0.66 %, SE 0.50 %, range 1.32 %)
+    p2: A 3.6734 [3.6732-3.8319] n=3 (IQR 2.16 %, SE 1.80 %, range 4.32 %) | B 2.1792 [1.9826-2.2338] n=3 (IQR 5.77 %, SE 4.39 %, range 11.53 %)
+  LETTER     : B/A 0.5462 (-45.38 %, B-A -1.6667) pooled YYY (bars i 14.91 / s 5.27 / r 27.76 %); passes p0:nnn(K1/1 0.5719,sep) p1:YYY(K3/3 0.5478,sep) p2:YYY(K3/3 0.5932,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.5462 (-45.38 %, B-A -1.6667) pooled YYY (bars i 14.91 / s 5.27 / r 27.76 %); passes p0:nnn(K1/1 0.5719,sep) p1:YYY(K3/3 0.5478,sep) p2:YYY(K3/3 0.5932,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-par W8: C4-JD#tip faster than C4-JDpar#parent  [0..500] (faster)
+  A ('C4-JDpar', 'parent', 8): 3.5206 [3.4741-3.7428] n=7 (IQR 2.72 %, SE 1.29 %, range 7.63 %)
+  B ('C4-JD', 'tip', 8): 1.8277 [1.8135-2.0274] n=7 (IQR 4.33 %, SE 2.02 %, range 11.70 %)
+    p0: A 3.7428 [3.7428-3.7428] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 1.8967 [1.8967-1.8967] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 3.4854 [3.4741-3.5206] n=3 (IQR 0.67 %, SE 0.50 %, range 1.33 %) | B 1.8263 [1.8139-1.8277] n=3 (IQR 0.38 %, SE 0.30 %, range 0.75 %)
+    p2: A 3.5607 [3.4766-3.5932] n=3 (IQR 1.64 %, SE 1.22 %, range 3.27 %) | B 1.9019 [1.8135-2.0274] n=3 (IQR 5.62 %, SE 4.09 %, range 11.24 %)
+  LETTER     : B/A 0.5191 (-48.09 %, B-A -1.6929) pooled YYY (bars i 10.24 / s 4.80 / r 27.94 %); passes p0:nnn(K1/1 0.5068,sep) p1:YYY(K3/3 0.5240,sep) p2:YYY(K3/3 0.5341,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.5191 (-48.09 %, B-A -1.6929) pooled YYY (bars i 10.24 / s 4.80 / r 27.94 %); passes p0:nnn(K1/1 0.5068,sep) p1:YYY(K3/3 0.5240,sep) p2:YYY(K3/3 0.5341,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-par W8: C4-JD#tip faster than C4-JDpar#parent  [100..500] (faster)
+  A ('C4-JDpar', 'parent', 8): 3.4550 [3.4325-3.7127] n=7 (IQR 2.54 %, SE 1.38 %, range 8.11 %)
+  B ('C4-JD', 'tip', 8): 1.7878 [1.7707-1.9758] n=7 (IQR 3.59 %, SE 1.95 %, range 11.47 %)
+    p0: A 3.7127 [3.7127-3.7127] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 1.8501 [1.8501-1.8501] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 3.4442 [3.4325-3.4550] n=3 (IQR 0.33 %, SE 0.24 %, range 0.65 %) | B 1.7830 [1.7707-1.7878] n=3 (IQR 0.48 %, SE 0.36 %, range 0.96 %)
+    p2: A 3.5183 [3.4375-3.5392] n=3 (IQR 1.45 %, SE 1.10 %, range 2.89 %) | B 1.8325 [1.7713-1.9758] n=3 (IQR 5.58 %, SE 4.14 %, range 11.16 %)
+  LETTER     : B/A 0.5174 (-48.26 %, B-A -1.6672) pooled YYY (bars i 8.80 / s 4.77 / r 28.10 %); passes p0:nnn(K1/1 0.4983,sep) p1:YYY(K3/3 0.5177,sep) p2:YYY(K3/3 0.5209,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.5174 (-48.26 %, B-A -1.6672) pooled YYY (bars i 8.80 / s 4.77 / r 28.10 %); passes p0:nnn(K1/1 0.4983,sep) p1:YYY(K3/3 0.5177,sep) p2:YYY(K3/3 0.5209,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-par W8: C4-JD#tip faster than C4-JDpar#parent  [0..100] (faster)
+  A ('C4-JDpar', 'parent', 8): 3.7304 [3.6331-3.8633] n=7 (IQR 4.03 %, SE 1.17 %, range 6.17 %)
+  B ('C4-JD', 'tip', 8): 2.0064 [1.9803-2.2338] n=7 (IQR 7.31 %, SE 2.47 %, range 12.64 %)
+    p0: A 3.8633 [3.8633-3.8633] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 2.0833 [2.0833-2.0833] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 3.6504 [3.6405-3.7827] n=3 (IQR 1.95 %, SE 1.57 %, range 3.90 %) | B 1.9866 [1.9803-2.0064] n=3 (IQR 0.66 %, SE 0.50 %, range 1.32 %)
+    p2: A 3.7304 [3.6331-3.8090] n=3 (IQR 2.36 %, SE 1.71 %, range 4.72 %) | B 2.1792 [1.9826-2.2338] n=3 (IQR 5.77 %, SE 4.39 %, range 11.53 %)
+  LETTER     : B/A 0.5379 (-46.21 %, B-A -1.7240) pooled YYY (bars i 16.70 / s 5.45 / r 28.13 %); passes p0:nnn(K1/1 0.5393,sep) p1:YYY(K3/3 0.5442,sep) p2:YYY(K3/3 0.5842,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.5379 (-46.21 %, B-A -1.7240) pooled YYY (bars i 16.70 / s 5.45 / r 28.13 %); passes p0:nnn(K1/1 0.5393,sep) p1:YYY(K3/3 0.5442,sep) p2:YYY(K3/3 0.5842,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-ap W16: C4-JD#tip faster than C4-JDap#tip  [0..500] (faster)
+  A ('C4-JDap', 'tip', 16): 3.7003 [3.6462-3.8975] n=8 (IQR 1.49 %, SE 0.96 %, range 6.79 %)
+  B ('C4-JD', 'tip', 16): 2.0887 [2.0503-2.2770] n=9 (IQR 4.35 %, SE 1.62 %, range 10.85 %)
+    p0: A 3.8357 [3.7739-3.8975] n=2 (IQR 1.61 %, SE 2.02 %, range 3.22 %) | B 2.2310 [2.0887-2.2770] n=3 (IQR 4.22 %, SE 3.18 %, range 8.44 %)
+    p1: A 3.6860 [3.6650-3.6925] n=3 (IQR 0.37 %, SE 0.28 %, range 0.75 %) | B 2.0553 [2.0503-2.1619] n=3 (IQR 2.71 %, SE 2.22 %, range 5.43 %)
+    p2: A 3.7081 [3.6462-3.7231] n=3 (IQR 1.04 %, SE 0.79 %, range 2.07 %) | B 2.0811 [2.0711-2.1093] n=3 (IQR 0.92 %, SE 0.69 %, range 1.84 %)
+  LETTER     : B/A 0.5645 (-43.55 %, B-A -1.6116) pooled YYY (bars i 9.19 / s 3.77 / r 25.60 %); passes p0:nnn(K2/3 0.5816,sep) p1:YYY(K3/3 0.5576,sep) p2:YYY(K3/3 0.5612,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.5645 (-43.55 %, B-A -1.6116) pooled YYY (bars i 9.19 / s 3.77 / r 25.60 %); passes p0:nnn(K2/3 0.5816,sep) p1:YYY(K3/3 0.5576,sep) p2:YYY(K3/3 0.5612,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-ap W16: C4-JD#tip faster than C4-JDap#tip  [100..500] (faster)
+  A ('C4-JDap', 'tip', 16): 3.6663 [3.6098-3.8706] n=8 (IQR 2.18 %, SE 1.05 %, range 7.11 %)
+  B ('C4-JD', 'tip', 16): 2.0486 [2.0110-2.2229] n=9 (IQR 4.17 %, SE 1.50 %, range 10.35 %)
+    p0: A 3.8141 [3.7577-3.8706] n=2 (IQR 1.48 %, SE 1.86 %, range 2.96 %) | B 2.1671 [2.0245-2.2229] n=3 (IQR 4.58 %, SE 3.42 %, range 9.16 %)
+    p1: A 3.6304 [3.6258-3.6587] n=3 (IQR 0.45 %, SE 0.36 %, range 0.91 %) | B 2.0189 [2.0110-2.1100] n=3 (IQR 2.45 %, SE 1.97 %, range 4.91 %)
+    p2: A 3.6738 [3.6098-3.6930] n=3 (IQR 1.13 %, SE 0.86 %, range 2.27 %) | B 2.0486 [2.0350-2.0791] n=3 (IQR 1.08 %, SE 0.80 %, range 2.15 %)
+  LETTER     : B/A 0.5588 (-44.12 %, B-A -1.6176) pooled YYY (bars i 9.42 / s 3.67 / r 25.11 %); passes p0:nnn(K2/3 0.5682,sep) p1:YYY(K3/3 0.5561,sep) p2:YYY(K3/3 0.5576,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.5588 (-44.12 %, B-A -1.6176) pooled YYY (bars i 9.42 / s 3.67 / r 25.11 %); passes p0:nnn(K2/3 0.5682,sep) p1:YYY(K3/3 0.5561,sep) p2:YYY(K3/3 0.5576,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-ap W16: C4-JD#tip faster than C4-JDap#tip  [0..100] (faster)
+  A ('C4-JDap', 'tip', 16): 3.8412 [3.7919-4.0050] n=8 (IQR 0.90 %, SE 0.77 %, range 5.55 %)
+  B ('C4-JD', 'tip', 16): 2.2302 [2.2009-2.4931] n=9 (IQR 7.11 %, SE 2.26 %, range 13.10 %)
+    p0: A 3.9220 [3.8391-4.0050] n=2 (IQR 2.12 %, SE 2.65 %, range 4.23 %) | B 2.4866 [2.3453-2.4931] n=3 (IQR 2.97 %, SE 2.43 %, range 5.94 %)
+    p1: A 3.8277 [3.8220-3.9084] n=3 (IQR 1.13 %, SE 0.91 %, range 2.26 %) | B 2.2076 [2.2009-2.3693] n=3 (IQR 3.81 %, SE 3.12 %, range 7.63 %)
+    p2: A 3.8433 [3.7919-3.8452] n=3 (IQR 0.69 %, SE 0.57 %, range 1.38 %) | B 2.2157 [2.2107-2.2302] n=3 (IQR 0.44 %, SE 0.33 %, range 0.88 %)
+  LETTER     : B/A 0.5806 (-41.94 %, B-A -1.6110) pooled YYY (bars i 14.33 / s 4.79 / r 28.46 %); passes p0:nnn(K2/3 0.6340,sep) p1:YYY(K3/3 0.5767,sep) p2:YYY(K3/3 0.5765,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.5806 (-41.94 %, B-A -1.6110) pooled YYY (bars i 14.33 / s 4.79 / r 28.46 %); passes p0:nnn(K2/3 0.6340,sep) p1:YYY(K3/3 0.5767,sep) p2:YYY(K3/3 0.5765,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-par W16: C4-JD#tip faster than C4-JDpar#parent  [0..500] (faster)
+  A ('C4-JDpar', 'parent', 16): 3.7023 [3.6391-3.8934] n=8 (IQR 3.90 %, SE 1.13 %, range 6.87 %)
+  B ('C4-JD', 'tip', 16): 2.0887 [2.0503-2.2770] n=9 (IQR 4.35 %, SE 1.62 %, range 10.85 %)
+    p0: A 3.8503 [3.8073-3.8934] n=2 (IQR 1.12 %, SE 1.40 %, range 2.23 %) | B 2.2310 [2.0887-2.2770] n=3 (IQR 4.22 %, SE 3.18 %, range 8.44 %)
+    p1: A 3.6763 [3.6630-3.6952] n=3 (IQR 0.44 %, SE 0.32 %, range 0.87 %) | B 2.0553 [2.0503-2.1619] n=3 (IQR 2.71 %, SE 2.22 %, range 5.43 %)
+    p2: A 3.7094 [3.6391-3.8474] n=3 (IQR 2.81 %, SE 2.07 %, range 5.62 %) | B 2.0811 [2.0711-2.1093] n=3 (IQR 0.92 %, SE 0.69 %, range 1.84 %)
+  LETTER     : B/A 0.5642 (-43.58 %, B-A -1.6136) pooled YYY (bars i 11.68 / s 3.95 / r 25.69 %); passes p0:nnn(K2/3 0.5794,sep) p1:YYY(K3/3 0.5591,sep) p2:YYY(K3/3 0.5610,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.5642 (-43.58 %, B-A -1.6136) pooled YYY (bars i 11.68 / s 3.95 / r 25.69 %); passes p0:nnn(K2/3 0.5794,sep) p1:YYY(K3/3 0.5591,sep) p2:YYY(K3/3 0.5610,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-par W16: C4-JD#tip faster than C4-JDpar#parent  [100..500] (faster)
+  A ('C4-JDpar', 'parent', 16): 3.6763 [3.6005-3.8669] n=8 (IQR 4.17 %, SE 1.18 %, range 7.25 %)
+  B ('C4-JD', 'tip', 16): 2.0486 [2.0110-2.2229] n=9 (IQR 4.17 %, SE 1.50 %, range 10.35 %)
+    p0: A 3.8229 [3.7790-3.8669] n=2 (IQR 1.15 %, SE 1.44 %, range 2.30 %) | B 2.1671 [2.0245-2.2229] n=3 (IQR 4.58 %, SE 3.42 %, range 9.16 %)
+    p1: A 3.6381 [3.6246-3.6694] n=3 (IQR 0.62 %, SE 0.46 %, range 1.23 %) | B 2.0189 [2.0110-2.1100] n=3 (IQR 2.45 %, SE 1.97 %, range 4.91 %)
+    p2: A 3.6831 [3.6005-3.8150] n=3 (IQR 2.91 %, SE 2.13 %, range 5.82 %) | B 2.0486 [2.0350-2.0791] n=3 (IQR 1.08 %, SE 0.80 %, range 2.15 %)
+  LETTER     : B/A 0.5573 (-44.27 %, B-A -1.6276) pooled YYY (bars i 11.80 / s 3.82 / r 25.26 %); passes p0:nnn(K2/3 0.5669,sep) p1:YYY(K3/3 0.5549,sep) p2:YYY(K3/3 0.5562,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.5573 (-44.27 %, B-A -1.6276) pooled YYY (bars i 11.80 / s 3.82 / r 25.26 %); passes p0:nnn(K2/3 0.5669,sep) p1:YYY(K3/3 0.5549,sep) p2:YYY(K3/3 0.5562,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+### F-par W16: C4-JD#tip faster than C4-JDpar#parent  [0..100] (faster)
+  A ('C4-JDpar', 'parent', 16): 3.8229 [3.7934-3.9993] n=8 (IQR 3.26 %, SE 0.97 %, range 5.39 %)
+  B ('C4-JD', 'tip', 16): 2.2302 [2.2009-2.4931] n=9 (IQR 7.11 %, SE 2.26 %, range 13.10 %)
+    p0: A 3.9600 [3.9207-3.9993] n=2 (IQR 0.99 %, SE 1.24 %, range 1.99 %) | B 2.4866 [2.3453-2.4931] n=3 (IQR 2.97 %, SE 2.43 %, range 5.94 %)
+    p1: A 3.8167 [3.7980-3.8292] n=3 (IQR 0.41 %, SE 0.30 %, range 0.82 %) | B 2.2076 [2.2009-2.3693] n=3 (IQR 3.81 %, SE 3.12 %, range 7.63 %)
+    p2: A 3.8145 [3.7934-3.9773] n=3 (IQR 2.41 %, SE 1.91 %, range 4.82 %) | B 2.2157 [2.2107-2.2302] n=3 (IQR 0.44 %, SE 0.33 %, range 0.88 %)
+  LETTER     : B/A 0.5834 (-41.66 %, B-A -1.5928) pooled YYY (bars i 15.64 / s 4.93 / r 28.33 %); passes p0:nnn(K2/3 0.6279,sep) p1:YYY(K3/3 0.5784,sep) p2:YYY(K3/3 0.5808,sep) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED
+  GATING-ONLY: B/A 0.5834 (-41.66 %, B-A -1.5928) pooled YYY (bars i 15.64 / s 4.93 / r 28.33 %); passes p0:nnn(K2/3 0.6279,sep) p1:YYY(K3/3 0.5784,sep) p2:YYY(K3/3 0.5808,sep) gates [1, 2] -> CLAIMED STRONG [B<A] => CLAIMED STRONG
+
+## Pre-registered controls (expected NOT claimed different)
+
+### C-JA W1: C4-JA tip vs parent  [0..500] (same)
+  A ('C4-JA', 'parent', 1): 16.6280 [16.2320-16.8753] n=8 (IQR 1.03 %, SE 0.54 %, range 3.87 %)
+  B ('C4-JA', 'tip', 1): 16.6133 [16.3782-17.8431] n=9 (IQR 0.45 %, SE 1.08 %, range 8.82 %)
+    p0: A 16.7819 [16.6884-16.8753] n=2 (IQR 0.56 %, SE 0.70 %, range 1.11 %) | B 16.5252 [16.3782-16.6385] n=3 (IQR 0.79 %, SE 0.57 %, range 1.58 %)
+    p1: A 16.4303 [16.2320-16.6037] n=3 (IQR 1.13 %, SE 0.82 %, range 2.26 %) | B 16.6133 [16.6085-17.8431] n=3 (IQR 3.72 %, SE 3.10 %, range 7.43 %)
+    p2: A 16.6524 [16.5827-16.7977] n=3 (IQR 0.65 %, SE 0.48 %, range 1.29 %) | B 16.6176 [16.5635-16.6890] n=3 (IQR 0.38 %, SE 0.27 %, range 0.76 %)
+  LETTER     : B/A 0.9991 (-0.09 %, B-A -0.0147) pooled nnn (bars i 2.25 / s 2.42 / r 19.26 %); passes p0:nnn(K2/3 0.9847,sep) p1:nnn(K3/3 1.0111,sep) p2:nnn(K3/3 0.9979) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED DIFFERENT
+  GATING-ONLY: B/A 0.9991 (-0.09 %, B-A -0.0147) pooled nnn (bars i 2.25 / s 2.42 / r 19.26 %); passes p0:nnn(K2/3 0.9847,sep) p1:nnn(K3/3 1.0111,sep) p2:nnn(K3/3 0.9979) gates [1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED DIFFERENT
+
+### C-JT W1: C4-JT tip vs parent  [0..500] (same)
+  A ('C4-JT', 'parent', 1): 4.5465 [4.4503-4.7952] n=8 (IQR 2.73 %, SE 1.06 %, range 7.59 %)
+  B ('C4-JT', 'tip', 1): 4.5930 [4.4350-4.8287] n=7 (IQR 3.20 %, SE 1.41 %, range 8.57 %)
+    p0: A 4.5045 [4.4946-4.5144] n=2 (IQR 0.22 %, SE 0.28 %, range 0.44 %) | B 4.5902 [4.5902-4.5902] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 4.5503 [4.5427-4.6392] n=3 (IQR 1.06 %, SE 0.85 %, range 2.12 %) | B 4.5930 [4.4350-4.8287] n=3 (IQR 4.29 %, SE 3.12 %, range 8.57 %)
+    p2: A 4.6317 [4.4503-4.7952] n=3 (IQR 3.72 %, SE 2.70 %, range 7.45 %) | B 4.6649 [4.5807-4.8002] n=3 (IQR 2.35 %, SE 1.72 %, range 4.70 %)
+  LETTER     : B/A 1.0102 (+1.02 %, B-A +0.0465) pooled nnn (bars i 8.41 / s 3.53 / r 22.89 %); passes p0:nnn(K2/1 1.0190,sep) p1:nnn(K3/3 1.0094) p2:nnn(K3/3 1.0072) gates [0, 1, 2] -> NOT CLAIMED [B>A] => NOT CLAIMED DIFFERENT
+  GATING-ONLY: B/A 1.0102 (+1.02 %, B-A +0.0465) pooled nnn (bars i 8.41 / s 3.53 / r 22.89 %); passes p0:nnn(K2/1 1.0190,sep) p1:nnn(K3/3 1.0094) p2:nnn(K3/3 1.0072) gates [1, 2] -> NOT CLAIMED [B>A] => NOT CLAIMED DIFFERENT
+
+### C-JA W8: C4-JA tip vs parent  [0..500] (same)
+  A ('C4-JA', 'parent', 8): 5.3197 [5.3081-5.6435] n=7 (IQR 2.82 %, SE 1.13 %, range 6.31 %)
+  B ('C4-JA', 'tip', 8): 5.3231 [5.3044-5.7047] n=7 (IQR 4.84 %, SE 1.51 %, range 7.52 %)
+    p0: A 5.6435 [5.6435-5.6435] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 5.5270 [5.5270-5.5270] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 5.3159 [5.3081-5.3169] n=3 (IQR 0.08 %, SE 0.07 %, range 0.16 %) | B 5.3221 [5.3095-5.3231] n=3 (IQR 0.13 %, SE 0.10 %, range 0.25 %)
+    p2: A 5.4615 [5.3197-5.4709] n=3 (IQR 1.38 %, SE 1.12 %, range 2.77 %) | B 5.6195 [5.3044-5.7047] n=3 (IQR 3.56 %, SE 2.72 %, range 7.12 %)
+  LETTER     : B/A 1.0006 (+0.06 %, B-A +0.0033) pooled nnn (bars i 11.19 / s 3.77 / r 19.63 %); passes p0:nnn(K1/1 0.9793,sep) p1:nnn(K3/3 1.0012) p2:nnn(K3/3 1.0289) gates [0, 1, 2] -> NOT CLAIMED [B>A] => NOT CLAIMED DIFFERENT
+  GATING-ONLY: B/A 1.0006 (+0.06 %, B-A +0.0033) pooled nnn (bars i 11.19 / s 3.77 / r 19.63 %); passes p0:nnn(K1/1 0.9793,sep) p1:nnn(K3/3 1.0012) p2:nnn(K3/3 1.0289) gates [1, 2] -> NOT CLAIMED [B>A] => NOT CLAIMED DIFFERENT
+
+### C-JT W8: C4-JT tip vs parent  [0..500] (same)
+  A ('C4-JT', 'parent', 8): 1.8733 [1.8144-2.0088] n=8 (IQR 8.19 %, SE 1.95 %, range 10.38 %)
+  B ('C4-JT', 'tip', 8): 1.8502 [1.8200-2.0088] n=7 (IQR 3.01 %, SE 1.72 %, range 10.21 %)
+    p0: A 1.9451 [1.9141-1.9760] n=2 (IQR 1.59 %, SE 1.99 %, range 3.18 %) | B 2.0088 [2.0088-2.0088] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 1.8182 [1.8144-1.8326] n=3 (IQR 0.50 %, SE 0.38 %, range 1.00 %) | B 1.8246 [1.8200-1.8502] n=3 (IQR 0.83 %, SE 0.64 %, range 1.66 %)
+    p2: A 1.9745 [1.8225-2.0088] n=3 (IQR 4.72 %, SE 3.63 %, range 9.44 %) | B 1.8611 [1.8269-1.9018] n=3 (IQR 2.01 %, SE 1.46 %, range 4.03 %)
+  LETTER     : B/A 0.9876 (-1.24 %, B-A -0.0232) pooled nnn (bars i 17.45 / s 5.21 / r 29.12 %); passes p0:nnn(K2/1 1.0328,sep) p1:nnn(K3/3 1.0036) p2:nnn(K3/3 0.9426) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED DIFFERENT
+  GATING-ONLY: B/A 0.9876 (-1.24 %, B-A -0.0232) pooled nnn (bars i 17.45 / s 5.21 / r 29.12 %); passes p0:nnn(K2/1 1.0328,sep) p1:nnn(K3/3 1.0036) p2:nnn(K3/3 0.9426) gates [1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED DIFFERENT
+
+### C-JA W16: C4-JA tip vs parent  [0..500] (same)
+  A ('C4-JA', 'parent', 16): 5.2500 [5.2179-5.8193] n=8 (IQR 2.74 %, SE 1.79 %, range 11.46 %)
+  B ('C4-JA', 'tip', 16): 5.2484 [5.2212-5.8170] n=8 (IQR 5.61 %, SE 1.86 %, range 11.35 %)
+    p0: A 5.4284 [5.3346-5.5221] n=2 (IQR 1.73 %, SE 2.16 %, range 3.45 %) | B 5.6736 [5.5302-5.8170] n=2 (IQR 2.53 %, SE 3.17 %, range 5.06 %)
+    p1: A 5.2304 [5.2179-5.2402] n=3 (IQR 0.21 %, SE 0.15 %, range 0.43 %) | B 5.2279 [5.2238-5.2635] n=3 (IQR 0.38 %, SE 0.30 %, range 0.76 %)
+    p2: A 5.2567 [5.2432-5.8193] n=3 (IQR 5.48 %, SE 4.53 %, range 10.96 %) | B 5.2334 [5.2212-5.5184] n=3 (IQR 2.84 %, SE 2.33 %, range 5.68 %)
+  LETTER     : B/A 0.9997 (-0.03 %, B-A -0.0015) pooled nnn (bars i 12.49 / s 5.16 / r 32.26 %); passes p0:nnn(K2/2 1.0452,sep) p1:nnn(K3/3 0.9995) p2:nnn(K3/3 0.9956) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED DIFFERENT
+  GATING-ONLY: B/A 0.9997 (-0.03 %, B-A -0.0015) pooled nnn (bars i 12.49 / s 5.16 / r 32.26 %); passes p0:nnn(K2/2 1.0452,sep) p1:nnn(K3/3 0.9995) p2:nnn(K3/3 0.9956) gates [1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED DIFFERENT
+
+### C-JT W16: C4-JT tip vs parent  [0..500] (same)
+  A ('C4-JT', 'parent', 16): 2.0756 [2.0562-2.2634] n=8 (IQR 6.03 %, SE 1.81 %, range 9.98 %)
+  B ('C4-JT', 'tip', 16): 2.0597 [2.0482-2.2244] n=7 (IQR 3.05 %, SE 1.63 %, range 8.56 %)
+    p0: A 2.1579 [2.0898-2.2260] n=2 (IQR 3.16 %, SE 3.95 %, range 6.31 %) | B 2.0547 [2.0547-2.0547] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 2.0613 [2.0562-2.1714] n=3 (IQR 2.79 %, SE 2.28 %, range 5.59 %) | B 2.0577 [2.0482-2.1721] n=3 (IQR 3.01 %, SE 2.42 %, range 6.02 %)
+    p2: A 2.0607 [2.0572-2.2634] n=3 (IQR 5.00 %, SE 4.15 %, range 10.01 %) | B 2.0658 [2.0597-2.2244] n=3 (IQR 3.99 %, SE 3.27 %, range 7.98 %)
+  LETTER     : B/A 0.9923 (-0.77 %, B-A -0.0159) pooled nnn (bars i 13.52 / s 4.86 / r 26.30 %); passes p0:nnn(K2/1 0.9522,sep) p1:nnn(K3/3 0.9982) p2:nnn(K3/3 1.0025) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED DIFFERENT
+  GATING-ONLY: B/A 0.9923 (-0.77 %, B-A -0.0159) pooled nnn (bars i 13.52 / s 4.86 / r 26.30 %); passes p0:nnn(K2/1 0.9522,sep) p1:nnn(K3/3 0.9982) p2:nnn(K3/3 1.0025) gates [1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED DIFFERENT
+
+## Pre-registered resolution rung (PC-8b-3; canary 0.060 ms per step; reference C4-JD#tip, same W)
+
+### RUNG W8: C4-rung vs C4-JD  [0..500] (rise)
+  A ('C4-JD', 'tip', 8): 1.8277 [1.8135-2.0274] n=7 (IQR 4.33 %, SE 2.02 %, range 11.70 %)
+  B ('C4-rung', 'tip', 8): 1.9191 [1.8876-2.0710] n=9 (IQR 7.06 %, SE 1.65 %, range 9.56 %)
+    p0: A 1.8967 [1.8967-1.8967] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 2.0275 [1.9380-2.0559] n=3 (IQR 2.91 %, SE 2.20 %, range 5.81 %)
+    p1: A 1.8263 [1.8139-1.8277] n=3 (IQR 0.38 %, SE 0.30 %, range 0.75 %) | B 1.8921 [1.8876-1.9191] n=3 (IQR 0.83 %, SE 0.65 %, range 1.66 %)
+    p2: A 1.9019 [1.8135-2.0274] n=3 (IQR 5.62 %, SE 4.09 %, range 11.24 %) | B 1.9015 [1.8890-2.0710] n=3 (IQR 4.78 %, SE 3.87 %, range 9.57 %)
+  LETTER     : B/A 1.0500 (+5.00 %, B-A +0.0914) pooled nnn (bars i 16.56 / s 5.22 / r 30.22 %); passes p0:nnn(K1/3 1.0690,sep) p1:YYn(K3/3 1.0360,sep) p2:nnn(K3/3 0.9998) gates [0, 1, 2] -> NOT CLAIMED [B>A] => NOT SEEN
+  GATING-ONLY: B/A 1.0500 (+5.00 %, B-A +0.0914) pooled nnn (bars i 16.56 / s 5.22 / r 30.22 %); passes p0:nnn(K1/3 1.0690,sep) p1:YYn(K3/3 1.0360,sep) p2:nnn(K3/3 0.9998) gates [1, 2] -> NOT CLAIMED [B>A] => NOT SEEN
+
+### RUNG W8: C4-rung vs C4-JD  [100..500] (rise)
+  A ('C4-JD', 'tip', 8): 1.7878 [1.7707-1.9758] n=7 (IQR 3.59 %, SE 1.95 %, range 11.47 %)
+  B ('C4-rung', 'tip', 8): 1.8881 [1.8408-2.0295] n=9 (IQR 6.94 %, SE 1.60 %, range 9.99 %)
+    p0: A 1.8501 [1.8501-1.8501] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 1.9815 [1.8899-1.9880] n=3 (IQR 2.47 %, SE 2.00 %, range 4.95 %)
+    p1: A 1.7830 [1.7707-1.7878] n=3 (IQR 0.48 %, SE 0.36 %, range 0.96 %) | B 1.8504 [1.8408-1.8881] n=3 (IQR 1.28 %, SE 0.98 %, range 2.56 %)
+    p2: A 1.8325 [1.7713-1.9758] n=3 (IQR 5.58 %, SE 4.14 %, range 11.16 %) | B 1.8507 [1.8480-2.0295] n=3 (IQR 4.90 %, SE 4.07 %, range 9.80 %)
+  LETTER     : B/A 1.0561 (+5.61 %, B-A +0.1003) pooled nYn (bars i 15.64 / s 5.04 / r 30.43 %); passes p0:nnn(K1/3 1.0710,sep) p1:YYn(K3/3 1.0378,sep) p2:nnn(K3/3 1.0099) gates [0, 1, 2] -> NOT CLAIMED [B>A] => NOT SEEN
+  GATING-ONLY: B/A 1.0561 (+5.61 %, B-A +0.1003) pooled nYn (bars i 15.64 / s 5.04 / r 30.43 %); passes p0:nnn(K1/3 1.0710,sep) p1:YYn(K3/3 1.0378,sep) p2:nnn(K3/3 1.0099) gates [1, 2] -> NOT CLAIMED [B>A] => NOT SEEN
+
+### RUNG W16: C4-rung vs C4-JD  [0..500] (rise)
+  A ('C4-JD', 'tip', 16): 2.0887 [2.0503-2.2770] n=9 (IQR 4.35 %, SE 1.62 %, range 10.85 %)
+  B ('C4-rung', 'tip', 16): 2.1294 [2.1074-2.3032] n=8 (IQR 4.00 %, SE 1.53 %, range 9.19 %)
+    p0: A 2.2310 [2.0887-2.2770] n=3 (IQR 4.22 %, SE 3.18 %, range 8.44 %) | B 2.2437 [2.1842-2.3032] n=2 (IQR 2.65 %, SE 3.32 %, range 5.31 %)
+    p1: A 2.0553 [2.0503-2.1619] n=3 (IQR 2.71 %, SE 2.22 %, range 5.43 %) | B 2.1248 [2.1171-2.1340] n=3 (IQR 0.40 %, SE 0.29 %, range 0.80 %)
+    p2: A 2.0811 [2.0711-2.1093] n=3 (IQR 0.92 %, SE 0.69 %, range 1.84 %) | B 2.1140 [2.1074-2.2530] n=3 (IQR 3.44 %, SE 2.81 %, range 6.88 %)
+  LETTER     : B/A 1.0195 (+1.95 %, B-A +0.0407) pooled nnn (bars i 11.81 / s 4.46 / r 28.45 %); passes p0:nnn(K3/2 1.0057) p1:nnn(K3/3 1.0338) p2:nnn(K3/3 1.0158) gates [0, 1, 2] -> NOT CLAIMED [B>A] => NOT SEEN
+  GATING-ONLY: B/A 1.0195 (+1.95 %, B-A +0.0407) pooled nnn (bars i 11.81 / s 4.46 / r 28.45 %); passes p0:nnn(K3/2 1.0057) p1:nnn(K3/3 1.0338) p2:nnn(K3/3 1.0158) gates [1, 2] -> NOT CLAIMED [B>A] => NOT SEEN
+
+### RUNG W16: C4-rung vs C4-JD  [100..500] (rise)
+  A ('C4-JD', 'tip', 16): 2.0486 [2.0110-2.2229] n=9 (IQR 4.17 %, SE 1.50 %, range 10.35 %)
+  B ('C4-rung', 'tip', 16): 2.0942 [2.0702-2.2492] n=8 (IQR 4.66 %, SE 1.59 %, range 8.55 %)
+    p0: A 2.1671 [2.0245-2.2229] n=3 (IQR 4.58 %, SE 3.42 %, range 9.16 %) | B 2.1982 [2.1529-2.2435] n=2 (IQR 2.06 %, SE 2.58 %, range 4.12 %)
+    p1: A 2.0189 [2.0110-2.1100] n=3 (IQR 2.45 %, SE 1.97 %, range 4.91 %) | B 2.0875 [2.0787-2.1010] n=3 (IQR 0.53 %, SE 0.39 %, range 1.07 %)
+    p2: A 2.0486 [2.0350-2.0791] n=3 (IQR 1.08 %, SE 0.80 %, range 2.15 %) | B 2.0757 [2.0702-2.2492] n=3 (IQR 4.31 %, SE 3.55 %, range 8.63 %)
+  LETTER     : B/A 1.0223 (+2.23 %, B-A +0.0456) pooled nnn (bars i 12.51 / s 4.37 / r 26.84 %); passes p0:nnn(K3/2 1.0143) p1:nnn(K3/3 1.0340) p2:nnn(K3/3 1.0132) gates [0, 1, 2] -> NOT CLAIMED [B>A] => NOT SEEN
+  GATING-ONLY: B/A 1.0223 (+2.23 %, B-A +0.0456) pooled nnn (bars i 12.51 / s 4.37 / r 26.84 %); passes p0:nnn(K3/2 1.0143) p1:nnn(K3/3 1.0340) p2:nnn(K3/3 1.0132) gates [1, 2] -> NOT CLAIMED [B>A] => NOT SEEN
+
+## Post hoc: A/A twin in TIP (C4-JT#tip vs C4-JD#tip, one configuration since C4)
+
+### AA W1: C4-JT#tip vs C4-JD#tip  [0..500] (same)
+  A ('C4-JD', 'tip', 1): 4.5692 [4.4430-4.9939] n=7 (IQR 7.65 %, SE 2.32 %, range 12.05 %)
+  B ('C4-JT', 'tip', 1): 4.5930 [4.4350-4.8287] n=7 (IQR 3.20 %, SE 1.41 %, range 8.57 %)
+    p0: A 4.9397 [4.9397-4.9397] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 4.5902 [4.5902-4.5902] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 4.5338 [4.5034-4.7965] n=3 (IQR 3.23 %, SE 2.57 %, range 6.47 %) | B 4.5930 [4.4350-4.8287] n=3 (IQR 4.29 %, SE 3.12 %, range 8.57 %)
+    p2: A 4.5692 [4.4430-4.9939] n=3 (IQR 6.03 %, SE 4.57 %, range 12.05 %) | B 4.6649 [4.5807-4.8002] n=3 (IQR 2.35 %, SE 1.72 %, range 4.70 %)
+  LETTER     : B/A 1.0052 (+0.52 %, B-A +0.0238) pooled nnn (bars i 16.59 / s 5.43 / r 29.58 %); passes p0:nnn(K1/1 0.9292,sep) p1:nnn(K3/3 1.0131) p2:nnn(K3/3 1.0209) gates [0, 1, 2] -> NOT CLAIMED [B>A] => NOT CLAIMED DIFFERENT
+  GATING-ONLY: B/A 1.0052 (+0.52 %, B-A +0.0238) pooled nnn (bars i 16.59 / s 5.43 / r 29.58 %); passes p0:nnn(K1/1 0.9292,sep) p1:nnn(K3/3 1.0131) p2:nnn(K3/3 1.0209) gates [1, 2] -> NOT CLAIMED [B>A] => NOT CLAIMED DIFFERENT
+
+### AA W8: C4-JT#tip vs C4-JD#tip  [0..500] (same)
+  A ('C4-JD', 'tip', 8): 1.8277 [1.8135-2.0274] n=7 (IQR 4.33 %, SE 2.02 %, range 11.70 %)
+  B ('C4-JT', 'tip', 8): 1.8502 [1.8200-2.0088] n=7 (IQR 3.01 %, SE 1.72 %, range 10.21 %)
+    p0: A 1.8967 [1.8967-1.8967] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 2.0088 [2.0088-2.0088] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 1.8263 [1.8139-1.8277] n=3 (IQR 0.38 %, SE 0.30 %, range 0.75 %) | B 1.8246 [1.8200-1.8502] n=3 (IQR 0.83 %, SE 0.64 %, range 1.66 %)
+    p2: A 1.9019 [1.8135-2.0274] n=3 (IQR 5.62 %, SE 4.09 %, range 11.24 %) | B 1.8611 [1.8269-1.9018] n=3 (IQR 2.01 %, SE 1.46 %, range 4.03 %)
+  LETTER     : B/A 1.0123 (+1.23 %, B-A +0.0225) pooled nnn (bars i 10.55 / s 5.31 / r 31.06 %); passes p0:nnn(K1/1 1.0591,sep) p1:nnn(K3/3 0.9991) p2:nnn(K3/3 0.9786) gates [0, 1, 2] -> NOT CLAIMED [B>A] => NOT CLAIMED DIFFERENT
+  GATING-ONLY: B/A 1.0123 (+1.23 %, B-A +0.0225) pooled nnn (bars i 10.55 / s 5.31 / r 31.06 %); passes p0:nnn(K1/1 1.0591,sep) p1:nnn(K3/3 0.9991) p2:nnn(K3/3 0.9786) gates [1, 2] -> NOT CLAIMED [B>A] => NOT CLAIMED DIFFERENT
+
+### AA W16: C4-JT#tip vs C4-JD#tip  [0..500] (same)
+  A ('C4-JD', 'tip', 16): 2.0887 [2.0503-2.2770] n=9 (IQR 4.35 %, SE 1.62 %, range 10.85 %)
+  B ('C4-JT', 'tip', 16): 2.0597 [2.0482-2.2244] n=7 (IQR 3.05 %, SE 1.63 %, range 8.56 %)
+    p0: A 2.2310 [2.0887-2.2770] n=3 (IQR 4.22 %, SE 3.18 %, range 8.44 %) | B 2.0547 [2.0547-2.0547] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 2.0553 [2.0503-2.1619] n=3 (IQR 2.71 %, SE 2.22 %, range 5.43 %) | B 2.0577 [2.0482-2.1721] n=3 (IQR 3.01 %, SE 2.42 %, range 6.02 %)
+    p2: A 2.0811 [2.0711-2.1093] n=3 (IQR 0.92 %, SE 0.69 %, range 1.84 %) | B 2.0658 [2.0597-2.2244] n=3 (IQR 3.99 %, SE 3.27 %, range 7.98 %)
+  LETTER     : B/A 0.9861 (-1.39 %, B-A -0.0290) pooled nnn (bars i 10.62 / s 4.59 / r 27.64 %); passes p0:nnn(K3/1 0.9210,sep) p1:nnn(K3/3 1.0012) p2:nnn(K3/3 0.9927) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED DIFFERENT
+  GATING-ONLY: B/A 0.9861 (-1.39 %, B-A -0.0290) pooled nnn (bars i 10.62 / s 4.59 / r 27.64 %); passes p0:nnn(K3/1 0.9210,sep) p1:nnn(K3/3 1.0012) p2:nnn(K3/3 0.9927) gates [1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED DIFFERENT
+
+## Post hoc: AllPairs across binaries (C4-JDap#tip vs C4-JDpar#parent; same config)
+
+### BIN W1: C4-JDap#tip vs C4-JDpar#parent  [0..500] (same)
+  A ('C4-JDpar', 'parent', 1): 6.2008 [6.0390-6.3550] n=8 (IQR 1.03 %, SE 0.71 %, range 5.10 %)
+  B ('C4-JDap', 'tip', 1): 6.1501 [6.0101-6.6297] n=7 (IQR 2.26 %, SE 1.59 %, range 10.07 %)
+    p0: A 6.2182 [6.2018-6.2346] n=2 (IQR 0.26 %, SE 0.33 %, range 0.53 %) | B 6.2270 [6.2270-6.2270] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 6.1949 [6.0606-6.2224] n=3 (IQR 1.31 %, SE 1.01 %, range 2.61 %) | B 6.1501 [6.0101-6.2047] n=3 (IQR 1.58 %, SE 1.18 %, range 3.16 %)
+    p2: A 6.1998 [6.0390-6.3550] n=3 (IQR 2.55 %, SE 1.84 %, range 5.10 %) | B 6.0894 [6.0640-6.6297] n=3 (IQR 4.64 %, SE 3.80 %, range 9.29 %)
+  LETTER     : B/A 0.9918 (-0.82 %, B-A -0.0506) pooled nnn (bars i 4.97 / s 3.48 / r 22.58 %); passes p0:nnn(K2/1 1.0014) p1:nnn(K3/3 0.9928) p2:nnn(K3/3 0.9822) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED DIFFERENT
+  GATING-ONLY: B/A 0.9918 (-0.82 %, B-A -0.0506) pooled nnn (bars i 4.97 / s 3.48 / r 22.58 %); passes p0:nnn(K2/1 1.0014) p1:nnn(K3/3 0.9928) p2:nnn(K3/3 0.9822) gates [1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED DIFFERENT
+
+### BIN W2: C4-JDap#tip vs C4-JDpar#parent  [0..500] (same)
+  A ('C4-JDpar', 'parent', 2): 4.6971 [4.6364-4.7735] n=8 (IQR 1.72 %, SE 0.50 %, range 2.92 %)
+  B ('C4-JDap', 'tip', 2): 4.7129 [4.6224-4.7774] n=8 (IQR 1.04 %, SE 0.45 %, range 3.29 %)
+    p0: A 4.7531 [4.7326-4.7735] n=2 (IQR 0.43 %, SE 0.54 %, range 0.86 %) | B 4.7697 [4.7620-4.7774] n=2 (IQR 0.16 %, SE 0.20 %, range 0.32 %)
+    p1: A 4.6625 [4.6519-4.6745] n=3 (IQR 0.24 %, SE 0.18 %, range 0.48 %) | B 4.7089 [4.6885-4.7169] n=3 (IQR 0.30 %, SE 0.23 %, range 0.60 %)
+    p2: A 4.7197 [4.6364-4.7641] n=3 (IQR 1.35 %, SE 0.99 %, range 2.71 %) | B 4.6954 [4.6224-4.7362] n=3 (IQR 1.21 %, SE 0.89 %, range 2.42 %)
+  LETTER     : B/A 1.0034 (+0.34 %, B-A +0.0158) pooled nnn (bars i 4.01 / s 1.34 / r 8.80 %); passes p0:nnn(K2/2 1.0035) p1:YYn(K3/3 1.0100,sep) p2:nnn(K3/3 0.9949) gates [0, 1, 2] -> NOT CLAIMED [B>A] => NOT CLAIMED DIFFERENT
+  GATING-ONLY: B/A 1.0034 (+0.34 %, B-A +0.0158) pooled nnn (bars i 4.01 / s 1.34 / r 8.80 %); passes p0:nnn(K2/2 1.0035) p1:YYn(K3/3 1.0100,sep) p2:nnn(K3/3 0.9949) gates [1, 2] -> NOT CLAIMED [B>A] => NOT CLAIMED DIFFERENT
+
+### BIN W4: C4-JDap#tip vs C4-JDpar#parent  [0..500] (same)
+  A ('C4-JDpar', 'parent', 4): 3.8845 [3.8567-3.9813] n=7 (IQR 1.42 %, SE 0.58 %, range 3.21 %)
+  B ('C4-JDap', 'tip', 4): 3.9106 [3.8587-4.0755] n=7 (IQR 2.26 %, SE 1.02 %, range 5.54 %)
+    p0: A 3.9510 [3.9510-3.9510] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 4.0755 [4.0755-4.0755] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 3.8632 [3.8567-3.8845] n=3 (IQR 0.36 %, SE 0.27 %, range 0.72 %) | B 3.9021 [3.8735-3.9106] n=3 (IQR 0.48 %, SE 0.36 %, range 0.95 %)
+    p2: A 3.8916 [3.8692-3.9813] n=3 (IQR 1.44 %, SE 1.10 %, range 2.88 %) | B 3.9107 [3.8587-4.0417] n=3 (IQR 2.34 %, SE 1.75 %, range 4.68 %)
+  LETTER     : B/A 1.0067 (+0.67 %, B-A +0.0261) pooled nnn (bars i 5.34 / s 2.36 / r 12.81 %); passes p0:nnn(K1/1 1.0315,sep) p1:nYn(K3/3 1.0101) p2:nnn(K3/3 1.0049) gates [0, 1, 2] -> NOT CLAIMED [B>A] => NOT CLAIMED DIFFERENT
+  GATING-ONLY: B/A 1.0067 (+0.67 %, B-A +0.0261) pooled nnn (bars i 5.34 / s 2.36 / r 12.81 %); passes p0:nnn(K1/1 1.0315,sep) p1:nYn(K3/3 1.0101) p2:nnn(K3/3 1.0049) gates [1, 2] -> NOT CLAIMED [B>A] => NOT CLAIMED DIFFERENT
+
+### BIN W8: C4-JDap#tip vs C4-JDpar#parent  [0..500] (same)
+  A ('C4-JDpar', 'parent', 8): 3.5206 [3.4741-3.7428] n=7 (IQR 2.72 %, SE 1.29 %, range 7.63 %)
+  B ('C4-JDap', 'tip', 8): 3.4851 [3.4581-3.5862] n=7 (IQR 1.31 %, SE 0.60 %, range 3.68 %)
+    p0: A 3.7428 [3.7428-3.7428] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %) | B 3.4747 [3.4747-3.4747] n=1 (IQR 0.00 %, SE 0.00 %, range 0.00 %)
+    p1: A 3.4854 [3.4741-3.5206] n=3 (IQR 0.67 %, SE 0.50 %, range 1.33 %) | B 3.4677 [3.4581-3.5185] n=3 (IQR 0.87 %, SE 0.68 %, range 1.74 %)
+    p2: A 3.5607 [3.4766-3.5932] n=3 (IQR 1.64 %, SE 1.22 %, range 3.27 %) | B 3.5153 [3.4851-3.5862] n=3 (IQR 1.44 %, SE 1.07 %, range 2.88 %)
+  LETTER     : B/A 0.9899 (-1.01 %, B-A -0.0355) pooled nnn (bars i 6.05 / s 2.85 / r 16.95 %); passes p0:nnn(K1/1 0.9284,sep) p1:nnn(K3/3 0.9949) p2:nnn(K3/3 0.9873) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED DIFFERENT
+  GATING-ONLY: B/A 0.9899 (-1.01 %, B-A -0.0355) pooled nnn (bars i 6.05 / s 2.85 / r 16.95 %); passes p0:nnn(K1/1 0.9284,sep) p1:nnn(K3/3 0.9949) p2:nnn(K3/3 0.9873) gates [1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED DIFFERENT
+
+### BIN W16: C4-JDap#tip vs C4-JDpar#parent  [0..500] (same)
+  A ('C4-JDpar', 'parent', 16): 3.7023 [3.6391-3.8934] n=8 (IQR 3.90 %, SE 1.13 %, range 6.87 %)
+  B ('C4-JDap', 'tip', 16): 3.7003 [3.6462-3.8975] n=8 (IQR 1.49 %, SE 0.96 %, range 6.79 %)
+    p0: A 3.8503 [3.8073-3.8934] n=2 (IQR 1.12 %, SE 1.40 %, range 2.23 %) | B 3.8357 [3.7739-3.8975] n=2 (IQR 1.61 %, SE 2.02 %, range 3.22 %)
+    p1: A 3.6763 [3.6630-3.6952] n=3 (IQR 0.44 %, SE 0.32 %, range 0.87 %) | B 3.6860 [3.6650-3.6925] n=3 (IQR 0.37 %, SE 0.28 %, range 0.75 %)
+    p2: A 3.7094 [3.6391-3.8474] n=3 (IQR 2.81 %, SE 2.07 %, range 5.62 %) | B 3.7081 [3.6462-3.7231] n=3 (IQR 1.04 %, SE 0.79 %, range 2.07 %)
+  LETTER     : B/A 0.9995 (-0.05 %, B-A -0.0020) pooled nnn (bars i 8.35 / s 2.97 / r 19.32 %); passes p0:nnn(K2/2 0.9962) p1:nnn(K3/3 1.0026) p2:nnn(K3/3 0.9996) gates [0, 1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED DIFFERENT
+  GATING-ONLY: B/A 0.9995 (-0.05 %, B-A -0.0020) pooled nnn (bars i 8.35 / s 2.97 / r 19.32 %); passes p0:nnn(K2/2 0.9962) p1:nnn(K3/3 1.0026) p2:nnn(K3/3 0.9996) gates [1, 2] -> NOT CLAIMED [B<A] => NOT CLAIMED DIFFERENT

@@ -1,0 +1,23 @@
+2026-09-30T18:37:55.935+03:00 === gate9a rapier start
+2026-09-30T18:38:00.101+03:00 rapier RP-D                 rs8      W1  exit 0 PASS
+2026-09-30T18:38:03.710+03:00 rapier RP-D                 rs8      W2  exit 0 PASS
+2026-09-30T18:38:06.278+03:00 rapier RP-D                 rs8      W4  exit 0 PASS
+2026-09-30T18:38:08.652+03:00 rapier RP-D                 rs8      W8  exit 0 PASS
+2026-09-30T18:38:10.951+03:00 rapier RP-D                 rs8      W16 exit 0 PASS
+2026-09-30T18:38:16.832+03:00 rapier RP-D                 rs4      W1  exit 0 PASS
+2026-09-30T18:38:20.056+03:00 rapier RP-D                 rs4      W2  exit 0 PASS
+2026-09-30T18:38:22.255+03:00 rapier RP-D                 rs4      W4  exit 0 PASS
+2026-09-30T18:38:24.135+03:00 rapier RP-D                 rs4      W8  exit 0 PASS
+2026-09-30T18:38:26.136+03:00 rapier RP-D                 rs4      W16 exit 0 PASS
+2026-09-30T18:38:33.280+03:00 rapier RP-M                 rs8      W1  exit 0 PASS
+2026-09-30T18:38:37.850+03:00 rapier RP-M                 rs8      W2  exit 0 PASS
+2026-09-30T18:38:42.454+03:00 rapier RP-M                 rs8      W4  exit 0 PASS
+2026-09-30T18:38:45.430+03:00 rapier RP-M                 rs8      W8  exit 0 PASS
+2026-09-30T18:38:49.869+03:00 rapier RP-M                 rs8      W16 exit 0 PASS
+2026-09-30T18:38:57.879+03:00 rapier RP-M                 rs4      W1  exit 0 PASS
+2026-09-30T18:39:02.105+03:00 rapier RP-M                 rs4      W2  exit 0 PASS
+2026-09-30T18:39:05.875+03:00 rapier RP-M                 rs4      W4  exit 0 PASS
+2026-09-30T18:39:08.669+03:00 rapier RP-M                 rs4      W8  exit 0 PASS
+2026-09-30T18:39:11.637+03:00 rapier RP-M                 rs4      W16 exit 0 PASS
+2026-09-30T18:39:11.639+03:00 === gate9a rapier end
+gate exit 0

@@ -1,0 +1,18 @@
+as selected      gap 20 worker  : K [2, 3, 3, 8] | p0 e 0.259 bars r/i/s 0.005/0.002/0.003 | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y | guard NOT CLAIMED | no guard CLAIMED STRONG | delta +6022
+as selected      gap 20 external: K [2, 3, 3, 8] | p0 e 0.282 bars r/i/s 0.008/0.004/0.005 | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y | guard NOT CLAIMED | no guard CLAIMED STRONG | delta +6258
+as selected      gap 80 worker  : K [2, 3, 3, 8] | p0 e 0.077 bars r/i/s 0.004/0.002/0.002 | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y | guard NOT CLAIMED | no guard CLAIMED STRONG | delta +6261
+as selected      gap 80 external: K [2, 3, 3, 8] | p0 e 0.078 bars r/i/s 0.008/0.004/0.005 | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y | guard NOT CLAIMED | no guard CLAIMED STRONG | delta +6174
+restore original gap 20 worker  : K [3, 3, 3, 9] | p0 e 0.257 bars r/i/s 0.051/0.026/0.020 | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y | guard CLAIMED STRONG | no guard CLAIMED STRONG | delta +6000
+restore original gap 20 external: K [3, 3, 3, 9] | p0 e 0.281 bars r/i/s 0.065/0.033/0.026 | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y | guard CLAIMED STRONG | no guard CLAIMED STRONG | delta +6208
+restore original gap 80 worker  : K [3, 3, 3, 9] | p0 e 0.077 bars r/i/s 0.007/0.003/0.003 | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y | guard CLAIMED STRONG | no guard CLAIMED STRONG | delta +6314
+restore original gap 80 external: K [3, 3, 3, 9] | p0 e 0.076 bars r/i/s 0.021/0.011/0.008 | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y | guard CLAIMED STRONG | no guard CLAIMED STRONG | delta +6125
+restore re-run   gap 20 worker  : K [3, 3, 3, 9] | p0 e 0.257 bars r/i/s 0.016/0.008/0.006 | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y | guard CLAIMED STRONG | no guard CLAIMED STRONG | delta +6000
+restore re-run   gap 20 external: K [3, 3, 3, 9] | p0 e 0.281 bars r/i/s 0.057/0.028/0.023 | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y | guard CLAIMED STRONG | no guard CLAIMED STRONG | delta +6292
+restore re-run   gap 80 worker  : K [3, 3, 3, 9] | p0 e 0.077 bars r/i/s 0.009/0.004/0.004 | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y | guard CLAIMED STRONG | no guard CLAIMED STRONG | delta +6314
+restore re-run   gap 80 external: K [3, 3, 3, 9] | p0 e 0.078 bars r/i/s 0.016/0.008/0.006 | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y | guard CLAIMED STRONG | no guard CLAIMED STRONG | delta +6281
+
+dropped omega-v2 slots and their processes (slope spin/park at gap 20, 80):
+  ('omega-v2', 0, 1, 'omega2-gap-external') original ['witness 4.03'] ['23286/29356', '83586/89400']
+  ('omega-v2', 0, 1, 'omega2-gap-external') rerun ['after 7.54', 'witness 2.33'] ['22697/29797', '82881/89939']
+  ('omega-v2', 0, 2, 'omega2-gap-worker') original ['after 7.27', 'witness 5.97'] ['23567/28672', '83344/89547']
+  ('omega-v2', 0, 2, 'omega2-gap-worker') rerun ['witness 2.79'] ['23228/28989', '82842/89439']

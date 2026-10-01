@@ -1,0 +1,16 @@
+bp_g4_uniform/tree_kd/96
+                        time:   [8.7204 µs 8.7875 µs 8.8605 µs]
+bp_g4_uniform/tree_kd/112
+                        time:   [9.9203 µs 9.9863 µs 10.054 µs]
+bp_g4_uniform/tree_kd/128
+                        time:   [11.310 µs 11.348 µs 11.393 µs]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high mild
+
+bp_g4_disparity/tree_kd/96
+                        time:   [10.189 µs 10.245 µs 10.309 µs]
+bp_g4_disparity/tree_kd/112
+                        time:   [11.794 µs 11.856 µs 11.922 µs]
+bp_g4_disparity/tree_kd/128
+                        time:   [14.055 µs 14.117 µs 14.188 µs]
+

@@ -1,0 +1,122 @@
+closed passes: C4-AB-p0, C4-AB-p1, C4-AB-p2, C4-G5-p0, C4-G5-p1, C4-G5-p2, C4-RAPIER-p0, C4-RAPIER-p1, C4-RAPIER-p2
+C4-RAPIER rows all: processes 214 (original 180, re-run 34); invalid (mine) 0; validity agrees with driver 214/214; clean agrees with driver 214/214; window means agree with driver cols (<= 1 ns) 214/214; unclean 34; slots used 180, dropped 0
+  unclean causes: {'witness': 32, 'receipt_after': 9}
+C4-AB rows ['C4-JD', 'C4-JT', 'C4-jolt56']: processes 180 (original 144, re-run 36); invalid (mine) 0; validity agrees with driver 180/180; clean agrees with driver 180/180; window means agree with driver cols (<= 1 ns) 180/180; unclean 59; slots used 121, dropped 23
+  unclean causes: {'witness': 50, 'receipt_after': 20}
+  DROPPED slot ('C4-AB', 0, 0, 0, 'C4-JD', 'tip', 8): attempts [('original', 0, ['receipt_after 5.02', 'witness 4.95']), ('rerun', 1, ['receipt_after 6.78'])]
+  DROPPED slot ('C4-AB', 0, 0, 0, 'C4-JT', 'parent', 16): attempts [('original', 0, ['witness 5.75']), ('rerun', 1, ['witness 2.21'])]
+  DROPPED slot ('C4-AB', 0, 0, 0, 'C4-JT', 'parent', 8): attempts [('original', 0, ['receipt_after 5.16']), ('rerun', 1, ['witness 3.21'])]
+  DROPPED slot ('C4-AB', 0, 0, 0, 'C4-JT', 'tip', 16): attempts [('original', 0, ['witness 6.7']), ('rerun', 1, ['witness 2.81'])]
+  DROPPED slot ('C4-AB', 0, 0, 0, 'C4-JT', 'tip', 8): attempts [('original', 0, ['witness 3.62']), ('rerun', 1, ['receipt_after 7.92'])]
+  DROPPED slot ('C4-AB', 0, 0, 0, 'C4-jolt56', 'j56', 4): attempts [('original', 0, ['witness 4.51']), ('rerun', 1, ['witness 3.62'])]
+  DROPPED slot ('C4-AB', 0, 0, 0, 'C4-jolt56', 'j56', 8): attempts [('original', 0, ['receipt_after 5.46', 'witness 5.7']), ('rerun', 1, ['witness 3.08'])]
+  DROPPED slot ('C4-AB', 0, 0, 1, 'C4-JD', 'tip', 1): attempts [('original', 0, ['witness 2.29'])]
+  DROPPED slot ('C4-AB', 0, 0, 1, 'C4-JD', 'tip', 2): attempts [('original', 0, ['receipt_after 12.73', 'witness 7.6'])]
+  DROPPED slot ('C4-AB', 0, 0, 1, 'C4-JD', 'tip', 4): attempts [('original', 0, ['witness 3.32'])]
+  DROPPED slot ('C4-AB', 0, 0, 1, 'C4-JD', 'tip', 8): attempts [('original', 0, ['witness 4.69'])]
+  DROPPED slot ('C4-AB', 0, 0, 1, 'C4-JT', 'parent', 1): attempts [('original', 0, ['receipt_after 5.14'])]
+  DROPPED slot ('C4-AB', 0, 0, 1, 'C4-JT', 'tip', 1): attempts [('original', 0, ['receipt_after 6.38'])]
+  DROPPED slot ('C4-AB', 0, 0, 1, 'C4-JT', 'tip', 16): attempts [('original', 0, ['witness 2.4']), ('rerun', 1, ['witness 3.36'])]
+  DROPPED slot ('C4-AB', 0, 0, 1, 'C4-jolt56', 'j56', 2): attempts [('original', 0, ['receipt_after 5.03', 'witness 5.53'])]
+  DROPPED slot ('C4-AB', 0, 0, 1, 'C4-jolt56', 'j56', 8): attempts [('original', 0, ['witness 4.14'])]
+  DROPPED slot ('C4-AB', 0, 0, 2, 'C4-JD', 'tip', 1): attempts [('original', 0, ['receipt_after 6.1', 'witness 6.76'])]
+  DROPPED slot ('C4-AB', 0, 0, 2, 'C4-JD', 'tip', 4): attempts [('original', 0, ['receipt_after 5.08', 'witness 4.47'])]
+  DROPPED slot ('C4-AB', 0, 0, 2, 'C4-JT', 'tip', 1): attempts [('original', 0, ['witness 5.04'])]
+  DROPPED slot ('C4-AB', 0, 0, 2, 'C4-JT', 'tip', 8): attempts [('original', 0, ['witness 3.66'])]
+  DROPPED slot ('C4-AB', 0, 0, 2, 'C4-jolt56', 'j56', 1): attempts [('original', 0, ['receipt_after 5.95'])]
+  DROPPED slot ('C4-AB', 0, 0, 2, 'C4-jolt56', 'j56', 4): attempts [('original', 0, ['receipt_after 5.95'])]
+  DROPPED slot ('C4-AB', 0, 0, 2, 'C4-jolt56', 'j56', 8): attempts [('original', 0, ['witness 2.82'])]
+C4-G5 rows ['C4-JD-armed']: processes 18 (original 18, re-run 0); invalid (mine) 0; validity agrees with driver 18/18; clean agrees with driver 18/18; window means agree with driver cols (<= 1 ns) 18/18; unclean 0; slots used 18, dropped 0
+  unclean causes: {}
+
+pass-cell K (clean valid slots per pass) for the cells this group reads; driver passcell record k_clean in brackets
+  C4-RAPIER  RP-D         rs4    W1   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-D         rs4    W2   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-D         rs4    W4   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-D         rs4    W8   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-D         rs4    W16  K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-D         rs8    W1   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-D         rs8    W2   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-D         rs8    W4   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-D         rs8    W8   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-D         rs8    W16  K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-M         rs4    W1   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-M         rs4    W2   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-M         rs4    W4   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-M         rs4    W8   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-M         rs4    W16  K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-M         rs8    W1   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-M         rs8    W2   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-M         rs8    W4   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-M         rs8    W8   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-RAPIER  RP-M         rs8    W16  K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-AB      C4-JD        tip    W1   K p0/p1/p2 = 1[1] / 3[3] / 3[3]   <- SHORT pass-cell
+  C4-AB      C4-JD        tip    W2   K p0/p1/p2 = 2[2] / 3[3] / 3[3]   <- SHORT pass-cell
+  C4-AB      C4-JD        tip    W4   K p0/p1/p2 = 1[1] / 3[3] / 3[3]   <- SHORT pass-cell
+  C4-AB      C4-JD        tip    W8   K p0/p1/p2 = 1[1] / 3[3] / 3[3]   <- SHORT pass-cell
+  C4-AB      C4-JD        tip    W16  K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-AB      C4-JT        parent W1   K p0/p1/p2 = 2[2] / 3[3] / 3[3]   <- SHORT pass-cell
+  C4-AB      C4-JT        parent W8   K p0/p1/p2 = 2[2] / 3[3] / 3[3]   <- SHORT pass-cell
+  C4-AB      C4-JT        parent W16  K p0/p1/p2 = 2[2] / 3[3] / 3[3]   <- SHORT pass-cell
+  C4-AB      C4-JT        tip    W1   K p0/p1/p2 = 1[1] / 3[3] / 3[3]   <- SHORT pass-cell
+  C4-AB      C4-JT        tip    W8   K p0/p1/p2 = 1[1] / 3[3] / 3[3]   <- SHORT pass-cell
+  C4-AB      C4-JT        tip    W16  K p0/p1/p2 = 1[1] / 3[3] / 3[3]   <- SHORT pass-cell
+  C4-AB      C4-jolt56    j56    W1   K p0/p1/p2 = 2[2] / 3[3] / 3[3]   <- SHORT pass-cell
+  C4-AB      C4-jolt56    j56    W2   K p0/p1/p2 = 2[2] / 3[3] / 3[3]   <- SHORT pass-cell
+  C4-AB      C4-jolt56    j56    W4   K p0/p1/p2 = 1[1] / 3[3] / 3[3]   <- SHORT pass-cell
+  C4-AB      C4-jolt56    j56    W8   K p0/p1/p2 = 0[0] / 3[3] / 3[3]   <- SHORT pass-cell
+  C4-AB      C4-jolt56    j56    W16  K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-G5      C4-JD-armed  tip    W1   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+  C4-G5      C4-JD-armed  tip    W8   K p0/p1/p2 = 3[3] / 3[3] / 3[3]
+
+block and pass times (first process start .. last process end, used + unused)
+  C4-RAPIER-p0: 20:46:03 .. 21:01:05
+  C4-RAPIER-p1: 21:03:43 .. 21:12:30
+  C4-RAPIER-p2: 21:15:08 .. 21:22:04
+  C4-AB-p0: 19:16:42 .. 19:58:42
+  C4-AB-p1: 20:02:02 .. 20:13:46
+  C4-AB-p2: 20:17:18 .. 20:43:24
+  C4-G5-p0: 21:24:56 .. 21:28:00
+  C4-G5-p1: 21:30:37 .. 21:33:40
+  C4-G5-p2: 21:36:53 .. 21:40:22
+
+receipts of the USED processes (medians): machine busy before / after (%), witness others_busy (%)
+  C4-RAPIER-p0: n 60  before 1.08  after 1.47  witness 0.68
+  C4-RAPIER-p1: n 60  before 0.62  after 0.62  witness 0.50
+  C4-RAPIER-p2: n 60  before 0.61  after 0.58  witness 0.31
+  C4-RAPIER-pall: n 180  before 0.72  after 0.78  witness 0.51
+  C4-AB-p0: n 25  before 2.48  after 2.64  witness 0.91
+  C4-AB-p1: n 48  before 1.25  after 1.18  witness 0.42
+  C4-AB-p2: n 48  before 1.86  after 1.66  witness 0.88
+  C4-AB-pall: n 121  before 1.66  after 1.52  witness 0.66
+  C4-G5-p0: n 6  before 0.55  after 0.68  witness 0.37
+  C4-G5-p1: n 6  before 0.55  after 0.66  witness 0.20
+  C4-G5-p2: n 6  before 0.59  after 0.60  witness 0.23
+  C4-G5-pall: n 18  before 0.57  after 0.62  witness 0.23
+
+our row-iteration census: 36 * mean(phys_np_points) over the window, C4-JD-armed#tip (G5), every used process
+  Nm     [0,100) W1: [4543.24] (distinct values over 9 processes)
+  Nm     [0,100) W8: [4543.24] (distinct values over 9 processes)
+  Nm     [0,500) W1: [4482.78] (distinct values over 9 processes)
+  Nm     [0,500) W8: [4482.78] (distinct values over 9 processes)
+  Nm     [100,500) W1: [4467.665] (distinct values over 9 processes)
+  Nm     [100,500) W8: [4467.665] (distinct values over 9 processes)
+  Np     [0,100) W1: [16354.58] (distinct values over 9 processes)
+  Np     [0,100) W8: [16354.58] (distinct values over 9 processes)
+  Np     [0,500) W1: [16513.92] (distinct values over 9 processes)
+  Np     [0,500) W8: [16513.92] (distinct values over 9 processes)
+  Np     [100,500) W1: [16553.755] (distinct values over 9 processes)
+  Np     [100,500) W8: [16553.755] (distinct values over 9 processes)
+  rows36 [0,100) W1: [588764.88] (distinct values over 9 processes)
+  rows36 [0,100) W8: [588764.88] (distinct values over 9 processes)
+  rows36 [0,500) W1: [594501.12] (distinct values over 9 processes)
+  rows36 [0,500) W8: [594501.12] (distinct values over 9 processes)
+  rows36 [100,500) W1: [595935.18] (distinct values over 9 processes)
+  rows36 [100,500) W8: [595935.18] (distinct values over 9 processes)
+  pins: Rapier RP-D rows 303,003 [0,100) / 354,674 [100,500); RP-M 935,729 / 1,071,107 (window9a_rows.md rows_pin)
+
+exe sha256 on disk now vs pin
+  tip: True (8d6e7d4173857ca8...)
+  j56: True (918fd2b70ecc634c...)
+  rs8: True (736c2a069f14a2ad...)
+  rs4: True (1e5136cada9777ab...)

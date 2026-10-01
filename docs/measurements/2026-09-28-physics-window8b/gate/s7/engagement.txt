@@ -1,0 +1,12 @@
+P (uncapped) JT W8: lanes_sum 392023, bound 8 x scopes + (W+1) x setup_steps = 399732, within True; color_scopes 49404, color_tasks 1126176, setup_steps 500, setup_tasks 15980 (W <= physical: recorded) PASS
+T (capped) JT W8: lanes_sum 381099, bound 8 x scopes + (W+1) x setup_steps = 399732, within True; color_scopes 49404, color_tasks 1126176, setup_steps 500, setup_tasks 15980 (W <= physical: recorded) PASS
+  JT W8: P and T color_scopes / color_tasks / setup_steps / setup_tasks equal: True
+P (uncapped) JT W16: lanes_sum 607272, bound 8 x scopes + (W+1) x setup_steps = 403732, within False; color_scopes 49404, color_tasks 1126176, setup_steps 500, setup_tasks 15980 (gated) PASS
+T (capped) JT W16: lanes_sum 391361, bound 8 x scopes + (W+1) x setup_steps = 403732, within True; color_scopes 49404, color_tasks 1126176, setup_steps 500, setup_tasks 15980 (gated) PASS
+  JT W16: P and T color_scopes / color_tasks / setup_steps / setup_tasks equal: True
+P (uncapped) JA W8: lanes_sum 394544, bound 8 x scopes + (W+1) x setup_steps = 399732, within True; color_scopes 49404, color_tasks 1485480, setup_steps 500, setup_tasks 15980 (W <= physical: recorded) PASS
+T (capped) JA W8: lanes_sum 380996, bound 8 x scopes + (W+1) x setup_steps = 399732, within True; color_scopes 49404, color_tasks 1485480, setup_steps 500, setup_tasks 15980 (W <= physical: recorded) PASS
+  JA W8: P and T color_scopes / color_tasks / setup_steps / setup_tasks equal: True
+P (uncapped) JA W16: lanes_sum 597418, bound 8 x scopes + (W+1) x setup_steps = 403732, within False; color_scopes 49404, color_tasks 1485480, setup_steps 500, setup_tasks 15980 (gated) PASS
+T (capped) JA W16: lanes_sum 399017, bound 8 x scopes + (W+1) x setup_steps = 403732, within True; color_scopes 49404, color_tasks 1485480, setup_steps 500, setup_tasks 15980 (gated) PASS
+  JA W16: P and T color_scopes / color_tasks / setup_steps / setup_tasks equal: True

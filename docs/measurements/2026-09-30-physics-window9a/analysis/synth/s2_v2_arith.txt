@@ -1,0 +1,25 @@
+9a today (C4-JD-armed#tip): points 16553.755, manifolds 4467.665; F0d trunk row: {'manif': 4483.0, 'points': 16608.0, 'passes': 130.0}
+F0g gap 0.5 [100,500): {('on', 'a'): {'manif': 8136.0, 'points': 29803.0, 'passes': 192.0}, ('on', 'b'): {'manif': 8501.0, 'points': 30847.0, 'passes': 192.0}, ('off', 'a'): {'manif': 8139.0, 'points': 29928.0, 'passes': 192.0}, ('off', 'b'): {'manif': 8496.0, 'points': 31019.0, 'passes': 192.0}}
+V2 (K3+S20+VMARGIN) work / F0d trunk: reuse on: points x1.8574, manifolds x1.8963 (8501 vs Jolt 8489); reuse off: points x1.8677, manifolds x1.8952 (8496 vs Jolt 8489)
+V2 velocity row-iterations on 9a basis: 1,106,865-1,113,037; Jolt/ours_V2 velocity rows 0.5083-0.5112 (today 0.9494); RP-M/ours_V2 rows 0.9623-0.9677 (equal-work band [0.90, 1.10])
+ours_V2 rows / RP-D rows (Rapier defaults, rows_pin 354,674): 3.121-3.138 (today 1.680); ours_V2 / Jolt velocity rows 1.956-1.967; points per manifold V2 3.629, 3.651; today 3.705
+
+# Model check on S20 (VERDICT: +0.476 ms at W8, +0.528 ms at W16)
+  W8: S20 dT = 0.4764-0.4790 ms
+  W16: S20 dT = 0.5333-0.5333 ms (rows only: no colour-pass cost at W16)
+
+# Ours after V2, [100,500), against 9a's other engines (ours = C4-JD#tip)
+W | ours now | model (lower) ours_V2 | const-ns/row (upper) ours_V2 | vs Jolt lower-upper | vs RP-D best | vs RP-M best
+W1 | 4.3504 | (no c_row at W1) | 8.080-8.125 | <= 0.812 | <= 1.651 | <= 1.053
+W2 | 2.9392 | (no c_row at W2) | 5.459-5.490 | <= 0.944 | <= 1.844 | <= 1.229
+W4 | 2.1605 | (no c_row at W4) | 4.013-4.035 | <= 1.094 | <= 2.005 | <= 1.264
+W8 | 1.7878 | 2.377-2.386 (dT 0.589-0.598) | 3.321-3.339 | 0.925-1.299 | 1.683-2.364 | 0.932-1.310
+W16 | 2.0486 | 2.725-2.733 (dT 0.677-0.685) | 3.805-3.826 | 1.088-1.527 | 1.727-2.425 | 0.975-1.369
+
+(ratios are ours_V2 / other; < 1 = ours faster. The upper bound scales the WHOLE step with rows, the lower bound omits setup and narrowphase growth; neither is a measurement. Window 9b's V2-AB block measures it.)
+
+# The lever budget at W8 against the V2 cost (arithmetic; plan and G5 figures, not measured here)
+  V2 dT(W8) model 0.589-0.598 ms; SR predicted 0.29 ms (PLAN M7, today's contact set); S5 re-priced 0.142-0.145 ms (G5 group); SR + S5 = 0.432-0.435 ms
+  W8 V2 model (lower) 2.377-2.386 minus SR+S5 -> 1.942-1.954 ms: vs Jolt 0.756-0.760, vs RP-D best 1.375-1.383, vs RP-M best 0.762-0.767 (chained arithmetic; the lever gains were priced on the pre-V2 contact set)
+  W8 V2 const-ns/row (upper) 3.321-3.339 minus SR+S5 -> 2.886-2.907 ms: vs Jolt 1.123-1.131, vs RP-D best 2.043-2.058, vs RP-M best 1.132-1.140 (chained arithmetic; the lever gains were priced on the pre-V2 contact set)
+  plan end state T(8) 1.28-1.42 ms (PLAN rev 3, pre-V2 contact set) vs 9a J-D T(8) [100,500) 1.7878

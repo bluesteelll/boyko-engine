@@ -1,0 +1,35 @@
+Physics window 9a (2026-09-30) - binaries, provenance and build commands. sha256 in bin/SHA256SUMS (the driver also pins each key's
+sha256 in rows9a.json `sha256_pin`, and checks the runners' config receipt tree_brute_max_rows: tip 128, parent 144).
+Toolchain for every cargo build: rustc 1.98.1 (48a229cea 2026-09-01) x86_64-pc-windows-msvc, cargo 1.98.1,
+RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc, PATH="$HOME/.cargo/bin:$PATH", CARGO_INCREMENTAL=0, CARGO_BUILD_JOBS=8,
+TMP/TEMP=D:/wt/_targets/tmp, RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS unset (x86-64-v3 from the tree's .cargo/config.toml), --locked with the
+tree's own Cargo.lock (sha256 c00bf4c41c52c8ae4bd12ec437acde99ae5dfc6881166551c8ddd93f4afceeab, CRLF as exported; identical before and
+after every build: logs/build_*.log.lock_{before,after}; equal to window 8b's lock).
+Every tree is a `git archive` export (never built in a worktree; no worktree was edited or checked out):
+  git -C D:/wt/lighttable archive 50e31f1a | tar -x -C D:/wt/_targets/w9a-trees/tip        (also .../g4rT)
+  git -C D:/wt/joltab     archive 3d9433ae | tar -x -C D:/wt/_targets/w9a-trees/parent
+The archive applies core.autocrlf=true, so the trees are CRLF.
+
+TIP    50e31f1a78bd53adf31628a3fa03ff28c2647275  u/phys-tree-c4 (D:/wt/lighttable, clean): the Tree is the default broadphase
+       (C4-1 1537eeb3 thresholds 128/136, C4-2 b858c238, C4-3 7af2d090 the flip, C4-4 1672bc82 the record, 50e31f1a the trunk sync).
+PARENT 3d9433aed2d2251d3bc4cc2ca59692027ddb2494  = `git merge-base u/phys-tree-c4 integ/unified` = integ/unified (D:/wt/joltab, clean):
+       AllPairs is the default. NOT window 8b's S4-off patched parent; the literal trunk. Its runner is NOT window 8b's
+       runner_tip_16191fda.exe (the trunk moved past 16191fda; the cut's reuse clause applies only when PARENT == 16191fda).
+
+runner_tip_50e31f1a.exe      (key tip)
+  tree   D:/wt/_targets/w9a-trees/tip (unmodified export)
+  cmd    tools/build_runner.sh D:/wt/_targets/w9a-trees/tip D:/wt/_targets/w9a-tip logs/build_tip.log
+         = cd <tree> && CARGO_TARGET_DIR=D:/wt/_targets/w9a-tip cargo bench --no-run --locked --profile parity -p boyko-physics --bench jolt_parity_pyramid
+  exe    D:/wt/_targets/w9a-tip/parity/deps/jolt_parity_pyramid-5662a59aaaeba37e.exe   (copied to bin/)
+runner_parent_3d9433ae.exe   (key parent)   the same command on D:/wt/_targets/w9a-trees/parent -> D:/wt/_targets/w9a-parent
+broadphase_g4rT_50e31f1a.exe (key g4rT)
+  tree   D:/wt/_targets/w9a-trees/g4rT = the TIP export + bin/g4ref.patch, applied byte-exactly by tools/patch_trees9a.py (found by
+         content): the G4_SIZES line -> the 28 sizes (17..192 step 8-16, 208..256 step 16, 1000). Exactly ONE file differs from the tip
+         export (benches/broadphase.rs, +90 bytes; 17,586 files in both, per-file size table and mtime scan).
+  cmd    tools/build_g4rT.sh D:/wt/_targets/w9a-trees/g4rT D:/wt/_targets/w9a-g4rT logs/build_g4rT.log
+         = cargo bench --no-run --locked -p boyko-physics --bench broadphase   (bench profile: codegen-units 1, no LTO)
+  exe    D:/wt/_targets/w9a-g4rT/release/deps/broadphase-f2515a6f878ca59a.exe
+bpbench_g4ref_93b2615b.exe   (key g4r7)   window 7 wave 2's Q3 instrument (93b2615b + variant/g4ref.diff, 27 sizes 17..256), a byte copy of
+       7dc37fc3-7b1e-46f1-89da-ccd0dba7c788/scratchpad/win7b/bin/bpbench_g4ref_93b2615b.exe (sha256 checked equal)
+broadphase_g4ref_16191fda.exe (key g4r8b)  window 8b's G4 instrument (16191fda + win8b g4ref.patch), a byte copy of win8b/bin/broadphase_g4ref_16191fda.exe
+D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe (key j56)  Jolt 5.6 (parity patch, P0 Distribution build), run in place (windows 7/8's j56)

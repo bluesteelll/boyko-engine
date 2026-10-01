@@ -1,0 +1,7 @@
+estimates.json mean.point_estimate vs recomputed Flat mean, worst rel diff over all ids of 12 processes: 4.44e-16
+9a/8b all_pairs: min 0.9786 max 0.9920 :: uniform/128 0.9912, uniform/136 0.9847, uniform/144 0.9920, uniform/152 0.9900, uniform/160 0.9895, disparity/128 0.9879, disparity/136 0.9900, disparity/144 0.9786, disparity/152 0.9899, disparity/160 0.9910
+9a/8b tree: min 0.9647 max 1.0076 :: uniform/128 1.0041, uniform/136 1.0060, uniform/144 1.0036, uniform/152 1.0067, uniform/160 1.0076, disparity/128 0.9647, disparity/136 0.9932, disparity/144 0.9976, disparity/152 1.0045, disparity/160 0.9949
+tree ns/row uniform: min 85.50 max 94.82 :: 94.82 90.38 89.45 87.18 87.49 88.17 87.34 86.38 85.50
+all_pairs ns/pair-test uniform: 1.3083 1.3084 1.2943 1.2893 1.3870 1.3715 1.3637 1.3469 1.3462
+tree ns/row disparity: min 101.51 max 108.70 :: 108.70 108.28 108.25 104.81 104.55 101.51 103.30 103.82 102.70
+all_pairs ns/pair-test disparity: 1.4395 1.4036 1.3934 1.3872 1.5575 1.5390 1.5169 1.5090 1.4997

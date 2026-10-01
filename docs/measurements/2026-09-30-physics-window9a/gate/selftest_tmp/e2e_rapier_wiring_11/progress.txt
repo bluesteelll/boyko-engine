@@ -1,0 +1,2 @@
+03:08:17 Rapier (wiring rehearsal) C4-RAPIER p0: 5 pass-cell(s) with unclean slots after the re-run stage: RAP-w#rs8@W1 K=0/1, RAP-w#rs8@W2 K=0/1, RAP-w#rs8@W4 K=0/1, RAP-w#rs8@W8 K=0/1, RAP-w#rs8@W16 K=0/1
+03:08:17 Rapier (wiring rehearsal) RAP-w p0 done
