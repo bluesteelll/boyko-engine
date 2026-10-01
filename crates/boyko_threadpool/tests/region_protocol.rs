@@ -100,10 +100,19 @@ fn exactly_once_matrix<P: RegionPolicy + 'static, const ARMED: bool>(label: &str
                     let (blocks, order) = random_table(&mut rng, p, shape);
                     let mut frame = Frame::new(blocks.len(), p as usize, blocks.len() * (8 * p as usize).max(1));
                     frame.set_table::<P>(&blocks, &order, p, 0);
-                    // 2 µs of work per block: without it participant 0 sweeps a whole item before a
-                    // parked helper wakes, and the matrix measured no helper block at all (the
-                    // anti-vacuity guard below caught exactly that on the first runs).
-                    let stages = Arc::new(Stages::new(&frame).with_work(Duration::from_micros(2)));
+                    // 2 µs of work per block, and participant 0's block 0 of the first published item
+                    // waits (bounded) for a helper to start: without them participant 0 sweeps whole
+                    // items before a parked helper wakes, and the anti-vacuity guard below measured no
+                    // helper block at all — first with trivially short blocks, then again under the
+                    // crate's parallel test run (other binaries' spinning helpers on every core).
+                    let mut stages = Stages::new(&frame).with_work(Duration::from_micros(2));
+                    let first_published = order.iter().find(|&&e| blocks[usize::from(e)] >= 2);
+                    if let Some(&e) = first_published
+                        && p >= 2
+                    {
+                        stages = stages.with_await_helper(u32::from(e));
+                    }
+                    let stages = Arc::new(stages);
                     let what = format!("{label} P{p} {route:?} seed {seed} shape {shape} blocks {blocks:?} order {order:?}");
                     let ran = run_region::<P, ARMED>(&pool, route, frame, stages, p);
                     check_report(&ran, p, &what);
