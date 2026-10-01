@@ -295,8 +295,8 @@ sections "After window 9a (2026-09-30)" and "After the window 9a resume (2026-10
 measured is this lane's `50e31f1a`.
 
 - **M7 is met: C4 merges.** All 10 no-slower comparisons hold (C4-JD against C4-JDap, and against
-  C4-JDpar, at W 1/2/4/8/16). C4-JD is 1.58–1.69 ms faster than the parent's default at every W,
-  93–100 % of the −1.70 ms of section 6, and no W is slower. By the letter "C4-JD claimed faster" is
+  C4-JDpar, at W 1/2/4/8/16). In medians C4-JD is 1.58–1.68 ms below C4-JDap and 1.61–1.69 ms below
+  C4-JDpar at every W, 93–100 % of the −1.70 ms of section 6, and no W is slower. By the letter "C4-JD claimed faster" is
   NOT CLAIMED, because C4-AB's pass 0 was contaminated; the merge rule asks only that it is not
   claimed slower. The controls (C4-JA and C4-JT, parent against tip) are not claimed different.
 - **G5 is recorded, and every bar passes** (B1–B3 STRONG; B4 and B5 hold). B1: the four `phys_bp_*`
@@ -318,8 +318,8 @@ measured is this lane's `50e31f1a`.
   1 µs per step.
 - **F3 (`LeafListKd`) is FREEZE-AND-REMOVE** (ruling 8 of 2026-10-01): C4 never selects kd, below
   the threshold all_pairs beats kd by 25–47 %, and at 128 kd is faster than neither arm. The lane
-  `c4-final` (branch `u/phys-c4-final`) freezes it under the annotated tag `phys/f3-kd-frozen` on
-  the kd commit and removes it. The return condition is a kd build form that claims t_qb lower at J
+  `c4-final` (branch `u/phys-c4-final`) freezes it under the annotated tag `phys/f3-kd-frozen` (on
+  trunk `82b3867f`, which holds kd whole) and removes it. The return condition is a kd build form that claims t_qb lower at J
   W1 and is not slower at W8.
 - **Not claimed, with the reasons in the window's analysis:** the Jolt standing (C4-AB's pass-0
   cells are short), the Rapier standing (cross-block, and the same short cells), and the cgu 1 twin
