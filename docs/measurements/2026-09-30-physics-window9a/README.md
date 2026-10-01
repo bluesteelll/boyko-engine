@@ -236,8 +236,11 @@ harness's `gate/prev_rev2/` (its README, `Cargo.toml`, `build.sh` and `src/main.
 - `README.md`, `Cargo.toml`, `Cargo.lock.txt`, `build.sh`, `.cargo/config.toml`, `src/main.rs.txt`, and `gate/*.md` (the harness's
   research, build, audit and review reports of its first revision, and `window9a_rows.md`, the rows and void rules the window used);
 - `gate/bin/SHA256SUMS` and `gate/bin/SOURCES.sha256`, the revision 2 receipts. `sha256sum -c gate/bin/SOURCES.sha256` run
-  from `rapier-harness/` passes for the five source files once the two renamed files are copied back:
-  `cp Cargo.lock.txt Cargo.lock` and `cp src/main.rs.txt src/main.rs`. Both carry the `.txt` suffix in this record, and the bytes
+  from `rapier-harness/` passes for the five source files on an LF checkout once the two renamed files are copied back:
+  `cp Cargo.lock.txt Cargo.lock` and `cp src/main.rs.txt src/main.rs`. (The pinned sums are of the LF bytes the repository
+  stores. A Windows checkout with `core.autocrlf=true` holds every text file as CRLF and the check then fails for all five:
+  strip the carriage returns first, from the five sources and from `gate/bin/SOURCES.sha256`, with `tr -d '\r'`, and make
+  the two copies from the stripped form.) Both renamed files carry the `.txt` suffix in this record, and the bytes
   are the ones the exes were built with. `Cargo.lock.txt` because the repository ignores `*.lock`. `src/main.rs.txt` because
   `internal_docs_anchors` bounds-checks every `file.rs:N` citation written inside a `.rs` source under the tree, and the harness
   source holds four such citations of rapier3d's own files (lines 37, 51, 56 and 446: `solve.rs:98` twice, `lib.rs:19`,
