@@ -1,0 +1,6 @@
+[0..500) W8 wall gain 0.1705 ms, span gain 0.1894 ms, wall/span 0.900; gain minus pooled i-bar (abs): wall 0.1181, span 0.1853; gain / 0.060 bar: wall 2.84x, span 3.16x; wall gain vs window-8 prediction 0.19-0.22: +0.0195 below the low end
+   W8 P-c PARENT 0.2615 TIP 0.0706 (speedup 3.70x, gain 0.1909); PARENT fill share P-c/setup 0.861
+   W16 P-c PARENT 0.2689 TIP 0.0721 (speedup 3.73x, gain 0.1968); PARENT fill share P-c/setup 0.865
+[100..500) W8 wall gain 0.1691 ms, span gain 0.1865 ms, wall/span 0.907; gain minus pooled i-bar (abs): wall 0.1255, span 0.1822; gain / 0.060 bar: wall 2.82x, span 3.11x; wall gain vs window-8 prediction 0.19-0.22: +0.0209 below the low end
+   W8 P-c PARENT 0.2585 TIP 0.0701 (speedup 3.69x, gain 0.1884); PARENT fill share P-c/setup 0.864
+   W16 P-c PARENT 0.2661 TIP 0.0720 (speedup 3.69x, gain 0.1941); PARENT fill share P-c/setup 0.867

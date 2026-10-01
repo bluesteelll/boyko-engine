@@ -1,0 +1,22 @@
+{
+ "_comment": "TEMPLATE for the reserved blocks (PREP.md 'Adding a block'). Copy to rows8b.extra.json and edit. The driver merges it over rows8b.json: binaries by key, rows by id, blocks by name, ordered by priority. Every exe must also get a line in bin/SHA256SUMS.",
+ "binaries": {
+  "s7p": {"exe": "bin/runner_s7_parent_<sha>.exe", "commit": "<parent sha>", "kind": "runner", "s4": "on", "what": "S7-AB parent"},
+  "s7t": {"exe": "bin/runner_s7_tip_<sha>.exe", "commit": "<tip sha>", "kind": "runner", "s4": "on", "what": "S7-AB tip"},
+  "omega2": {"exe": "bin/omega_b_region_v2_<sha>.exe", "commit": "<sha>", "kind": "micro", "what": "omega_b v2 bench"}
+ },
+ "rows": [
+  {"id": "S7-JT", "blocks": ["S7-AB"], "kind": "runner", "binaries": ["s7p", "s7t"],
+   "args": ["--scene", "jolt", "--gap", "0.5", "--cfg", "default", "--broadphase", "tree", "--sleeping", "off"],
+   "workers": [8, 16], "steps": 500, "window": [0, 500], "metric_windows": [[0, 100], [100, 500]], "armed": false,
+   "pose_ref": "JT500", "broadphase": "Tree", "bp_kernel": null,
+   "tree_diag_expect": {"static_rebuilds": 1, "members": 1, "evictions": 0}},
+  {"id": "omega2-worker", "blocks": ["omega-v2"], "kind": "micro", "binaries": ["omega2"],
+   "args": ["--bench", "--mode", "omega-b", "--route", "worker"], "workers": [0], "armed": false,
+   "expect_summaries": null, "expect_fields": {"bench": "omega_b", "route": "worker"}}
+ ],
+ "blocks": [
+  {"name": "S7-AB", "item": "S7", "priority": 1.5, "warmup": ["S7-JT", "s7t", 8]},
+  {"name": "omega-v2", "item": "S1", "priority": 2.5, "warmup": ["omega2-worker", "omega2", 0]}
+ ]
+}

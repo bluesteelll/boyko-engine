@@ -1,0 +1,52 @@
+F3 runner records: 302 timed: 299 warm-ups: 3 originals: 243 re-runs: 56
+missing span steps in [100,500) over all armed processes: 0
+phys_bp_queried values over [100,500) on armed processes: {1240.0: 30400}
+validity problems (incl. warm-ups): 0
+slots: 243 used: 227 used by re-run: 40 dropped: 16
+  dropped (0, 0, 'F3-TR-armed', 1) re-run clean_why: [('witness', 2.49)] orig clean_why: [('witness', 2.71)]
+  dropped (0, 1, 'F3-RT-kd', 16) re-run clean_why: [('after', 9.02)] orig clean_why: [('witness', 2.18)]
+  dropped (0, 1, 'F3-RT-kd', 2) re-run clean_why: [('witness', 2.24)] orig clean_why: [('witness', 2.12)]
+  dropped (0, 1, 'F3-RT-leaflist', 1) re-run clean_why: [('witness', 2.27)] orig clean_why: [('witness', 2.53)]
+  dropped (0, 2, 'F3-RT-kd', 4) re-run clean_why: [('witness', 2.08)] orig clean_why: [('witness', 2.01)]
+  dropped (0, 2, 'F3-RT-kd', 8) re-run clean_why: [('after', 16.83)] orig clean_why: [('witness', 2.21)]
+  dropped (0, 2, 'F3-RT-leaflist', 8) re-run clean_why: [('witness', 2.74)] orig clean_why: [('witness', 3.26)]
+  dropped (1, 0, 'F3-TD-armed-leaflist', 1) re-run clean_why: [('witness', 2.11)] orig clean_why: [('witness', 2.15)]
+  dropped (1, 1, 'F3-JT-kd', 16) re-run clean_why: [('witness', 5.17)] orig clean_why: [('witness', 2.15)]
+  dropped (1, 1, 'F3-JT-leaflist', 16) re-run clean_why: [('witness', 2.44)] orig clean_why: [('witness', 2.26)]
+  dropped (1, 1, 'F3-TA-armed-kd', 1) re-run clean_why: [('witness', 2.21)] orig clean_why: [('witness', 2.15)]
+  dropped (1, 2, 'F3-JT-leaflist', 8) re-run clean_why: [('witness', 5.53)] orig clean_why: [('witness', 2.16)]
+  dropped (2, 0, 'F3-RT-kd', 16) re-run clean_why: [('after', 6.67), ('witness', 2.49)] orig clean_why: [('witness', 2.21)]
+  dropped (2, 1, 'F3-JT-kd', 4) re-run clean_why: [('witness', 3.26)] orig clean_why: [('witness', 2.07)]
+  dropped (2, 1, 'F3-JT-leaflist', 4) re-run clean_why: [('witness', 2.02)] orig clean_why: [('witness', 2.38)]
+  dropped (2, 2, 'F3-JT-leaflist', 2) re-run clean_why: [('witness', 2.5)] orig clean_why: [('witness', 2.17)]
+drop reasons (re-run): {'witness': 13, 'after': 2, 'after,witness': 1}
+unclean timed processes: 72
+  top other process among unclean: {'claude.exe': 70, 'ms-teamsupdate.exe': 1, 'steamwebhelper.exe': 1}
+  cell F3-JT-kd                 W1   n=9 per pass [3, 3, 3]
+  cell F3-JT-kd                 W16  n=8 per pass [3, 2, 3]
+  cell F3-JT-kd                 W2   n=9 per pass [3, 3, 3]
+  cell F3-JT-kd                 W4   n=8 per pass [3, 3, 2]
+  cell F3-JT-kd                 W8   n=9 per pass [3, 3, 3]
+  cell F3-JT-leaflist           W1   n=9 per pass [3, 3, 3]
+  cell F3-JT-leaflist           W16  n=8 per pass [3, 2, 3]
+  cell F3-JT-leaflist           W2   n=8 per pass [3, 3, 2]
+  cell F3-JT-leaflist           W4   n=8 per pass [3, 3, 2]
+  cell F3-JT-leaflist           W8   n=8 per pass [3, 2, 3]
+  cell F3-RT-kd                 W1   n=9 per pass [3, 3, 3]
+  cell F3-RT-kd                 W16  n=7 per pass [2, 3, 2]
+  cell F3-RT-kd                 W2   n=8 per pass [2, 3, 3]
+  cell F3-RT-kd                 W4   n=8 per pass [2, 3, 3]
+  cell F3-RT-kd                 W8   n=8 per pass [2, 3, 3]
+  cell F3-RT-leaflist           W1   n=8 per pass [2, 3, 3]
+  cell F3-RT-leaflist           W16  n=9 per pass [3, 3, 3]
+  cell F3-RT-leaflist           W2   n=9 per pass [3, 3, 3]
+  cell F3-RT-leaflist           W4   n=9 per pass [3, 3, 3]
+  cell F3-RT-leaflist           W8   n=8 per pass [2, 3, 3]
+  cell F3-TA-armed-kd           W1   n=8 per pass [3, 2, 3]
+  cell F3-TA-armed-leaflist     W1   n=9 per pass [3, 3, 3]
+  cell F3-TD-armed-kd           W1   n=9 per pass [3, 3, 3]
+  cell F3-TD-armed-kd           W8   n=9 per pass [3, 3, 3]
+  cell F3-TD-armed-leaflist     W1   n=8 per pass [3, 2, 3]
+  cell F3-TD-armed-leaflist     W8   n=9 per pass [3, 3, 3]
+  cell F3-TR-armed              W1   n=8 per pass [2, 3, 3]
+cells: 27 cells with n<9: 15 pass-cells with K<3: 16 K distribution: Counter({3: 65, 2: 16})

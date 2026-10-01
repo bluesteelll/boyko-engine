@@ -1,0 +1,6 @@
+PARK verdicts that change when region_ns_mean replaces region_ns_median: 1
+   ((0, 'worker', 4, 1), ('CLAIMED', 'CLAIMED', -94.44444444444446), ('NOT CLAIMED', 'NOT CLAIMED', -69.6583333333333))
+used-process region/scope medians: 952 not a multiple of 100 ns: 0
+pass 0 round-0 order: ['omega-wgap-external', 'omega-wgap-worker', 'omega2-gap-external', 'omega2-gap-worker', 'omega2-external', 'omega2-worker']
+pass 1 round-0 order: ['omega2-worker', 'omega2-external', 'omega2-gap-worker', 'omega2-gap-external', 'omega-wgap-worker', 'omega-wgap-external']
+pass 2 round-0 order: ['omega-wgap-external', 'omega-wgap-worker', 'omega2-gap-external', 'omega2-gap-worker', 'omega2-external', 'omega2-worker']

@@ -1,0 +1,15 @@
+{
+ "JSonT": {
+  "static_rebuilds": 1,
+  "sleeper_rebuilds": 1,
+  "evictions": 0,
+  "members": 1241
+ },
+ "JSonT-a": {
+  "static_rebuilds": 1,
+  "sleeper_rebuilds": 1,
+  "evictions": 0,
+  "members": 1241
+ },
+ "_source": "gate fixture JSonT500 (tip W1); re-checked at W1 and W8 by gate8b.py rows"
+}

@@ -1,0 +1,4 @@
+2026-09-29T07:40:32.058+03:00 === gate8b micro start
+2026-09-29T07:40:32.702+03:00 micro omega-wgap-worker        exit 0 summaries 8 calibration lines 0 park rows 0 (no park taken at gap 0: 0) PASS
+2026-09-29T07:40:33.345+03:00 micro omega-wgap-external      exit 0 summaries 8 calibration lines 0 park rows 0 (no park taken at gap 0: 0) PASS
+2026-09-29T07:40:33.347+03:00 === gate8b micro end

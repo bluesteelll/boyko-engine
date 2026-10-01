@@ -1,0 +1,35 @@
+# POST HOC 1: the TIP binary resolution from block S7-AB (s7p = runner_tip_16191fda.exe), ruling 1, [0,500)
+W8 S7-ladder8-F0.5 (inj 0.0300 ms): rise +0.0337 ms, pooled n/n/Y; passes p0 +0.0430 n/Y/Y p1 +0.0200 n/n/n p2 +0.0194 n/n/n -> NOT CLAIMED
+W8 S7-ladder8-F1 (inj 0.0600 ms): rise +0.0660 ms, pooled n/Y/Y; passes p0 +0.0669 Y/Y/Y p1 +0.0723 Y/Y/Y p2 +0.0469 n/Y/Y -> CLAIMED
+W8 S7-ladder8-F1.5 (inj 0.0900 ms): rise +0.0911 ms, pooled n/Y/Y; passes p0 +0.0920 n/Y/Y p1 +0.0980 Y/Y/Y p2 +0.0756 n/Y/Y -> CLAIMED
+W8 S7-ladder8-F2 (inj 0.1200 ms): rise +0.1257 ms, pooled Y/Y/Y; passes p0 +0.1287 Y/Y/Y p1 +0.1441 Y/Y/Y p2 +0.1061 Y/Y/Y -> CLAIMED STRONG
+  R_8 (smallest rung seen with every larger rung seen): 0.0600 ms
+  reference S7-JT#s7p@W8 1.8152 [1.7989-1.8491] K=9 (IQR 0.0158, SE 0.0064; r 2.77 / i 0.87 / s 0.36 %)
+W16 S7-ladder16-F0.5 (inj 0.0525 ms): rise +0.0545 ms, pooled n/Y/Y; passes p0 +0.0502 n/Y/Y p1 +0.0519 Y/Y/Y p2 +0.0584 Y/Y/Y -> CLAIMED
+W16 S7-ladder16-F1 (inj 0.1050 ms): rise +0.1139 ms, pooled Y/Y/Y; passes p0 +0.1125 Y/Y/Y p1 +0.1059 Y/Y/Y p2 +0.1399 Y/Y/Y -> CLAIMED STRONG
+W16 S7-ladder16-F1.5 (inj 0.1575 ms): rise +0.1599 ms, pooled Y/Y/Y; passes p0 +0.1501 Y/Y/Y p1 +0.1597 Y/Y/Y p2 +0.1645 Y/Y/Y -> CLAIMED STRONG
+W16 S7-ladder16-F2 (inj 0.2100 ms): rise +0.2146 ms, pooled Y/Y/Y; passes p0 +0.2054 Y/Y/Y p1 +0.2153 Y/Y/Y p2 +0.2211 Y/Y/Y -> CLAIMED STRONG
+  R_16 (smallest rung seen with every larger rung seen): 0.0525 ms
+  reference S7-JT#s7p@W16 2.0502 [2.0393-2.0659] K=9 (IQR 0.0108, SE 0.0034; r 1.30 / i 0.53 / s 0.17 %)
+
+# POST HOC 2: window 8 q3 per-wave numbers were TSC ticks. Recomputed on win8/raw, J-T-a block W8S-A, [100,500)
+W8 (K=6): ramp/wave raw 2.031 "us" -> 0.617 us; tail/wave raw 3.322 -> 1.009 us; ramp+tail 5.353 -> 1.625 us; np ramp 0.837 us, np tail 9.257 us; ticks_per_ns 3.2934-3.2936
+W16 (K=6): ramp/wave raw 2.155 "us" -> 0.654 us; tail/wave raw 4.978 -> 1.511 us; ramp+tail 7.133 -> 2.166 us; np ramp 0.907 us, np tail 10.680 us; ticks_per_ns 3.2935-3.2937
+
+# POST HOC 3: S4-AB armed, TIP vs PARENT per-wave fields [100,500) (TIP sums include its one setup wave per step)
+W8 parent (K=9): waves/step 96.00, first ramp 4124.8 ns, pass ramp 2972.8 ns, ramp/wave 642.9, join/wave 283.0, imbalance/wave 723.3, first tail 972.3, ramp sum 61.72 us/step, tail sum 96.64 us/step
+W8 tip (K=9): waves/step 97.00, first ramp 4069.4 ns, pass ramp 2890.6 ns, ramp/wave 658.1, join/wave 281.5, imbalance/wave 758.0, first tail 1008.5, ramp sum 63.83 us/step, tail sum 100.94 us/step
+W16 parent (K=9): waves/step 96.00, first ramp 4204.9 ns, pass ramp 2865.8 ns, ramp/wave 663.5, join/wave 457.8, imbalance/wave 1130.9, first tail 1676.5, ramp sum 63.69 us/step, tail sum 153.37 us/step
+W16 tip (K=9): waves/step 97.00, first ramp 4284.7 ns, pass ramp 2775.1 ns, ramp/wave 685.5, join/wave 468.7, imbalance/wave 1166.6, first tail 1507.3, ramp sum 66.49 us/step, tail sum 158.28 us/step
+
+# POST HOC 4: SPLIT-J-T-a (block SPLIT) vs S4-JT-a#parent (block S4-AB), same exe/row/W: wall [0,500) medians
+W8 armed S4-AB 2.0806 vs SPLIT 2.0852; disarmed S4-AB 1.9859 vs SPLIT 1.9909
+W16 armed S4-AB 2.3339 vs SPLIT 2.3288; disarmed S4-AB 2.2203 vs SPLIT 2.2239
+W1 disarmed S4-AB 4.4217 vs SPLIT 4.3986
+
+# POST HOC 2b: window 8 "W16 growth mostly in the tail: +1.66 us/wave x 96 ~ 0.16 ms" in ns (win8/raw, W8S-A J-T-a, [100,500))
+tail/wave W8 1.009 us, W16 1.511 us; growth 0.503 us/wave x 96 waves = 0.0483 ms per step
+
+# POST HOC 2c: window 8 omega(W) in ns from win8/raw (spans are ns in the CSV), W8S-A J-T-a, [100,500)
+W8: wide 610.05 us, wide(1) 2343.22 us, waves 96.00, omega 3.304 us; ramp+tail (ns-corrected) / omega = 49.2 %
+W16: wide 776.04 us, wide(1) 2343.22 us, waves 96.00, omega 6.558 us; ramp+tail (ns-corrected) / omega = 33.0 %

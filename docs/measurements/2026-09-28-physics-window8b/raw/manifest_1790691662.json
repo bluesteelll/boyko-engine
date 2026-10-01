@@ -1,0 +1,582 @@
+{
+ "generated": "2026-09-29T17:21:02.493+03:00",
+ "rows_json": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8b\\rows8b.json",
+ "rows_extra": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8b\\rows8b.extra.json",
+ "binaries": {
+  "tip": {
+   "exe": "bin/runner_tip_16191fda.exe",
+   "commit": "16191fda6de68ab377391c3e781d4709b7a3ecd7",
+   "kind": "runner",
+   "s4": "on",
+   "what": "TIP: jolt_parity_pyramid --profile parity from an export of 16191fda, unmodified",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8b\\bin\\runner_tip_16191fda.exe",
+   "sha256": "aa34fadff73923bcc69daa3e517bbbf1de693f01659ab86900460f84e0a371a1"
+  },
+  "parent": {
+   "exe": "bin/runner_parent_16191fda_s4off.exe",
+   "commit": "16191fda6de68ab377391c3e781d4709b7a3ecd7 + bin/parent.patch",
+   "kind": "runner",
+   "s4": "off",
+   "what": "PARENT: the same export with ONE edit, SETUP_MAX_TASKS 32 -> 1 (S4 needs >= 2 ranges, so it never dispatches); bin/parent.patch",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8b\\bin\\runner_parent_16191fda_s4off.exe",
+   "sha256": "9c6690ac116cba029f8ec810e9d947bf2b1a366031f02a38bcb94d87671fc8a4"
+  },
+  "g4ref": {
+   "exe": "bin/broadphase_g4ref_16191fda.exe",
+   "commit": "16191fda6de68ab377391c3e781d4709b7a3ecd7 + bin/g4ref.patch",
+   "kind": "criterion",
+   "what": "the G4 instrument: benches/broadphase.rs with G4_SIZES replaced (tree-f3/window_cmds.md \u00a71), cargo bench --no-run --locked (bench profile)",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8b\\bin\\broadphase_g4ref_16191fda.exe",
+   "sha256": "b887850f38633d62419344c41080d1bada92bc931c3307989b6f6fb314a33b6d"
+  },
+  "dmA": {
+   "exe": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/238150a2-5c92-4147-8309-b6428586e8a7/scratchpad/win8/bin/dm1_A.exe",
+   "commit": "cad5439b61ba6f07739523901aab90edf7079433",
+   "kind": "dm1",
+   "what": "window 8's DM1 A (host-visible table), reused by sha256 (win8/bin/SHA256SUMS)",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8\\bin\\dm1_A.exe",
+   "sha256": "47cb2c9b6f419948cc773d7da392a1d7dc4ebe218875e66180b07fddf3a52c75"
+  },
+  "dmB": {
+   "exe": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/238150a2-5c92-4147-8309-b6428586e8a7/scratchpad/win8/bin/dm1_B.exe",
+   "commit": "97ee830f754e008032992fcd8a928cd29c04936f",
+   "kind": "dm1",
+   "what": "window 8's DM1 B = C6 (device-local table), reused by sha256",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8\\bin\\dm1_B.exe",
+   "sha256": "79bba864480255c2e90a1067d91e8bea7ed891e7916f760791854d01ef2b40ad"
+  },
+  "s7p": {
+   "exe": "bin/runner_tip_16191fda.exe",
+   "commit": "16191fda6de68ab377391c3e781d4709b7a3ecd7",
+   "kind": "runner",
+   "s4": "on",
+   "s7": "uncapped",
+   "sha256_pin": "aa34fadff73923bcc69daa3e517bbbf1de693f01659ab86900460f84e0a371a1",
+   "what": "S7-AB P: the SAME FILE as key tip (trunk 16191fda = 54a7714f's crates + S4, no S7), reused by orchestrator decision",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8b\\bin\\runner_tip_16191fda.exe",
+   "sha256": "aa34fadff73923bcc69daa3e517bbbf1de693f01659ab86900460f84e0a371a1"
+  },
+  "s7t": {
+   "exe": "bin/runner_s7_tip_a3adc827.exe",
+   "commit": "a3adc827e2b528ca3519babc50de36f7f20748b0",
+   "kind": "runner",
+   "s4": "on",
+   "s7": "capped",
+   "sha256_pin": "c4232eaed89e8afc7edd2bf51fa7504acde772d1ff43a1c0ad9c91f42323ace8",
+   "what": "S7-AB T: u/phys-s7 tip a3adc827 (S4 + S7 partial), --profile parity from an unmodified export",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8b\\bin\\runner_s7_tip_a3adc827.exe",
+   "sha256": "c4232eaed89e8afc7edd2bf51fa7504acde772d1ff43a1c0ad9c91f42323ace8"
+  },
+  "omega2": {
+   "exe": "bin/omega_b_region_v2_a3adc827.exe",
+   "commit": "a3adc827e2b528ca3519babc50de36f7f20748b0",
+   "kind": "micro",
+   "sha256_pin": "48e9486ac04a36c0f16426c0b6f3eaa50e782f4ea6951d099df392fb2ba954f4",
+   "what": "omega_b_region at a3adc827 (omega_b v2 = --mode omega-b2; v1 modes unchanged), --profile parity",
+   "path": "C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8b\\bin\\omega_b_region_v2_a3adc827.exe",
+   "sha256": "48e9486ac04a36c0f16426c0b6f3eaa50e782f4ea6951d099df392fb2ba954f4"
+  }
+ },
+ "fixtures": {
+  "JT500": {
+   "hash": "0x30c5438bc6ad9ffa",
+   "known": "0x30c5438bc6ad9ffa",
+   "recorded_by": "tip@W1 500 steps",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off"
+   ],
+   "sha256": "e268d7a5e9ffc4c6b25d403601e119d20b490cbaed5cec4a910e3159f28a5b89",
+   "first_frozen_step": null,
+   "tree_diag": {
+    "static_rebuilds": 1,
+    "sleeper_rebuilds": 0,
+    "evictions": 0,
+    "translations": 0,
+    "patches": 0,
+    "hint_candidates": 0,
+    "wide_rows": 0,
+    "excluded_rows": 0,
+    "locator_resets": 0,
+    "members": 1,
+    "leaf_list_leaves": 77500,
+    "fallback_leaves": 2,
+    "row_walk_leaves": 0,
+    "kd_order_builds": 0,
+    "bp_kernel": "LeafList"
+   },
+   "fail": []
+  },
+  "JToff500": {
+   "hash": "0x32d5e235342b4143",
+   "known": "0x32d5e235342b4143",
+   "recorded_by": "tip@W1 500 steps",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--contact-reuse",
+    "off"
+   ],
+   "sha256": "eff361e1bdf7261ddee5237cfbc4dbc3ad79d3a743a94fb2ebdee39c832e390f",
+   "first_frozen_step": null,
+   "tree_diag": {
+    "static_rebuilds": 1,
+    "sleeper_rebuilds": 0,
+    "evictions": 0,
+    "translations": 0,
+    "patches": 0,
+    "hint_candidates": 0,
+    "wide_rows": 0,
+    "excluded_rows": 0,
+    "locator_resets": 0,
+    "members": 1,
+    "leaf_list_leaves": 77500,
+    "fallback_leaves": 2,
+    "row_walk_leaves": 0,
+    "kd_order_builds": 0,
+    "bp_kernel": "LeafList"
+   },
+   "fail": []
+  },
+  "JTA500": {
+   "hash": "0x30c5438bc6ad9ffa",
+   "known": "0x30c5438bc6ad9ffa",
+   "recorded_by": "tip@W1 500 steps",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree",
+    "--bp-kernel",
+    "leaflist",
+    "--arm-profiler"
+   ],
+   "sha256": "e268d7a5e9ffc4c6b25d403601e119d20b490cbaed5cec4a910e3159f28a5b89",
+   "first_frozen_step": null,
+   "tree_diag": {
+    "static_rebuilds": 1,
+    "sleeper_rebuilds": 0,
+    "evictions": 0,
+    "translations": 0,
+    "patches": 0,
+    "hint_candidates": 0,
+    "wide_rows": 0,
+    "excluded_rows": 0,
+    "locator_resets": 0,
+    "members": 1,
+    "leaf_list_leaves": 77500,
+    "fallback_leaves": 2,
+    "row_walk_leaves": 0,
+    "kd_order_builds": 0,
+    "bp_kernel": "LeafList"
+   },
+   "fail": []
+  },
+  "RT500": {
+   "hash": "0x6cbe24bf8fafda26",
+   "known": "0x6cbe24bf8fafda26",
+   "recorded_by": "tip@W1 500 steps",
+   "args": [
+    "--scene",
+    "rest",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--bp-kernel",
+    "leaflist"
+   ],
+   "sha256": "11b83951c3eb8680023b3da576b5898f65f05f83bec3e544f108c4609cddf187",
+   "first_frozen_step": null,
+   "tree_diag": {
+    "static_rebuilds": 1,
+    "sleeper_rebuilds": 0,
+    "evictions": 0,
+    "translations": 0,
+    "patches": 0,
+    "hint_candidates": 0,
+    "wide_rows": 0,
+    "excluded_rows": 0,
+    "locator_resets": 0,
+    "members": 1,
+    "leaf_list_leaves": 77500,
+    "fallback_leaves": 2,
+    "row_walk_leaves": 0,
+    "kd_order_builds": 0,
+    "bp_kernel": "LeafList"
+   },
+   "fail": []
+  },
+  "JSonT500": {
+   "hash": "0x3db47fae414b655c",
+   "known": null,
+   "recorded_by": "tip@W1 500 steps",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "on"
+   ],
+   "sha256": "205bc5448ea03caa9a8757265fdd74f87f6e93b9aa1346e90f9ec447aa1f1abf",
+   "first_frozen_step": 274,
+   "tree_diag": {
+    "static_rebuilds": 1,
+    "sleeper_rebuilds": 1,
+    "evictions": 0,
+    "translations": 0,
+    "patches": 0,
+    "hint_candidates": 2480,
+    "wide_rows": 0,
+    "excluded_rows": 0,
+    "locator_resets": 0,
+    "members": 1241,
+    "leaf_list_leaves": 42935,
+    "fallback_leaves": 2,
+    "row_walk_leaves": 0,
+    "kd_order_builds": 0,
+    "bp_kernel": "LeafList"
+   },
+   "fail": []
+  },
+  "JSoffT500": {
+   "hash": "0x30c5438bc6ad9ffa",
+   "known": null,
+   "recorded_by": "tip@W1 500 steps",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off"
+   ],
+   "sha256": "e268d7a5e9ffc4c6b25d403601e119d20b490cbaed5cec4a910e3159f28a5b89",
+   "first_frozen_step": null,
+   "tree_diag": {
+    "static_rebuilds": 1,
+    "sleeper_rebuilds": 0,
+    "evictions": 0,
+    "translations": 0,
+    "patches": 0,
+    "hint_candidates": 0,
+    "wide_rows": 0,
+    "excluded_rows": 0,
+    "locator_resets": 0,
+    "members": 1,
+    "leaf_list_leaves": 77500,
+    "fallback_leaves": 2,
+    "row_walk_leaves": 0,
+    "kd_order_builds": 0,
+    "bp_kernel": "LeafList"
+   },
+   "fail": []
+  },
+  "JA500": {
+   "hash": "0x30c5438bc6ad9ffa",
+   "known": "0x30c5438bc6ad9ffa",
+   "recorded_by": "tip@W1 500 steps (s7p = tip exe)",
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a"
+   ],
+   "sha256": "e268d7a5e9ffc4c6b25d403601e119d20b490cbaed5cec4a910e3159f28a5b89",
+   "first_frozen_step": null,
+   "tree_diag": {
+    "static_rebuilds": 0,
+    "sleeper_rebuilds": 0,
+    "evictions": 0,
+    "translations": 0,
+    "patches": 0,
+    "hint_candidates": 0,
+    "wide_rows": 0,
+    "excluded_rows": 0,
+    "locator_resets": 0,
+    "members": 0,
+    "leaf_list_leaves": 0,
+    "fallback_leaves": 0,
+    "row_walk_leaves": 0,
+    "kd_order_builds": 0,
+    "bp_kernel": "LeafList"
+   },
+   "fail": [],
+   "window8_fixture": "docs/measurements/2026-09-27-physics-window8/gate/fixtures/JA500.pose (export of a3adc827): byte-equal",
+   "added": "2026-09-29 (tools/s7pre8b.py fixture)"
+  }
+ },
+ "protocol": {
+  "ruling": "RULINGS-2026-09-27-W8.md ruling 1 (pre-registered before any 8b data)",
+  "k_per_cell": 9,
+  "passes": 3,
+  "rounds_per_pass": 3,
+  "order": "pass 0 REVERSED, pass 1 forward, pass 2 REVERSED (ruling 1: \"p0 reversed, p1, p2 reversed\"). The forward list: W ascending, inside a W group row by row (this file's order), each row's binaries in order (S4-AB: parent then tip, so the two exes are adjacent in every round). One untimed warm-up per pass.",
+  "receipt_s_between_processes": 5.0,
+  "receipt_s_before_pass": 10.0,
+  "busy_pct_limit": 5.0,
+  "others_busy_pct_limit": 2.0,
+  "rerun_once_at_end_of_pass": "receipt before/after > 5 %, OR the during-process witness others_busy_pct > 2 %, OR invalid; a slot whose re-run is also hot is dropped by the reduction",
+  "void_pass_on_build_process": true,
+  "placement": "P-none",
+  "placement_receipt": "per process, RECORDED, NEVER used to drop a process: the per-logical-CPU busy share over the process lifetime (window 8 analysis's reading: the top CPU and its share) plus the main thread's own CPU time (GetThreadTimes on the thread the process was created with); main_share_top_est = top CPU busy seconds / main-thread CPU seconds, capped at 1. Exact at W1 on an idle machine; an upper bound at W >= 2 (workers share the CPUs).",
+  "claim_rule": "the analysis: IQR (i) AND SE (s) in every clean block and pooled; min-max (r) reported beside, \"STRONG\" when it also passes",
+  "idle_rule": "tools/wait_idle8b.ps1 (window 8 wait_idle8.ps1 + the 8b exe names): 0 build procs AND 0 procs under D:/wt/_targets or D:/wt/mq-* on 3 consecutive 60-s polls, 10-s cpu < 5 %; up to 30 polls per wait; a timeout STOPS the window (exit 3)",
+  "hard_stop": "--cutoff HH:MM (no process starts whose estimated end passes it); the STOP flag file win8b/STOP; a block that does not fit before the cutoff is skipped WHOLE",
+  "windowed_hang_s": 300,
+  "own_k": "F3-G4 keeps the Q3 recipe's own K = 3 (one pass x three rounds, no separate warm-up: criterion warms every benchmark); DM1 keeps ruling 9's ABBA x 2 per row (one pass, 8 processes per row)"
+ },
+ "blocks": [
+  {
+   "name": "S4-AB",
+   "item": "S4",
+   "priority": 1,
+   "warmup": [
+    "S4-JT",
+    "tip",
+    8
+   ]
+  },
+  {
+   "name": "S7-AB",
+   "item": "S7",
+   "priority": 1.5,
+   "warmup": [
+    "S7-JT",
+    "s7t",
+    8
+   ],
+   "note": "cut.md \u00a75 item 3; K 9 (ruling 1); pre-flight gate/s7/ (tools/s7pre8b.py)"
+  },
+  {
+   "name": "SPLIT",
+   "item": "W8S",
+   "priority": 2,
+   "warmup": [
+    "SPLIT-J-T",
+    "parent",
+    8
+   ]
+  },
+  {
+   "name": "omega-v2",
+   "item": "S1",
+   "priority": 2.5,
+   "warmup": [
+    "omega2-worker",
+    "omega2",
+    0
+   ],
+   "note": "cut.md 'Window 8b: the S7 commands as amended', K 9 over three passes; void rules tools/micro8b.py; + omega(W, gap) with the N4 receipt (omega-wgap-worker / -external, v1 omega mode, cut.md:698/:709)"
+  },
+  {
+   "name": "F3",
+   "item": "F3",
+   "priority": 3,
+   "warmup": [
+    "F3-JT-leaflist",
+    "tip",
+    8
+   ]
+  },
+  {
+   "name": "F3-G4",
+   "item": "F3",
+   "priority": 4,
+   "passes": 1,
+   "rounds": 3,
+   "note": "the Q3 recipe: K 3, one pass x three rounds, no separate warm-up (criterion warms each benchmark)"
+  },
+  {
+   "name": "J-Son-T",
+   "item": "L10",
+   "priority": 5,
+   "warmup": [
+    "JSonT",
+    "tip",
+    8
+   ]
+  },
+  {
+   "name": "DM1",
+   "item": "DM1",
+   "priority": 6,
+   "warmup": [
+    "dm-vb-1920x1080-idle",
+    "dmA",
+    0
+   ],
+   "passes": 1,
+   "rounds": 1,
+   "order": [
+    [
+     "dm-vb-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmA",
+     0
+    ]
+   ]
+  },
+  {
+   "name": "omega-v1-cont",
+   "item": "S1",
+   "priority": 7.5,
+   "passes": 1,
+   "rounds": 3,
+   "warmup": [
+    "omega1-s36-worker",
+    "omega2",
+    0
+   ],
+   "note": "cut.md \u00a75 item 4's optional continuity with window 8 (its omega-b rows), K 3 = one pass x three rounds"
+  }
+ ],
+ "cutoff": "2026-09-29T21:36:00",
+ "test": false,
+ "resume": false
+}

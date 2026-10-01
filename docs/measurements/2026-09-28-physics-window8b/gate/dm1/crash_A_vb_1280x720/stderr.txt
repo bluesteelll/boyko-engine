@@ -1,0 +1,1 @@
+DM1 timing: path=VisibilityBuffer res=1280x720 edit_rows=0 grow_at=None frames=31

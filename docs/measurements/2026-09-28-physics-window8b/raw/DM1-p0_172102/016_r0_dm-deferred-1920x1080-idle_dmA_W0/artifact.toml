@@ -1,0 +1,47 @@
+schema_version = 10
+session_lo = 5701125580186119349
+session_hi = 7290425865704734153
+run_token = ""
+workload_tag = "deferred_mesh#f315f884"
+content_tag = ""
+instrument = "live"
+precision_decimals = 1
+regimes = "none"
+modes = "off"
+regime_n_distinct = 1
+present_mode = "fifo"
+subsystems_tag = "neither"
+alloc_shim = false
+alloc_allocs = 0
+alloc_deallocs = 0
+alloc_bytes = 0
+cpu_gpu_offset = "-1790557698335305216"
+cpu_gpu_bracket_ns = 11
+cpu_gpu_driver_ns = 1
+cpu_gpu_probes = 21
+cpu_gpu_rejected = 11
+cpu_gpu_epoch = 0
+cpu_gpu_drift_ns = 161792
+cpu_gpu_span_ns = 1721516074
+census_measured = 220
+census_not_bracketed = 0
+census_lost = 0
+census_torn = 0
+
+[order]
+frames_checked = 0
+frames_skipped = 0
+violations = 0
+worst_ns = 0.0
+derived_inconclusive = []
+
+[[zone]]
+id = 17
+label = "measured"
+n = 220
+median_ns = 593920.0
+mean_ns = 595148.8
+p95_ns = 606208.0
+stddev_ns = 6108.7
+begin_off_ns = 0.0
+end_off_ns = 593920.0

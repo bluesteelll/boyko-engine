@@ -1,0 +1,6 @@
+# 2026-09-29 07:11:42 host core counts
+engine's own read (used for the bound): s7-omega2/tr1/t_s7_debug.txt:14 ->
+test the_engine_reads_a_physical_core_count ... S7 host receipt: physical 8, logical 16, source Os
+independent OS cross-check (not the engine's read): Win32_Processor via CIM ->
+NumberOfCores=8 NumberOfLogicalProcessors=16 Name=AMD Ryzen 9 5900HS with Radeon Graphics        
+runner SUMMARY host object (T, gate/s7/T-JT-W16-armed): {'logical_cores': 16}

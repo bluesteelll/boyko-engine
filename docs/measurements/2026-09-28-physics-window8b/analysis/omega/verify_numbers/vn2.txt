@@ -1,0 +1,43 @@
+## cells (pooled) and receipts
+  worker   W8  gap  0: 7100 [IQR 600, SE 155, 6400-7400] K=9 | helped 1992-2000 | first_helper med 400 [300-400] | mean-cell 7075
+  worker   W8  gap  5: 2800 [IQR 300, SE 300, 2600-4900] K=9 | helped 1998-2000 | first_helper med 900 [600-900] | mean-cell 3162
+  worker   W8  gap 20: 9300 [IQR 200, SE 218, 8800-10700] K=9 | helped 1998-2000 | first_helper med 3400 [3400-3500] | mean-cell 9488
+  worker   W8  gap 80: 9100 [IQR 400, SE 215, 8800-10500] K=9 | helped 2000-2000 | first_helper med 3500 [3500-3600] | mean-cell 9481
+  worker   W16 gap  0: 10500 [IQR 400, SE 115, 9900-10800] K=9 | helped 2000-2000 | first_helper med 400 [400-400] | mean-cell 10296
+  worker   W16 gap  5: 11100 [IQR 300, SE 152, 10200-11400] K=9 | helped 1992-2000 | first_helper med 400 [400-400] | mean-cell 11080
+  worker   W16 gap 20: 20600 [IQR 200, SE 310, 20200-22700] K=9 | helped 2000-2000 | first_helper med 3600 [3600-3900] | mean-cell 21681
+  worker   W16 gap 80: 20700 [IQR 300, SE 140, 20300-21300] K=9 | helped 2000-2000 | first_helper med 3700 [3700-3700] | mean-cell 22075
+  external W8  gap  0: 4700 [IQR 0, SE 72, 4500-5100] K=9 | helped 1997-2000 | first_helper med 300 [300-400] | mean-cell 4740
+  external W8  gap  5: 4300 [IQR 200, SE 122, 3700-4600] K=9 | helped 1999-2000 | first_helper med 900 [700-1000] | mean-cell 4336
+  external W8  gap 20: 11000 [IQR 200, SE 47, 10800-11100] K=9 | helped 1999-2000 | first_helper med 3500 [3400-3500] | mean-cell 11005
+  external W8  gap 80: 10900 [IQR 100, SE 42, 10800-11100] K=9 | helped 2000-2000 | first_helper med 3600 [3500-3600] | mean-cell 11006
+  external W16 gap  0: 5200 [IQR 100, SE 47, 5000-5300] K=9 | helped 1997-2000 | first_helper med 300 [300-300] | mean-cell 5293
+  external W16 gap  5: 6600 [IQR 200, SE 57, 6400-6800] K=9 | helped 2000-2000 | first_helper med 400 [400-400] | mean-cell 7586
+  external W16 gap 20: 21600 [IQR 300, SE 233, 20800-22700] K=9 | helped 2000-2000 | first_helper med 3600 [3600-3700] | mean-cell 23510
+  external W16 gap 80: 22200 [IQR 1000, SE 291, 21400-23500] K=9 | helped 2000-2000 | first_helper med 3700 [3700-3800] | mean-cell 24332
+
+## comparisons (B vs A), ruling 1
+  worker   W8  N4 omega(80)-omega(0) : 7100 -> 9100 = +2000 (+28.2 %) | p0 Y/Y/Y p1 n/Y/Y p2 Y/Y/Y pooled n/Y/Y | K [3, 3, 3, 9] | CLAIMED (no guard CLAIMED)
+  worker   W8  AW omega(80)-omega(5) : 2800 -> 9100 = +6300 (+225.0 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled Y/Y/Y | K [3, 3, 3, 9] | CLAIMED STRONG (no guard CLAIMED STRONG)
+  worker   W8  omega(80)-omega(20)   : 9300 -> 9100 = -200 (-2.2 %) | p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n | K [3, 3, 3, 9] | NOT CLAIMED (no guard NOT CLAIMED)
+  worker   W8  omega(5)-omega(0)     : 7100 -> 2800 = -4300 (-60.6 %) | p0 Y/Y/Y p1 n/n/n p2 Y/Y/Y pooled n/Y/Y | K [3, 3, 3, 9] | NOT CLAIMED (no guard NOT CLAIMED)
+  worker   W8  omega(20)-omega(5)    : 2800 -> 9300 = +6500 (+232.1 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled Y/Y/Y | K [3, 3, 3, 9] | CLAIMED STRONG (no guard CLAIMED STRONG)
+  worker   W8  first_helper 5->80: 900 -> 3500 | pooled Y/Y/Y | CLAIMED STRONG (post hoc)
+  worker   W16 N4 omega(80)-omega(0) : 10500 -> 20700 = +10200 (+97.1 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled Y/Y/Y | K [3, 3, 3, 9] | CLAIMED STRONG (no guard CLAIMED STRONG)
+  worker   W16 AW omega(80)-omega(5) : 11100 -> 20700 = +9600 (+86.5 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled Y/Y/Y | K [3, 3, 3, 9] | CLAIMED STRONG (no guard CLAIMED STRONG)
+  worker   W16 omega(80)-omega(20)   : 20600 -> 20700 = +100 (+0.5 %) | p0 n/n/n p1 n/n/n p2 n/n/Y pooled n/n/n | K [3, 3, 3, 9] | NOT CLAIMED (no guard NOT CLAIMED)
+  worker   W16 omega(5)-omega(0)     : 10500 -> 11100 = +600 (+5.7 %) | p0 n/Y/Y p1 n/n/n p2 Y/Y/Y pooled n/n/Y | K [3, 3, 3, 9] | NOT CLAIMED (no guard NOT CLAIMED)
+  worker   W16 omega(20)-omega(5)    : 11100 -> 20600 = +9500 (+85.6 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled Y/Y/Y | K [3, 3, 3, 9] | CLAIMED STRONG (no guard CLAIMED STRONG)
+  worker   W16 first_helper 5->80: 400 -> 3700 | pooled Y/Y/Y | CLAIMED STRONG (post hoc)
+  external W8  N4 omega(80)-omega(0) : 4700 -> 10900 = +6200 (+131.9 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled Y/Y/Y | K [3, 3, 3, 9] | CLAIMED STRONG (no guard CLAIMED STRONG)
+  external W8  AW omega(80)-omega(5) : 4300 -> 10900 = +6600 (+153.5 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled Y/Y/Y | K [3, 3, 3, 9] | CLAIMED STRONG (no guard CLAIMED STRONG)
+  external W8  omega(80)-omega(20)   : 11000 -> 10900 = -100 (-0.9 %) | p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n | K [3, 3, 3, 9] | NOT CLAIMED (no guard NOT CLAIMED)
+  external W8  omega(5)-omega(0)     : 4700 -> 4300 = -400 (-8.5 %) | p0 n/Y/Y p1 n/n/n p2 n/n/n pooled n/n/Y | K [3, 3, 3, 9] | NOT CLAIMED (no guard NOT CLAIMED)
+  external W8  omega(20)-omega(5)    : 4300 -> 11000 = +6700 (+155.8 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled Y/Y/Y | K [3, 3, 3, 9] | CLAIMED STRONG (no guard CLAIMED STRONG)
+  external W8  first_helper 5->80: 900 -> 3600 | pooled Y/Y/Y | CLAIMED STRONG (post hoc)
+  external W16 N4 omega(80)-omega(0) : 5200 -> 22200 = +17000 (+326.9 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled Y/Y/Y | K [3, 3, 3, 9] | CLAIMED STRONG (no guard CLAIMED STRONG)
+  external W16 AW omega(80)-omega(5) : 6600 -> 22200 = +15600 (+236.4 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled Y/Y/Y | K [3, 3, 3, 9] | CLAIMED STRONG (no guard CLAIMED STRONG)
+  external W16 omega(80)-omega(20)   : 21600 -> 22200 = +600 (+2.8 %) | p0 n/n/n p1 n/n/n p2 n/Y/Y pooled n/n/n | K [3, 3, 3, 9] | NOT CLAIMED (no guard NOT CLAIMED)
+  external W16 omega(5)-omega(0)     : 5200 -> 6600 = +1400 (+26.9 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled Y/Y/Y | K [3, 3, 3, 9] | CLAIMED STRONG (no guard CLAIMED STRONG)
+  external W16 omega(20)-omega(5)    : 6600 -> 21600 = +15000 (+227.3 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled Y/Y/Y | K [3, 3, 3, 9] | CLAIMED STRONG (no guard CLAIMED STRONG)
+  external W16 first_helper 5->80: 400 -> 3700 | pooled Y/Y/Y | CLAIMED STRONG (post hoc)

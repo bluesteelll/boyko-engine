@@ -1,0 +1,28 @@
+
+## [100..500)
+W8 per step (us): L_wide 319.5 = ramp 60.8 (19.0 %) + join 26.3 (8.2 %) + imbalance 68.9 (21.6 %) + in-wave remainder 163.4 (51.1 %)
+   ramp per step = first-wave 4.12 + other pass-first 31.40 + non-pass-first 25.32; pass-first share 58.4 %
+   per wave (ns): first ramp 4117 = 6.5x the helped-wave mean 634; pass-first mean 2960 = 9.8x the other waves 302; tail 992 = imbalance 718 (72.4 %) + join 274 (27.6 %); ramp+tail 1626 = 48.9 % of omega 3328
+   S1-addressable dispatch (arith., upper bound before S1 own costs): ramp 60.8 + join 26.3 - one recruitment 4.1 = 83.0 us/step; imbalance 68.9 us/step is not dispatch
+   np wave: ramp 835 ns, tail 10615 ns = imbalance 8100 (76.3 %) + join 2537; route worker 1.000
+W16 per step (us): L_wide 650.5 = ramp 63.9 (9.8 %) + join 44.2 (6.8 %) + imbalance 109.6 (16.9 %) + in-wave remainder 432.7 (66.5 %)
+   ramp per step = first-wave 4.20 + other pass-first 30.26 + non-pass-first 29.47; pass-first share 53.9 %
+   per wave (ns): first ramp 4195 = 6.3x the helped-wave mean 666; pass-first mean 2872 = 8.1x the other waves 353; tail 1603 = imbalance 1142 (71.3 %) + join 461 (28.7 %); ramp+tail 2269 = 33.5 % of omega 6776
+   S1-addressable dispatch (arith., upper bound before S1 own costs): ramp 63.9 + join 44.2 - one recruitment 4.2 = 103.9 us/step; imbalance 109.6 us/step is not dispatch
+   np wave: ramp 978 ns, tail 11026 ns = imbalance 8794 (79.8 %) + join 2209; route worker 1.000
+W16 - W8 per step (us): L_wide +331.0; ramp +3.1; join +17.9; imbalance +40.7; in-wave remainder +269.3
+serial stages W8 (armed PARENT, ms) -> lever: setup 0.2988 (P-c 0.2582) -> S4; warm 0.3079 -> S2; integrate group 0.1218 -> S3; bp query 0.2078 (bp 0.2655) -> S5; graph 0.1195 -> S6 (not built); narrow colours 0.0479 -> S1 narrow term; np serial 0.0352
+
+## [0..500)
+W8 per step (us): L_wide 323.1 = ramp 61.9 (19.2 %) + join 27.3 (8.4 %) + imbalance 69.8 (21.6 %) + in-wave remainder 164.1 (50.8 %)
+   ramp per step = first-wave 4.13 + other pass-first 31.41 + non-pass-first 26.34; pass-first share 57.4 %
+   per wave (ns): first ramp 4134 = 6.6x the helped-wave mean 626; pass-first mean 2962 = 9.7x the other waves 305; tail 983 = imbalance 707 (71.9 %) + join 276 (28.1 %); ramp+tail 1609 = 49.2 % of omega 3270
+   S1-addressable dispatch (arith., upper bound before S1 own costs): ramp 61.9 + join 27.3 - one recruitment 4.1 = 85.0 us/step; imbalance 69.8 us/step is not dispatch
+   np wave: ramp 934 ns, tail 14270 ns = imbalance 11456 (80.3 %) + join 2652; route worker 1.000
+W16 per step (us): L_wide 661.2 = ramp 65.5 (9.9 %) + join 46.1 (7.0 %) + imbalance 112.9 (17.1 %) + in-wave remainder 436.9 (66.1 %)
+   ramp per step = first-wave 4.23 + other pass-first 30.35 + non-pass-first 30.96; pass-first share 52.8 %
+   per wave (ns): first ramp 4232 = 6.4x the helped-wave mean 663; pass-first mean 2881 = 8.1x the other waves 357; tail 1607 = imbalance 1143 (71.1 %) + join 466 (29.0 %); ramp+tail 2270 = 33.9 % of omega 6691
+   S1-addressable dispatch (arith., upper bound before S1 own costs): ramp 65.5 + join 46.1 - one recruitment 4.2 = 107.4 us/step; imbalance 112.9 us/step is not dispatch
+   np wave: ramp 1105 ns, tail 14515 ns = imbalance 11934 (82.2 %) + join 2531; route worker 1.000
+W16 - W8 per step (us): L_wide +338.0; ramp +3.7; join +18.8; imbalance +43.1; in-wave remainder +272.7
+serial stages W8 (armed PARENT, ms) -> lever: setup 0.3029 (P-c 0.2611) -> S4; warm 0.3087 -> S2; integrate group 0.1219 -> S3; bp query 0.2101 (bp 0.2679) -> S5; graph 0.1199 -> S6 (not built); narrow colours 0.0459 -> S1 narrow term; np serial 0.0372

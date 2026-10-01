@@ -1,0 +1,30 @@
+[
+ {
+  "tag": "501-steps-vs-JT500",
+  "binary": "parent",
+  "exit": 4,
+  "expect_pose": "mismatch: 64480 vs 64480 bytes, first differing body Some(0)",
+  "pass": true
+ },
+ {
+  "tag": "J-T-off-vs-JT500",
+  "binary": "parent",
+  "exit": 4,
+  "expect_pose": "mismatch: 64480 vs 64480 bytes, first differing body Some(0)",
+  "pass": true
+ },
+ {
+  "tag": "501-steps-vs-JT500",
+  "binary": "tip",
+  "exit": 4,
+  "expect_pose": "mismatch: 64480 vs 64480 bytes, first differing body Some(0)",
+  "pass": true
+ },
+ {
+  "tag": "J-T-off-vs-JT500",
+  "binary": "tip",
+  "exit": 4,
+  "expect_pose": "mismatch: 64480 vs 64480 bytes, first differing body Some(0)",
+  "pass": true
+ }
+]

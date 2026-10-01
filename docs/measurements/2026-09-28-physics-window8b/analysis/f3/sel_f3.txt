@@ -1,0 +1,56 @@
+F3 block: 302 process records (3 warm-ups, 299 timed: 243 originals, 56 re-runs); pass_done markers 3
+voided passes (any block): 0
+slots 243, used 227 (40 by their re-run), dropped 16
+validity problems (my re-derivation): 0
+dropped slots:
+  pass 0 round 0 F3-TR-armed W1: [('original', ['witness 2.71'], []), ('rerun', ['witness 2.49'], [])]
+  pass 0 round 1 F3-RT-kd W2: [('original', ['witness 2.12'], []), ('rerun', ['witness 2.24'], [])]
+  pass 0 round 1 F3-RT-kd W16: [('original', ['witness 2.18'], []), ('rerun', ['receipt after 9.02'], [])]
+  pass 0 round 1 F3-RT-leaflist W1: [('original', ['witness 2.53'], []), ('rerun', ['witness 2.27'], [])]
+  pass 0 round 2 F3-RT-kd W4: [('original', ['witness 2.01'], []), ('rerun', ['witness 2.08'], [])]
+  pass 0 round 2 F3-RT-kd W8: [('original', ['witness 2.21'], []), ('rerun', ['receipt after 16.83'], [])]
+  pass 0 round 2 F3-RT-leaflist W8: [('original', ['witness 3.26'], []), ('rerun', ['witness 2.74'], [])]
+  pass 1 round 0 F3-TD-armed-leaflist W1: [('original', ['witness 2.15'], []), ('rerun', ['witness 2.11'], [])]
+  pass 1 round 1 F3-JT-kd W16: [('original', ['witness 2.15'], []), ('rerun', ['witness 5.17'], [])]
+  pass 1 round 1 F3-JT-leaflist W16: [('original', ['witness 2.26'], []), ('rerun', ['witness 2.44'], [])]
+  pass 1 round 1 F3-TA-armed-kd W1: [('original', ['witness 2.15'], []), ('rerun', ['witness 2.21'], [])]
+  pass 1 round 2 F3-JT-leaflist W8: [('original', ['witness 2.16'], []), ('rerun', ['witness 5.53'], [])]
+  pass 2 round 0 F3-RT-kd W16: [('original', ['witness 2.21'], []), ('rerun', ['receipt after 6.67', 'witness 2.49'], [])]
+  pass 2 round 1 F3-JT-kd W4: [('original', ['witness 2.07'], []), ('rerun', ['witness 3.26'], [])]
+  pass 2 round 1 F3-JT-leaflist W4: [('original', ['witness 2.38'], []), ('rerun', ['witness 2.02'], [])]
+  pass 2 round 2 F3-JT-leaflist W2: [('original', ['witness 2.17'], []), ('rerun', ['witness 2.5'], [])]
+driver agreement (compared, not used): valid flag differs on 0, clean flag differs on 0, max |mean_ms - mine| = 0 ms
+unclean processes: 72 of 299 (witness-only 68)
+
+K per cell (used slots) p0/p1/p2 pooled:
+  F3-JT-kd               W1  3/3/3 pooled 9
+  F3-JT-kd               W2  3/3/3 pooled 9
+  F3-JT-kd               W4  3/3/2 pooled 8
+  F3-JT-kd               W8  3/3/3 pooled 9
+  F3-JT-kd               W16 3/2/3 pooled 8
+  F3-JT-leaflist         W1  3/3/3 pooled 9
+  F3-JT-leaflist         W2  3/3/2 pooled 8
+  F3-JT-leaflist         W4  3/3/2 pooled 8
+  F3-JT-leaflist         W8  3/2/3 pooled 8
+  F3-JT-leaflist         W16 3/2/3 pooled 8
+  F3-RT-kd               W1  3/3/3 pooled 9
+  F3-RT-kd               W2  2/3/3 pooled 8
+  F3-RT-kd               W4  2/3/3 pooled 8
+  F3-RT-kd               W8  2/3/3 pooled 8
+  F3-RT-kd               W16 2/3/2 pooled 7
+  F3-RT-leaflist         W1  2/3/3 pooled 8
+  F3-RT-leaflist         W2  3/3/3 pooled 9
+  F3-RT-leaflist         W4  3/3/3 pooled 9
+  F3-RT-leaflist         W8  2/3/3 pooled 8
+  F3-RT-leaflist         W16 3/3/3 pooled 9
+  F3-TA-armed-kd         W1  3/2/3 pooled 8
+  F3-TA-armed-leaflist   W1  3/3/3 pooled 9
+  F3-TD-armed-kd         W1  3/3/3 pooled 9
+  F3-TD-armed-kd         W8  3/3/3 pooled 9
+  F3-TD-armed-leaflist   W1  3/2/3 pooled 8
+  F3-TD-armed-leaflist   W8  3/3/3 pooled 9
+  F3-TR-armed            W1  2/3/3 pooled 8
+tree_brute_max_rows in every SUMMARY: [144]
+kd_order_builds per kernel: [('leaflist', 0), ('leaflist-kd', 500), ('rowwalk', 0)]
+armed rows: phys_bp_queried [(1240.0,)]; query_n [(1.0,)]; build_n [(1.0,)]
+manifolds per step over [100,500) per row family (every process): {'F3-RT': [6961.885], 'F3-JT': [4467.665], 'F3-TD-armed': [4467.665], 'F3-TR-armed': [4467.665], 'F3-TA-armed': [4467.665]}

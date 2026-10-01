@@ -1,0 +1,37 @@
+# SPLIT (PARENT, SPLIT-J-T-a, [100,500)): per-step us and per-wave ns, cell medians over K = 9
+  W8: waves/step 96.00, helped 1.000; ramp 60.8 (pass-first 35.5 = 58 %), tail 95.2 = imbalance 69.0 (72 %) + join 26.3 (28 %) us/step; first ramp 4117 ns, pass-first 2960 ns = 9.8x the other waves 302 ns
+  W16: waves/step 96.00, helped 1.000; ramp 63.9 (pass-first 34.5 = 54 %), tail 153.9 = imbalance 109.6 (71 %) + join 44.2 (29 %) us/step; first ramp 4195 ns, pass-first 2872 ns = 8.1x the other waves 353 ns
+
+# F3 c_q = t_q / queried rows per step (TD-armed W1, median over steps [100,500), per process; cell median)
+  F3-TD-armed-leaflist: t_q 201.98 us; queried rows per step [1240.0]; c_q 162.9 ns (n=8)
+  F3-TD-armed-kd: t_q 167.88 us; queried rows per step [1240.0]; c_q 135.4 ns (n=9)
+
+# J-Son-T: first_frozen_step over ON records; L10 serial pieces (armed JSonT-a, us/step, [0,100) and [274,500))
+  first_frozen_step values: [274]
+  W1 [0,100): L10 pieces 19.60 us/step = 0.123 % of the OFF disarmed step 15884.3 us
+  W1 [274,500): L10 pieces 25.16 us/step = 0.172 % of the OFF disarmed step 14614.5 us
+  W8 [0,100): L10 pieces 21.16 us/step = 0.516 % of the OFF disarmed step 4097.1 us
+  W8 [274,500): L10 pieces 27.01 us/step = 0.700 % of the OFF disarmed step 3859.4 us
+
+# S7 paired per (pass, round): T/P at W16 and W8, [0,500)
+  S7-JT W8: T/P median 0.9985 [0.9840-1.0102], T slower in 3 of 9 rounds
+  S7-JT W16: T/P median 1.0690 [1.0600-1.0874], T slower in 9 of 9 rounds
+  S7-JA W8: T/P median 1.0011 [0.9967-1.0186], T slower in 6 of 9 rounds
+  S7-JA W16: T/P median 1.1245 [1.1035-1.1483], T slower in 9 of 9 rounds
+
+# post hoc: trunk scaling W8 -> W16 (P = s7p = trunk; ruling 1, LETTER), and serial spans at W8 on TIP (armed)
+  S7-JT P(16) vs P(8): B/A 1.1295 (+12.95 %, B-A +0.2350) pooled YYY (bars i 2.03 / s 0.79 / r 6.11 %); passes p0:YYY(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> CLAIMED STRONG [B>A]
+  S7-JA P(16) vs P(8): B/A 0.9811 (-1.89 %, B-A -0.1002) pooled YYn (bars i 0.87 / s 0.66 / r 4.97 %); passes p0:nnn(K3/3) p1:YYY(K3/3) p2:YYY(K3/3) -> NOT CLAIMED [B<A]
+  S4-JT-a#parent@W8 [100,500) phys_bp_query_ns: 0.2077 ms (n=9)
+  S4-JT-a#tip@W8 [100,500) phys_bp_query_ns: 0.2069 ms (n=9)
+  S4-JT-a#parent@W8 [100,500) sys_physics_broadphase_colored_ns: 0.2655 ms (n=9)
+  S4-JT-a#tip@W8 [100,500) sys_physics_broadphase_colored_ns: 0.2645 ms (n=9)
+  S4-JT-a#parent@W8 [100,500) phys_warm_apply_ns: 0.3079 ms (n=9)
+  S4-JT-a#tip@W8 [100,500) phys_warm_apply_ns: 0.3081 ms (n=9)
+  S4-JT-a#parent@W8 [100,500) phys_solve_build_ns: 0.2992 ms (n=9)
+  S4-JT-a#tip@W8 [100,500) phys_solve_build_ns: 0.1127 ms (n=9)
+
+# SPLIT L_wide decomposition W8 vs W16 (PARENT armed, [100,500), us/step; L_wide = wide(W) - wide(1)/W)
+  W8: L_wide 319.5 = ramp 60.8 + join 26.3 + imbalance 69.0 + in-wave remainder 163.4 (51.1 %)
+  W16: L_wide 650.5 = ramp 63.9 + join 44.2 + imbalance 109.6 + in-wave remainder 432.7 (66.5 %)
+  W16 - W8: L_wide +331.0; ramp +3.1, join +17.9, imbalance +40.7, in-wave +269.3 (81 % of the growth)

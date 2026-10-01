@@ -1,0 +1,132 @@
+## V1 void rules (cut.md W5 amended)
+  used processes 34 SUMMARY 776 CALIBRATION 34 work_ns range 568.6-577.6 exactly_once all True lost_wakeups 0 all True
+   park (route,cfg,stages) cells 44 VOID 0 | gap-0 cells 36 no-park-taken 35 mixed 0 parked on every rep [(('worker', 8, 4, 0, 72), [2, 2, 2, 2, 2, 2, 2, 2, 3])]
+   gap>0 park rows (gap, stages, parks_per_region_median) values seen: [(20, 36, 252), (20, 72, 504), (80, 36, 252), (80, 72, 504)]
+  all timed processes 49 SUMMARY 1092 CALIBRATION 49 work_ns range 568.6-578.9 exactly_once all True lost_wakeups 0 all True
+   park (route,cfg,stages) cells 44 VOID 0 | gap-0 cells 36 no-park-taken 33 mixed 2 parked on every rep [(('worker', 8, 4, 0, 72), [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3])]
+   gap>0 park rows (gap, stages, parks_per_region_median) values seen: [(20, 36, 252), (20, 72, 504), (80, 36, 252), (80, 72, 504)]
+   mixed ('external', 8, 4, 0, 72) [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 4]
+   mixed ('worker', 8, 2, 0, 72) [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+
+## S1 input omega_b2(P=8, b=4P, gap 0): per-process slope (region_ns_median@72 - @36)/36, cell = median
+  worker   spin 3353 [IQR 111, SE 49, 3247-3608] K=9 | on region_ns_mean: 3458
+  worker   park 3369 [IQR 94, SE 63, 3192-3692] K=9 | on region_ns_mean: 3478
+  external spin 3144 [IQR 403, SE 103, 2922-3647] K=9 | on region_ns_mean: 3338
+  external park 3183 [IQR 261, SE 104, 3003-3694] K=9 | on region_ns_mean: 3352
+
+## all configs: slope cells (n) and net of work (slope - bpp x work_ns_calibrated - gap_ns, per process, median)
+  worker   P2 b=1P gap  0: spin 667 [650-672] n=9 net 94; park 664 [656-678] n=9 net 93;
+  worker   P2 b=2P gap  0: spin 1267 [1222-1275] n=9 net 120; park 1269 [1225-1292] n=9 net 126;
+  worker   P2 b=4P gap  0: spin 2467 [2394-2486] n=9 net 179; park 2467 [2392-2478] n=9 net 185;
+  worker   P4 b=1P gap  0: spin 836 [814-872] n=9 net 265; park 742 [731-767] n=9 net 171;
+  worker   P4 b=2P gap  0: spin 1464 [1433-1511] n=9 net 318; park 1383 [1339-1397] n=9 net 243;
+  worker   P4 b=4P gap  0: spin 2772 [2678-2806] n=9 net 491; park 2769 [2669-2950] n=9 net 476;
+  worker   P8 b=1P gap  0: spin 919 [861-1119] n=9 net 346; park 950 [811-1089] n=9 net 378;
+  worker   P8 b=2P gap  0: spin 1742 [1597-1894] n=9 net 598; park 1703 [1650-1914] n=9 net 554;
+  worker   P8 b=4P gap  0: spin 3353 [3247-3608] n=9 net 1059; park 3369 [3192-3692] n=9 net 1073;
+  worker   P8 b=4P gap 20: spin 23135 [22950-23244] n=8 net 844; park 29157 [28961-29208] n=8 net 6865;
+  worker   P8 b=4P gap 80: spin 83126 [83019-83172] n=8 net 832; park 89388 [89281-89656] n=8 net 7095;
+  external P2 b=1P gap  0: spin 672 [633-894] n=9 net 100; park 675 [656-836] n=9 net 103;
+  external P2 b=2P gap  0: spin 1267 [1231-1278] n=9 net 118; park 1256 [1225-1275] n=9 net 109;
+  external P2 b=4P gap  0: spin 2461 [2386-2481] n=9 net 168; park 2467 [2369-2469] n=9 net 170;
+  external P4 b=1P gap  0: spin 833 [783-856] n=9 net 261; park 736 [714-742] n=9 net 162;
+  external P4 b=2P gap  0: spin 1453 [1272-1475] n=9 net 307; park 1381 [1319-1389] n=9 net 230;
+  external P4 b=4P gap  0: spin 2678 [2589-2694] n=9 net 386; park 2656 [2569-2681] n=9 net 369;
+  external P8 b=1P gap  0: spin 989 [931-1064] n=9 net 416; park 972 [922-1153] n=9 net 400;
+  external P8 b=2P gap  0: spin 1822 [1761-1986] n=9 net 679; park 1647 [1569-1742] n=9 net 502;
+  external P8 b=4P gap  0: spin 3144 [2922-3647] n=9 net 857; park 3183 [3003-3694] n=9 net 878;
+  external P8 b=4P gap 20: spin 22726 [22556-23508] n=8 net 443; park 28985 [28883-29056] n=8 net 6705;
+  external P8 b=4P gap 80: spin 83125 [82717-83508] n=8 net 842; park 89299 [89206-89414] n=8 net 7012;
+
+## PARK-g: park slope vs spin slope, ruling 1 (i AND s every pass and pooled; r -> STRONG)
+  gap  0 worker   P2 b=1P: spin 667 park 664 delta -3 (-0.4 %) | p0 n/n/n p1 n/n/n p2 n/Y/Y pooled n/n/n | K [3, 3, 3, 9] | guard: NOT CLAIMED | no guard: NOT CLAIMED | paired 5/9 pos, med +6 [-14..+19]
+  gap  0 worker   P2 b=2P: spin 1267 park 1269 delta +3 (+0.2 %) | p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n | K [3, 3, 3, 9] | guard: NOT CLAIMED | no guard: NOT CLAIMED | paired 7/9 pos, med +8 [-6..+17]
+  gap  0 worker   P2 b=4P: spin 2467 park 2467 delta +0 (+0.0 %) | p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n | K [3, 3, 3, 9] | guard: NOT CLAIMED | no guard: NOT CLAIMED | paired 3/9 pos, med -6 [-33..+11]
+  gap  0 worker   P4 b=1P: spin 836 park 742 delta -94 (-11.3 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled n/Y/Y | K [3, 3, 3, 9] | guard: CLAIMED | no guard: CLAIMED | paired 0/9 pos, med -92 [-131..-75]
+  gap  0 worker   P4 b=2P: spin 1464 park 1383 delta -81 (-5.5 %) | p0 Y/Y/Y p1 n/Y/Y p2 n/Y/Y pooled n/Y/Y | K [3, 3, 3, 9] | guard: CLAIMED | no guard: CLAIMED | paired 0/9 pos, med -81 [-119..-72]
+  gap  0 worker   P4 b=4P: spin 2772 park 2769 delta -3 (-0.1 %) | p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n | K [3, 3, 3, 9] | guard: NOT CLAIMED | no guard: NOT CLAIMED | paired 5/9 pos, med +6 [-33..+169]
+  gap  0 worker   P8 b=1P: spin 919 park 950 delta +31 (+3.3 %) | p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n | K [3, 3, 3, 9] | guard: NOT CLAIMED | no guard: NOT CLAIMED | paired 5/9 pos, med +17 [-183..+78]
+  gap  0 worker   P8 b=2P: spin 1742 park 1703 delta -39 (-2.2 %) | p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n | K [3, 3, 3, 9] | guard: NOT CLAIMED | no guard: NOT CLAIMED | paired 3/9 pos, med -8 [-158..+67]
+  gap  0 worker   P8 b=4P: spin 3353 park 3369 delta +17 (+0.5 %) | p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n | K [3, 3, 3, 9] | guard: NOT CLAIMED | no guard: NOT CLAIMED | paired 5/9 pos, med +14 [-144..+161]
+  gap  0 external P2 b=1P: spin 672 park 675 delta +3 (+0.4 %) | p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n | K [3, 3, 3, 9] | guard: NOT CLAIMED | no guard: NOT CLAIMED | paired 6/9 pos, med +3 [-58..+22]
+  gap  0 external P2 b=2P: spin 1267 park 1256 delta -11 (-0.9 %) | p0 n/n/n p1 n/n/n p2 n/n/Y pooled n/n/n | K [3, 3, 3, 9] | guard: NOT CLAIMED | no guard: NOT CLAIMED | paired 2/9 pos, med -6 [-31..+11]
+  gap  0 external P2 b=4P: spin 2461 park 2467 delta +6 (+0.2 %) | p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n | K [3, 3, 3, 9] | guard: NOT CLAIMED | no guard: NOT CLAIMED | paired 3/9 pos, med -3 [-17..+19]
+  gap  0 external P4 b=1P: spin 833 park 736 delta -97 (-11.7 %) | p0 Y/Y/Y p1 n/Y/Y p2 Y/Y/Y pooled n/Y/Y | K [3, 3, 3, 9] | guard: CLAIMED | no guard: CLAIMED | paired 0/9 pos, med -100 [-114..-47]
+  gap  0 external P4 b=2P: spin 1453 park 1381 delta -72 (-5.0 %) | p0 n/n/Y p1 n/n/n p2 n/n/n pooled n/n/Y | K [3, 3, 3, 9] | guard: NOT CLAIMED | no guard: NOT CLAIMED | paired 1/9 pos, med -75 [-100..+108]
+  gap  0 external P4 b=4P: spin 2678 park 2656 delta -22 (-0.8 %) | p0 n/n/n p1 n/Y/Y p2 n/n/n pooled n/n/n | K [3, 3, 3, 9] | guard: NOT CLAIMED | no guard: NOT CLAIMED | paired 0/9 pos, med -14 [-50..-3]
+  gap  0 external P8 b=1P: spin 989 park 972 delta -17 (-1.7 %) | p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n | K [3, 3, 3, 9] | guard: NOT CLAIMED | no guard: NOT CLAIMED | paired 5/9 pos, med +3 [-142..+211]
+  gap  0 external P8 b=2P: spin 1822 park 1647 delta -175 (-9.6 %) | p0 n/n/Y p1 n/n/n p2 n/Y/Y pooled n/n/Y | K [3, 3, 3, 9] | guard: NOT CLAIMED | no guard: NOT CLAIMED | paired 0/9 pos, med -153 [-406..-72]
+  gap  0 external P8 b=4P: spin 3144 park 3183 delta +39 (+1.2 %) | p0 n/n/n p1 n/Y/Y p2 n/n/n pooled n/n/n | K [3, 3, 3, 9] | guard: NOT CLAIMED | no guard: NOT CLAIMED | paired 6/9 pos, med +175 [-256..+281]
+  gap 20 worker   P8 b=4P: spin 23135 park 29157 delta +6022 (+26.0 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled Y/Y/Y | K [2, 3, 3, 8] | guard: NOT CLAIMED | no guard: CLAIMED STRONG | paired 8/8 pos, med +6011 [+5836..+6089]
+  gap 20 external P8 b=4P: spin 22726 park 28985 delta +6258 (+27.5 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled Y/Y/Y | K [2, 3, 3, 8] | guard: NOT CLAIMED | no guard: CLAIMED STRONG | paired 8/8 pos, med +6325 [+5428..+6433]
+  gap 80 worker   P8 b=4P: spin 83126 park 89388 delta +6261 (+7.5 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled Y/Y/Y | K [2, 3, 3, 8] | guard: NOT CLAIMED | no guard: CLAIMED STRONG | paired 8/8 pos, med +6282 [+6161..+6500]
+  gap 80 external P8 b=4P: spin 83125 park 89299 delta +6174 (+7.4 %) | p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y pooled Y/Y/Y | K [2, 3, 3, 8] | guard: NOT CLAIMED | no guard: CLAIMED STRONG | paired 8/8 pos, med +6254 [+5697..+6611]
+
+## gap rows: cells with IQR/SE (pooled)
+  gap 20 worker   spin 23135 [IQR 147, SE 46, 22950-23244] K=8
+  gap 20 worker   park 29157 [IQR 91, SE 37, 28961-29208] K=8
+  gap 20 external spin 22726 [IQR 624, SE 167, 22556-23508] K=8
+  gap 20 external park 28985 [IQR 123, SE 31, 28883-29056] K=8
+  gap 80 worker   spin 83126 [IQR 43, SE 22, 83019-83172] K=8
+  gap 80 worker   park 89388 [IQR 133, SE 55, 89281-89656] K=8
+  gap 80 external spin 83125 [IQR 545, SE 139, 82717-83508] K=8
+  gap 80 external park 89299 [IQR 93, SE 31, 89206-89414] K=8
+
+## PART: participation receipts at P8 b=4P, cell medians over used processes
+  worker   gap  0 spin st36: active_median med 8 [8-8]; all_active_reps med 1000 [1000-1000]; first_helper med 900 [800-1000]; helped 1000-1000 n=9
+  worker   gap  0 spin st72: active_median med 8 [8-8]; all_active_reps med 1000 [1000-1000]; first_helper med 7500 [7300-7600]; helped 1000-1000 n=9
+  worker   gap  0 park st36: active_median med 8 [8-8]; all_active_reps med 1000 [999-1000]; first_helper med 800 [700-1000]; helped 1000-1000 n=9
+  worker   gap  0 park st72: active_median med 8 [8-8]; all_active_reps med 1000 [998-1000]; first_helper med 7500 [7300-7600]; helped 1000-1000 n=9
+  worker   gap 20 spin st36: active_median med 8.0 [8-8]; all_active_reps med 1000.0 [1000-1000]; first_helper med 27150.0 [25900-27600]; helped 1000-1000 n=8
+  worker   gap 20 spin st72: active_median med 8.0 [8-8]; all_active_reps med 1000.0 [1000-1000]; first_helper med 27950.0 [27500-28200]; helped 1000-1000 n=8
+  worker   gap 20 park st36: active_median med 7.0 [7-7]; all_active_reps med 321.5 [143-442]; first_helper med 24100.0 [24000-26200]; helped 1000-1000 n=8
+  worker   gap 20 park st72: active_median med 7.5 [7-8]; all_active_reps med 493.0 [249-665]; first_helper med 30450.0 [30400-30600]; helped 1000-1000 n=8
+  worker   gap 80 spin st36: active_median med 8.0 [8-8]; all_active_reps med 1000.0 [1000-1000]; first_helper med 87850.0 [87500-88100]; helped 1000-1000 n=8
+  worker   gap 80 spin st72: active_median med 8.0 [8-8]; all_active_reps med 1000.0 [1000-1000]; first_helper med 88250.0 [88000-88600]; helped 1000-1000 n=8
+  worker   gap 80 park st36: active_median med 8.0 [8-8]; all_active_reps med 798.0 [678-960]; first_helper med 84650.0 [84200-90300]; helped 1000-1000 n=8
+  worker   gap 80 park st72: active_median med 8.0 [8-8]; all_active_reps med 924.5 [811-998]; first_helper med 90850.0 [90700-91000]; helped 1000-1000 n=8
+  external gap  0 spin st36: active_median med 8 [8-8]; all_active_reps med 1000 [1000-1000]; first_helper med 1700 [1600-1900]; helped 1000-1000 n=9
+  external gap  0 spin st72: active_median med 8 [8-8]; all_active_reps med 1000 [1000-1000]; first_helper med 2100 [1900-2200]; helped 1000-1000 n=9
+  external gap  0 park st36: active_median med 8 [8-8]; all_active_reps med 1000 [1000-1000]; first_helper med 1700 [1600-1900]; helped 1000-1000 n=9
+  external gap  0 park st72: active_median med 8 [8-8]; all_active_reps med 1000 [1000-1000]; first_helper med 2000 [1900-2000]; helped 1000-1000 n=9
+  external gap 20 spin st36: active_median med 8.0 [8-8]; all_active_reps med 1000.0 [1000-1000]; first_helper med 22050.0 [21900-22200]; helped 1000-1000 n=8
+  external gap 20 spin st72: active_median med 8.0 [8-8]; all_active_reps med 1000.0 [1000-1000]; first_helper med 22200.0 [22000-22400]; helped 1000-1000 n=8
+  external gap 20 park st36: active_median med 7.0 [7-7]; all_active_reps med 294.0 [154-468]; first_helper med 25000.0 [24900-25100]; helped 1000-1000 n=8
+  external gap 20 park st72: active_median med 7.0 [7-8]; all_active_reps med 415.0 [292-717]; first_helper med 25350.0 [25100-25500]; helped 1000-1000 n=8
+  external gap 80 spin st36: active_median med 8.0 [8-8]; all_active_reps med 1000.0 [1000-1000]; first_helper med 82450.0 [82000-82700]; helped 1000-1000 n=8
+  external gap 80 spin st72: active_median med 8.0 [8-8]; all_active_reps med 1000.0 [1000-1000]; first_helper med 82750.0 [82400-83600]; helped 1000-1000 n=8
+  external gap 80 park st36: active_median med 8.0 [8-8]; all_active_reps med 871.5 [807-974]; first_helper med 85400.0 [85300-85400]; helped 1000-1000 n=8
+  external gap 80 park st72: active_median med 8.0 [8-8]; all_active_reps med 973.0 [929-997]; first_helper med 85750.0 [85500-85900]; helped 1000-1000 n=8
+  gap 0, used: (P, active_median) seen [(2, 2), (4, 4), (8, 8)]
+  gap 0, used: min all_active_reps per P {2: 998, 4: 998, 8: 997}
+
+## A3: first helper at 36 vs 72 stages, P8 b=4P gap 0, per process (ns)
+  worker   spin first36 800-1000 first72 7300-7600; (first72-first36)/36 median 183 [178-189]; cell-median bound 183
+  worker   park first36 700-1000 first72 7300-7600; (first72-first36)/36 median 183 [181-189]; cell-median bound 186
+  external spin first36 1600-1900 first72 1900-2200; (first72-first36)/36 median 8 [6-14]; cell-median bound 11
+  external park first36 1600-1900 first72 1900-2000; (first72-first36)/36 median 6 [3-11]; cell-median bound 8
+
+## Route: worker vs external slope, same (P, b, helper, gap), ruling 1
+  gap  0 P2 b=1P spin: worker 667 external 672 (ext/wk 1.008) p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P2 b=1P park: worker 664 external 675 (ext/wk 1.017) p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P2 b=2P spin: worker 1267 external 1267 (ext/wk 1.000) p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P2 b=2P park: worker 1269 external 1256 (ext/wk 0.989) p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P2 b=4P spin: worker 2467 external 2461 (ext/wk 0.998) p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P2 b=4P park: worker 2467 external 2467 (ext/wk 1.000) p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P4 b=1P spin: worker 836 external 833 (ext/wk 0.997) p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P4 b=1P park: worker 742 external 736 (ext/wk 0.993) p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P4 b=2P spin: worker 1464 external 1453 (ext/wk 0.992) p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P4 b=2P park: worker 1383 external 1381 (ext/wk 0.998) p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P4 b=4P spin: worker 2772 external 2678 (ext/wk 0.966) p0 n/Y/Y p1 n/n/n p2 n/Y/Y pooled n/Y/Y -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P4 b=4P park: worker 2769 external 2656 (ext/wk 0.959) p0 n/n/n p1 n/n/Y p2 n/n/Y pooled n/Y/Y -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P8 b=1P spin: worker 919 external 989 (ext/wk 1.076) p0 n/n/n p1 n/n/n p2 n/n/Y pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P8 b=1P park: worker 950 external 972 (ext/wk 1.023) p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P8 b=2P spin: worker 1742 external 1822 (ext/wk 1.046) p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P8 b=2P park: worker 1703 external 1647 (ext/wk 0.967) p0 n/n/n p1 n/n/n p2 n/n/n pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P8 b=4P spin: worker 3353 external 3144 (ext/wk 0.938) p0 n/n/n p1 n/Y/Y p2 n/n/n pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap  0 P8 b=4P park: worker 3369 external 3183 (ext/wk 0.945) p0 n/n/n p1 n/Y/Y p2 n/n/n pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap 20 P8 b=4P spin: worker 23135 external 22726 (ext/wk 0.982) p0 Y/Y/Y p1 n/Y/Y p2 n/n/Y pooled n/n/Y -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap 20 P8 b=4P park: worker 29157 external 28985 (ext/wk 0.994) p0 Y/Y/Y p1 n/Y/Y p2 n/Y/Y pooled n/n/Y -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap 80 P8 b=4P spin: worker 83126 external 83125 (ext/wk 1.000) p0 n/n/n p1 n/n/n p2 n/Y/Y pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  gap 80 P8 b=4P park: worker 89388 external 89299 (ext/wk 0.999) p0 n/Y/Y p1 n/n/n p2 n/n/n pooled n/n/n -> NOT CLAIMED (no guard NOT CLAIMED)
+  route configs 22 claimed (guard) 0

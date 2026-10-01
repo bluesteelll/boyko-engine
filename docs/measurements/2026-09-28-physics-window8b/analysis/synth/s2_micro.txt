@@ -1,0 +1,108 @@
+# omega_b v2 / omega(W, gap) / v1 continuity (synthesis re-derivation), ns
+used processes: omega-v2 52, omega-v1-cont 8; work_ns_calibrated over used SUMMARY lines 568.6-577.6
+
+## P8 slopes and net stage cost (cell medians over K; n)
+  worker   b=1P spin: slope 919 [861-1119] (IQR 156, SE 38) n=9; net 346
+  worker   b=1P park: slope 950 [811-1089] (IQR 14, SE 32) n=9; net 378
+  worker   b=2P spin: slope 1742 [1597-1894] (IQR 156, SE 43) n=9; net 598
+  worker   b=2P park: slope 1703 [1650-1914] (IQR 50, SE 33) n=9; net 554
+  worker   b=4P spin: slope 3353 [3247-3608] (IQR 111, SE 49) n=9; net 1059
+  worker   b=4P park: slope 3369 [3192-3692] (IQR 94, SE 63) n=9; net 1073
+  external b=1P spin: slope 989 [931-1064] (IQR 75, SE 20) n=9; net 416
+  external b=1P park: slope 972 [922-1153] (IQR 64, SE 36) n=9; net 400
+  external b=2P spin: slope 1822 [1761-1986] (IQR 36, SE 28) n=9; net 679
+  external b=2P park: slope 1647 [1569-1742] (IQR 108, SE 27) n=9; net 502
+  external b=4P spin: slope 3144 [2922-3647] (IQR 403, SE 103) n=9; net 857
+  external b=4P park: slope 3183 [3003-3694] (IQR 261, SE 104) n=9; net 878
+  P8 b=1P net range over routes x helpers: 346-416 ns
+  P8 b=2P net range over routes x helpers: 502-679 ns
+  P8 b=4P net range over routes x helpers: 857-1073 ns
+  P8 b=4P raw slope range: 3144-3369 ns; 4 x work = 2288 ns
+
+## park vs spin (B = park, A = spin), ruling 1
+  worker   P8 b=1P gap  0: spin 919 n=9, park 950 n=9; park-spin +31 (+3.3 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 NOT CLAIMED
+  worker   P8 b=2P gap  0: spin 1742 n=9, park 1703 n=9; park-spin -39 (-2.2 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 NOT CLAIMED
+  worker   P8 b=4P gap  0: spin 3353 n=9, park 3369 n=9; park-spin +17 (+0.5 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 NOT CLAIMED
+  worker   P8 b=4P gap 20: spin 23135 n=8, park 29157 n=8; park-spin +6022 (+26.0 %); Ks [(2, 2), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 CLAIMED STRONG park dearer
+  worker   P8 b=4P gap 80: spin 83126 n=8, park 89388 n=8; park-spin +6261 (+7.5 %); Ks [(2, 2), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 CLAIMED STRONG park dearer
+  worker   P4 b=1P gap  0: spin 836 n=9, park 742 n=9; park-spin -94 (-11.3 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER CLAIMED park cheaper | K2 CLAIMED park cheaper
+  worker   P4 b=2P gap  0: spin 1464 n=9, park 1383 n=9; park-spin -81 (-5.5 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER CLAIMED park cheaper | K2 CLAIMED park cheaper
+  worker   P4 b=4P gap  0: spin 2772 n=9, park 2769 n=9; park-spin -3 (-0.1 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 NOT CLAIMED
+  worker   P2 b=1P gap  0: spin 667 n=9, park 664 n=9; park-spin -3 (-0.4 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 NOT CLAIMED
+  worker   P2 b=2P gap  0: spin 1267 n=9, park 1269 n=9; park-spin +3 (+0.2 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 NOT CLAIMED
+  worker   P2 b=4P gap  0: spin 2467 n=9, park 2467 n=9; park-spin +0 (+0.0 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 NOT CLAIMED
+  external P8 b=1P gap  0: spin 989 n=9, park 972 n=9; park-spin -17 (-1.7 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 NOT CLAIMED
+  external P8 b=2P gap  0: spin 1822 n=9, park 1647 n=9; park-spin -175 (-9.6 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 NOT CLAIMED
+  external P8 b=4P gap  0: spin 3144 n=9, park 3183 n=9; park-spin +39 (+1.2 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 NOT CLAIMED
+  external P8 b=4P gap 20: spin 22726 n=8, park 28985 n=8; park-spin +6258 (+27.5 %); Ks [(2, 2), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 CLAIMED STRONG park dearer
+  external P8 b=4P gap 80: spin 83125 n=8, park 89299 n=8; park-spin +6174 (+7.4 %); Ks [(2, 2), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 CLAIMED STRONG park dearer
+  external P4 b=1P gap  0: spin 833 n=9, park 736 n=9; park-spin -97 (-11.7 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER CLAIMED park cheaper | K2 CLAIMED park cheaper
+  external P4 b=2P gap  0: spin 1453 n=9, park 1381 n=9; park-spin -72 (-5.0 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 NOT CLAIMED
+  external P4 b=4P gap  0: spin 2678 n=9, park 2656 n=9; park-spin -22 (-0.8 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 NOT CLAIMED
+  external P2 b=1P gap  0: spin 672 n=9, park 675 n=9; park-spin +3 (+0.4 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 NOT CLAIMED
+  external P2 b=2P gap  0: spin 1267 n=9, park 1256 n=9; park-spin -11 (-0.9 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 NOT CLAIMED
+  external P2 b=4P gap  0: spin 2461 n=9, park 2467 n=9; park-spin +6 (+0.2 %); Ks [(3, 3), (3, 3), (3, 3)]; LETTER NOT CLAIMED | K2 NOT CLAIMED
+
+## participation at P8 b=4P (active_median, all_active_reps median over used processes)
+  worker   spin gap  0 st 36: active 8, all_active_reps 1000 [1000-1000]
+  worker   spin gap  0 st 72: active 8, all_active_reps 1000 [1000-1000]
+  worker   spin gap 20 st 36: active 8.0, all_active_reps 1000.0 [1000-1000]
+  worker   spin gap 20 st 72: active 8.0, all_active_reps 1000.0 [1000-1000]
+  worker   spin gap 80 st 36: active 8.0, all_active_reps 1000.0 [1000-1000]
+  worker   spin gap 80 st 72: active 8.0, all_active_reps 1000.0 [1000-1000]
+  worker   park gap  0 st 36: active 8, all_active_reps 1000 [999-1000]
+  worker   park gap  0 st 72: active 8, all_active_reps 1000 [998-1000]
+  worker   park gap 20 st 36: active 7.0, all_active_reps 321.5 [143-442]
+  worker   park gap 20 st 72: active 7.5, all_active_reps 493.0 [249-665]
+  worker   park gap 80 st 36: active 8.0, all_active_reps 798.0 [678-960]
+  worker   park gap 80 st 72: active 8.0, all_active_reps 924.5 [811-998]
+  external spin gap  0 st 36: active 8, all_active_reps 1000 [1000-1000]
+  external spin gap  0 st 72: active 8, all_active_reps 1000 [1000-1000]
+  external spin gap 20 st 36: active 8.0, all_active_reps 1000.0 [1000-1000]
+  external spin gap 20 st 72: active 8.0, all_active_reps 1000.0 [1000-1000]
+  external spin gap 80 st 36: active 8.0, all_active_reps 1000.0 [1000-1000]
+  external spin gap 80 st 72: active 8.0, all_active_reps 1000.0 [1000-1000]
+  external park gap  0 st 36: active 8, all_active_reps 1000 [1000-1000]
+  external park gap  0 st 72: active 8, all_active_reps 1000 [1000-1000]
+  external park gap 20 st 36: active 7.0, all_active_reps 294.0 [154-468]
+  external park gap 20 st 72: active 7.0, all_active_reps 415.0 [292-717]
+  external park gap 80 st 36: active 8.0, all_active_reps 871.5 [807-974]
+  external park gap 80 st 72: active 8.0, all_active_reps 973.0 [929-997]
+
+## first helper inside the region, P8 b=4P gap 0 (cell median of per-process medians, ns)
+  worker   spin: 36 st 900 [800-1000], 72 st 7500 [7300-7600]; bias bound (72-36)/36 = 183 ns/stage
+  worker   park: 36 st 800 [700-1000], 72 st 7500 [7300-7600]; bias bound (72-36)/36 = 186 ns/stage
+  external spin: 36 st 1700 [1600-1900], 72 st 2100 [1900-2200]; bias bound (72-36)/36 = 11 ns/stage
+  external park: 36 st 1700 [1600-1900], 72 st 2000 [1900-2000]; bias bound (72-36)/36 = 8 ns/stage
+
+## omega(W, gap): scope ns (cell median), first helper ns; N4 = omega(80) - omega(0); AW = omega(80) - omega(5)
+  worker   W 8: gap 0: 7100 (fh 400) n=9, gap 5: 2800 (fh 900) n=9, gap 20: 9300 (fh 3400) n=9, gap 80: 9100 (fh 3500) n=9
+      N4: +2000 ns; LETTER CLAIMED [B>A] | K2 CLAIMED [B>A]
+      AW: +6300 ns; LETTER CLAIMED STRONG [B>A] | K2 CLAIMED STRONG [B>A]
+      omega(80)-omega(20): -200 ns; LETTER NOT CLAIMED
+  worker   W16: gap 0: 10500 (fh 400) n=9, gap 5: 11100 (fh 400) n=9, gap 20: 20600 (fh 3600) n=9, gap 80: 20700 (fh 3700) n=9
+      N4: +10200 ns; LETTER CLAIMED STRONG [B>A] | K2 CLAIMED STRONG [B>A]
+      AW: +9600 ns; LETTER CLAIMED STRONG [B>A] | K2 CLAIMED STRONG [B>A]
+      omega(80)-omega(20): +100 ns; LETTER NOT CLAIMED
+  external W 8: gap 0: 4700 (fh 300) n=9, gap 5: 4300 (fh 900) n=9, gap 20: 11000 (fh 3500) n=9, gap 80: 10900 (fh 3600) n=9
+      N4: +6200 ns; LETTER CLAIMED STRONG [B>A] | K2 CLAIMED STRONG [B>A]
+      AW: +6600 ns; LETTER CLAIMED STRONG [B>A] | K2 CLAIMED STRONG [B>A]
+      omega(80)-omega(20): -100 ns; LETTER NOT CLAIMED
+  external W16: gap 0: 5200 (fh 300) n=9, gap 5: 6600 (fh 400) n=9, gap 20: 21600 (fh 3600) n=9, gap 80: 22200 (fh 3700) n=9
+      N4: +17000 ns; LETTER CLAIMED STRONG [B>A] | K2 CLAIMED STRONG [B>A]
+      AW: +15600 ns; LETTER CLAIMED STRONG [B>A] | K2 CLAIMED STRONG [B>A]
+      omega(80)-omega(20): +600 ns; LETTER NOT CLAIMED
+
+## park void rule re-read (park rows; per (config, stages) cell over the USED processes)
+  park cells 44; gap>0 cells VOID (0 parks on every used process): 0; gap-0 cells with no park taken: 35 of 36; gap-0 cells that parked: [(('worker', 8, 4, 0, 72), [2, 3])]
+  gap>0 parks per region (gap, stages, values): [(20, 36, (252,)), (20, 72, (504,)), (80, 36, (252,)), (80, 72, (504,))]
+
+## v1 continuity (window 8 N5 method: slope = (cell region@72 - cell region@36)/36), P8
+  worker   P 2: region36 15250 (K=2), region72 31200 (K=2); slope 443.1
+  worker   P 4: region36 44500 (K=2), region72 86200 (K=2); slope 1158.3
+  worker   P 8: region36 110400 (K=2), region72 218200 (K=2); slope 2994.4
+  worker   P16: region36 210800 (K=2), region72 424500 (K=2); slope 5936.1
+  external P 2: region36 16500 (K=2), region72 33700 (K=2); slope 477.8
+  external P 4: region36 41450 (K=2), region72 100200 (K=2); slope 1631.9
+  external P 8: region36 108150 (K=2), region72 223150 (K=2); slope 3194.4
+  external P16: region36 222950 (K=2), region72 400450 (K=2); slope 4930.6

@@ -1,0 +1,256 @@
+# J-Son-T: sleeping ON vs OFF on the tree broadphase (TIP 16191fda, cfg a, gap 0.5), K = 9 = 3 passes x 3 rounds
+records (non-warm-up) 85; slots 72; used 70; dropped slots 2
+validity problems (independent re-check): 0
+  DROPPED slot pass 0 round 0 JSoffT@W8 seq 2: [('original', [], ['witness 2.73']), ('rerun', [], ['receipt after 5.51'])]
+  DROPPED slot pass 0 round 0 JSoffT@W1 seq 6: [('original', [], ['receipt after 14.77']), ('rerun', [], ['witness 2.01'])]
+unclean processes: 15
+  (0, 0, 'JSoffT', 8, 'original', ['witness 2.73'])
+  (0, 0, 'JSonT-a', 8, 'original', ['witness 2.91'])
+  (0, 0, 'JSonT', 8, 'original', ['witness 2.22'])
+  (0, 0, 'JSoffT', 1, 'original', ['receipt after 14.77'])
+  (0, 1, 'JSonT-a', 1, 'original', ['witness 2.47'])
+  (0, 2, 'JSonT', 8, 'original', ['witness 3.06'])
+  (0, 0, 'JSoffT', 8, 'rerun', ['receipt after 5.51'])
+  (0, 0, 'JSoffT', 1, 'rerun', ['witness 2.01'])
+  (1, 0, 'JSonT-a', 1, 'original', ['witness 2.29'])
+  (1, 2, 'JSonT-a', 1, 'original', ['witness 2.54'])
+  (1, 2, 'JSonT-a', 8, 'original', ['witness 3.15'])
+  (2, 1, 'JSonT-a', 8, 'original', ['witness 2.28'])
+  (2, 1, 'JSonT', 8, 'original', ['witness 2.2'])
+  (2, 2, 'JSonT', 8, 'original', ['witness 2.97'])
+  (2, 2, 'JSoffT-a', 1, 'original', ['witness 2.14'])
+re-runs used: 11 [(0, 0, 'JSonT-a', 8), (0, 0, 'JSonT', 8), (0, 1, 'JSonT-a', 1), (0, 2, 'JSonT', 8), (1, 0, 'JSonT-a', 1), (1, 2, 'JSonT-a', 1), (1, 2, 'JSonT-a', 8), (2, 1, 'JSonT-a', 8), (2, 1, 'JSonT', 8), (2, 2, 'JSonT', 8), (2, 2, 'JSoffT-a', 1)]
+per-process means vs the driver cols (4 windows x 85 processes): mismatches 0
+receipts of used processes: before max 4.79, after max 4.02, witness max 1.93 %
+first_frozen_step (SUMMARY) on ON rows: [274]
+pose hashes: [('JSoffT', '0x30c5438bc6ad9ffa'), ('JSoffT-a', '0x30c5438bc6ad9ffa'), ('JSonT', '0x3db47fae414b655c'), ('JSonT-a', '0x3db47fae414b655c')]
+
+## Cells (ms/step; cell = median over K of process means) and ON/OFF under ruling 1
+
+[0..100) W1 disarmed
+  OFF JSoffT: 15.8843 [15.8007-15.9408] K=8 (IQR 0.0423 = 0.27 %, SE 0.0190 = 0.12 %, range 0.88 %)
+  ON  JSonT:  15.9107 [15.7714-16.0471] K=9 (IQR 0.1245 = 0.78 %, SE 0.0353 = 0.22 %, range 1.73 %)
+  ON/OFF pooled: 1.0017 (+0.17 %, d +0.0264) r/i/s n/n/n bars r 3.89 / i 1.65 / s 0.50 %
+  pass 0: OFF 15.8843 (K 2, IQR 0.06 %, SE 0.08 %) ON 15.9583 (K 3, IQR 0.46 %, SE 0.38 %) -> 1.0047 (+0.47 %, d +0.0740) r/i/s n/n/n bars r 1.84 / i 0.92 / s 0.77 % [K 2/3 < 3: no claim possible]
+          same pass with K >= 2 allowed: 1.0047 (+0.47 %, d +0.0740) r/i/s n/n/n bars r 1.84 / i 0.92 / s 0.77 %
+  pass 1: OFF 15.8561 (K 3, IQR 0.37 %, SE 0.27 %) ON 15.9005 (K 3, IQR 0.87 %, SE 0.63 %) -> 1.0028 (+0.28 %, d +0.0444) r/i/s n/n/n bars r 3.77 / i 1.88 / s 1.36 %
+  pass 2: OFF 15.9011 (K 3, IQR 0.24 %, SE 0.17 %) ON 15.9107 (K 3, IQR 0.25 %, SE 0.20 %) -> 1.0006 (+0.06 %, d +0.0096) r/i/s n/n/n bars r 1.37 / i 0.69 / s 0.53 %
+  RULING 1 (K >= 3 per pass): NOT CLAIMED ; with a K = 2 pass admitted: NOT CLAIMED 
+
+[100..500) W1 disarmed
+  OFF JSoffT: 14.7501 [14.6881-15.0911] K=8 (IQR 0.1053 = 0.71 %, SE 0.0670 = 0.45 %, range 2.73 %)
+  ON  JSonT:  6.5164 [6.4901-6.5343] K=9 (IQR 0.0186 = 0.28 %, SE 0.0061 = 0.09 %, range 0.68 %)
+  ON/OFF pooled: 0.4418 (-55.82 %, d -8.2338) r/i/s Y/Y/Y bars r 5.63 / i 1.54 / s 0.93 %
+  pass 0: OFF 14.8500 (K 2, IQR 1.02 %, SE 1.28 %) ON 6.5171 (K 3, IQR 0.14 %, SE 0.12 %) -> 0.4389 (-56.11 %, d -8.3329) r/i/s n/n/n bars r 4.11 / i 2.06 / s 2.56 % [K 2/3 < 3: no claim possible]
+          same pass with K >= 2 allowed: 0.4389 (-56.11 %, d -8.3329) r/i/s Y/Y/Y bars r 4.11 / i 2.06 / s 2.56 %
+  pass 1: OFF 14.7405 (K 3, IQR 0.13 %, SE 0.09 %) ON 6.5141 (K 3, IQR 0.18 %, SE 0.15 %) -> 0.4419 (-55.81 %, d -8.2264) r/i/s Y/Y/Y bars r 0.88 / i 0.44 / s 0.34 %
+  pass 2: OFF 14.7624 (K 3, IQR 1.37 %, SE 1.05 %) ON 6.5237 (K 3, IQR 0.34 %, SE 0.26 %) -> 0.4419 (-55.81 %, d -8.2388) r/i/s Y/Y/Y bars r 5.63 / i 2.81 / s 2.16 %
+  RULING 1 (K >= 3 per pass): NOT CLAIMED ; with a K = 2 pass admitted: CLAIMED STRONG ON faster
+
+[274..500) W1 disarmed
+  OFF JSoffT: 14.6145 [14.5637-14.9805] K=8 (IQR 0.1344 = 0.92 %, SE 0.0743 = 0.51 %, range 2.85 %)
+  ON  JSonT:  0.1254 [0.1223-0.1349] K=9 (IQR 0.0066 = 5.23 %, SE 0.0017 = 1.39 %, range 10.04 %)
+  ON/OFF pooled: 0.0086 (-99.14 %, d -14.4891) r/i/s Y/Y/Y bars r 20.87 / i 10.62 / s 2.95 %
+  pass 0: OFF 14.7545 (K 2, IQR 1.21 %, SE 1.51 %) ON 0.1250 (K 3, IQR 3.16 %, SE 2.33 %) -> 0.0085 (-99.15 %, d -14.6295) r/i/s n/n/n bars r 13.54 / i 6.77 / s 5.55 % [K 2/3 < 3: no claim possible]
+          same pass with K >= 2 allowed: 0.0085 (-99.15 %, d -14.6295) r/i/s Y/Y/Y bars r 13.54 / i 6.77 / s 5.55 %
+  pass 1: OFF 14.6042 (K 3, IQR 0.13 %, SE 0.10 %) ON 0.1254 (K 3, IQR 1.00 %, SE 0.74 %) -> 0.0086 (-99.14 %, d -14.4788) r/i/s Y/Y/Y bars r 4.04 / i 2.02 / s 1.50 %
+  pass 2: OFF 14.6459 (K 3, IQR 1.42 %, SE 1.09 %) ON 0.1307 (K 3, IQR 4.34 %, SE 3.18 %) -> 0.0089 (-99.11 %, d -14.5153) r/i/s Y/Y/Y bars r 18.28 / i 9.14 / s 6.72 %
+  RULING 1 (K >= 3 per pass): NOT CLAIMED ; with a K = 2 pass admitted: CLAIMED STRONG ON faster
+
+[0..500) W1 disarmed (post hoc window)
+  OFF JSoffT: 14.9733 [14.9307-15.2611] K=8 (IQR 0.1011 = 0.68 %, SE 0.0558 = 0.37 %, range 2.21 %)
+  ON  JSonT:  8.3857 [8.3655-8.4225] K=9 (IQR 0.0322 = 0.38 %, SE 0.0081 = 0.10 %, range 0.68 %)
+  ON/OFF pooled: 0.5600 (-44.00 %, d -6.5876) r/i/s Y/Y/Y bars r 4.62 / i 1.55 / s 0.77 %
+  pass 0: OFF 15.0568 (K 2, IQR 0.82 %, SE 1.02 %) ON 8.3912 (K 3, IQR 0.18 %, SE 0.13 %) -> 0.5573 (-44.27 %, d -6.6657) r/i/s n/n/n bars r 3.34 / i 1.67 / s 2.06 % [K 2/3 < 3: no claim possible]
+          same pass with K >= 2 allowed: 0.5573 (-44.27 %, d -6.6657) r/i/s Y/Y/Y bars r 3.34 / i 1.67 / s 2.06 %
+  pass 1: OFF 14.9636 (K 3, IQR 0.18 %, SE 0.13 %) ON 8.3742 (K 3, IQR 0.34 %, SE 0.27 %) -> 0.5596 (-44.04 %, d -6.5894) r/i/s Y/Y/Y bars r 1.53 / i 0.77 / s 0.59 %
+  pass 2: OFF 14.9830 (K 3, IQR 1.10 %, SE 0.86 %) ON 8.3857 (K 3, IQR 0.21 %, SE 0.15 %) -> 0.5597 (-44.03 %, d -6.5973) r/i/s Y/Y/Y bars r 4.49 / i 2.24 / s 1.74 %
+  RULING 1 (K >= 3 per pass): NOT CLAIMED ; with a K = 2 pass admitted: CLAIMED STRONG ON faster
+
+[100..274) W1 disarmed (post hoc window)
+  OFF JSoffT: 14.9076 [14.8497-15.2349] K=8 (IQR 0.1114 = 0.75 %, SE 0.0593 = 0.40 %, range 2.58 %)
+  ON  JSonT:  14.8173 [14.7499-14.8463] K=9 (IQR 0.0510 = 0.34 %, SE 0.0144 = 0.10 %, range 0.65 %)
+  ON/OFF pooled: 0.9939 (-0.61 %, d -0.0903) r/i/s n/n/n bars r 5.33 / i 1.65 / s 0.82 %
+  pass 0: OFF 14.9740 (K 2, IQR 0.78 %, SE 0.97 %) ON 14.8214 (K 3, IQR 0.17 %, SE 0.14 %) -> 0.9898 (-1.02 %, d -0.1527) r/i/s n/n/n bars r 3.19 / i 1.59 / s 1.97 % [K 2/3 < 3: no claim possible]
+          same pass with K >= 2 allowed: 0.9898 (-1.02 %, d -0.1527) r/i/s n/n/n bars r 3.19 / i 1.59 / s 1.97 %
+  pass 1: OFF 14.9015 (K 3, IQR 0.24 %, SE 0.19 %) ON 14.8143 (K 3, IQR 0.19 %, SE 0.15 %) -> 0.9941 (-0.59 %, d -0.0872) r/i/s n/n/Y bars r 1.21 / i 0.61 / s 0.48 %
+  pass 2: OFF 14.9138 (K 3, IQR 1.29 %, SE 1.00 %) ON 14.8365 (K 3, IQR 0.32 %, SE 0.26 %) -> 0.9948 (-0.52 %, d -0.0773) r/i/s n/n/n bars r 5.33 / i 2.66 / s 2.07 %
+  RULING 1 (K >= 3 per pass): NOT CLAIMED ; with a K = 2 pass admitted: NOT CLAIMED 
+
+[277..500) W1 disarmed (post hoc window)
+  OFF JSoffT: 14.6148 [14.5655-14.9854] K=8 (IQR 0.1333 = 0.91 %, SE 0.0743 = 0.51 %, range 2.87 %)
+  ON  JSonT:  0.1085 [0.1062-0.1166] K=9 (IQR 0.0046 = 4.24 %, SE 0.0014 = 1.34 %, range 9.58 %)
+  ON/OFF pooled: 0.0074 (-99.26 %, d -14.5063) r/i/s Y/Y/Y bars r 20.00 / i 8.68 / s 2.86 %
+  pass 0: OFF 14.7559 (K 2, IQR 1.19 %, SE 1.49 %) ON 0.1085 (K 3, IQR 3.46 %, SE 2.57 %) -> 0.0074 (-99.26 %, d -14.6474) r/i/s n/n/n bars r 14.63 / i 7.32 / s 5.95 % [K 2/3 < 3: no claim possible]
+          same pass with K >= 2 allowed: 0.0074 (-99.26 %, d -14.6474) r/i/s Y/Y/Y bars r 14.63 / i 7.32 / s 5.95 %
+  pass 1: OFF 14.6044 (K 3, IQR 0.13 %, SE 0.09 %) ON 0.1078 (K 3, IQR 1.04 %, SE 0.81 %) -> 0.0074 (-99.26 %, d -14.4966) r/i/s Y/Y/Y bars r 4.19 / i 2.09 / s 1.63 %
+  pass 2: OFF 14.6489 (K 3, IQR 1.43 %, SE 1.10 %) ON 0.1122 (K 3, IQR 4.04 %, SE 2.92 %) -> 0.0077 (-99.23 %, d -14.5367) r/i/s Y/Y/Y bars r 17.14 / i 8.57 / s 6.24 %
+  RULING 1 (K >= 3 per pass): NOT CLAIMED ; with a K = 2 pass admitted: CLAIMED STRONG ON faster
+
+[0..100) W8 disarmed
+  OFF JSoffT: 4.0971 [3.8807-4.1347] K=8 (IQR 0.1746 = 4.26 %, SE 0.0459 = 1.12 %, range 6.20 %)
+  ON  JSonT:  4.1235 [3.8187-4.1790] K=9 (IQR 0.2005 = 4.86 %, SE 0.0558 = 1.35 %, range 8.74 %)
+  ON/OFF pooled: 1.0065 (+0.65 %, d +0.0265) r/i/s n/n/n bars r 21.43 / i 12.93 / s 3.51 %
+  pass 0: OFF 4.0439 (K 2, IQR 2.04 %, SE 2.56 %) ON 4.1547 (K 3, IQR 2.14 %, SE 1.76 %) -> 1.0274 (+2.74 %, d +0.1108) r/i/s n/n/n bars r 11.84 / i 5.92 / s 6.22 % [K 2/3 < 3: no claim possible]
+          same pass with K >= 2 allowed: 1.0274 (+2.74 %, d +0.1108) r/i/s n/n/n bars r 11.84 / i 5.92 / s 6.22 %
+  pass 1: OFF 4.0931 (K 3, IQR 2.12 %, SE 1.73 %) ON 4.1235 (K 3, IQR 2.93 %, SE 2.35 %) -> 1.0074 (+0.74 %, d +0.0304) r/i/s n/n/n bars r 14.44 / i 7.22 / s 5.83 %
+  pass 2: OFF 4.1307 (K 3, IQR 3.07 %, SE 2.55 %) ON 3.9542 (K 3, IQR 4.56 %, SE 3.33 %) -> 0.9573 (-4.27 %, d -0.1766) r/i/s n/n/n bars r 21.98 / i 10.99 / s 8.39 %
+  RULING 1 (K >= 3 per pass): NOT CLAIMED ; with a K = 2 pass admitted: NOT CLAIMED 
+
+[100..500) W8 disarmed
+  OFF JSoffT: 3.8260 [3.7364-3.9122] K=8 (IQR 0.1102 = 2.88 %, SE 0.0305 = 0.80 %, range 4.60 %)
+  ON  JSonT:  1.7127 [1.6680-1.8061] K=9 (IQR 0.1158 = 6.76 %, SE 0.0255 = 1.49 %, range 8.06 %)
+  ON/OFF pooled: 0.4476 (-55.24 %, d -2.1134) r/i/s Y/Y/Y bars r 18.56 / i 14.70 / s 3.38 %
+  pass 0: OFF 3.8028 (K 2, IQR 1.06 %, SE 1.33 %) ON 1.8001 (K 3, IQR 3.63 %, SE 2.97 %) -> 0.4734 (-52.66 %, d -2.0027) r/i/s n/n/n bars r 15.13 / i 7.56 / s 6.50 % [K 2/3 < 3: no claim possible]
+          same pass with K >= 2 allowed: 0.4734 (-52.66 %, d -2.0027) r/i/s Y/Y/Y bars r 15.13 / i 7.56 / s 6.50 %
+  pass 1: OFF 3.8090 (K 3, IQR 2.07 %, SE 1.50 %) ON 1.7961 (K 3, IQR 2.73 %, SE 2.18 %) -> 0.4716 (-52.84 %, d -2.0128) r/i/s Y/Y/Y bars r 13.71 / i 6.86 / s 5.29 %
+  pass 2: OFF 3.8569 (K 3, IQR 2.28 %, SE 1.69 %) ON 1.6843 (K 3, IQR 1.32 %, SE 0.97 %) -> 0.4367 (-56.33 %, d -2.1726) r/i/s Y/Y/Y bars r 10.55 / i 5.27 / s 3.89 %
+  RULING 1 (K >= 3 per pass): NOT CLAIMED ; with a K = 2 pass admitted: CLAIMED STRONG ON faster
+
+[274..500) W8 disarmed
+  OFF JSoffT: 3.8594 [3.6371-3.9422] K=8 (IQR 0.1155 = 2.99 %, SE 0.0449 = 1.16 %, range 7.91 %)
+  ON  JSonT:  0.1337 [0.1246-0.1395] K=9 (IQR 0.0073 = 5.48 %, SE 0.0020 = 1.52 %, range 11.09 %)
+  ON/OFF pooled: 0.0346 (-96.54 %, d -3.7257) r/i/s Y/Y/Y bars r 27.24 / i 12.48 / s 3.82 %
+  pass 0: OFF 3.8133 (K 2, IQR 1.15 %, SE 1.44 %) ON 0.1324 (K 3, IQR 3.05 %, SE 2.21 %) -> 0.0347 (-96.53 %, d -3.6809) r/i/s n/n/n bars r 13.04 / i 6.52 / s 5.28 % [K 2/3 < 3: no claim possible]
+          same pass with K >= 2 allowed: 0.0347 (-96.53 %, d -3.6809) r/i/s Y/Y/Y bars r 13.04 / i 6.52 / s 5.28 %
+  pass 1: OFF 3.8641 (K 3, IQR 2.30 %, SE 1.76 %) ON 0.1372 (K 3, IQR 5.40 %, SE 4.21 %) -> 0.0355 (-96.45 %, d -3.7269) r/i/s Y/Y/Y bars r 23.48 / i 11.74 / s 9.14 %
+  pass 2: OFF 3.8616 (K 3, IQR 3.95 %, SE 2.96 %) ON 0.1337 (K 3, IQR 2.64 %, SE 1.93 %) -> 0.0346 (-96.54 %, d -3.7280) r/i/s Y/Y/Y bars r 19.00 / i 9.50 / s 7.07 %
+  RULING 1 (K >= 3 per pass): NOT CLAIMED ; with a K = 2 pass admitted: CLAIMED STRONG ON faster
+
+[0..500) W8 disarmed (post hoc window)
+  OFF JSoffT: 3.8472 [3.8023-3.9559] K=8 (IQR 0.0947 = 2.46 %, SE 0.0266 = 0.69 %, range 3.99 %)
+  ON  JSonT:  2.1953 [2.1253-2.2769] K=9 (IQR 0.1249 = 5.69 %, SE 0.0254 = 1.16 %, range 6.91 %)
+  ON/OFF pooled: 0.5706 (-42.94 %, d -1.6519) r/i/s Y/Y/Y bars r 15.96 / i 12.40 / s 2.70 %
+  pass 0: OFF 3.8510 (K 2, IQR 1.27 %, SE 1.59 %) ON 2.2710 (K 3, IQR 3.09 %, SE 2.53 %) -> 0.5897 (-41.03 %, d -1.5800) r/i/s n/n/n bars r 13.34 / i 6.67 / s 5.97 % [K 2/3 < 3: no claim possible]
+          same pass with K >= 2 allowed: 0.5897 (-41.03 %, d -1.5800) r/i/s Y/Y/Y bars r 13.34 / i 6.67 / s 5.97 %
+  pass 1: OFF 3.8327 (K 3, IQR 1.67 %, SE 1.29 %) ON 2.2256 (K 3, IQR 1.49 %, SE 1.08 %) -> 0.5807 (-41.93 %, d -1.6072) r/i/s Y/Y/Y bars r 8.94 / i 4.47 / s 3.36 %
+  pass 2: OFF 3.8617 (K 3, IQR 1.81 %, SE 1.34 %) ON 2.1339 (K 3, IQR 1.36 %, SE 1.06 %) -> 0.5526 (-44.74 %, d -1.7278) r/i/s Y/Y/Y bars r 9.06 / i 4.53 / s 3.41 %
+  RULING 1 (K >= 3 per pass): NOT CLAIMED ; with a K = 2 pass admitted: CLAIMED STRONG ON faster
+
+[100..274) W8 disarmed (post hoc window)
+  OFF JSoffT: 3.8144 [3.6397-3.9779] K=8 (IQR 0.2071 = 5.43 %, SE 0.0564 = 1.48 %, range 8.87 %)
+  ON  JSonT:  3.7645 [3.6609-3.9744] K=9 (IQR 0.2622 = 6.97 %, SE 0.0570 = 1.51 %, range 8.33 %)
+  ON/OFF pooled: 0.9869 (-1.31 %, d -0.0500) r/i/s n/n/n bars r 24.33 / i 17.66 / s 4.23 %
+  pass 0: OFF 3.7892 (K 2, IQR 3.95 %, SE 4.95 %) ON 3.9662 (K 3, IQR 3.66 %, SE 3.01 %) -> 1.0467 (+4.67 %, d +0.1770) r/i/s n/n/n bars r 21.52 / i 10.76 / s 11.58 % [K 2/3 < 3: no claim possible]
+          same pass with K >= 2 allowed: 1.0467 (+4.67 %, d +0.1770) r/i/s n/n/n bars r 21.52 / i 10.76 / s 11.58 %
+  pass 1: OFF 3.7636 (K 3, IQR 3.32 %, SE 2.47 %) ON 3.9479 (K 3, IQR 2.65 %, SE 2.09 %) -> 1.0490 (+4.90 %, d +0.1843) r/i/s n/n/n bars r 17.00 / i 8.50 / s 6.48 %
+  pass 2: OFF 3.8653 (K 3, IQR 3.00 %, SE 2.17 %) ON 3.7039 (K 3, IQR 1.34 %, SE 0.97 %) -> 0.9583 (-4.17 %, d -0.1613) r/i/s n/n/n bars r 13.13 / i 6.57 / s 4.75 %
+  RULING 1 (K >= 3 per pass): NOT CLAIMED ; with a K = 2 pass admitted: NOT CLAIMED 
+
+[277..500) W8 disarmed (post hoc window)
+  OFF JSoffT: 3.8608 [3.6384-3.9440] K=8 (IQR 0.1156 = 2.99 %, SE 0.0448 = 1.16 %, range 7.92 %)
+  ON  JSonT:  0.1177 [0.1100-0.1233] K=9 (IQR 0.0064 = 5.46 %, SE 0.0018 = 1.53 %, range 11.25 %)
+  ON/OFF pooled: 0.0305 (-96.95 %, d -3.7431) r/i/s Y/Y/Y bars r 27.51 / i 12.46 / s 3.84 %
+  pass 0: OFF 3.8150 (K 2, IQR 1.23 %, SE 1.54 %) ON 0.1177 (K 3, IQR 3.18 %, SE 2.31 %) -> 0.0309 (-96.91 %, d -3.6973) r/i/s n/n/n bars r 13.64 / i 6.82 / s 5.54 % [K 2/3 < 3: no claim possible]
+          same pass with K >= 2 allowed: 0.0309 (-96.91 %, d -3.6973) r/i/s Y/Y/Y bars r 13.64 / i 6.82 / s 5.54 %
+  pass 1: OFF 3.8641 (K 3, IQR 2.26 %, SE 1.73 %) ON 0.1213 (K 3, IQR 5.46 %, SE 4.26 %) -> 0.0314 (-96.86 %, d -3.7428) r/i/s Y/Y/Y bars r 23.63 / i 11.81 / s 9.19 %
+  pass 2: OFF 3.8599 (K 3, IQR 3.96 %, SE 2.96 %) ON 0.1169 (K 3, IQR 2.53 %, SE 1.86 %) -> 0.0303 (-96.97 %, d -3.7430) r/i/s Y/Y/Y bars r 18.80 / i 9.40 / s 6.99 %
+  RULING 1 (K >= 3 per pass): NOT CLAIMED ; with a K = 2 pass admitted: CLAIMED STRONG ON faster
+
+[0..100) W1 armed
+  OFF JSoffT-a: 15.9196 [15.8153-15.9895] K=9 (IQR 0.0980 = 0.62 %, SE 0.0259 = 0.16 %, range 1.09 %)
+  ON  JSonT-a:  15.9363 [15.8338-16.1450] K=9 (IQR 0.0939 = 0.59 %, SE 0.0401 = 0.25 %, range 1.95 %)
+  ON/OFF pooled: 1.0011 (+0.11 %, d +0.0167) r/i/s n/n/n bars r 4.48 / i 1.70 / s 0.60 %
+  pass 0: OFF 15.9126 (K 3, IQR 0.22 %, SE 0.17 %) ON 16.0153 (K 3, IQR 0.69 %, SE 0.53 %) -> 1.0065 (+0.65 %, d +0.1027) r/i/s n/n/n bars r 2.87 / i 1.44 / s 1.11 %
+  pass 1: OFF 15.9196 (K 3, IQR 0.39 %, SE 0.29 %) ON 15.9363 (K 3, IQR 0.36 %, SE 0.26 %) -> 1.0011 (+0.11 %, d +0.0167) r/i/s n/n/n bars r 2.12 / i 1.06 / s 0.78 %
+  pass 2: OFF 15.9712 (K 3, IQR 0.55 %, SE 0.43 %) ON 15.9266 (K 3, IQR 0.70 %, SE 0.58 %) -> 0.9972 (-0.28 %, d -0.0446) r/i/s n/n/n bars r 3.55 / i 1.78 / s 1.45 %
+  RULING 1 (K >= 3 per pass): NOT CLAIMED ; with a K = 2 pass admitted: NOT CLAIMED 
+
+[100..500) W1 armed
+  OFF JSoffT-a: 14.7674 [14.7382-15.0432] K=9 (IQR 0.0638 = 0.43 %, SE 0.0508 = 0.34 %, range 2.07 %)
+  ON  JSonT-a:  6.5397 [6.5208-6.6667] K=9 (IQR 0.0297 = 0.45 %, SE 0.0190 = 0.29 %, range 2.23 %)
+  ON/OFF pooled: 0.4429 (-55.71 %, d -8.2276) r/i/s Y/Y/Y bars r 6.08 / i 1.25 / s 0.90 %
+  pass 0: OFF 14.7616 (K 3, IQR 0.94 %, SE 0.78 %) ON 6.5553 (K 3, IQR 0.25 %, SE 0.20 %) -> 0.4441 (-55.59 %, d -8.2063) r/i/s Y/Y/Y bars r 3.89 / i 1.94 / s 1.61 %
+  pass 1: OFF 14.7764 (K 3, IQR 0.19 %, SE 0.15 %) ON 6.5256 (K 3, IQR 0.19 %, SE 0.15 %) -> 0.4416 (-55.84 %, d -8.2508) r/i/s Y/Y/Y bars r 1.08 / i 0.54 / s 0.42 %
+  pass 2: OFF 14.7598 (K 3, IQR 1.03 %, SE 0.83 %) ON 6.5397 (K 3, IQR 1.12 %, SE 0.88 %) -> 0.4431 (-55.69 %, d -8.2201) r/i/s Y/Y/Y bars r 6.08 / i 3.04 / s 2.42 %
+  RULING 1 (K >= 3 per pass): CLAIMED STRONG ON faster; with a K = 2 pass admitted: CLAIMED STRONG ON faster
+
+[274..500) W1 armed
+  OFF JSoffT-a: 14.6551 [14.6263-14.9638] K=9 (IQR 0.1092 = 0.75 %, SE 0.0576 = 0.39 %, range 2.30 %)
+  ON  JSonT-a:  0.1277 [0.1237-0.1334] K=9 (IQR 0.0048 = 3.72 %, SE 0.0014 = 1.06 %, range 7.55 %)
+  ON/OFF pooled: 0.0087 (-99.13 %, d -14.5275) r/i/s Y/Y/Y bars r 15.79 / i 7.59 / s 2.27 %
+  pass 0: OFF 14.6720 (K 3, IQR 1.11 %, SE 0.89 %) ON 0.1303 (K 3, IQR 1.73 %, SE 1.26 %) -> 0.0089 (-99.11 %, d -14.5417) r/i/s Y/Y/Y bars r 8.23 / i 4.11 / s 3.08 %
+  pass 1: OFF 14.6551 (K 3, IQR 0.37 %, SE 0.30 %) ON 0.1250 (K 3, IQR 0.72 %, SE 0.54 %) -> 0.0085 (-99.15 %, d -14.5301) r/i/s Y/Y/Y bars r 3.25 / i 1.62 / s 1.23 %
+  pass 2: OFF 14.6460 (K 3, IQR 1.15 %, SE 0.93 %) ON 0.1285 (K 3, IQR 2.21 %, SE 1.74 %) -> 0.0088 (-99.12 %, d -14.5176) r/i/s Y/Y/Y bars r 9.98 / i 4.99 / s 3.95 %
+  RULING 1 (K >= 3 per pass): CLAIMED STRONG ON faster; with a K = 2 pass admitted: CLAIMED STRONG ON faster
+
+[0..500) W1 armed (post hoc window)
+  OFF JSoffT-a: 15.0042 [14.9536-15.2324] K=9 (IQR 0.0310 = 0.21 %, SE 0.0428 = 0.29 %, range 1.86 %)
+  ON  JSonT-a:  8.4161 [8.3943-8.5624] K=9 (IQR 0.0298 = 0.35 %, SE 0.0216 = 0.26 %, range 2.00 %)
+  ON/OFF pooled: 0.5609 (-43.91 %, d -6.5882) r/i/s Y/Y/Y bars r 5.46 / i 0.82 / s 0.77 %
+  pass 0: OFF 14.9937 (K 3, IQR 0.78 %, SE 0.63 %) ON 8.4246 (K 3, IQR 0.28 %, SE 0.21 %) -> 0.5619 (-43.81 %, d -6.5691) r/i/s Y/Y/Y bars r 3.31 / i 1.66 / s 1.33 %
+  pass 1: OFF 15.0051 (K 3, IQR 0.07 %, SE 0.06 %) ON 8.4048 (K 3, IQR 0.24 %, SE 0.18 %) -> 0.5601 (-43.99 %, d -6.6003) r/i/s Y/Y/Y bars r 1.00 / i 0.50 / s 0.38 %
+  pass 2: OFF 15.0021 (K 3, IQR 0.93 %, SE 0.72 %) ON 8.4161 (K 3, IQR 0.95 %, SE 0.76 %) -> 0.5610 (-43.90 %, d -6.5860) r/i/s Y/Y/Y bars r 5.32 / i 2.66 / s 2.10 %
+  RULING 1 (K >= 3 per pass): CLAIMED STRONG ON faster; with a K = 2 pass admitted: CLAIMED STRONG ON faster
+
+[100..274) W1 armed (post hoc window)
+  OFF JSoffT-a: 14.9131 [14.8741-15.1477] K=9 (IQR 0.0372 = 0.25 %, SE 0.0435 = 0.29 %, range 1.83 %)
+  ON  JSonT-a:  14.8681 [14.8236-15.1526] K=9 (IQR 0.0622 = 0.42 %, SE 0.0425 = 0.29 %, range 2.21 %)
+  ON/OFF pooled: 0.9970 (-0.30 %, d -0.0451) r/i/s n/n/n bars r 5.75 / i 0.97 / s 0.82 %
+  pass 0: OFF 14.9239 (K 3, IQR 0.86 %, SE 0.66 %) ON 14.9005 (K 3, IQR 0.23 %, SE 0.18 %) -> 0.9984 (-0.16 %, d -0.0234) r/i/s n/n/n bars r 3.58 / i 1.79 / s 1.38 %
+  pass 1: OFF 14.9131 (K 3, IQR 0.11 %, SE 0.09 %) ON 14.8383 (K 3, IQR 0.19 %, SE 0.15 %) -> 0.9950 (-0.50 %, d -0.0748) r/i/s n/Y/Y bars r 0.87 / i 0.44 / s 0.35 %
+  pass 2: OFF 14.9077 (K 3, IQR 0.89 %, SE 0.71 %) ON 14.8681 (K 3, IQR 1.11 %, SE 0.87 %) -> 0.9973 (-0.27 %, d -0.0396) r/i/s n/n/n bars r 5.67 / i 2.84 / s 2.24 %
+  RULING 1 (K >= 3 per pass): NOT CLAIMED ; with a K = 2 pass admitted: NOT CLAIMED 
+
+[277..500) W1 armed (post hoc window)
+  OFF JSoffT-a: 14.6581 [14.6292-14.9673] K=9 (IQR 0.1135 = 0.77 %, SE 0.0578 = 0.39 %, range 2.31 %)
+  ON  JSonT-a:  0.1112 [0.1074-0.1149] K=9 (IQR 0.0030 = 2.73 %, SE 0.0010 = 0.94 %, range 6.68 %)
+  ON/OFF pooled: 0.0076 (-99.24 %, d -14.5469) r/i/s Y/Y/Y bars r 14.14 / i 5.67 / s 2.04 %
+  pass 0: OFF 14.6751 (K 3, IQR 1.14 %, SE 0.90 %) ON 0.1117 (K 3, IQR 1.25 %, SE 0.98 %) -> 0.0076 (-99.24 %, d -14.5634) r/i/s Y/Y/Y bars r 6.77 / i 3.38 / s 2.65 %
+  pass 1: OFF 14.6581 (K 3, IQR 0.38 %, SE 0.30 %) ON 0.1086 (K 3, IQR 0.58 %, SE 0.46 %) -> 0.0074 (-99.26 %, d -14.5495) r/i/s Y/Y/Y bars r 2.76 / i 1.38 / s 1.11 %
+  pass 2: OFF 14.6457 (K 3, IQR 1.14 %, SE 0.93 %) ON 0.1112 (K 3, IQR 2.17 %, SE 1.64 %) -> 0.0076 (-99.24 %, d -14.5345) r/i/s Y/Y/Y bars r 9.82 / i 4.91 / s 3.77 %
+  RULING 1 (K >= 3 per pass): CLAIMED STRONG ON faster; with a K = 2 pass admitted: CLAIMED STRONG ON faster
+
+[0..100) W8 armed
+  OFF JSoffT-a: 4.2259 [3.9162-4.3020] K=9 (IQR 0.2844 = 6.73 %, SE 0.0633 = 1.50 %, range 9.13 %)
+  ON  JSonT-a:  4.2392 [3.9497-4.2935] K=9 (IQR 0.0970 = 2.29 %, SE 0.0538 = 1.27 %, range 8.11 %)
+  ON/OFF pooled: 1.0032 (+0.32 %, d +0.0134) r/i/s n/n/n bars r 24.42 / i 14.22 / s 3.93 %
+  pass 0: OFF 4.2259 (K 3, IQR 4.56 %, SE 3.50 %) ON 4.2392 (K 3, IQR 1.10 %, SE 0.80 %) -> 1.0032 (+0.32 %, d +0.0134) r/i/s n/n/n bars r 18.79 / i 9.39 / s 7.18 %
+  pass 1: OFF 4.2209 (K 3, IQR 3.24 %, SE 2.57 %) ON 4.1794 (K 3, IQR 3.55 %, SE 2.62 %) -> 0.9902 (-0.98 %, d -0.0415) r/i/s n/n/n bars r 19.22 / i 9.61 / s 7.34 %
+  pass 2: OFF 4.2635 (K 3, IQR 3.35 %, SE 2.79 %) ON 4.2410 (K 3, IQR 3.88 %, SE 3.07 %) -> 0.9947 (-0.53 %, d -0.0225) r/i/s n/n/n bars r 20.49 / i 10.25 / s 8.30 %
+  RULING 1 (K >= 3 per pass): NOT CLAIMED ; with a K = 2 pass admitted: NOT CLAIMED 
+
+[100..500) W8 armed
+  OFF JSoffT-a: 3.9420 [3.8701-4.1038] K=9 (IQR 0.1089 = 2.76 %, SE 0.0326 = 0.83 %, range 5.93 %)
+  ON  JSonT-a:  1.7813 [1.7151-1.8543] K=9 (IQR 0.0952 = 5.35 %, SE 0.0231 = 1.30 %, range 7.81 %)
+  ON/OFF pooled: 0.4519 (-54.81 %, d -2.1607) r/i/s Y/Y/Y bars r 19.62 / i 12.03 / s 3.08 %
+  pass 0: OFF 3.9149 (K 3, IQR 1.39 %, SE 1.14 %) ON 1.8437 (K 3, IQR 3.37 %, SE 2.75 %) -> 0.4709 (-52.91 %, d -2.0713) r/i/s Y/Y/Y bars r 14.58 / i 7.29 / s 5.95 %
+  pass 1: OFF 3.9955 (K 3, IQR 1.85 %, SE 1.44 %) ON 1.8358 (K 3, IQR 2.88 %, SE 2.23 %) -> 0.4595 (-54.05 %, d -2.1597) r/i/s Y/Y/Y bars r 13.70 / i 6.85 / s 5.31 %
+  pass 2: OFF 3.9420 (K 3, IQR 2.89 %, SE 2.15 %) ON 1.7745 (K 3, IQR 1.87 %, SE 1.48 %) -> 0.4502 (-54.98 %, d -2.1675) r/i/s Y/Y/Y bars r 13.74 / i 6.87 / s 5.22 %
+  RULING 1 (K >= 3 per pass): CLAIMED STRONG ON faster; with a K = 2 pass admitted: CLAIMED STRONG ON faster
+
+[274..500) W8 armed
+  OFF JSoffT-a: 3.9985 [3.7288-4.0900] K=9 (IQR 0.2022 = 5.06 %, SE 0.0547 = 1.37 %, range 9.03 %)
+  ON  JSonT-a:  0.1334 [0.1242-0.1371] K=9 (IQR 0.0105 = 7.87 %, SE 0.0022 = 1.68 %, range 9.68 %)
+  ON/OFF pooled: 0.0334 (-96.66 %, d -3.8651) r/i/s Y/Y/Y bars r 26.48 / i 18.71 / s 4.33 %
+  pass 0: OFF 3.8173 (K 3, IQR 3.24 %, SE 2.61 %) ON 0.1365 (K 3, IQR 4.04 %, SE 3.30 %) -> 0.0357 (-96.43 %, d -3.6809) r/i/s Y/Y/Y bars r 20.72 / i 10.36 / s 8.41 %
+  pass 1: OFF 3.9985 (K 3, IQR 2.15 %, SE 1.75 %) ON 0.1334 (K 3, IQR 1.56 %, SE 1.29 %) -> 0.0334 (-96.66 %, d -3.8651) r/i/s Y/Y/Y bars r 10.61 / i 5.31 / s 4.35 %
+  pass 2: OFF 4.0195 (K 3, IQR 4.49 %, SE 3.45 %) ON 0.1246 (K 3, IQR 5.18 %, SE 4.26 %) -> 0.0310 (-96.90 %, d -3.8949) r/i/s Y/Y/Y bars r 27.43 / i 13.72 / s 10.96 %
+  RULING 1 (K >= 3 per pass): CLAIMED STRONG ON faster; with a K = 2 pass admitted: CLAIMED STRONG ON faster
+
+[0..500) W8 armed (post hoc window)
+  OFF JSoffT-a: 3.9876 [3.9462-4.1358] K=9 (IQR 0.0439 = 1.10 %, SE 0.0257 = 0.64 %, range 4.75 %)
+  ON  JSonT-a:  2.2754 [2.1947-2.3336] K=9 (IQR 0.0993 = 4.36 %, SE 0.0233 = 1.02 %, range 6.10 %)
+  ON/OFF pooled: 0.5706 (-42.94 %, d -1.7122) r/i/s Y/Y/Y bars r 15.47 / i 9.00 / s 2.42 %
+  pass 0: OFF 3.9876 (K 3, IQR 0.26 %, SE 0.19 %) ON 2.3196 (K 3, IQR 2.27 %, SE 1.79 %) -> 0.5817 (-41.83 %, d -1.6680) r/i/s Y/Y/Y bars r 9.16 / i 4.58 / s 3.59 %
+  pass 1: OFF 3.9918 (K 3, IQR 1.41 %, SE 1.02 %) ON 2.3193 (K 3, IQR 2.79 %, SE 2.29 %) -> 0.5810 (-41.90 %, d -1.6725) r/i/s Y/Y/Y bars r 12.48 / i 6.24 / s 5.01 %
+  pass 2: OFF 3.9539 (K 3, IQR 2.36 %, SE 1.95 %) ON 2.2203 (K 3, IQR 1.36 %, SE 1.09 %) -> 0.5616 (-43.84 %, d -1.7336) r/i/s Y/Y/Y bars r 10.88 / i 5.44 / s 4.46 %
+  RULING 1 (K >= 3 per pass): CLAIMED STRONG ON faster; with a K = 2 pass admitted: CLAIMED STRONG ON faster
+
+[100..274) W8 armed (post hoc window)
+  OFF JSoffT-a: 4.0417 [3.8414-4.1218] K=9 (IQR 0.0711 = 1.76 %, SE 0.0357 = 0.88 %, range 6.94 %)
+  ON  JSonT-a:  3.9181 [3.7810-4.0894] K=9 (IQR 0.2149 = 5.49 %, SE 0.0513 = 1.31 %, range 7.87 %)
+  ON/OFF pooled: 0.9694 (-3.06 %, d -0.1237) r/i/s n/n/n bars r 20.98 / i 11.52 / s 3.16 %
+  pass 0: OFF 4.0417 (K 3, IQR 0.87 %, SE 0.68 %) ON 4.0610 (K 3, IQR 3.34 %, SE 2.73 %) -> 1.0048 (+0.48 %, d +0.0193) r/i/s n/n/n bars r 13.80 / i 6.90 / s 5.62 %
+  pass 1: OFF 3.9810 (K 3, IQR 1.60 %, SE 1.16 %) ON 4.0523 (K 3, IQR 3.00 %, SE 2.34 %) -> 1.0179 (+1.79 %, d +0.0713) r/i/s n/n/n bars r 13.60 / i 6.80 / s 5.22 %
+  pass 2: OFF 4.0678 (K 3, IQR 3.45 %, SE 2.65 %) ON 3.9170 (K 3, IQR 1.75 %, SE 1.46 %) -> 0.9629 (-3.71 %, d -0.1508) r/i/s n/n/n bars r 15.46 / i 7.73 / s 6.04 %
+  RULING 1 (K >= 3 per pass): NOT CLAIMED ; with a K = 2 pass admitted: NOT CLAIMED 
+
+[277..500) W8 armed (post hoc window)
+  OFF JSoffT-a: 3.9985 [3.7254-4.0921] K=9 (IQR 0.2075 = 5.19 %, SE 0.0553 = 1.38 %, range 9.17 %)
+  ON  JSonT-a:  0.1177 [0.1097-0.1217] K=9 (IQR 0.0057 = 4.82 %, SE 0.0018 = 1.57 %, range 10.14 %)
+  ON/OFF pooled: 0.0294 (-97.06 %, d -3.8808) r/i/s Y/Y/Y bars r 27.35 / i 14.17 / s 4.18 %
+  pass 0: OFF 3.8136 (K 3, IQR 3.29 %, SE 2.66 %) ON 0.1177 (K 3, IQR 4.06 %, SE 2.95 %) -> 0.0309 (-96.91 %, d -3.6959) r/i/s Y/Y/Y bars r 20.90 / i 10.45 / s 7.95 %
+  pass 1: OFF 3.9985 (K 3, IQR 2.09 %, SE 1.71 %) ON 0.1177 (K 3, IQR 1.17 %, SE 0.96 %) -> 0.0294 (-97.06 %, d -3.8808) r/i/s Y/Y/Y bars r 9.59 / i 4.79 / s 3.93 %
+  pass 2: OFF 4.0212 (K 3, IQR 4.56 %, SE 3.50 %) ON 0.1100 (K 3, IQR 5.08 %, SE 4.19 %) -> 0.0274 (-97.26 %, d -3.9112) r/i/s Y/Y/Y bars r 27.30 / i 13.65 / s 10.92 %
+  RULING 1 (K >= 3 per pass): CLAIMED STRONG ON faster; with a K = 2 pass admitted: CLAIMED STRONG ON faster

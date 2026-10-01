@@ -1,0 +1,11 @@
+--- a/crates/boyko_physics/src/solver/colored.rs
++++ b/crates/boyko_physics/src/solver/colored.rs
+@@ -388,7 +388,7 @@
+ 
+ /// S4: the most tasks the setup scope spawns — row D's one-block rule: 32 task cells of at most
+ /// 128 B fill the scope's first 4 KiB block, so the scope costs one boxed frame and one chunk.
+-pub(crate) const SETUP_MAX_TASKS: usize = 32;
++pub(crate) const SETUP_MAX_TASKS: usize = 1;
+ 
+ /// S4: the setup scope's task count for a step of `points` laid-out points in `n_cohorts`
+ /// cohorts on `lanes` workers — the lanes, work, cohort and cell-budget terms. At two or more the

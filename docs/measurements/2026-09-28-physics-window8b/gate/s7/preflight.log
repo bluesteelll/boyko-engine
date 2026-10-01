@@ -1,0 +1,52 @@
+2026-09-29T07:09:45.683+03:00 fixture JA500: s7p (= tip exe) W1 exit 0 pose 0x30c5438bc6ad9ffa void 0; bytes equal to window 8's committed JA500.pose: True -> OK
+2026-09-29T07:09:54.055+03:00 P JT W1  disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:10:03.655+03:00 P JA W1  disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:10:05.712+03:00 P JT W2  disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:10:12.118+03:00 P JA W2  disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:10:13.988+03:00 P JT W4  disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:10:19.272+03:00 P JA W4  disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:10:20.847+03:00 P JT W8  disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:10:25.211+03:00 P JA W8  disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:10:27.466+03:00 P JT W16 disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:10:33.675+03:00 P JA W16 disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:10:37.609+03:00 T JT W1  disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:10:47.794+03:00 T JA W1  disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:10:49.742+03:00 T JT W2  disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:10:55.887+03:00 T JA W2  disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:10:57.413+03:00 T JT W4  disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:11:01.740+03:00 T JA W4  disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:11:03.204+03:00 T JT W8  disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:11:06.828+03:00 T JA W8  disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:11:08.334+03:00 T JT W16 disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:11:12.322+03:00 T JA W16 disarmed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:11:12.323+03:00 cmp P vs T JT W1: equal (silent)
+2026-09-29T07:11:12.324+03:00 cmp P vs T JA W1: equal (silent)
+2026-09-29T07:11:12.325+03:00 cmp P vs T JT W2: equal (silent)
+2026-09-29T07:11:12.326+03:00 cmp P vs T JA W2: equal (silent)
+2026-09-29T07:11:12.327+03:00 cmp P vs T JT W4: equal (silent)
+2026-09-29T07:11:12.327+03:00 cmp P vs T JA W4: equal (silent)
+2026-09-29T07:11:12.328+03:00 cmp P vs T JT W8: equal (silent)
+2026-09-29T07:11:12.328+03:00 cmp P vs T JA W8: equal (silent)
+2026-09-29T07:11:12.329+03:00 cmp P vs T JT W16: equal (silent)
+2026-09-29T07:11:12.330+03:00 cmp P vs T JA W16: equal (silent)
+2026-09-29T07:11:13.860+03:00 P JT W8  armed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:11:17.719+03:00 P JA W8  armed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:11:19.265+03:00 P JT W16 armed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:11:23.031+03:00 P JA W16 armed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:11:24.828+03:00 T JT W8  armed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:11:29.224+03:00 T JA W8  armed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:11:30.942+03:00 T JT W16 armed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:11:34.965+03:00 T JA W16 armed: exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 PASS
+2026-09-29T07:11:34.967+03:00 P (uncapped) JT W8: lanes_sum 392023, bound 8 x scopes + (W+1) x setup_steps = 399732, within True; color_scopes 49404, color_tasks 1126176, setup_steps 500, setup_tasks 15980 (W <= physical: recorded) PASS
+2026-09-29T07:11:34.967+03:00 T (capped) JT W8: lanes_sum 381099, bound 8 x scopes + (W+1) x setup_steps = 399732, within True; color_scopes 49404, color_tasks 1126176, setup_steps 500, setup_tasks 15980 (W <= physical: recorded) PASS
+2026-09-29T07:11:34.967+03:00   JT W8: P and T color_scopes / color_tasks / setup_steps / setup_tasks equal: True
+2026-09-29T07:11:34.968+03:00 P (uncapped) JT W16: lanes_sum 607272, bound 8 x scopes + (W+1) x setup_steps = 403732, within False; color_scopes 49404, color_tasks 1126176, setup_steps 500, setup_tasks 15980 (gated) PASS
+2026-09-29T07:11:34.968+03:00 T (capped) JT W16: lanes_sum 391361, bound 8 x scopes + (W+1) x setup_steps = 403732, within True; color_scopes 49404, color_tasks 1126176, setup_steps 500, setup_tasks 15980 (gated) PASS
+2026-09-29T07:11:34.968+03:00   JT W16: P and T color_scopes / color_tasks / setup_steps / setup_tasks equal: True
+2026-09-29T07:11:34.969+03:00 P (uncapped) JA W8: lanes_sum 394544, bound 8 x scopes + (W+1) x setup_steps = 399732, within True; color_scopes 49404, color_tasks 1485480, setup_steps 500, setup_tasks 15980 (W <= physical: recorded) PASS
+2026-09-29T07:11:34.969+03:00 T (capped) JA W8: lanes_sum 380996, bound 8 x scopes + (W+1) x setup_steps = 399732, within True; color_scopes 49404, color_tasks 1485480, setup_steps 500, setup_tasks 15980 (W <= physical: recorded) PASS
+2026-09-29T07:11:34.970+03:00   JA W8: P and T color_scopes / color_tasks / setup_steps / setup_tasks equal: True
+2026-09-29T07:11:34.970+03:00 P (uncapped) JA W16: lanes_sum 597418, bound 8 x scopes + (W+1) x setup_steps = 403732, within False; color_scopes 49404, color_tasks 1485480, setup_steps 500, setup_tasks 15980 (gated) PASS
+2026-09-29T07:11:34.970+03:00 T (capped) JA W16: lanes_sum 399017, bound 8 x scopes + (W+1) x setup_steps = 403732, within True; color_scopes 49404, color_tasks 1485480, setup_steps 500, setup_tasks 15980 (gated) PASS
+2026-09-29T07:11:34.971+03:00   JA W16: P and T color_scopes / color_tasks / setup_steps / setup_tasks equal: True
+2026-09-29T07:11:34.972+03:00 S7 pre-flight: 28 processes (0 failing), cmp 10 (0 differ), engagement 12 checks (0 failing) -> PASS
