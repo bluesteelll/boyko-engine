@@ -441,7 +441,7 @@ In [.claude/agents/](.claude/agents/) the following are defined:
 The main Claude in the chat acts as the **orchestrator** — chooses the right agents for each task and runs the iteration loops.
 
 **Model routing — the current routing** (owner decision "both steps", 2026-09-30; rulings 5 and 7 of
-the section "After window 9a (2026-09-30)" of
+the 2026-09-30 list in the section "After window 9a (2026-09-30)" of
 [`docs/physics/perf-campaign/levers/00-RULINGS.md`](docs/physics/perf-campaign/levers/00-RULINGS.md)).
 The `model:` frontmatter of all nine agent files stays `opus`; the orchestrator's lane scripts
 choose the tier per call, as below.
