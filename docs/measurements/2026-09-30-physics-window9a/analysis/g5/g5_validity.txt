@@ -1,0 +1,36 @@
+# C4-G5 validity (passes with pass_done: [(0, 0), (1, 0), (2, 0)])
+processes (timed) 95: original 90, rerun 5; warm-ups 3
+invalid by my check: 0; driver valid flag false: 0; disagreements: 0
+unclean by my check: 5; driver contaminated: 5; disagreements: 0
+  UNCLEAN original p0 seq 25 C4-S16ap W1 wall 0.022 s: ['witness 9.09']
+  UNCLEAN original p2 seq 5 C4-S16ap W1 wall 0.023 s: ['witness 4.35']
+  UNCLEAN original p2 seq 8 C4-R W1 wall 3.462 s: ['receipt after 6.24', 'witness 3.5']
+  UNCLEAN original p2 seq 15 C4-S16ap W1 wall 0.023 s: ['witness 4.35']
+  UNCLEAN original p2 seq 25 C4-S16ap W1 wall 0.022 s: ['witness 9.09']
+slots used 90, dropped 0
+re-runs used (slot filled by a re-run): 5
+K per cell (pass0/pass1/pass2 -> pooled):
+  C4-JD-armed    W1  3/3/3 -> 9
+  C4-JD-armed    W8  3/3/3 -> 9
+  C4-JDap-armed  W1  3/3/3 -> 9
+  C4-JDap-armed  W8  3/3/3 -> 9
+  C4-R           W1  3/3/3 -> 9
+  C4-R           W8  3/3/3 -> 9
+  C4-Rap         W1  3/3/3 -> 9
+  C4-Rap         W8  3/3/3 -> 9
+  C4-S16         W1  3/3/3 -> 9
+  C4-S16ap       W1  3/3/3 -> 9
+R4 (C4-S16 vs C4-S16ap pose bytes): 13 records, verdicts {'equal': 13}
+pose hashes of used processes: [(('C4-JD-armed', 1, '0x30c5438bc6ad9ffa'), 9), (('C4-JD-armed', 8, '0x30c5438bc6ad9ffa'), 9), (('C4-JDap-armed', 1, '0x30c5438bc6ad9ffa'), 9), (('C4-JDap-armed', 8, '0x30c5438bc6ad9ffa'), 9), (('C4-R', 1, '0x6cbe24bf8fafda26'), 9), (('C4-R', 8, '0x6cbe24bf8fafda26'), 9), (('C4-Rap', 1, '0x6cbe24bf8fafda26'), 9), (('C4-Rap', 8, '0x6cbe24bf8fafda26'), 9), (('C4-S16', 1, '0x4470add61a854f4c'), 9), (('C4-S16ap', 1, '0x4470add61a854f4c'), 9)]
+  tree_diag ('C4-JD-armed', (('bp_kernel', 'LeafList'), ('evictions', 0), ('fallback_leaves', 2), ('leaf_list_leaves', 77500), ('members', 1), ('static_rebuilds', 1))) x18
+  tree_diag ('C4-JDap-armed', (('bp_kernel', 'LeafList'), ('evictions', 0), ('fallback_leaves', 0), ('leaf_list_leaves', 0), ('members', 0), ('static_rebuilds', 0))) x18
+  tree_diag ('C4-R', (('bp_kernel', 'LeafList'), ('evictions', 0), ('fallback_leaves', 2), ('leaf_list_leaves', 77500), ('members', 1), ('static_rebuilds', 1))) x18
+  tree_diag ('C4-Rap', (('bp_kernel', 'LeafList'), ('evictions', 0), ('fallback_leaves', 0), ('leaf_list_leaves', 0), ('members', 0), ('static_rebuilds', 0))) x18
+  tree_diag ('C4-S16', (('bp_kernel', 'LeafList'), ('evictions', 0), ('fallback_leaves', 0), ('leaf_list_leaves', 0), ('members', 0), ('static_rebuilds', 0))) x9
+  tree_diag ('C4-S16ap', (('bp_kernel', 'LeafList'), ('evictions', 0), ('fallback_leaves', 0), ('leaf_list_leaves', 0), ('members', 0), ('static_rebuilds', 0))) x9
+void_steps on armed used processes: [0]
+receipts, used W1 (n=54): before median 0.60 % max 2.02; after median 0.67 max 2.02; witness median 0.16 max 0.79
+receipts, used W8 (n=36): before median 0.71 % max 1.43; after median 0.65 max 1.75; witness median 0.19 max 1.46
+pass 0: first start 21:24:36, last end 21:28:05
+pass 1: first start 21:30:37, last end 21:34:01
+pass 2: first start 21:36:33, last end 21:40:46

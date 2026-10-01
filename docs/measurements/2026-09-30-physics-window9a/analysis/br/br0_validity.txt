@@ -1,0 +1,36 @@
+## 0. Records
+- aborted 2026-09-30 attempt (run_tag 191354): 8 process records, pass_done False -> NOT data, excluded
+- resumed run (run_tag 033740): 9 process records; closed passes [(0, 0)]
+- timed processes in closed passes: 9 (originals 9, re-runs 0); used 9; dropped slots 0
+
+## 1. Per process (execution order)
+- seq 1 r0 g4rT  original: exit 0, sha True, ids stdout 8 / disk 8 (need 8), sampling ['Flat'] x[10], printed-vs-recomputed worst 2.06e-05, driver est_ms-vs-recomputed worst 2.06e-05; receipts 0.52 / 2.61 %, witness 1.28 %, build []; valid True, clean True; wall 162.3 s; 2026-10-01T04:00:42.263+03:00 .. 2026-10-01T04:03:24.573+03:00
+- seq 2 r0 g4r8b original: exit 0, sha True, ids stdout 8 / disk 8 (need 8), sampling ['Flat'] x[10], printed-vs-recomputed worst 2.69e-05, driver est_ms-vs-recomputed worst 2.69e-05; receipts 2.61 / 3.0 %, witness 1.22 %, build []; valid True, clean True; wall 165.0 s; 2026-10-01T04:03:29.601+03:00 .. 2026-10-01T04:06:14.664+03:00
+- seq 3 r0 g4r7  original: exit 0, sha True, ids stdout 8 / disk 8 (need 8), sampling ['Flat'] x[10], printed-vs-recomputed worst 1.85e-05, driver est_ms-vs-recomputed worst 1.85e-05; receipts 3.0 / 1.43 %, witness 1.22 %, build []; valid True, clean True; wall 165.0 s; 2026-10-01T04:06:19.693+03:00 .. 2026-10-01T04:09:04.711+03:00
+- seq 4 r1 g4rT  original: exit 0, sha True, ids stdout 8 / disk 8 (need 8), sampling ['Flat'] x[10], printed-vs-recomputed worst 3.30e-05, driver est_ms-vs-recomputed worst 3.30e-05; receipts 1.43 / 1.29 %, witness 1.2 %, build []; valid True, clean True; wall 170.9 s; 2026-10-01T04:09:09.739+03:00 .. 2026-10-01T04:12:00.656+03:00
+- seq 5 r1 g4r8b original: exit 0, sha True, ids stdout 8 / disk 8 (need 8), sampling ['Flat'] x[10], printed-vs-recomputed worst 1.95e-05, driver est_ms-vs-recomputed worst 1.95e-05; receipts 1.29 / 2.99 %, witness 1.24 %, build []; valid True, clean True; wall 169.2 s; 2026-10-01T04:12:05.684+03:00 .. 2026-10-01T04:14:54.941+03:00
+- seq 6 r1 g4r7  original: exit 0, sha True, ids stdout 8 / disk 8 (need 8), sampling ['Flat'] x[10], printed-vs-recomputed worst 1.92e-05, driver est_ms-vs-recomputed worst 1.92e-05; receipts 2.99 / 2.98 %, witness 1.19 %, build []; valid True, clean True; wall 162.7 s; 2026-10-01T04:14:59.969+03:00 .. 2026-10-01T04:17:42.739+03:00
+- seq 7 r2 g4rT  original: exit 0, sha True, ids stdout 8 / disk 8 (need 8), sampling ['Flat'] x[10], printed-vs-recomputed worst 3.67e-05, driver est_ms-vs-recomputed worst 3.67e-05; receipts 2.98 / 1.18 %, witness 1.19 %, build []; valid True, clean True; wall 164.4 s; 2026-10-01T04:17:47.768+03:00 .. 2026-10-01T04:20:32.226+03:00
+- seq 8 r2 g4r8b original: exit 0, sha True, ids stdout 8 / disk 8 (need 8), sampling ['Flat'] x[10], printed-vs-recomputed worst 2.21e-05, driver est_ms-vs-recomputed worst 2.21e-05; receipts 1.18 / 2.12 %, witness 1.28 %, build []; valid True, clean True; wall 163.1 s; 2026-10-01T04:20:37.254+03:00 .. 2026-10-01T04:23:20.433+03:00
+- seq 9 r2 g4r7  original: exit 0, sha True, ids stdout 8 / disk 8 (need 8), sampling ['Flat'] x[10], printed-vs-recomputed worst 3.35e-05, driver est_ms-vs-recomputed worst 3.35e-05; receipts 2.12 / 1.76 %, witness 1.21 %, build []; valid True, clean True; wall 166.6 s; 2026-10-01T04:23:25.460+03:00 .. 2026-10-01T04:26:12.063+03:00
+
+## 2. Order: the three exes adjacent in every round (the one pass is REVERSED: g4rT, g4r8b, g4r7)
+- round 0: g4rT -> g4r8b -> g4r7
+- round 1: g4rT -> g4r8b -> g4r7
+- round 2: g4rT -> g4r8b -> g4r7
+
+## 3. Pass-cells: driver k_clean vs mine
+- g4r7: driver k_clean 3, gates True, reruns 0; mine K 3 -> AGREE
+- g4r8b: driver k_clean 3, gates True, reruns 0; mine K 3 -> AGREE
+- g4rT: driver k_clean 3, gates True, reruns 0; mine K 3 -> AGREE
+
+## 4. Workload identity at 144/256 (stderr kernel receipts: rows, pairs), every process
+- 9 of 9 processes carry the reference workload; reference: [(('disparity', 144, 'LeafList'), (148, 930)), (('disparity', 256, 'LeafList'), (260, 1670)), (('uniform', 144, 'LeafList'), (144, 315)), (('uniform', 256, 'LeafList'), (256, 568))]
+
+## 5. Receipts of the used processes (recorded; clean thresholds 5 / 5 / 2 %)
+- g4r7  n=3: witness [1.22, 1.19, 1.21] %; receipts before [3.0, 2.99, 2.12] / after [1.43, 2.98, 1.76] %; perf _Total median per process ['129.1', '129.2', '129.0'] (% of nominal clock, PDH witness); main_share_top_est [0.651, 0.401, 0.612]; top CPU [2, 6, 2]
+- g4r8b n=3: witness [1.22, 1.24, 1.28] %; receipts before [2.61, 1.29, 1.18] / after [3.0, 2.99, 2.12] %; perf _Total median per process ['128.9', '129.1', '129.0'] (% of nominal clock, PDH witness); main_share_top_est [0.84, 0.661, 0.713]; top CPU [2, 2, 2]
+- g4rT  n=3: witness [1.28, 1.2, 1.19] %; receipts before [0.52, 1.43, 2.98] / after [2.61, 1.29, 1.18] %; perf _Total median per process ['129.1', '129.0', '128.8'] (% of nominal clock, PDH witness); main_share_top_est [0.663, 0.734, 0.536]; top CPU [2, 2, 2]
+- perf _Total over the 9 used processes: median 129.0, min 128.8, max 129.2
+- top other process (witness) per used process: [('claude.exe', 9)]
+- block span: 2026-10-01T04:00:42.263+03:00 .. 2026-10-01T04:26:12.063+03:00

@@ -1,0 +1,7 @@
+2026-09-28T15:51:12.484+03:00   R4 selftest-p0 r0 F3-JT-kd vs F3-JT-leaflist W=8: DIFFER (a mismatch voids the F3 block in the analysis)
+2026-09-28T16:02:44.177+03:00   R4 selftest-p0 r0 F3-JT-kd vs F3-JT-leaflist W=8: DIFFER (a mismatch voids the F3 block in the analysis)
+2026-09-28T16:19:23.354+03:00   R4 selftest-p0 r0 F3-JT-kd vs F3-JT-leaflist W=8: DIFFER (a mismatch voids the F3 block in the analysis)
+2026-09-29T07:14:50.677+03:00   R4 selftest-p0 r0 F3-JT-kd vs F3-JT-leaflist W=8: DIFFER (a mismatch voids the F3 block in the analysis)
+2026-09-29T07:14:59.634+03:00   R4 selftest-p0 r0 F3-JT-kd vs F3-JT-leaflist W=8: DIFFER (a mismatch voids the F3 block in the analysis)
+2026-09-29T07:41:14.887+03:00   R4 selftest-p0 r0 F3-JT-kd vs F3-JT-leaflist W=8: DIFFER (a mismatch voids the F3 block in the analysis)
+2026-09-29T07:41:23.445+03:00   R4 selftest-p0 r0 F3-JT-kd vs F3-JT-leaflist W=8: DIFFER (a mismatch voids the F3 block in the analysis)

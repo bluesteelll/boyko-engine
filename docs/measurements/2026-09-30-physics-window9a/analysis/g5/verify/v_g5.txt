@@ -1,0 +1,120 @@
+G5 pass_done records: [(0, 0, '191354'), (1, 0, '191354'), (2, 0, '191354')]
+G5 timed process records: 95 (original 90, rerun 5); warm-ups 3
+tip exe sha256 on disk == pin: True
+invalid (mine): []
+driver valid disagreements: []
+unclean (mine):
+   p0 r2 seq25 C4-S16ap W1 original#0: ['witness 9.09'] wall_s 0.022
+   p2 r0 seq5 C4-S16ap W1 original#0: ['witness 4.35'] wall_s 0.023
+   p2 r0 seq8 C4-R W1 original#0: ['after 6.24', 'witness 3.5'] wall_s 3.462
+   p2 r1 seq15 C4-S16ap W1 original#0: ['witness 4.35'] wall_s 0.023
+   p2 r2 seq25 C4-S16ap W1 original#0: ['witness 9.09'] wall_s 0.022
+driver clean disagreements: []
+processes outside a pass_done pass: 0
+slots 90, used 90
+   K ('C4-JD-armed', 1): {0: 3, 1: 3, 2: 3}
+   K ('C4-JD-armed', 8): {0: 3, 1: 3, 2: 3}
+   K ('C4-JDap-armed', 1): {0: 3, 1: 3, 2: 3}
+   K ('C4-JDap-armed', 8): {0: 3, 1: 3, 2: 3}
+   K ('C4-R', 1): {0: 3, 1: 3, 2: 3}
+   K ('C4-R', 8): {0: 3, 1: 3, 2: 3}
+   K ('C4-Rap', 1): {0: 3, 1: 3, 2: 3}
+   K ('C4-Rap', 8): {0: 3, 1: 3, 2: 3}
+   K ('C4-S16', 1): {0: 3, 1: 3, 2: 3}
+   K ('C4-S16ap', 1): {0: 3, 1: 3, 2: 3}
+
+=== B1 (tree span Sigma4, median over [100,500), per process) ===
+B1-W1: C4-JD-armed@W1 0.2502 [0.2486-0.2522] n=9 (i 0.27 s 0.18 r 1.45 %) vs bar 0.3600: -30.50 % pooled YYY; p0 0.2506 YYY K3 | p1 0.2500 YYY K3 | p2 0.2502 YYY K3 -> CLAIMED STRONG [B<A]
+B1-W8: C4-JD-armed@W8 0.2608 [0.2602-0.2617] n=9 (i 0.23 s 0.08 r 0.58 %) vs bar 0.3500: -25.48 % pooled YYY; p0 0.2608 YYY K3 | p1 0.2606 YYY K3 | p2 0.2610 YYY K3 -> CLAIMED STRONG [B<A]
+  (mean-over-steps variant)
+B1-W1 mean: C4-JD-armed@W1 0.2535 [0.2501-0.2552] n=9 (i 0.41 s 0.26 r 2.02 %) vs bar 0.3600: -29.59 % pooled YYY; p0 0.2551 YYY K3 | p1 0.2526 YYY K3 | p2 0.2534 YYY K3 -> CLAIMED STRONG [B<A]
+B1-W8 mean: C4-JD-armed@W8 0.2651 [0.2634-0.2656] n=9 (i 0.25 s 0.11 r 0.81 %) vs bar 0.3500: -24.25 % pooled YYY; p0 0.2653 YYY K3 | p1 0.2651 YYY K3 | p2 0.2647 YYY K3 -> CLAIMED STRONG [B<A]
+
+=== B2 realized dbp(8) = SYS(JDap-armed) - SYS(JD-armed), W8 ===
+B2 diff (median over steps): A C4-JD-armed 0.2611 [0.2605-0.2619] n=9 (i 0.23 s 0.08 r 0.57 %) | B C4-JDap-armed 1.8390 [1.8333-1.8449] n=9 (i 0.34 s 0.09 r 0.63 %)
+    B/A 7.0425 (+604.25 %, d +1.5779) pooled YYY bars i 0.83 s 0.23 r 1.70; p0 0.2611->1.8391 YYY K3/3 | p1 0.2610->1.8390 YYY K3/3 | p2 0.2613->1.8386 YYY K3/3 -> CLAIMED STRONG [B>A]
+    delta of cell medians 1.5779; per pass [1.578, 1.578, 1.5773]
+    paired delta per (pass,round): 1.5776 [1.5720-1.5844] n=9 (i 0.35 s 0.10 r 0.79 %)
+    paired delta vs 1.03: +53.16 % pooled YYY passes ['YYY', 'YYY', 'YYY'] -> ('CLAIMED STRONG', 'B>A')
+    JDap vs (JD+1.03): d +0.5479 pooled YYY passes ['YYY', 'YYY', 'YYY'] -> ('CLAIMED STRONG', 'B>A')
+    worst case: min(JDap) - max(JD) = 1.5714
+B2 diff (mean over steps): A C4-JD-armed 0.2655 [0.2638-0.2659] n=9 (i 0.25 s 0.11 r 0.80 %) | B C4-JDap-armed 1.8395 [1.8351-1.8455] n=9 (i 0.33 s 0.08 r 0.57 %)
+    B/A 6.9293 (+592.93 %, d +1.5740) pooled YYY bars i 0.83 s 0.28 r 1.96; p0 0.2656->1.8399 YYY K3/3 | p1 0.2655->1.8395 YYY K3/3 | p2 0.2650->1.8388 YYY K3/3 -> CLAIMED STRONG [B>A]
+    delta of cell medians 1.5740; per pass [1.5743, 1.574, 1.5738]
+    paired delta per (pass,round): 1.5742 [1.5695-1.5817] n=9 (i 0.41 s 0.11 r 0.78 %)
+    paired delta vs 1.03: +52.83 % pooled YYY passes ['YYY', 'YYY', 'YYY'] -> ('CLAIMED STRONG', 'B>A')
+    JDap vs (JD+1.03): d +0.5440 pooled YYY passes ['YYY', 'YYY', 'YYY'] -> ('CLAIMED STRONG', 'B>A')
+    worst case: min(JDap) - max(JD) = 1.5692
+
+=== B3: C4-R (Tree) vs C4-Rap, mean wall [0,500) ===
+B3-W1: A C4-Rap 7.8501 [7.7449-8.0296] n=9 (i 1.51 s 0.49 r 3.63 %) | B C4-R 6.2638 [6.1794-6.4022] n=9 (i 2.79 s 0.63 r 3.56 %)
+    B/A 0.7979 (-20.21 %, d -1.5863) pooled YYY bars i 6.35 s 1.59 r 10.16; p0 7.7978->6.2638 YYY K3/3 | p1 7.8501->6.3233 YYY K3/3 | p2 7.8683->6.1985 YYY K3/3 -> CLAIMED STRONG [B<A]
+B3-W8: A C4-Rap 4.1626 [4.1241-4.1948] n=9 (i 1.04 s 0.27 r 1.70 %) | B C4-R 2.5136 [2.4903-2.5278] n=9 (i 0.64 s 0.19 r 1.49 %)
+    B/A 0.6039 (-39.61 %, d -1.6490) pooled YYY bars i 2.45 s 0.67 r 4.52; p0 4.1662->2.5200 YYY K3/3 | p1 4.1626->2.5148 YYY K3/3 | p2 4.1274->2.5039 YYY K3/3 -> CLAIMED STRONG [B<A]
+  (window [100,500) variant, post hoc)
+B3-W1 [100,500): A C4-Rap 7.8205 [7.7087-8.0047] n=9 (i 1.96 s 0.53 r 3.79 %) | B C4-R 6.2365 [6.1513-6.3769] n=9 (i 2.72 s 0.64 r 3.62 %)
+    B/A 0.7974 (-20.26 %, d -1.5840) pooled YYY bars i 6.70 s 1.65 r 10.47; p0 7.7545->6.2365 YYY K3/3 | p1 7.8205->6.2989 YYY K3/3 | p2 7.8487->6.1754 YYY K3/3 -> CLAIMED STRONG [B<A]
+B3-W8 [100,500): A C4-Rap 4.1613 [4.1170-4.2006] n=9 (i 1.18 s 0.31 r 2.01 %) | B C4-R 2.5068 [2.4837-2.5184] n=9 (i 0.75 s 0.21 r 1.38 %)
+    B/A 0.6024 (-39.76 %, d -1.6545) pooled YYY bars i 2.79 s 0.75 r 4.88; p0 4.1682->2.5133 YYY K3/3 | p1 4.1613->2.5110 YYY K3/3 | p2 4.1207->2.4959 YYY K3/3 -> CLAIMED STRONG [B<A]
+
+=== B4: C4-S16 vs C4-S16ap W1, mean wall [0,500) (us) ===
+B4: A C4-S16ap 30.1416 [29.2834-30.7368] n=9 (i 1.47 s 0.73 r 4.82 %) | B C4-S16 30.6212 [29.7944-31.3688] n=9 (i 2.47 s 0.75 r 5.14 %)
+    B/A 1.0159 (+1.59 %, d +0.4796) pooled nnn bars i 5.75 s 2.08 r 14.10; p0 30.1142->30.6212 nnn K3/3 | p1 30.1240->30.6042 nnn K3/3 | p2 30.5840->30.9440 nnn K3/3 -> NOT CLAIMED [B>A]
+B4 [100,500): A C4-S16ap 28.4367 [27.5470-29.2873] n=9 (i 2.95 s 0.93 r 6.12 %) | B C4-S16 28.9453 [27.7365-29.7718] n=9 (i 3.54 s 1.01 r 7.03 %)
+    B/A 1.0179 (+1.79 %, d +0.5085) pooled nnn bars i 9.22 s 2.75 r 18.64; p0 28.3145->29.3307 nnn K3/3 | p1 28.6762->28.7135 nnn K3/3 | p2 29.2190->28.9453 nnn K3/3 -> NOT CLAIMED [B>A]
+B4 [0,100): A C4-S16ap 36.4090 [34.0020-39.5220] n=9 (i 2.89 s 1.89 r 15.16 %) | B C4-S16 36.9520 [35.4350-41.0630] n=9 (i 6.41 s 1.99 r 15.23 %)
+    B/A 1.0149 (+1.49 %, d +0.5430) pooled nnn bars i 14.06 s 5.49 r 42.98; p0 36.8240->36.9520 nnn K3/3 | p1 35.5730->36.8460 nnn K3/3 | p2 36.8080->38.0260 nnn K3/3 -> NOT CLAIMED [B>A]
+
+=== B5 structure ===
+armed processes (all incl. unused): 36; void_steps!=0: 0; first_void non-null: 0; csv void nonzero: 0
+span-count anomalies: 0
+pose ok (bytes+hash) over all G5 timed processes: 95/95
+R4 records: 13; sample: {"r4": true, "run_tag": "191354", "block": "C4-G5", "pass": 0, "pass_attempt": 0, "round": 0, "r4_row": "C4-S16", "r4_twin": "C4-S16ap", "r4_binary": "tip", "r4_W": 1, "verdict": "equal", "r4_attempts": ["original", "original"], "time": "2026-09-30T21:25:45.944+03:00"}
+own R4 (S16 vs S16ap pose bytes per pass/round): 9/9 equal
+S16 TreeDiag (sample): {'static_rebuilds': 0, 'sleeper_rebuilds': 0, 'evictions': 0, 'translations': 0, 'patches': 0, 'hint_candidates': 0, 'wide_rows': 0, 'excluded_rows': 0, 'locator_resets': 0, 'members': 0, 'leaf_list_leaves': 0, 'fallback_leaves': 0, 'row_walk_leaves': 0, 'kd_order_builds': 0, 'bp_kernel': 'LeafList'}
+
+=== Stage profile JD-armed (median over steps [100,500); cell median; ms) ===
+W1: verify 0.0061 build 0.0209 query 0.1960 assemble 0.0266 | S4 0.2502 sys 0.2504 sys-S4 0.00025 | armed wall [100,500) 4.3496 [0,500) 4.5838 | query/S4 78.3% sys/wall 5.8%
+   mean over steps: verify 0.0063 build 0.0213 query 0.1988 assemble 0.0269 S4 0.2535 sys 0.2538
+   queried [1240.0]; members [1.0]; rebuilds in [100,500) [0.0]; rebuild step idx [2]; bp_pairs 9545.0-9549.0; manifolds 4454.0-4472.0; diag {(77500, 2, 'LeafList')}
+   c_q = t_q(median over steps)/1240 = 158.0 ns
+W8: verify 0.0064 build 0.0213 query 0.2046 assemble 0.0279 | S4 0.2608 sys 0.2611 sys-S4 0.00030 | armed wall [100,500) 1.8586 [0,500) 1.9042 | query/S4 78.5% sys/wall 14.0%
+   mean over steps: verify 0.0065 build 0.0216 query 0.2076 assemble 0.0294 S4 0.2651 sys 0.2655
+   queried [1240.0]; members [1.0]; rebuilds in [100,500) [0.0]; rebuild step idx [2]; bp_pairs 9545.0-9549.0; manifolds 4454.0-4472.0; diag {(77500, 2, 'LeafList')}
+   c_q = t_q(median over steps)/1240 = 165.0 ns
+JDap-armed W1: sys 1.8203 ms; armed wall [100,500) 5.7894; share 31.4%; parallel_broadphase {False}
+JDap-armed W8: sys 1.8390 ms; armed wall [100,500) 3.5140; share 52.3%; parallel_broadphase {False}
+
+=== S5 ===
+S5 t_q W8 mean-over-steps vs 0.2069: C4-JD-armed@W8 0.2076 [0.2063-0.2078] n=9 (i 0.33 s 0.10 r 0.72 %) vs bar 0.2069: +0.33 % pooled nYn; p0 0.2076 nYn K3 | p1 0.2072 nnn K3 | p2 0.2076 nnn K3 -> NOT CLAIMED [B>A]
+S5 t_q W8 median-over-steps vs 0.2069: C4-JD-armed@W8 0.2046 [0.2043-0.2054] n=9 (i 0.21 s 0.07 r 0.54 %) vs bar 0.2069: -1.10 % pooled YYY; p0 0.2046 YYY K3 | p1 0.2048 YYY K3 | p2 0.2046 YYY K3 -> CLAIMED STRONG [B<A]
+S5 t_q W8 median-over-steps vs 0.20693 (F3 figure): C4-JD-armed@W8 0.2046 [0.2043-0.2054] n=9 (i 0.21 s 0.07 r 0.54 %) vs bar 0.2069: -1.11 % pooled YYY; p0 0.2046 YYY K3 | p1 0.2048 YYY K3 | p2 0.2046 YYY K3 -> CLAIMED STRONG [B<A]
+S5 letter: mean t_q / mean armed wall [100,500) vs 0.05: C4-JD-armed@W8 0.1114 [0.1111-0.1119] n=9 (i 0.42 s 0.12 r 0.77 %) vs bar 0.0500: +122.86 % pooled YYY; p0 0.1114 YYY K3 | p1 0.1113 YYY K3 | p2 0.1118 YYY K3 -> CLAIMED STRONG [B>A]
+S5 letter: median t_q / mean armed wall [100,500) vs 0.05: C4-JD-armed@W8 0.1102 [0.1093-0.1105] n=9 (i 0.30 s 0.13 r 1.13 %) vs bar 0.0500: +120.31 % pooled YYY; p0 0.1102 YYY K3 | p1 0.1100 YYY K3 | p2 0.1103 YYY K3 -> CLAIMED STRONG [B>A]
+S5 letter: mean t_q / mean armed wall [0,500) vs 0.05: C4-JD-armed@W8 0.1088 [0.1083-0.1093] n=9 (i 0.45 s 0.13 r 0.95 %) vs bar 0.0500: +117.57 % pooled YYY; p0 0.1087 YYY K3 | p1 0.1088 YYY K3 | p2 0.1091 YYY K3 -> CLAIMED STRONG [B>A]
+
+=== post hoc: W8 vs W1 per stage on JD-armed (median over steps) ===
+W8 vs W1 phys_bp_verify_ns: A C4-JD-armed 6.1470 [6.1070-6.2670] n=9 (i 1.06 s 0.36 r 2.60 %) | B C4-JD-armed 6.3920 [6.3420-6.5480] n=9 (i 1.10 s 0.41 r 3.22 %)
+    B/A 1.0399 (+3.99 %, d +0.2450) pooled YYn bars i 3.04 s 1.09 r 8.29; p0 6.2020->6.3870 YYn K3/3 | p1 6.1470->6.4120 YYn K3/3 | p2 6.1470->6.3920 YYn K3/3 -> CLAIMED [B>A]
+W8 vs W1 phys_bp_build_ns: A C4-JD-armed 20.8750 [20.6000-22.7040] n=9 (i 0.87 s 1.27 r 10.08 %) | B C4-JD-armed 21.3110 [21.1110-21.9390] n=9 (i 2.23 s 0.62 r 3.89 %)
+    B/A 1.0209 (+2.09 %, d +0.4360) pooled nnn bars i 4.79 s 2.83 r 21.60; p0 20.8750->21.5970 nnn K3/3 | p1 21.0320->21.2210 nnn K3/3 | p2 20.8510->21.3110 nYn K3/3 -> NOT CLAIMED [B>A]
+W8 vs W1 phys_bp_query_ns: A C4-JD-armed 195.9790 [194.7320-196.6910] n=9 (i 0.39 s 0.15 r 1.00 %) | B C4-JD-armed 204.6310 [204.2520-205.3560] n=9 (i 0.21 s 0.07 r 0.54 %)
+    B/A 1.0441 (+4.41 %, d +8.6520) pooled YYY bars i 0.88 s 0.33 r 2.27; p0 196.1530->204.6310 YYY K3/3 | p1 195.3960->204.7850 YYY K3/3 | p2 195.8830->204.6200 YYY K3/3 -> CLAIMED STRONG [B>A]
+W8 vs W1 phys_bp_assemble_ns: A C4-JD-armed 26.6210 [26.5510-26.6420] n=9 (i 0.20 s 0.05 r 0.34 %) | B C4-JD-armed 27.8840 [27.8440-27.9760] n=9 (i 0.24 s 0.07 r 0.47 %)
+    B/A 1.0474 (+4.74 %, d +1.2630) pooled YYY bars i 0.61 s 0.17 r 1.17; p0 26.5610->27.8650 YYY K3/3 | p1 26.6210->27.8840 YYY K3/3 | p2 26.6230->27.9040 YYY K3/3 -> CLAIMED STRONG [B>A]
+W8 vs W1 SUM4: A C4-JD-armed 250.1985 [248.6175-252.2375] n=9 (i 0.27 s 0.18 r 1.45 %) | B C4-JD-armed 260.8330 [260.1700-261.6740] n=9 (i 0.23 s 0.08 r 0.58 %)
+    B/A 1.0425 (+4.25 %, d +10.6345) pooled YYY bars i 0.70 s 0.39 r 3.12; p0 250.6300->260.8330 YYY K3/3 | p1 249.9615->260.6340 YYY K3/3 | p2 250.1985->260.9985 YYY K3/3 -> CLAIMED STRONG [B>A]
+
+=== post hoc 5: armed wall JD vs JDap ===
+armed wall W8 [100,500): A C4-JDap-armed 3.5140 [3.4944-3.5246] n=9 (i 0.27 s 0.11 r 0.86 %) | B C4-JD-armed 1.8586 [1.8550-1.8711] n=9 (i 0.14 s 0.10 r 0.87 %)
+    B/A 0.5289 (-47.11 %, d -1.6553) pooled YYY bars i 0.61 s 0.30 r 2.44; p0 3.5162->1.8602 YYY K3/3 | p1 3.5083->1.8594 YYY K3/3 | p2 3.5140->1.8585 YYY K3/3 -> CLAIMED STRONG [B<A]
+armed wall W8 [0,500): A C4-JDap-armed 3.5553 [3.5367-3.5682] n=9 (i 0.33 s 0.11 r 0.89 %) | B C4-JD-armed 1.9042 [1.8989-1.9140] n=9 (i 0.14 s 0.10 r 0.79 %)
+    B/A 0.5356 (-46.44 %, d -1.6511) pooled YYY bars i 0.71 s 0.29 r 2.38; p0 3.5553->1.9041 YYY K3/3 | p1 3.5508->1.9042 YYY K3/3 | p2 3.5570->1.9045 YYY K3/3 -> CLAIMED STRONG [B<A]
+armed wall W1 [0,500): A C4-JDap-armed 6.0179 [5.9742-6.1839] n=9 (i 2.23 s 0.53 r 3.48 %) | B C4-JD-armed 4.5838 [4.4550-4.8703] n=9 (i 2.82 s 1.15 r 9.06 %)
+    B/A 0.7617 (-23.83 %, d -1.4341) pooled YYY bars i 7.19 s 2.54 r 19.41; p0 6.1353->4.5848 YYY K3/3 | p1 5.9981->4.5838 YYY K3/3 | p2 6.0645->4.4710 YYY K3/3 -> CLAIMED STRONG [B<A]
+
+=== receipts of used processes ===
+p0: before median 0.70 after 0.63 witness 0.16; start 2026-09-30T21:24:36.173+03:00 end 2026-09-30T21:28:05.456+03:00
+p1: before median 0.56 after 0.62 witness 0.20; start 2026-09-30T21:30:37.160+03:00 end 2026-09-30T21:34:01.312+03:00
+p2: before median 0.70 after 0.70 witness 0.17; start 2026-09-30T21:36:33.019+03:00 end 2026-09-30T21:40:46.021+03:00
+profile_name values: {'dev'}

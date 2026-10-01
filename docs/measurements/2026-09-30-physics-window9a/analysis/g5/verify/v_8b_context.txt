@@ -1,0 +1,34 @@
+8b blocks: ['DM1', 'F3', 'F3-G4', 'J-Son-T', 'S4-AB', 'S7-AB', 'SPLIT', 'omega-v1-cont', 'omega-v2']
+S4-AB S4-JT-a#tip@W8 mean-over-steps t_q ms: 0.2069 [0.2054-0.2078] n=9 (i 0.44 s 0.15 r 1.12)
+S4-AB S4-JT-a#tip@W8 median-over-steps t_q ms: 0.2037 [0.2027-0.2053] n=9 (i 0.42 s 0.16 r 1.25)
+S4-AB S4-JT-a#tip@W8 t_q / armed wall: 0.1111 [0.1094-0.1116] n=9 (i 0.70 s 0.32 r 2.00)
+S4-AB S4-JT-a#tip@W16 mean-over-steps t_q ms: 0.2125 [0.2110-0.2145] n=9 (i 0.38 s 0.19 r 1.61)
+S4-AB S4-JT-a#tip@W16 median-over-steps t_q ms: 0.2103 [0.2090-0.2132] n=9 (i 0.21 s 0.26 r 1.98)
+S4-AB S4-JT-a#tip@W16 t_q / armed wall: 0.1006 [0.0993-0.1018] n=9 (i 0.70 s 0.30 r 2.45)
+  S4-JT-a#tip W16 vs W8 (mean): +2.73 % pooled YYn passes ['YYn', 'YYY', 'YYY'] -> CLAIMED
+  S4-JT-a#tip W16 vs W8 (median): +3.26 % pooled YYn passes ['YYn', 'YYn', 'YYY'] -> CLAIMED
+S4-AB S4-JT-a#parent@W8 mean-over-steps t_q ms: 0.2077 [0.2072-0.2089] n=9 (i 0.42 s 0.12 r 0.83)
+S4-AB S4-JT-a#parent@W8 median-over-steps t_q ms: 0.2049 [0.2037-0.2059] n=9 (i 0.24 s 0.15 r 1.10)
+S4-AB S4-JT-a#parent@W8 t_q / armed wall: 0.1021 [0.1003-0.1025] n=9 (i 0.33 s 0.26 r 2.20)
+S4-AB S4-JT-a#parent@W16 mean-over-steps t_q ms: 0.2143 [0.2126-0.2170] n=9 (i 0.52 s 0.23 r 2.04)
+S4-AB S4-JT-a#parent@W16 median-over-steps t_q ms: 0.2119 [0.2101-0.2146] n=9 (i 0.99 s 0.29 r 2.11)
+S4-AB S4-JT-a#parent@W16 t_q / armed wall: 0.0936 [0.0875-0.0945] n=9 (i 0.90 s 1.15 r 7.43)
+  S4-JT-a#parent W16 vs W8 (mean): +3.17 % pooled YYn passes ['YYY', 'YYn', 'YYY'] -> CLAIMED
+  S4-JT-a#parent W16 vs W8 (median): +3.42 % pooled YYn passes ['YYY', 'YYn', 'YYY'] -> CLAIMED
+SPLIT SPLIT-J-T-a#parent@W1 mean-over-steps t_q ms: 0.1987 [0.1976-0.1993] n=9 (i 0.15 s 0.11 r 0.88)
+SPLIT SPLIT-J-T-a#parent@W1 median-over-steps t_q ms: 0.1951 [0.1942-0.1964] n=9 (i 0.65 s 0.17 r 1.17)
+SPLIT SPLIT-J-T-a#parent@W1 t_q / armed wall: 0.0471 [0.0462-0.0473] n=9 (i 1.29 s 0.34 r 2.33)
+SPLIT SPLIT-J-T-a#parent@W8 mean-over-steps t_q ms: 0.2078 [0.2071-0.2090] n=9 (i 0.30 s 0.11 r 0.91)
+SPLIT SPLIT-J-T-a#parent@W8 median-over-steps t_q ms: 0.2044 [0.2038-0.2051] n=9 (i 0.09 s 0.08 r 0.65)
+SPLIT SPLIT-J-T-a#parent@W8 t_q / armed wall: 0.1018 [0.1016-0.1024] n=9 (i 0.49 s 0.12 r 0.78)
+SPLIT SPLIT-J-T-a#parent@W16 mean-over-steps t_q ms: 0.2151 [0.2128-0.2160] n=9 (i 0.48 s 0.21 r 1.51)
+SPLIT SPLIT-J-T-a#parent@W16 median-over-steps t_q ms: 0.2129 [0.2095-0.2138] n=9 (i 0.88 s 0.28 r 2.04)
+SPLIT SPLIT-J-T-a#parent@W16 t_q / armed wall: 0.0939 [0.0932-0.0952] n=9 (i 0.52 s 0.25 r 2.16)
+  SPLIT-J-T-a#parent W16 vs W8 (mean): +3.51 % pooled YYn passes ['YYY', 'YYY', 'YYY'] -> CLAIMED
+  SPLIT-J-T-a#parent W16 vs W8 (median): +4.17 % pooled YYn passes ['YYY', 'YYY', 'YYY'] -> CLAIMED
+  SPLIT-J-T-a#parent W8 vs W1 (median): +4.74 % pooled YYY passes ['YYY', 'YYY', 'YYY'] -> CLAIMED STRONG
+
+--- two-cell comparison 9a t_q(W8) vs the 8b reference cells (pooled only; cross-window, cross-binary) ---
+mean conv vs 8b S4-JT-a#tip (0.2069): ref 0.20687 (i 0.44 s 0.15 r 1.12, n 9) -> 9a 0.20758: +0.35 % pooled nnn bars i 1.09 s 0.37 r 2.66
+median conv vs 8b S4-JT-a#tip: ref 0.20369 (i 0.42 s 0.16 r 1.25, n 9) -> 9a 0.20463: +0.46 % pooled nYn bars i 0.93 s 0.35 r 2.73
+median conv vs 8b F3-TD-armed-leaflist (206.93 us): ref 0.20693 (i 1.30 s 0.56 r 4.16, n 9) -> 9a 0.20463: -1.11 % pooled nnn bars i 2.63 s 1.12 r 8.40

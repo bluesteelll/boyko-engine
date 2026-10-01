@@ -1,0 +1,65 @@
+# o2 omega(W, gap), 32 zero-work tasks after a gap; ns; cell = median over K processes of the per-process SUMMARY value
+
+## route worker, W8
+  gap  0 us: scope 7100 [IQR 600, SE 155, 6400-7400] n=9 | mean-of-reps cell 7075 | helped_reps [1992, 1998, 2000, 2000, 2000, 2000, 2000, 2000, 2000] of [2000] | first_helper_ns_median 400 [IQR 0, SE 18, 300-400] n=9 | scope - first 6700
+           per pass scope medians: 7400 (K 3) / 6800 (K 3) / 6800 (K 3)
+  gap  5 us: scope 2800 [IQR 300, SE 300, 2600-4900] n=9 | mean-of-reps cell 3162 | helped_reps [1998, 1999, 1999, 1999, 2000, 2000, 2000, 2000, 2000] of [2000] | first_helper_ns_median 900 [IQR 0, SE 42, 600-900] n=9 | scope - first 1900
+           per pass scope medians: 2700 (K 3) / 2800 (K 3) / 3000 (K 3)
+  gap 20 us: scope 9300 [IQR 200, SE 218, 8800-10700] n=9 | mean-of-reps cell 9488 | helped_reps [1998, 1998, 1998, 2000, 2000, 2000, 2000, 2000, 2000] of [2000] | first_helper_ns_median 3400 [IQR 0, SE 14, 3400-3500] n=9 | scope - first 5900
+           per pass scope medians: 9200 (K 3) / 9400 (K 3) / 9300 (K 3)
+  gap 80 us: scope 9100 [IQR 400, SE 215, 8800-10500] n=9 | mean-of-reps cell 9481 | helped_reps [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000] of [2000] | first_helper_ns_median 3500 [IQR 100, SE 21, 3500-3600] n=9 | scope - first 5600
+           per pass scope medians: 9300 (K 3) / 9300 (K 3) / 8900 (K 3)
+  N4 lower bound omega(80) - omega(0): B-A +2000 (+28.2 %) n/Y/Y bars r 46.8 / i 19.1 / s 6.4 % | pooled n/Y/Y p0 Y/Y/Y p1 n/Y/Y p2 Y/Y/Y -> CLAIMED
+  omega(80) - omega(5) (gap 5 = awake baseline): B-A +6300 (+225.0 %) Y/Y/Y bars r 168.5 / i 23.2 / s 21.9 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+  omega(20) - omega(5): B-A +6500 (+232.1 %) Y/Y/Y bars r 169.3 / i 21.9 / s 21.9 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+  omega(80) - omega(20): B-A -200 (-2.2 %) n/n/n bars r 55.4 / i 9.8 / s 6.7 % | pooled n/n/n p0 n/n/n p1 n/n/n p2 n/n/n -> NOT CLAIMED
+  omega(5) - omega(0): B-A -4300 (-60.6 %) n/Y/Y bars r 166.7 / i 27.3 / s 21.8 % | pooled n/Y/Y p0 Y/Y/Y p1 n/n/n p2 Y/Y/Y -> NOT CLAIMED
+  first_helper(80) - first_helper(5) (post hoc): B-A +2600 (+288.9 %) Y/Y/Y bars r 66.9 / i 5.7 / s 9.5 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+
+## route worker, W16
+  gap  0 us: scope 10500 [IQR 400, SE 115, 9900-10800] n=9 | mean-of-reps cell 10296 | helped_reps [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000] of [2000] | first_helper_ns_median 400 [IQR 0, SE 0, 400-400] n=9 | scope - first 10100
+           per pass scope medians: 10700 (K 3) / 10300 (K 3) / 10400 (K 3)
+  gap  5 us: scope 11100 [IQR 300, SE 152, 10200-11400] n=9 | mean-of-reps cell 11080 | helped_reps [1992, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000] of [2000] | first_helper_ns_median 400 [IQR 0, SE 0, 400-400] n=9 | scope - first 10700
+           per pass scope medians: 11300 (K 3) / 11000 (K 3) / 11100 (K 3)
+  gap 20 us: scope 20600 [IQR 200, SE 310, 20200-22700] n=9 | mean-of-reps cell 21681 | helped_reps [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000] of [2000] | first_helper_ns_median 3600 [IQR 100, SE 42, 3600-3900] n=9 | scope - first 17000
+           per pass scope medians: 20500 (K 3) / 20900 (K 3) / 20600 (K 3)
+  gap 80 us: scope 20700 [IQR 300, SE 140, 20300-21300] n=9 | mean-of-reps cell 22075 | helped_reps [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000] of [2000] | first_helper_ns_median 3700 [IQR 0, SE 0, 3700-3700] n=9 | scope - first 17000
+           per pass scope medians: 20500 (K 3) / 21200 (K 3) / 20800 (K 3)
+  N4 lower bound omega(80) - omega(0): B-A +10200 (+97.1 %) Y/Y/Y bars r 19.7 / i 8.2 / s 2.6 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+  omega(80) - omega(5) (gap 5 = awake baseline): B-A +9600 (+86.5 %) Y/Y/Y bars r 23.7 / i 6.1 / s 3.1 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+  omega(20) - omega(5): B-A +9500 (+85.6 %) Y/Y/Y bars r 32.5 / i 5.7 / s 4.1 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+  omega(80) - omega(20): B-A +100 (+0.5 %) n/n/n bars r 26.1 / i 3.5 / s 3.3 % | pooled n/n/n p0 n/n/n p1 n/n/n p2 n/n/Y -> NOT CLAIMED
+  omega(5) - omega(0): B-A +600 (+5.7 %) n/n/Y bars r 27.6 / i 9.3 / s 3.5 % | pooled n/n/Y p0 n/Y/Y p1 n/n/n p2 Y/Y/Y -> NOT CLAIMED
+  first_helper(80) - first_helper(5) (post hoc): B-A +3300 (+825.0 %) Y/Y/Y bars r 0.0 / i 0.0 / s 0.0 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+
+## route external, W8
+  gap  0 us: scope 4700 [IQR 0, SE 72, 4500-5100] n=9 | mean-of-reps cell 4740 | helped_reps [1997, 1999, 1999, 1999, 1999, 1999, 1999, 1999, 2000] of [2000] | first_helper_ns_median 300 [IQR 0, SE 14, 300-400] n=9 | scope - first 4400
+           per pass scope medians: 4700 (K 3) / 4700 (K 3) / 4700 (K 3)
+  gap  5 us: scope 4300 [IQR 200, SE 122, 3700-4600] n=9 | mean-of-reps cell 4336 | helped_reps [1999, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000] of [2000] | first_helper_ns_median 900 [IQR 0, SE 42, 700-1000] n=9 | scope - first 3400
+           per pass scope medians: 4300 (K 3) / 3900 (K 3) / 4500 (K 3)
+  gap 20 us: scope 11000 [IQR 200, SE 47, 10800-11100] n=9 | mean-of-reps cell 11005 | helped_reps [1999, 1999, 1999, 1999, 2000, 2000, 2000, 2000, 2000] of [2000] | first_helper_ns_median 3500 [IQR 0, SE 18, 3400-3500] n=9 | scope - first 7500
+           per pass scope medians: 10900 (K 3) / 11000 (K 3) / 11000 (K 3)
+  gap 80 us: scope 10900 [IQR 100, SE 42, 10800-11100] n=9 | mean-of-reps cell 11006 | helped_reps [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000] of [2000] | first_helper_ns_median 3600 [IQR 0, SE 14, 3500-3600] n=9 | scope - first 7300
+           per pass scope medians: 10800 (K 3) / 11000 (K 3) / 11000 (K 3)
+  N4 lower bound omega(80) - omega(0): B-A +6200 (+131.9 %) Y/Y/Y bars r 26.1 / i 1.8 / s 3.2 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+  omega(80) - omega(5) (gap 5 = awake baseline): B-A +6600 (+153.5 %) Y/Y/Y bars r 42.2 / i 9.5 / s 5.7 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+  omega(20) - omega(5): B-A +6700 (+155.8 %) Y/Y/Y bars r 42.2 / i 10.0 / s 5.7 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+  omega(80) - omega(20): B-A -100 (-0.9 %) n/n/n bars r 7.7 / i 4.1 / s 1.1 % | pooled n/n/n p0 n/n/n p1 n/n/n p2 n/n/n -> NOT CLAIMED
+  omega(5) - omega(0): B-A -400 (-8.5 %) n/n/Y bars r 49.0 / i 9.3 / s 6.4 % | pooled n/n/Y p0 n/Y/Y p1 n/n/n p2 n/n/n -> NOT CLAIMED
+  first_helper(80) - first_helper(5) (post hoc): B-A +2700 (+300.0 %) Y/Y/Y bars r 66.9 / i 0.0 / s 9.3 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+
+## route external, W16
+  gap  0 us: scope 5200 [IQR 100, SE 47, 5000-5300] n=9 | mean-of-reps cell 5293 | helped_reps [1997, 1997, 1999, 2000, 2000, 2000, 2000, 2000, 2000] of [2000] | first_helper_ns_median 300 [IQR 0, SE 0, 300-300] n=9 | scope - first 4900
+           per pass scope medians: 5100 (K 3) / 5200 (K 3) / 5200 (K 3)
+  gap  5 us: scope 6600 [IQR 200, SE 57, 6400-6800] n=9 | mean-of-reps cell 7586 | helped_reps [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000] of [2000] | first_helper_ns_median 400 [IQR 0, SE 0, 400-400] n=9 | scope - first 6200
+           per pass scope medians: 6600 (K 3) / 6800 (K 3) / 6600 (K 3)
+  gap 20 us: scope 21600 [IQR 300, SE 233, 20800-22700] n=9 | mean-of-reps cell 23510 | helped_reps [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000] of [2000] | first_helper_ns_median 3600 [IQR 100, SE 21, 3600-3700] n=9 | scope - first 18000
+           per pass scope medians: 21500 (K 3) / 21600 (K 3) / 21800 (K 3)
+  gap 80 us: scope 22200 [IQR 1000, SE 291, 21400-23500] n=9 | mean-of-reps cell 24332 | helped_reps [2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000, 2000] of [2000] | first_helper_ns_median 3700 [IQR 100, SE 21, 3700-3800] n=9 | scope - first 18500
+           per pass scope medians: 22000 (K 3) / 21500 (K 3) / 22600 (K 3)
+  N4 lower bound omega(80) - omega(0): B-A +17000 (+326.9 %) Y/Y/Y bars r 22.2 / i 9.8 / s 3.2 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+  omega(80) - omega(5) (gap 5 = awake baseline): B-A +15600 (+236.4 %) Y/Y/Y bars r 22.5 / i 10.9 / s 3.1 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+  omega(20) - omega(5): B-A +15000 (+227.3 %) Y/Y/Y bars r 21.4 / i 6.7 / s 2.8 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+  omega(80) - omega(20): B-A +600 (+2.8 %) n/n/n bars r 25.8 / i 9.4 / s 3.4 % | pooled n/n/n p0 n/n/n p1 n/n/n p2 n/Y/Y -> NOT CLAIMED
+  omega(5) - omega(0): B-A +1400 (+26.9 %) Y/Y/Y bars r 16.7 / i 7.2 / s 2.5 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+  first_helper(80) - first_helper(5) (post hoc): B-A +3300 (+825.0 %) Y/Y/Y bars r 5.4 / i 5.4 / s 1.1 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG

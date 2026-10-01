@@ -1,0 +1,133 @@
+# o5 P8 per-process detail (ns); placement = top CPU busy %, main-thread cycle share (recorded only)
+
+## worker P8 b=1P spin
+  p0 r0 rerun    slope   1036  r36   39400 r72   76700  first36/72   900/  900  parks36/72 0/0  allact72 1000  top [14, 55.5] main_frac 0.0172
+  p0 r1 original slope   1047  r36   35800 r72   73500  first36/72   800/  800  parks36/72 0/0  allact72 1000  top [0, 55.6] main_frac 0.0174
+  p0 r2 rerun    slope    917  r36   36300 r72   69300  first36/72   900/  800  parks36/72 0/0  allact72 1000  top [4, 48.1] main_frac 0.0174
+  p1 r0 original slope   1119  r36   35600 r72   75900  first36/72   800/  900  parks36/72 0/0  allact72 1000  top [14, 52.0] main_frac 0.0169
+  p1 r1 rerun    slope    861  r36   37300 r72   68300  first36/72   800/  800  parks36/72 0/0  allact72 1000  top [4, 47.7] main_frac 0.0174
+  p1 r2 original slope    881  r36   36400 r72   68100  first36/72   800/  800  parks36/72 0/0  allact72 1000  top [0, 52.8] main_frac 0.0182
+  p2 r0 original slope    919  r36   35600 r72   68700  first36/72   900/  900  parks36/72 0/0  allact72 1000  top [4, 46.9] main_frac 0.0176
+  p2 r1 original slope    872  r36   37500 r72   68900  first36/72   900/  900  parks36/72 0/0  allact72 1000  top [0, 45.2] main_frac 0.0176
+  p2 r2 original slope    936  r36   35100 r72   68800  first36/72   800/  800  parks36/72 0/0  allact72 1000  top [4, 46.9] main_frac 0.0176
+
+## worker P8 b=1P park
+  p0 r0 rerun    slope    853  r36   39400 r72   70100  first36/72   800/  800  parks36/72 0/0  allact72 1000  top [14, 55.5] main_frac 0.0172
+  p0 r1 original slope    956  r36   35000 r72   69400  first36/72   700/  700  parks36/72 0/0  allact72 1000  top [0, 55.6] main_frac 0.0174
+  p0 r2 rerun    slope    942  r36   35300 r72   69200  first36/72   700/  800  parks36/72 0/0  allact72 1000  top [4, 48.1] main_frac 0.0174
+  p1 r0 original slope   1089  r36   38900 r72   78100  first36/72   800/  900  parks36/72 0/0  allact72 1000  top [14, 52.0] main_frac 0.0169
+  p1 r1 rerun    slope    811  r36   39700 r72   68900  first36/72   800/  700  parks36/72 0/0  allact72 1000  top [4, 47.7] main_frac 0.0174
+  p1 r2 original slope    950  r36   34500 r72   68700  first36/72   700/  700  parks36/72 0/0  allact72 1000  top [0, 52.8] main_frac 0.0182
+  p2 r0 original slope    958  r36   35200 r72   69700  first36/72   700/  800  parks36/72 0/0  allact72 1000  top [4, 46.9] main_frac 0.0176
+  p2 r1 original slope    950  r36   35500 r72   69700  first36/72   800/  800  parks36/72 0/0  allact72 1000  top [0, 45.2] main_frac 0.0176
+  p2 r2 original slope    953  r36   35700 r72   70000  first36/72   700/  700  parks36/72 0/0  allact72 1000  top [4, 46.9] main_frac 0.0176
+
+## worker P8 b=2P spin
+  p0 r0 rerun    slope   1869  r36   68900 r72  136200  first36/72   900/  900  parks36/72 0/0  allact72 1000  top [14, 55.5] main_frac 0.0172
+  p0 r1 original slope   1681  r36   60900 r72  121400  first36/72   800/  800  parks36/72 0/0  allact72 1000  top [0, 55.6] main_frac 0.0174
+  p0 r2 rerun    slope   1742  r36   62100 r72  124800  first36/72   800/  900  parks36/72 0/0  allact72 1000  top [4, 48.1] main_frac 0.0174
+  p1 r0 original slope   1894  r36   68100 r72  136300  first36/72   900/  900  parks36/72 0/0  allact72 1000  top [14, 52.0] main_frac 0.0169
+  p1 r1 rerun    slope   1597  r36   64500 r72  122000  first36/72   800/  800  parks36/72 0/0  allact72 1000  top [4, 47.7] main_frac 0.0174
+  p1 r2 original slope   1658  r36   60200 r72  119900  first36/72   800/  900  parks36/72 0/0  allact72 1000  top [0, 52.8] main_frac 0.0182
+  p2 r0 original slope   1789  r36   60600 r72  125000  first36/72   800/  900  parks36/72 0/0  allact72 1000  top [4, 46.9] main_frac 0.0176
+  p2 r1 original slope   1836  r36   61000 r72  127100  first36/72   800/  900  parks36/72 0/0  allact72 1000  top [0, 45.2] main_frac 0.0176
+  p2 r2 original slope   1694  r36   60900 r72  121900  first36/72   800/  800  parks36/72 0/0  allact72 1000  top [4, 46.9] main_frac 0.0176
+
+## worker P8 b=2P park
+  p0 r0 rerun    slope   1711  r36   69700 r72  131300  first36/72   800/  800  parks36/72 0/0  allact72 1000  top [14, 55.5] main_frac 0.0172
+  p0 r1 original slope   1747  r36   61500 r72  124400  first36/72   700/  700  parks36/72 0/0  allact72 1000  top [0, 55.6] main_frac 0.0174
+  p0 r2 rerun    slope   1672  r36   62200 r72  122400  first36/72   800/  800  parks36/72 0/0  allact72 1000  top [4, 48.1] main_frac 0.0174
+  p1 r0 original slope   1914  r36   69500 r72  138400  first36/72   800/  900  parks36/72 0/0  allact72 1000  top [14, 52.0] main_frac 0.0169
+  p1 r1 rerun    slope   1656  r36   61400 r72  121000  first36/72   700/  700  parks36/72 0/0  allact72 1000  top [4, 47.7] main_frac 0.0174
+  p1 r2 original slope   1650  r36   59500 r72  118900  first36/72   700/  800  parks36/72 0/0  allact72 1000  top [0, 52.8] main_frac 0.0182
+  p2 r0 original slope   1722  r36   61500 r72  123500  first36/72   800/  800  parks36/72 0/0  allact72 1000  top [4, 46.9] main_frac 0.0176
+  p2 r1 original slope   1703  r36   61600 r72  122900  first36/72   800/  800  parks36/72 0/0  allact72 1000  top [0, 45.2] main_frac 0.0176
+  p2 r2 original slope   1686  r36   62000 r72  122700  first36/72   700/  700  parks36/72 0/0  allact72 1000  top [4, 46.9] main_frac 0.0176
+
+## worker P8 b=4P spin
+  p0 r0 rerun    slope   3336  r36  128700 r72  248800  first36/72   900/ 7600  parks36/72 0/0  allact72 1000  top [14, 55.5] main_frac 0.0172
+  p0 r1 original slope   3294  r36  120400 r72  239000  first36/72   800/ 7600  parks36/72 0/0  allact72 1000  top [0, 55.6] main_frac 0.0174
+  p0 r2 rerun    slope   3447  r36  117500 r72  241600  first36/72   900/ 7600  parks36/72 0/0  allact72 1000  top [4, 48.1] main_frac 0.0174
+  p1 r0 original slope   3608  r36  131000 r72  260900  first36/72  1000/ 7600  parks36/72 0/0  allact72 1000  top [14, 52.0] main_frac 0.0169
+  p1 r1 rerun    slope   3336  r36  117300 r72  237400  first36/72   900/ 7500  parks36/72 0/0  allact72 1000  top [4, 47.7] main_frac 0.0174
+  p1 r2 original slope   3531  r36  116800 r72  243900  first36/72   900/ 7500  parks36/72 0/0  allact72 1000  top [0, 52.8] main_frac 0.0182
+  p2 r0 original slope   3353  r36  118100 r72  238800  first36/72   900/ 7300  parks36/72 0/0  allact72 1000  top [4, 46.9] main_frac 0.0176
+  p2 r1 original slope   3356  r36  118300 r72  239100  first36/72   900/ 7300  parks36/72 0/0  allact72 1000  top [0, 45.2] main_frac 0.0176
+  p2 r2 original slope   3247  r36  121000 r72  237900  first36/72   900/ 7300  parks36/72 0/0  allact72 1000  top [4, 46.9] main_frac 0.0176
+
+## worker P8 b=4P park
+  p0 r0 rerun    slope   3192  r36  129700 r72  244600  first36/72   900/ 7500  parks36/72 0/2  allact72  998  top [14, 55.5] main_frac 0.0172
+  p0 r1 original slope   3417  r36  118000 r72  241000  first36/72   700/ 7500  parks36/72 0/2  allact72 1000  top [0, 55.6] main_frac 0.0174
+  p0 r2 rerun    slope   3317  r36  121500 r72  240900  first36/72   800/ 7500  parks36/72 0/2  allact72 1000  top [4, 48.1] main_frac 0.0174
+  p1 r0 original slope   3592  r36  132000 r72  261300  first36/72   900/ 7500  parks36/72 0/2  allact72 1000  top [14, 52.0] main_frac 0.0169
+  p1 r1 rerun    slope   3372  r36  118200 r72  239600  first36/72   800/ 7500  parks36/72 0/2  allact72 1000  top [4, 47.7] main_frac 0.0174
+  p1 r2 original slope   3692  r36  121100 r72  254000  first36/72  1000/ 7600  parks36/72 0/3  allact72 1000  top [0, 52.8] main_frac 0.0182
+  p2 r0 original slope   3322  r36  121100 r72  240700  first36/72   800/ 7300  parks36/72 0/2  allact72 1000  top [4, 46.9] main_frac 0.0176
+  p2 r1 original slope   3369  r36  119000 r72  240300  first36/72   800/ 7300  parks36/72 0/2  allact72 1000  top [0, 45.2] main_frac 0.0176
+  p2 r2 original slope   3339  r36  120200 r72  240400  first36/72   800/ 7300  parks36/72 0/2  allact72 1000  top [4, 46.9] main_frac 0.0176
+
+## external P8 b=1P spin
+  p0 r0 original slope    931  r36   35700 r72   69200  first36/72  1400/ 1600  parks36/72 0/0  allact72 1000  top [0, 64.1] main_frac 0.1986
+  p0 r1 rerun    slope    953  r36   37900 r72   72200  first36/72  1400/ 1500  parks36/72 0/0  allact72 1000  top [2, 59.9] main_frac 0.1995
+  p0 r2 rerun    slope   1064  r36   35200 r72   73500  first36/72  1500/ 1700  parks36/72 0/0  allact72 1000  top [2, 57.2] main_frac 0.1991
+  p1 r0 original slope   1017  r36   35100 r72   71700  first36/72  1500/ 1500  parks36/72 0/0  allact72 1000  top [4, 66.5] main_frac 0.1998
+  p1 r1 rerun    slope    942  r36   36400 r72   70300  first36/72  1400/ 1700  parks36/72 0/0  allact72 1000  top [4, 42.5] main_frac 0.2005
+  p1 r2 rerun    slope    989  r36   36300 r72   71900  first36/72  1400/ 1500  parks36/72 0/0  allact72 1000  top [7, 52.7] main_frac 0.2002
+  p2 r0 original slope   1019  r36   38300 r72   75000  first36/72  1600/ 1800  parks36/72 0/0  allact72 1000  top [2, 58.3] main_frac 0.199
+  p2 r1 original slope   1039  r36   36200 r72   73600  first36/72  1400/ 1500  parks36/72 0/0  allact72 1000  top [2, 82.5] main_frac 0.1992
+  p2 r2 original slope    944  r36   34500 r72   68500  first36/72  1500/ 1400  parks36/72 0/0  allact72 1000  top [2, 52.9] main_frac 0.2004
+
+## external P8 b=1P park
+  p0 r0 original slope    933  r36   36300 r72   69900  first36/72  1400/ 1400  parks36/72 0/0  allact72 1000  top [0, 64.1] main_frac 0.1986
+  p0 r1 rerun    slope   1014  r36   35300 r72   71800  first36/72  1400/ 1500  parks36/72 0/0  allact72 1000  top [2, 59.9] main_frac 0.1995
+  p0 r2 rerun    slope    922  r36   37400 r72   70600  first36/72  1600/ 1400  parks36/72 0/0  allact72 1000  top [2, 57.2] main_frac 0.1991
+  p1 r0 original slope    964  r36   36500 r72   71200  first36/72  1400/ 1400  parks36/72 0/0  allact72 1000  top [4, 66.5] main_frac 0.1998
+  p1 r1 rerun    slope   1153  r36   36100 r72   77600  first36/72  1300/ 1600  parks36/72 0/0  allact72 1000  top [4, 42.5] main_frac 0.2005
+  p1 r2 rerun    slope    972  r36   36200 r72   71200  first36/72  1300/ 1300  parks36/72 0/0  allact72 1000  top [7, 52.7] main_frac 0.2002
+  p2 r0 original slope   1142  r36   36100 r72   77200  first36/72  1400/ 1700  parks36/72 0/0  allact72 1000  top [2, 58.3] main_frac 0.199
+  p2 r1 original slope    978  r36   36300 r72   71500  first36/72  1400/ 1700  parks36/72 0/0  allact72 1000  top [2, 82.5] main_frac 0.1992
+  p2 r2 original slope    950  r36   34500 r72   68700  first36/72  1400/ 1500  parks36/72 0/0  allact72 1000  top [2, 52.9] main_frac 0.2004
+
+## external P8 b=2P spin
+  p0 r0 original slope   1761  r36   65000 r72  128400  first36/72  1700/ 1800  parks36/72 0/0  allact72 1000  top [0, 64.1] main_frac 0.1986
+  p0 r1 rerun    slope   1836  r36   64000 r72  130100  first36/72  1500/ 1700  parks36/72 0/0  allact72 1000  top [2, 59.9] main_frac 0.1995
+  p0 r2 rerun    slope   1867  r36   66300 r72  133500  first36/72  1600/ 1700  parks36/72 0/0  allact72 1000  top [2, 57.2] main_frac 0.1991
+  p1 r0 original slope   1986  r36   65700 r72  137200  first36/72  1600/ 1700  parks36/72 0/0  allact72 1000  top [4, 66.5] main_frac 0.1998
+  p1 r1 rerun    slope   1761  r36   65800 r72  129200  first36/72  1400/ 1900  parks36/72 0/0  allact72 1000  top [4, 42.5] main_frac 0.2005
+  p1 r2 rerun    slope   1800  r36   65900 r72  130700  first36/72  1500/ 1800  parks36/72 0/0  allact72 1000  top [7, 52.7] main_frac 0.2002
+  p2 r0 original slope   1831  r36   65700 r72  131600  first36/72  1400/ 1600  parks36/72 0/0  allact72 1000  top [2, 58.3] main_frac 0.199
+  p2 r1 original slope   1817  r36   65600 r72  131000  first36/72  1500/ 1700  parks36/72 0/0  allact72 1000  top [2, 82.5] main_frac 0.1992
+  p2 r2 original slope   1822  r36   62700 r72  128300  first36/72  1700/ 1800  parks36/72 0/0  allact72 1000  top [2, 52.9] main_frac 0.2004
+
+## external P8 b=2P park
+  p0 r0 original slope   1689  r36   63400 r72  124200  first36/72  1500/ 1700  parks36/72 0/0  allact72 1000  top [0, 64.1] main_frac 0.1986
+  p0 r1 rerun    slope   1608  r36   66000 r72  123900  first36/72  1400/ 1600  parks36/72 0/0  allact72 1000  top [2, 59.9] main_frac 0.1995
+  p0 r2 rerun    slope   1742  r36   69300 r72  132000  first36/72  1500/ 1800  parks36/72 0/0  allact72 1000  top [2, 57.2] main_frac 0.1991
+  p1 r0 original slope   1581  r36   65900 r72  122800  first36/72  1600/ 1800  parks36/72 0/0  allact72 1000  top [4, 66.5] main_frac 0.1998
+  p1 r1 rerun    slope   1681  r36   61600 r72  122100  first36/72  1400/ 1900  parks36/72 0/0  allact72 1000  top [4, 42.5] main_frac 0.2005
+  p1 r2 rerun    slope   1647  r36   62800 r72  122100  first36/72  1400/ 1900  parks36/72 0/0  allact72 1000  top [7, 52.7] main_frac 0.2002
+  p2 r0 original slope   1569  r36   65100 r72  121600  first36/72  1400/ 1600  parks36/72 0/0  allact72 1000  top [2, 58.3] main_frac 0.199
+  p2 r1 original slope   1714  r36   63700 r72  125400  first36/72  1800/ 1900  parks36/72 0/0  allact72 1000  top [2, 82.5] main_frac 0.1992
+  p2 r2 original slope   1569  r36   63000 r72  119500  first36/72  1400/ 1800  parks36/72 0/0  allact72 1000  top [2, 52.9] main_frac 0.2004
+
+## external P8 b=4P spin
+  p0 r0 original slope   3275  r36  116100 r72  234000  first36/72  1900/ 2200  parks36/72 0/0  allact72 1000  top [0, 64.1] main_frac 0.1986
+  p0 r1 rerun    slope   3386  r36  126600 r72  248500  first36/72  1600/ 2100  parks36/72 0/0  allact72 1000  top [2, 59.9] main_frac 0.1995
+  p0 r2 rerun    slope   3092  r36  128300 r72  239600  first36/72  1900/ 2100  parks36/72 0/0  allact72 1000  top [2, 57.2] main_frac 0.1991
+  p1 r0 original slope   2983  r36  127300 r72  234700  first36/72  1900/ 2100  parks36/72 0/0  allact72 1000  top [4, 66.5] main_frac 0.1998
+  p1 r1 rerun    slope   2922  r36  126000 r72  231200  first36/72  1600/ 1900  parks36/72 0/0  allact72 1000  top [4, 42.5] main_frac 0.2005
+  p1 r2 rerun    slope   2975  r36  126100 r72  233200  first36/72  1700/ 2100  parks36/72 0/0  allact72 1000  top [7, 52.7] main_frac 0.2002
+  p2 r0 original slope   3436  r36  125800 r72  249500  first36/72  1600/ 1900  parks36/72 0/0  allact72 1000  top [2, 58.3] main_frac 0.199
+  p2 r1 original slope   3647  r36  127300 r72  258600  first36/72  1700/ 2100  parks36/72 0/0  allact72 1000  top [2, 82.5] main_frac 0.1992
+  p2 r2 original slope   3144  r36  118000 r72  231200  first36/72  1700/ 2100  parks36/72 0/0  allact72 1000  top [2, 52.9] main_frac 0.2004
+
+## external P8 b=4P park
+  p0 r0 original slope   3189  r36  122700 r72  237500  first36/72  1800/ 2000  parks36/72 0/0  allact72 1000  top [0, 64.1] main_frac 0.1986
+  p0 r1 rerun    slope   3667  r36  125200 r72  257200  first36/72  1600/ 2000  parks36/72 0/0  allact72 1000  top [2, 59.9] main_frac 0.1995
+  p0 r2 rerun    slope   3131  r36  128800 r72  241500  first36/72  1900/ 2000  parks36/72 0/0  allact72 1000  top [2, 57.2] main_frac 0.1991
+  p1 r0 original slope   3158  r36  125300 r72  239000  first36/72  1700/ 2000  parks36/72 0/0  allact72 1000  top [4, 66.5] main_frac 0.1998
+  p1 r1 rerun    slope   3100  r36  123300 r72  234900  first36/72  1600/ 2000  parks36/72 0/0  allact72 1000  top [4, 42.5] main_frac 0.2005
+  p1 r2 rerun    slope   3183  r36  119500 r72  234100  first36/72  1700/ 1900  parks36/72 0/0  allact72 1000  top [7, 52.7] main_frac 0.2002
+  p2 r0 original slope   3694  r36  120200 r72  253200  first36/72  1900/ 2000  parks36/72 0/0  allact72 1000  top [2, 58.3] main_frac 0.199
+  p2 r1 original slope   3392  r36  125200 r72  247300  first36/72  1700/ 1900  parks36/72 0/0  allact72 1000  top [2, 82.5] main_frac 0.1992
+  p2 r2 original slope   3003  r36  122000 r72  230100  first36/72  1900/ 2000  parks36/72 0/0  allact72 1000  top [2, 52.9] main_frac 0.2004

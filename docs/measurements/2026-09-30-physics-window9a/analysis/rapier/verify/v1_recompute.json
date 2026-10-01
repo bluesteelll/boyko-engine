@@ -1,0 +1,262 @@
+{
+ "R-ARM RP-D W1 [100,500)": "NOT CLAIMED B>A",
+ "R-ARM RP-D W2 [100,500)": "CLAIMED B>A",
+ "R-ARM RP-D W4 [100,500)": "CLAIMED B>A",
+ "R-ARM RP-D W8 [100,500)": "NOT CLAIMED B>A",
+ "R-ARM RP-D W16 [100,500)": "NOT CLAIMED B>A",
+ "R-ARM RP-M W1 [100,500)": "CLAIMED STRONG B>A",
+ "R-ARM RP-M W2 [100,500)": "CLAIMED B>A",
+ "R-ARM RP-M W4 [100,500)": "CLAIMED B>A",
+ "R-ARM RP-M W8 [100,500)": "NOT CLAIMED B>A",
+ "R-ARM RP-M W16 [100,500)": "NOT CLAIMED B>A",
+ "R-ARM RP-D W1 [0,100)": "NOT CLAIMED B>A",
+ "R-ARM RP-D W2 [0,100)": "CLAIMED B>A",
+ "R-ARM RP-D W4 [0,100)": "NOT CLAIMED B>A",
+ "R-ARM RP-D W8 [0,100)": "NOT CLAIMED B>A",
+ "R-ARM RP-D W16 [0,100)": "NOT CLAIMED B<A",
+ "R-ARM RP-M W1 [0,100)": "CLAIMED STRONG B>A",
+ "R-ARM RP-M W2 [0,100)": "CLAIMED B>A",
+ "R-ARM RP-M W4 [0,100)": "NOT CLAIMED B>A",
+ "R-ARM RP-M W8 [0,100)": "NOT CLAIMED B>A",
+ "R-ARM RP-M W16 [0,100)": "NOT CLAIMED B>A",
+ "R-WALL-D W1 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster",
+  "EXCL_rfirst": "ours faster"
+ },
+ "R-WALL-D W2 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "NOT CLAIMED",
+  "EXCL_rfirst": "NOT CLAIMED"
+ },
+ "R-WALL-D W4 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "NOT CLAIMED",
+  "EXCL_rfirst": "NOT CLAIMED"
+ },
+ "R-WALL-D W8 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "Rapier faster (rs8,rs4)",
+  "EXCL_rfirst": "Rapier faster (rs8,rs4)"
+ },
+ "R-WALL-D W16 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "NOT CLAIMED",
+  "EXCL_rfirst": "Rapier faster (rs8,rs4)"
+ },
+ "R-WALL-M W1 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster STRONG",
+  "EXCL_rfirst": "ours faster STRONG"
+ },
+ "R-WALL-M W2 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster STRONG",
+  "EXCL_rfirst": "ours faster STRONG"
+ },
+ "R-WALL-M W4 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster STRONG",
+  "EXCL_rfirst": "ours faster STRONG"
+ },
+ "R-WALL-M W8 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster",
+  "EXCL_rfirst": "NOT CLAIMED"
+ },
+ "R-WALL-M W16 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster STRONG",
+  "EXCL_rfirst": "ours faster"
+ },
+ "R-ROW-D W1 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster STRONG",
+  "EXCL_rfirst": "ours faster STRONG"
+ },
+ "R-ROW-D W2 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster STRONG",
+  "EXCL_rfirst": "ours faster STRONG"
+ },
+ "R-ROW-D W4 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster STRONG",
+  "EXCL_rfirst": "ours faster STRONG"
+ },
+ "R-ROW-D W8 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster STRONG",
+  "EXCL_rfirst": "ours faster"
+ },
+ "R-ROW-D W16 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster",
+  "EXCL_rfirst": "NOT CLAIMED"
+ },
+ "R-ROW-M W1 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "NOT CLAIMED",
+  "EXCL_rfirst": "NOT CLAIMED"
+ },
+ "R-ROW-M W2 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "NOT CLAIMED",
+  "EXCL_rfirst": "Rapier faster (rs8)"
+ },
+ "R-ROW-M W4 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "Rapier faster (rs8)",
+  "EXCL_rfirst": "Rapier faster (rs8)"
+ },
+ "R-ROW-M W8 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "Rapier faster (rs4)",
+  "EXCL_rfirst": "Rapier faster (rs4)"
+ },
+ "R-ROW-M W16 [100,500)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "Rapier faster (rs8,rs4)",
+  "EXCL_rfirst": "Rapier faster (rs8,rs4) STRONG"
+ },
+ "R-WALL-D W1 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "Rapier faster (rs8)",
+  "EXCL_rfirst": "Rapier faster (rs8) STRONG"
+ },
+ "R-WALL-D W2 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "Rapier faster (rs8,rs4) STRONG",
+  "EXCL_rfirst": "Rapier faster (rs8,rs4) STRONG"
+ },
+ "R-WALL-D W4 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "Rapier faster (rs8,rs4) STRONG",
+  "EXCL_rfirst": "Rapier faster (rs8,rs4) STRONG"
+ },
+ "R-WALL-D W8 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "Rapier faster (rs8,rs4)",
+  "EXCL_rfirst": "Rapier faster (rs8,rs4) STRONG"
+ },
+ "R-WALL-D W16 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "Rapier faster (rs4)",
+  "EXCL_rfirst": "Rapier faster (rs4)"
+ },
+ "R-WALL-M W1 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster STRONG",
+  "EXCL_rfirst": "ours faster STRONG"
+ },
+ "R-WALL-M W2 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster STRONG",
+  "EXCL_rfirst": "ours faster STRONG"
+ },
+ "R-WALL-M W4 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster STRONG",
+  "EXCL_rfirst": "ours faster"
+ },
+ "R-WALL-M W8 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster",
+  "EXCL_rfirst": "ours faster"
+ },
+ "R-WALL-M W16 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster STRONG",
+  "EXCL_rfirst": "ours faster"
+ },
+ "R-ROW-D W1 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster STRONG",
+  "EXCL_rfirst": "ours faster STRONG"
+ },
+ "R-ROW-D W2 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster STRONG",
+  "EXCL_rfirst": "ours faster STRONG"
+ },
+ "R-ROW-D W4 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster STRONG",
+  "EXCL_rfirst": "ours faster STRONG"
+ },
+ "R-ROW-D W8 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster STRONG",
+  "EXCL_rfirst": "ours faster"
+ },
+ "R-ROW-D W16 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "ours faster",
+  "EXCL_rfirst": "ours faster"
+ },
+ "R-ROW-M W1 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "NOT CLAIMED",
+  "EXCL_rfirst": "NOT CLAIMED"
+ },
+ "R-ROW-M W2 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "NOT CLAIMED",
+  "EXCL_rfirst": "NOT CLAIMED"
+ },
+ "R-ROW-M W4 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "NOT CLAIMED",
+  "EXCL_rfirst": "NOT CLAIMED"
+ },
+ "R-ROW-M W8 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "NOT CLAIMED",
+  "EXCL_rfirst": "NOT CLAIMED"
+ },
+ "R-ROW-M W16 [0,100)": {
+  "LETTER": "NOT CLAIMED",
+  "LETTER_rfirst": "NOT CLAIMED",
+  "EXCL": "NOT CLAIMED",
+  "EXCL_rfirst": "Rapier faster (rs8)"
+ }
+}

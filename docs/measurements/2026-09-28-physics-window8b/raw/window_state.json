@@ -1,0 +1,21 @@
+{
+ "start": "2026-09-29T17:21:02.494+03:00",
+ "test": false,
+ "placement": "P-none (no affinity call)",
+ "voids": [],
+ "machine_before": {
+  "time": "2026-09-29T17:21:02.508+03:00",
+  "powercfg": "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)"
+ },
+ "last": "omega-v1-cont-p0 r2 omega1-s36-worker#omega2@W0",
+ "rounds_done": 3,
+ "end": "2026-09-29T21:09:20.760+03:00",
+ "status": "complete",
+ "exit": 0,
+ "timed": 894,
+ "rerun": 108,
+ "warm": 20,
+ "voided_processes": 0,
+ "r4_differ": 0,
+ "binaries_after": "all match"
+}

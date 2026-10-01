@@ -1,0 +1,124 @@
+
+# POST HOC ratios, window [0..500) (B/A; the ruling-1 reading is descriptive, nothing here was pre-registered)
+  T16/T8 J-T: A 1.8112 [1.8003-1.8536] K=9 (r 2.94 / i 0.51 / s 0.46 %); B 2.1902 [2.1816-2.2341] K=9 (r 2.40 / i 0.46 / s 0.30 %)
+      B/A pooled 1.2092 (+20.92 %, d +0.3790 ms) Y/Y/Y bars r 7.59 / i 1.37 / s 1.10 %; p0 1.2088 Y/Y/Y | p1 1.2115 Y/Y/Y | p2 1.2109 Y/Y/Y; ruling-1 reading: CLAIMED STRONG (B slower); binding threshold 3.27 % = 0.0593 ms
+  P16/P8 J-T: A 1.8152 [1.7989-1.8491] K=9 (r 2.77 / i 0.87 / s 0.36 %); B 2.0502 [2.0393-2.0659] K=9 (r 1.30 / i 0.53 / s 0.17 %)
+      B/A pooled 1.1295 (+12.95 %, d +0.2350 ms) Y/Y/Y bars r 6.11 / i 2.03 / s 0.79 %; p0 1.1324 Y/Y/Y | p1 1.1332 Y/Y/Y | p2 1.1170 Y/Y/Y; ruling-1 reading: CLAIMED STRONG (B slower); binding threshold 2.03 % = 0.0368 ms
+  T16/T8 J-A: A 5.3040 [5.2953-5.4035] K=9 (r 2.04 / i 0.27 / s 0.26 %); B 5.8658 [5.8421-5.9646] K=9 (r 2.09 / i 0.20 / s 0.25 %)
+      B/A pooled 1.1059 (+10.59 %, d +0.5617 ms) Y/Y/Y bars r 5.84 / i 0.67 / s 0.73 %; p0 1.1059 Y/Y/Y | p1 1.1050 Y/Y/Y | p2 1.1048 Y/Y/Y; ruling-1 reading: CLAIMED STRONG (B slower); binding threshold 2.09 % = 0.1107 ms
+  P16/P8 J-A: A 5.3081 [5.2750-5.3216] K=9 (r 0.88 / i 0.21 / s 0.11 %); B 5.2079 [5.1945-5.3156] K=9 (r 2.33 / i 0.38 / s 0.31 %)
+      B/A pooled 0.9811 (-1.89 %, d -0.1002 ms) n/Y/Y bars r 4.97 / i 0.87 / s 0.66 %; p0 0.9904 n/n/n | p1 0.9837 Y/Y/Y | p2 0.9801 Y/Y/Y; ruling-1 reading: NOT CLAIMED (B faster); binding threshold 2.17 % = 0.1151 ms
+  T16/P16 J-A: A 5.2079 [5.1945-5.3156] K=9 (r 2.33 / i 0.38 / s 0.31 %); B 5.8658 [5.8421-5.9646] K=9 (r 2.09 / i 0.20 / s 0.25 %)
+      B/A pooled 1.1263 (+12.63 %, d +0.6579 ms) Y/Y/Y bars r 6.25 / i 0.85 / s 0.80 %; p0 1.1148 Y/Y/Y | p1 1.1252 Y/Y/Y | p2 1.1281 Y/Y/Y; ruling-1 reading: CLAIMED STRONG (B slower); binding threshold 2.19 % = 0.1141 ms
+  T1/P1 J-T (S7-JT-W1, optional Q10 pair): A 4.4167 [4.3957-4.5564] K=9 (r 3.64 / i 0.84 / s 0.49 %); B 4.4551 [4.4037-4.5598] K=9 (r 3.50 / i 1.50 / s 0.54 %)
+      B/A pooled 1.0087 (+0.87 %, d +0.0384 ms) n/n/n bars r 10.10 / i 3.44 / s 1.46 %; p0 0.9847 n/n/n | p1 1.0067 n/n/n | p2 1.0117 n/n/n; ruling-1 reading: NOT CLAIMED (B slower); binding threshold 4.70 % = 0.2074 ms
+
+# POST HOC ratios, window [0..100) (B/A; the ruling-1 reading is descriptive, nothing here was pre-registered)
+  T16/T8 J-T: A 1.9740 [1.9632-2.0034] K=9 (r 2.04 / i 0.44 / s 0.32 %); B 2.3317 [2.3240-2.3552] K=9 (r 1.34 / i 0.10 / s 0.15 %)
+      B/A pooled 1.1812 (+18.12 %, d +0.3576 ms) Y/Y/Y bars r 4.87 / i 0.90 / s 0.71 %; p0 1.1857 Y/Y/Y | p1 1.1809 Y/Y/Y | p2 1.1647 Y/Y/Y; ruling-1 reading: CLAIMED STRONG (B slower); binding threshold 2.01 % = 0.0397 ms
+  P16/P8 J-T: A 1.9829 [1.9579-2.0197] K=9 (r 3.12 / i 1.39 / s 0.42 %); B 2.2008 [2.1875-2.2137] K=9 (r 1.19 / i 0.26 / s 0.14 %)
+      B/A pooled 1.1099 (+10.99 %, d +0.2179 ms) Y/Y/Y bars r 6.67 / i 2.83 / s 0.89 %; p0 1.1101 Y/Y/Y | p1 1.1127 Y/Y/Y | p2 1.0910 Y/Y/Y; ruling-1 reading: CLAIMED STRONG (B slower); binding threshold 2.83 % = 0.0561 ms
+  T16/T8 J-A: A 5.4386 [5.4165-5.4734] K=9 (r 1.05 / i 0.20 / s 0.12 %); B 5.9839 [5.9606-6.0614] K=9 (r 1.68 / i 0.20 / s 0.20 %)
+      B/A pooled 1.1003 (+10.03 %, d +0.5453 ms) Y/Y/Y bars r 3.97 / i 0.57 / s 0.47 %; p0 1.1008 Y/Y/Y | p1 1.1004 Y/Y/Y | p2 1.1001 Y/Y/Y; ruling-1 reading: CLAIMED STRONG (B slower); binding threshold 1.56 % = 0.0850 ms
+  P16/P8 J-A: A 5.4397 [5.4085-5.4594] K=9 (r 0.94 / i 0.21 / s 0.11 %); B 5.3484 [5.3414-5.4622] K=9 (r 2.26 / i 0.51 / s 0.36 %)
+      B/A pooled 0.9832 (-1.68 %, d -0.0913 ms) n/Y/Y bars r 4.89 / i 1.11 / s 0.75 %; p0 0.9997 n/n/n | p1 0.9845 n/Y/Y | p2 0.9812 Y/Y/Y; ruling-1 reading: NOT CLAIMED (B faster); binding threshold 2.12 % = 0.1155 ms
+  T16/P16 J-A: A 5.3484 [5.3414-5.4622] K=9 (r 2.26 / i 0.51 / s 0.36 %); B 5.9839 [5.9606-6.0614] K=9 (r 1.68 / i 0.20 / s 0.20 %)
+      B/A pooled 1.1188 (+11.88 %, d +0.6355 ms) Y/Y/Y bars r 5.63 / i 1.10 / s 0.82 %; p0 1.0999 Y/Y/Y | p1 1.1189 Y/Y/Y | p2 1.1199 Y/Y/Y; ruling-1 reading: CLAIMED STRONG (B slower); binding threshold 2.14 % = 0.1143 ms
+  T1/P1 J-T (S7-JT-W1, optional Q10 pair): A 5.3374 [5.2911-5.5668] K=9 (r 5.17 / i 2.01 / s 0.73 %); B 5.3754 [5.3065-5.4661] K=9 (r 2.97 / i 1.46 / s 0.46 %)
+      B/A pooled 1.0071 (+0.71 %, d +0.0380 ms) n/n/n bars r 11.92 / i 4.98 / s 1.72 %; p0 0.9702 n/n/n | p1 1.0099 n/n/n | p2 1.0079 n/n/n; ruling-1 reading: NOT CLAIMED (B slower); binding threshold 5.42 % = 0.2893 ms
+
+# POST HOC ratios, window [100..500) (B/A; the ruling-1 reading is descriptive, nothing here was pre-registered)
+  T16/T8 J-T: A 1.7638 [1.7589-1.8165] K=9 (r 3.27 / i 0.63 / s 0.55 %); B 2.1552 [2.1458-2.2038] K=9 (r 2.69 / i 0.57 / s 0.35 %)
+      B/A pooled 1.2219 (+22.19 %, d +0.3914 ms) Y/Y/Y bars r 8.47 / i 1.70 / s 1.31 %; p0 1.2165 Y/Y/Y | p1 1.2201 Y/Y/Y | p2 1.2242 Y/Y/Y; ruling-1 reading: CLAIMED STRONG (B slower); binding threshold 3.99 % = 0.0703 ms
+  P16/P8 J-T: A 1.7746 [1.7583-1.8064] K=9 (r 2.71 / i 0.78 / s 0.35 %); B 2.0115 [2.0022-2.0327] K=9 (r 1.51 / i 0.60 / s 0.20 %)
+      B/A pooled 1.1335 (+13.35 %, d +0.2369 ms) Y/Y/Y bars r 6.21 / i 1.96 / s 0.80 %; p0 1.1380 Y/Y/Y | p1 1.1390 Y/Y/Y | p2 1.1244 Y/Y/Y; ruling-1 reading: CLAIMED STRONG (B slower); binding threshold 2.08 % = 0.0369 ms
+  T16/T8 J-A: A 5.2713 [5.2617-5.3960] K=9 (r 2.55 / i 0.30 / s 0.33 %); B 5.8369 [5.8124-5.9404] K=9 (r 2.19 / i 0.25 / s 0.27 %)
+      B/A pooled 1.1073 (+10.73 %, d +0.5656 ms) Y/Y/Y bars r 6.72 / i 0.78 / s 0.84 %; p0 1.1076 Y/Y/Y | p1 1.1058 Y/Y/Y | p2 1.1059 Y/Y/Y; ruling-1 reading: CLAIMED STRONG (B slower); binding threshold 2.59 % = 0.1364 ms
+  P16/P8 J-A: A 5.2737 [5.2417-5.2891] K=9 (r 0.90 / i 0.32 / s 0.11 %); B 5.1745 [5.1554-5.2850] K=9 (r 2.51 / i 0.37 / s 0.32 %)
+      B/A pooled 0.9812 (-1.88 %, d -0.0992 ms) n/Y/Y bars r 5.33 / i 0.99 / s 0.67 %; p0 0.9867 n/n/n | p1 0.9838 Y/Y/Y | p2 0.9804 Y/Y/Y; ruling-1 reading: NOT CLAIMED (B faster); binding threshold 2.30 % = 0.1213 ms
+  T16/P16 J-A: A 5.1745 [5.1554-5.2850] K=9 (r 2.51 / i 0.37 / s 0.32 %); B 5.8369 [5.8124-5.9404] K=9 (r 2.19 / i 0.25 / s 0.27 %)
+      B/A pooled 1.1280 (+12.80 %, d +0.6624 ms) Y/Y/Y bars r 6.66 / i 0.89 / s 0.82 %; p0 1.1200 Y/Y/Y | p1 1.1264 Y/Y/Y | p2 1.1301 Y/Y/Y; ruling-1 reading: CLAIMED STRONG (B slower); binding threshold 2.32 % = 0.1201 ms
+  T1/P1 J-T (S7-JT-W1, optional Q10 pair): A 4.1817 [4.1647-4.3254] K=9 (r 3.84 / i 0.78 / s 0.49 %); B 4.2213 [4.1753-4.3332] K=9 (r 3.74 / i 1.45 / s 0.57 %)
+      B/A pooled 1.0095 (+0.95 %, d +0.0396 ms) n/n/n bars r 10.73 / i 3.30 / s 1.51 %; p0 0.9951 n/n/n | p1 1.0124 n/Y/Y | p2 1.0119 n/n/n; ruling-1 reading: NOT CLAIMED (B slower); binding threshold 4.93 % = 0.2062 ms
+
+# POST HOC scaling T(1)/T(W) on J-T from the W1 pair row (same binary, [0,500))
+  s7p: T(1) 4.4167 ms; T(1)/T(W): W8 2.433; W16 2.154
+  s7t: T(1) 4.4551 ms; T(1)/T(W): W8 2.460; W16 2.034
+
+# POST HOC per manifold, [100,500): ns per manifold = wall / (each process own manifold mean); counts are identical in every process of both scenes (s7_select.txt), so every ratio equals the wall ratio
+  S7-JT#s7p@W8: 397.2 [393.6-404.3] K=9 (r 2.71 / i 0.78 / s 0.35 %) ns/manifold
+  S7-JT#s7t@W8: 394.8 [393.7-406.6] K=9 (r 3.27 / i 0.63 / s 0.55 %) ns/manifold
+  S7-JT#s7p@W16: 450.2 [448.2-455.0] K=9 (r 1.51 / i 0.60 / s 0.20 %) ns/manifold
+  S7-JT#s7t@W16: 482.4 [480.3-493.3] K=9 (r 2.69 / i 0.57 / s 0.35 %) ns/manifold
+  S7-JA#s7p@W8: 1180.4 [1173.2-1183.9] K=9 (r 0.90 / i 0.32 / s 0.11 %) ns/manifold
+  S7-JA#s7t@W8: 1179.9 [1177.7-1207.8] K=9 (r 2.55 / i 0.30 / s 0.33 %) ns/manifold
+  S7-JA#s7p@W16: 1158.2 [1153.9-1183.0] K=9 (r 2.51 / i 0.37 / s 0.32 %) ns/manifold
+  S7-JA#s7t@W16: 1306.5 [1301.0-1329.6] K=9 (r 2.19 / i 0.25 / s 0.27 %) ns/manifold
+
+# POST HOC paired per round: T/P of the two adjacent processes of one (pass, round), [0,500); n = 9 pairs
+  S7-JT@W8: T/P median 0.9985 [0.9840-1.0102], T slower in 3 of 9; T-P median -0.0027 ms [-0.0293..+0.0187]
+  S7-JT@W16: T/P median 1.0690 [1.0600-1.0874], T slower in 9 of 9; T-P median +0.1409 ms [+0.1240..+0.1796]
+  S7-JA@W8: T/P median 1.0011 [0.9967-1.0186], T slower in 6 of 9; T-P median +0.0060 ms [-0.0177..+0.0987]
+  S7-JA@W16: T/P median 1.1245 [1.1035-1.1483], T slower in 9 of 9; T-P median +0.6486 ms [+0.5501..+0.7701]
+  S7-JT-W1@W1: T/P median 1.0050 [0.9836-1.0364], T slower in 6 of 9; T-P median +0.0224 ms [-0.0734..+0.1600]
+
+# POST HOC sensitivity: the two hot originals used in place of their clean re-runs (the protocol uses the re-runs)
+  p1 r0 S7-JA#s7t@W8: original 5.3407 ms (['witness 2.29']), re-run 5.3031 ms
+  p2 r0 S7-JT-W1#s7t@W1: original 5.2124 ms (['receipt after 6.5', 'witness 3.95']), re-run 4.5598 ms
+  C2-JA with the hot original: A 5.3081 [5.2750-5.3216] K=9 (r 0.88 / i 0.21 / s 0.11 %); B 5.3145 [5.2953-5.4035] K=9 (r 2.04 / i 0.46 / s 0.26 %)
+      B/A pooled 1.0012 (+0.12 %, d +0.0064 ms) n/n/n bars r 4.43 / i 1.02 / s 0.57 %; p0 0.9984 n/n/n | p1 1.0064 n/n/n | p2 1.0007 n/n/n; ruling-1 reading: NOT CLAIMED (B slower); binding threshold 2.06 % = 0.1096 ms
+  C1-JA with the hot original: A 5.3145 [5.2953-5.4035] K=9 (r 2.04 / i 0.46 / s 0.26 %); B 5.8658 [5.8421-5.9646] K=9 (r 2.09 / i 0.20 / s 0.25 %)
+      B/A pooled 1.1037 (+10.37 %, d +0.5513 ms) Y/Y/Y bars r 5.83 / i 1.01 / s 0.73 %; p0 1.1059 Y/Y/Y | p1 1.0997 Y/Y/Y | p2 1.1048 Y/Y/Y; ruling-1 reading: CLAIMED STRONG (B slower); binding threshold 2.09 % = 0.1109 ms
+  W1 pair with the hot original: A 4.4167 [4.3957-4.5564] K=9 (r 3.64 / i 0.84 / s 0.49 %); B 4.4551 [4.4037-5.2124] K=9 (r 18.15 / i 1.50 / s 2.41 %)
+      B/A pooled 1.0087 (+0.87 %, d +0.0384 ms) n/n/n bars r 37.03 / i 3.44 / s 4.93 %; p0 0.9847 n/n/n | p1 1.0067 n/n/n | p2 1.0117 n/n/n; ruling-1 reading: NOT CLAIMED (B slower); binding threshold 18.01 % = 0.7954 ms
+
+# Placement receipts (RECORDED, never used to select): per cell, median [min-max] of the main-thread cycle fraction and of the top logical CPU busy %; then every process more than 1.5 % from its cell median, [0,500)
+  S7-JA#s7p@W8 (n 9): main_cycle_frac 0.004 [0.003-0.004]; top CPU busy 90.1 [87.2-93.0] %
+  S7-JA#s7p@W16 (n 9): main_cycle_frac 0.002 [0.002-0.002]; top CPU busy 79.3 [73.7-85.7] %
+  S7-JA#s7t@W8 (n 9): main_cycle_frac 0.004 [0.004-0.004]; top CPU busy 89.5 [85.8-95.3] %
+  S7-JA#s7t@W16 (n 9): main_cycle_frac 0.003 [0.003-0.003]; top CPU busy 77.1 [73.0-84.2] %
+  S7-JA-ladder16-F1#s7p@W16 (n 9): main_cycle_frac 0.002 [0.002-0.002]; top CPU busy 76.7 [72.7-83.7] %
+  S7-JT#s7p@W8 (n 9): main_cycle_frac 0.010 [0.009-0.010]; top CPU busy 86.4 [83.3-96.6] %
+  S7-JT#s7p@W16 (n 9): main_cycle_frac 0.005 [0.005-0.005]; top CPU busy 76.1 [68.2-84.8] %
+  S7-JT#s7t@W8 (n 9): main_cycle_frac 0.010 [0.010-0.010]; top CPU busy 84.7 [82.0-96.6] %
+  S7-JT#s7t@W16 (n 9): main_cycle_frac 0.005 [0.005-0.005]; top CPU busy 76.1 [66.7-80.8] %
+  S7-JT-W1#s7p@W1 (n 9): main_cycle_frac 0.016 [0.015-0.016]; top CPU busy 95.2 [89.6-98.6] %
+  S7-JT-W1#s7t@W1 (n 9): main_cycle_frac 0.016 [0.016-0.016]; top CPU busy 95.8 [93.9-99.3] %
+  S7-ladder16-F0.5#s7p@W16 (n 9): main_cycle_frac 0.005 [0.005-0.005]; top CPU busy 78.3 [67.6-81.2] %
+  S7-ladder16-F1#s7p@W16 (n 9): main_cycle_frac 0.005 [0.005-0.005]; top CPU busy 73.6 [68.1-84.5] %
+  S7-ladder16-F1.5#s7p@W16 (n 9): main_cycle_frac 0.005 [0.005-0.005]; top CPU busy 73.6 [69.9-84.7] %
+  S7-ladder16-F2#s7p@W16 (n 9): main_cycle_frac 0.005 [0.005-0.005]; top CPU busy 73.7 [66.2-90.7] %
+  S7-ladder8-F0.5#s7p@W8 (n 9): main_cycle_frac 0.010 [0.010-0.011]; top CPU busy 91.7 [82.0-95.1] %
+  S7-ladder8-F1#s7p@W8 (n 9): main_cycle_frac 0.010 [0.010-0.011]; top CPU busy 90.3 [85.5-96.7] %
+  S7-ladder8-F1.5#s7p@W8 (n 9): main_cycle_frac 0.010 [0.010-0.011]; top CPU busy 90.5 [85.2-98.4] %
+  S7-ladder8-F2#s7p@W8 (n 9): main_cycle_frac 0.010 [0.010-0.010]; top CPU busy 92.2 [85.9-95.4] %
+  outliers (> 1.5 % from the cell median):
+    p0 r1 S7-JA#s7p@W16 17:50:03: 5.3156 ms (+2.07 %); main_cycle_frac 0.0021, top3 [[10, 75.7], [14, 46.8], [7, 45.7]], receipts 0.96/0.92 %, witness 0.52 %
+    p0 r2 S7-JA#s7t@W8 17:52:55: 5.4035 ms (+1.88 %); main_cycle_frac 0.0036, top3 [[10, 85.8], [12, 48.3], [14, 43.8]], receipts 0.41/0.58 %, witness 1.15 %
+    p2 r2 S7-JA#s7t@W16 18:12:11: 5.9646 ms (+1.68 %); main_cycle_frac 0.0026, top3 [[10, 76.7], [12, 44.3], [14, 39.6]], receipts 3.63/2.37 %, witness 0.95 %
+    p2 r0 S7-JT#s7p@W8 18:08:45: 1.8491 ms (+1.87 %); main_cycle_frac 0.0094, top3 [[10, 83.6], [14, 45.9], [12, 43.3]], receipts 1.51/0.57 %, witness 0.31 %
+    p0 r2 S7-JT#s7t@W8 17:53:10: 1.8450 ms (+1.86 %); main_cycle_frac 0.0099, top3 [[10, 83.9], [12, 42.6], [7, 36.7]], receipts 0.98/0.21 %, witness 0.21 %
+    p2 r0 S7-JT#s7t@W8 18:08:39: 1.8536 ms (+2.34 %); main_cycle_frac 0.01, top3 [[10, 82.0], [12, 46.7], [14, 44.3]], receipts 1.14/1.51 %, witness 0.21 %
+    p0 r2 S7-JT#s7t@W16 17:52:18: 2.2341 ms (+2.00 %); main_cycle_frac 0.0047, top3 [[10, 80.8], [0, 79.5], [4, 58.9]], receipts 1.24/0.47 %, witness 0.18 %
+    p0 r0 S7-JT-W1#s7p@W1 17:49:15: 4.5564 ms (+3.16 %); main_cycle_frac 0.015, top3 [[10, 95.2], [12, 4.8], [2, 2.7]], receipts 0.62/0.83 %, witness 0.35 %
+    p0 r0 S7-JT-W1#s7t@W1 17:49:08: 4.5493 ms (+2.11 %); main_cycle_frac 0.0157, top3 [[10, 95.3], [12, 2.7], [14, 2.0]], receipts 0.37/0.62 %, witness 0.13 %
+    p2 r0 S7-JT-W1#s7t@W1 18:13:45: 4.5598 ms (+2.35 %); main_cycle_frac 0.0156, top3 [[10, 93.9], [2, 5.4], [12, 2.0]], receipts 1.31/0.45 %, witness 0.26 %
+    p0 r2 S7-ladder8-F1.5#s7p@W8 17:52:37: 1.9368 ms (+1.60 %); main_cycle_frac 0.01, top3 [[10, 90.5], [12, 54.0], [14, 53.1]], receipts 0.27/1.14 %, witness 1.0 %
+  11 outlier processes of 171
+
+# POST HOC order inside the adjacent pair (by seq; re-runs excluded), T/P per pass
+  S7-JT@W8 p0: first launched ['s7t', 's7t', 's7t']; T/P per round 0.9985, 1.0028, 1.0102
+  S7-JT@W8 p1: first launched ['s7p', 's7p', 's7p']; T/P per round 0.9990, 0.9946, 0.9908
+  S7-JT@W8 p2: first launched ['s7t', 's7t', 's7t']; T/P per round 1.0024, 0.9981, 0.9840
+  S7-JT@W16 p0: first launched ['s7t', 's7t', 's7t']; T/P per round 1.0600, 1.0690, 1.0874
+  S7-JT@W16 p1: first launched ['s7p', 's7p', 's7p']; T/P per round 1.0613, 1.0651, 1.0669
+  S7-JT@W16 p2: first launched ['s7t', 's7t', 's7t']; T/P per round 1.0705, 1.0740, 1.0742
+  S7-JA@W8 p0: first launched ['s7t', 's7t', 's7t']; T/P per round 0.9968, 0.9967, 1.0186
+  S7-JA@W8 p1: first launched ['s7p', 's7p', 's7p']; T/P per round 1.0053, 1.0011, 1.0038
+  S7-JA@W8 p2: first launched ['s7t', 's7t', 's7t']; T/P per round 1.0013, 0.9996, 1.0006
+  S7-JA@W16 p0: first launched ['s7t', 's7t', 's7t']; T/P per round 1.1229, 1.1035, 1.1153
+  S7-JA@W16 p1: first launched ['s7p', 's7p', 's7p']; T/P per round 1.1245, 1.1253, 1.1240
+  S7-JA@W16 p2: first launched ['s7t', 's7t', 's7t']; T/P per round 1.1247, 1.1259, 1.1483
+  S7-JT-W1@W1 p0: first launched ['s7t', 's7t', 's7t']; T/P per round 0.9984, 0.9836, 1.0003
+  S7-JT-W1@W1 p1: first launched ['s7p', 's7p', 's7p']; T/P per round 1.0135, 1.0108, 1.0050
+  S7-JT-W1@W1 p2: first launched ['s7t', 's7t', 's7t']; T/P per round 1.0364, 1.0117, 0.9987

@@ -1,0 +1,3 @@
+exit 3
+STOP at start: binaries do not match bin/SHA256SUMS ['tipcgu1 C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win9a\\bin\\runner_tip_50e31f1a.exe 8d6e7d4173857ca83b47cd350890b8e178451fb48f030ac3d25aaef33cd268c3 != its pinned sha256 3e1f72babf76987260988481f12ddbe409ecdc308ce141326529ef89b020d771 (a key/exe swap)']
+2026-10-01T03:08:27.426+03:00

@@ -1,0 +1,4 @@
+p0: slots with an unclean original 74; slots re-run 38; re-run processes 38; clean re-runs 28
+p0 waited_s inside the re-run stage: 150.2 s; first start 2026-09-30T19:52:34.265+03:00 last end 2026-09-30T19:59:04.579+03:00
+p0 slots never re-run: 36 (all dropped: True)
+p0 dropped slots: 46 = never re-run 36 + re-run but unclean again 10

@@ -1,0 +1,56 @@
+    # ---- the C4-CGU block end to end (2026-10-01): --test rehearses control flow with real 12-step processes of BOTH exes on the REAL overlay
+    if have_cgu:
+        E2E_N[0] += 1
+        craw = os.path.join(GATE, 'selftest_tmp', f'e2e_cgu_{E2E_N[0]}')
+        shutil.rmtree(craw, ignore_errors=True)
+        os.makedirs(craw)
+        e = dict(os.environ, W9A_TEST_RAW=craw, W9A_TEST_HOT='C4-JDcgu#tipcgu1@W8:0:1')
+        e.pop('W9A_EXTRA', None)
+        for k in ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS'):
+            e.pop(k, None)
+        pc = subprocess.run([sys.executable, '-B', DRIVER, '--test', '--blocks', 'C4-CGU', '--test-rounds', '1'], env=e,
+                            capture_output=True, text=True, cwd=W9, timeout=900)
+        crecs = [json.loads(l) for l in open(os.path.join(craw, 'runs.jsonl'), encoding='utf-8')] if os.path.exists(os.path.join(craw, 'runs.jsonl')) else []
+        cprocs = [r for r in crecs if 'row' in r and r.get('attempt') != 'warmup']
+        cwarm = [r for r in crecs if 'row' in r and r.get('attempt') == 'warmup']
+        corig = sorted((r for r in cprocs if r['attempt'] == 'original'), key=lambda r: r['seq'])
+        case('e2e C4-CGU --test (1 round, W9A_TEST_HOT: C4-JDcgu#tipcgu1@W8 hot once): exit 0, 10 originals + 1 re-run, 0 invalid, every record kind runner',
+             [] if (pc.returncode == 0 and len(corig) == 10 and len(cprocs) == 11 and not any(r.get('invalid') for r in cprocs + cwarm)
+                    and all(r['kind'] == 'runner' for r in cprocs + cwarm)) else [f'exit {pc.returncode} originals {len(corig)} procs {len(cprocs)} invalid {[r.get("invalid") for r in cprocs if r.get("invalid")][:2]} {pc.stderr[-200:]}'], False)
+        case('e2e C4-CGU: two warm-ups per pass in order C4-JDcgu tip W8 then tipcgu1 W8 (one per exe)',
+             [] if [(r['row'], r['binary'], r['W']) for r in cwarm] == [('C4-JDcgu', 'tip', 8), ('C4-JDcgu', 'tipcgu1', 8)] else [str([(r['row'], r['binary'], r['W']) for r in cwarm])], False)
+        case('e2e C4-CGU: the EXECUTED order of pass 0 is the reversed forward order and tip / tipcgu1 are adjacent at every W',
+             [] if ([(r['row'], r['binary'], r['W']) for r in corig] == R.pass_order(R.cell_order('C4-CGU'), 0, cb) and not cg_adjacent([(r['row'], r['binary'], r['W']) for r in corig]))
+             else ['executed order differs'], False)
+        case('e2e C4-CGU: the injected hot slot was re-run once (round 0, rerun_no 1, tipcgu1 W8) and left the stage clean',
+             [] if sorted((r['round'], r['rerun_no'], r['row'], r['binary'], r['W']) for r in cprocs if r['attempt'] == 'rerun') == [(0, 1, 'C4-JDcgu', 'tipcgu1', 8)] else ['re-run set differs'], False)
+        case('e2e C4-CGU: each binary key ran ITS OWN exe (path and the sha256 in the record == the pin) - tip the cgu16 exe, tipcgu1 the cgu1 exe',
+             [] if all(r['exe'].endswith({'tip': 'runner_tip_50e31f1a.exe', 'tipcgu1': 'runner_tipcgu1_50e31f1a.exe'}[r['binary']])
+                       and r['exe_sha256'] == R.BINS[r['binary']]['sha256_pin'] for r in cprocs + cwarm) else ['exe or sha differ'], False)
+        case('e2e C4-CGU: both exes ran in the rehearsal (a block that only ran one exe would be an A/A)',
+             [] if {r['binary'] for r in cprocs} == {'tip', 'tipcgu1'} else [str({r['binary'] for r in cprocs})], False)
+        # WIRING: the cgu1 exe under the `tip` key (tip's pin kept), and the cgu16 exe under `tipcgu1`: the driver must STOP AT START (exit 3) with no
+        # process run - the record validators cannot see this swap (same config receipt, same pose), the pin can, and main() must act on it.
+        ov_real = json.load(open(os.path.join(W9, 'rows9a.extra.json'), encoding='utf-8'))
+        for label, key, to in (('tip -> the cgu1 exe', 'tip', 'tipcgu1'), ('tipcgu1 -> the cgu16 exe', 'tipcgu1', 'tip')):
+            ov_bad = json.loads(json.dumps(ov_real))
+            src_bin = ov_bad['binaries'].get(to) or R.ROWS_JSON['binaries'][to]
+            ov_bad['binaries'][key] = dict(ov_bad['binaries'].get(key) or R.ROWS_JSON['binaries'][key], exe=src_bin['exe'])
+            ov_bad['_comment'] = 'REHEARSAL ONLY (selftest9a.py wiring case): ' + label
+            bp = os.path.join(GATE, 'selftest_tmp', f'cgu_wiring_{key}.json')
+            with open(bp, 'w', encoding='utf-8', newline='\n') as f:
+                json.dump(ov_bad, f)
+            E2E_N[0] += 1
+            wraw = os.path.join(GATE, 'selftest_tmp', f'e2e_cgu_wiring_{E2E_N[0]}')
+            shutil.rmtree(wraw, ignore_errors=True)
+            os.makedirs(wraw)
+            e2 = dict(os.environ, W9A_EXTRA=bp, W9A_TEST_RAW=wraw, W9A_TEST_HOT='none#none@W0:0:0')
+            for k in ('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS'):
+                e2.pop(k, None)
+            pw = subprocess.run([sys.executable, '-B', DRIVER, '--test', '--blocks', 'C4-CGU', '--test-rounds', '1'], env=e2,
+                                capture_output=True, text=True, cwd=W9, timeout=900)
+            wrecs = [json.loads(l) for l in open(os.path.join(wraw, 'runs.jsonl'), encoding='utf-8')] if os.path.exists(os.path.join(wraw, 'runs.jsonl')) else []
+            wdone = open(os.path.join(wraw, 'driver_done.txt'), encoding='utf-8').read() if os.path.exists(os.path.join(wraw, 'driver_done.txt')) else ''
+            case(f'e2e wiring ({label}): the driver STOPS AT START (exit 3, "binaries do not match", the pin named) and runs no process',
+                 [] if (pw.returncode == 3 and 'binaries do not match' in wdone and 'pinned sha256' in wdone and not [r for r in wrecs if 'row' in r])
+                 else [f'exit {pw.returncode} done {wdone[:160]!r} processes {len([r for r in wrecs if "row" in r])} {pw.stderr[-200:]}'], False)

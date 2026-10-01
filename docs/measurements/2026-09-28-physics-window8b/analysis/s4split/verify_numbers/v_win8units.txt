@@ -1,0 +1,11 @@
+win8 W8S-A J-T-a timed records 18
+W8 n 6 ticks_per_ns 3.2934-3.2936; CSV/SUMMARY ramp ratio [0,500) [3.2934, 3.2935, 3.2936]
+   raw ramp/wave 2031.2 -> as-published us 2.031, in ns 616.7; raw tail/wave 3322.1 -> 3.322 us published, ns 1008.7
+   np ramp raw 2756.2 (ns 836.8), np tail raw 30490.0 (ns 9257.3)
+W16 n 6 ticks_per_ns 3.2935-3.2937; CSV/SUMMARY ramp ratio [0,500) [3.2935, 3.2936, 3.2937]
+   raw ramp/wave 2155.2 -> as-published us 2.155, in ns 654.3; raw tail/wave 4977.9 -> 4.978 us published, ns 1511.4
+   np ramp raw 2987.5 (ns 907.1), np tail raw 35174.3 (ns 10679.6)
+W1 wide median over 6 processes
+W8 omega 3.304 us; ramp+tail in ns-units 1.623 us = 49.1 % of omega
+W16 omega 6.558 us; ramp+tail in ns-units 2.168 us = 33.1 % of omega
+W16-W8 tail growth: 0.503 us/wave x 96 = 0.0483 ms (published: +1.66 us/wave, ~0.16 ms)

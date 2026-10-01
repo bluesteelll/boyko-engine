@@ -1,0 +1,5 @@
+used re-runs with >= 3 used originals in the cell: n = 50; ratio to the originals median: median 1.0378, quartiles 1.0143 / 1.0814, > 1 in 45 of 50, > 1.05 in 23
+control, used originals (leave-one-out): n = 210; median 0.9996, quartiles 0.9901 / 1.0142, > 1 in 100 of 210, > 1.05 in 20
+  re-runs used in p0: n 28, median ratio 1.0364
+  re-runs used in p1: n 2, median ratio 0.9990
+  re-runs used in p2: n 20, median ratio 1.0551

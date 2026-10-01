@@ -175,7 +175,7 @@ mod tests {
             contact_hertz: 41.0,
             contact_damping: 3.5,
             warm_start: false,
-            broadphase: BroadphaseKind::Tree,
+            broadphase: off_default_kind(),
             broadphase_select: BroadphaseSelectMode::Auto,
             simd: false,
             simd_solve: false,
@@ -201,6 +201,16 @@ mod tests {
             self_collision_iters: 3,
             soft_body_colored: true,
             soft_self_collision_colored: true,
+        }
+    }
+
+    /// A broadphase kind that is not the default's. A literal went stale once: `Tree` was the
+    /// perturbation until the tree broadphase's C4 made it the default, and the round trip then
+    /// compared the default with itself. The match is exhaustive, so a new kind is placed here.
+    fn off_default_kind() -> BroadphaseKind {
+        match PhysicsConfig::default().broadphase {
+            BroadphaseKind::AllPairs => BroadphaseKind::Tree,
+            BroadphaseKind::Grid | BroadphaseKind::Tree => BroadphaseKind::AllPairs,
         }
     }
 
@@ -289,6 +299,93 @@ mod tests {
         );
     }
 
+    /// Every field of `a` differs from `b`'s, floats by their bits: the round trip's anti-vacuity,
+    /// per field. The destructure is exhaustive, so a new field fails to compile here until it is
+    /// compared.
+    fn assert_config_differs_everywhere(a: &PhysicsConfig, b: &PhysicsConfig) {
+        let PhysicsConfig {
+            gravity,
+            dt,
+            substeps,
+            relax_iterations,
+            contact_hertz,
+            contact_damping,
+            warm_start,
+            broadphase,
+            broadphase_select,
+            simd,
+            simd_solve,
+            sdf_narrowphase,
+            parallel_broadphase,
+            colored,
+            parallel_solve,
+            parallel_narrowphase,
+            contact_reuse,
+            contact_reuse_distance,
+            speculative_distance,
+            speculative_velocity_cap,
+            sleeping,
+            sleep_skip,
+            sleep_threshold,
+            sleep_frames,
+            soft_body,
+            soft_damping,
+            soft_rest_clamp,
+            soft_rigid_coupling,
+            self_collision_iters,
+            soft_body_colored,
+            soft_self_collision_colored,
+        } = *a;
+        let bits = |v: Vec3| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()];
+        let why = "anti-vacuity: the perturbed configuration keeps the default's";
+        assert_ne!(bits(gravity), bits(b.gravity), "{why} gravity");
+        assert_ne!(dt.to_bits(), b.dt.to_bits(), "{why} dt");
+        assert_ne!(substeps, b.substeps, "{why} substeps");
+        assert_ne!(relax_iterations, b.relax_iterations, "{why} relax_iterations");
+        assert_ne!(contact_hertz.to_bits(), b.contact_hertz.to_bits(), "{why} contact_hertz");
+        assert_ne!(contact_damping.to_bits(), b.contact_damping.to_bits(), "{why} contact_damping");
+        assert_ne!(warm_start, b.warm_start, "{why} warm_start");
+        assert_ne!(broadphase, b.broadphase, "{why} broadphase");
+        assert_ne!(broadphase_select, b.broadphase_select, "{why} broadphase_select");
+        assert_ne!(simd, b.simd, "{why} simd");
+        assert_ne!(simd_solve, b.simd_solve, "{why} simd_solve");
+        assert_ne!(sdf_narrowphase, b.sdf_narrowphase, "{why} sdf_narrowphase");
+        assert_ne!(parallel_broadphase, b.parallel_broadphase, "{why} parallel_broadphase");
+        assert_ne!(colored, b.colored, "{why} colored");
+        assert_ne!(parallel_solve, b.parallel_solve, "{why} parallel_solve");
+        assert_ne!(parallel_narrowphase, b.parallel_narrowphase, "{why} parallel_narrowphase");
+        assert_ne!(contact_reuse, b.contact_reuse, "{why} contact_reuse");
+        assert_ne!(
+            contact_reuse_distance.to_bits(),
+            b.contact_reuse_distance.to_bits(),
+            "{why} contact_reuse_distance"
+        );
+        assert_ne!(
+            speculative_distance.to_bits(),
+            b.speculative_distance.to_bits(),
+            "{why} speculative_distance"
+        );
+        assert_ne!(
+            speculative_velocity_cap.to_bits(),
+            b.speculative_velocity_cap.to_bits(),
+            "{why} speculative_velocity_cap"
+        );
+        assert_ne!(sleeping, b.sleeping, "{why} sleeping");
+        assert_ne!(sleep_skip, b.sleep_skip, "{why} sleep_skip");
+        assert_ne!(sleep_threshold.to_bits(), b.sleep_threshold.to_bits(), "{why} sleep_threshold");
+        assert_ne!(sleep_frames, b.sleep_frames, "{why} sleep_frames");
+        assert_ne!(soft_body, b.soft_body, "{why} soft_body");
+        assert_ne!(soft_damping.to_bits(), b.soft_damping.to_bits(), "{why} soft_damping");
+        assert_ne!(soft_rest_clamp, b.soft_rest_clamp, "{why} soft_rest_clamp");
+        assert_ne!(soft_rigid_coupling, b.soft_rigid_coupling, "{why} soft_rigid_coupling");
+        assert_ne!(self_collision_iters, b.self_collision_iters, "{why} self_collision_iters");
+        assert_ne!(soft_body_colored, b.soft_body_colored, "{why} soft_body_colored");
+        assert_ne!(
+            soft_self_collision_colored, b.soft_self_collision_colored,
+            "{why} soft_self_collision_colored"
+        );
+    }
+
     /// The edit bits of a field, for a value comparison.
     fn edit_bits(field: &SdfField) -> Vec<[u32; 4]> {
         field
@@ -327,11 +424,10 @@ mod tests {
         assert_config_eq(inputs.config(), &cfg);
         assert_eq!(inputs.wake_requests(), 42, "the latched wake count");
         assert_eq!(inputs.seq, 7, "the latched gather sequence");
-        // Anti-vacuity: the perturbed configuration differs from the default in every field the
-        // round trip compares, so a latch that kept `new()`'s value would fail above.
-        let default = PhysicsConfig::default();
-        let caught = std::panic::catch_unwind(|| assert_config_eq(&default, &cfg));
-        assert!(caught.is_err(), "anti-vacuity: the perturbed config equals the default");
+        // Anti-vacuity, field by field: the perturbed configuration differs from the default in
+        // EVERY field the round trip compares, so a latch that kept `new()`'s value in any one
+        // field would fail above.
+        assert_config_differs_everywhere(&PhysicsConfig::default(), &cfg);
     }
 
     #[test]

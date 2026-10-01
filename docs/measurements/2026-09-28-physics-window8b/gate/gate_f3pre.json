@@ -1,0 +1,97 @@
+{
+ "preflight": [
+  {
+   "kernel": "leaflist",
+   "exit": 0,
+   "void_steps": 0,
+   "kd_order_builds": 0
+  },
+  {
+   "kernel": "leaflist-kd",
+   "exit": 0,
+   "void_steps": 0,
+   "kd_order_builds": 20
+  }
+ ],
+ "r4_rows": [
+  {
+   "row": "F3-TD-armed-kd",
+   "twin": "F3-TD-armed-leaflist",
+   "W": 1,
+   "equal": true
+  },
+  {
+   "row": "F3-TD-armed-kd",
+   "twin": "F3-TD-armed-leaflist",
+   "W": 8,
+   "equal": true
+  },
+  {
+   "row": "F3-TA-armed-kd",
+   "twin": "F3-TA-armed-leaflist",
+   "W": 1,
+   "equal": true
+  },
+  {
+   "row": "F3-JT-kd",
+   "twin": "F3-JT-leaflist",
+   "W": 1,
+   "equal": true
+  },
+  {
+   "row": "F3-JT-kd",
+   "twin": "F3-JT-leaflist",
+   "W": 2,
+   "equal": true
+  },
+  {
+   "row": "F3-JT-kd",
+   "twin": "F3-JT-leaflist",
+   "W": 4,
+   "equal": true
+  },
+  {
+   "row": "F3-JT-kd",
+   "twin": "F3-JT-leaflist",
+   "W": 8,
+   "equal": true
+  },
+  {
+   "row": "F3-JT-kd",
+   "twin": "F3-JT-leaflist",
+   "W": 16,
+   "equal": true
+  },
+  {
+   "row": "F3-RT-kd",
+   "twin": "F3-RT-leaflist",
+   "W": 1,
+   "equal": true
+  },
+  {
+   "row": "F3-RT-kd",
+   "twin": "F3-RT-leaflist",
+   "W": 2,
+   "equal": true
+  },
+  {
+   "row": "F3-RT-kd",
+   "twin": "F3-RT-leaflist",
+   "W": 4,
+   "equal": true
+  },
+  {
+   "row": "F3-RT-kd",
+   "twin": "F3-RT-leaflist",
+   "W": 8,
+   "equal": true
+  },
+  {
+   "row": "F3-RT-kd",
+   "twin": "F3-RT-leaflist",
+   "W": 16,
+   "equal": true
+  }
+ ],
+ "preflight_pass": true
+}

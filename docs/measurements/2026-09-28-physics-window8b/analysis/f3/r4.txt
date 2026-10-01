@@ -1,0 +1,10 @@
+processes read: 302 (warm-ups 3, originals 243, re-runs 56)
+pose_hash != the row hash: 0 []
+distinct pose.bin byte strings among processes whose row hash is 0x30c5438bc6ad9ffa: 1 (len [64480])
+distinct pose.bin byte strings among processes whose row hash is 0x6cbe24bf8fafda26: 1 (len [64480])
+fixture JT500.pose equals the processes' single pose byte string: True
+fixture JTA500.pose equals the processes' single pose byte string: True
+fixture RT500.pose equals the processes' single pose byte string: True
+(pair, W, pass, round) keys: 117; leaflist x leaflist-kd pose comparisons (every attempt pairing): 180; equal 180; differ/missing 0 []
+driver r4 records (compared): 171, verdicts ['equal']
+R4: HOLDS

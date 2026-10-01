@@ -2554,6 +2554,9 @@ fn spawn_towers(world: &mut EcsMaster, levels: usize, x0: f32, z0: f32) -> [Vec3
 /// move-ins, releases on the D2 steps, the Rows steps' translation of the withheld list, a static
 /// admitted and vanishing with the spawned slab, and the flushes dissolving the set. RED-first:
 /// `Vec::with_capacity(1)` in the tree's release and in its sleeper admission.
+///
+/// Without `tree` the window runs on AllPairs, named explicitly since the tree broadphase's C4
+/// made the Tree the default kind: S8 keeps the census on the verbatim AllPairs arm.
 fn s8_sleep_skip_transitions(rows: &mut Vec<Row>, tree: bool) {
     use boyko_physics::broadphase_tree::BroadphaseTree;
     use boyko_physics::plugin::add_physics_sdf;
@@ -2566,7 +2569,7 @@ fn s8_sleep_skip_transitions(rows: &mut Vec<Row>, tree: bool) {
     let label = if tree {
         "S8-tree — sleep-skip transitions, SDF pipeline, sleeping ON (Sets), serial, Tree"
     } else {
-        "S8 — sleep-skip transitions, SDF pipeline, sleeping ON (Sets), serial"
+        "S8 — sleep-skip transitions, SDF pipeline, sleeping ON (Sets), serial, AllPairs"
     };
     let mut samples: Vec<Snap> = Vec::with_capacity(TOTAL_FRAMES);
     let setup_before = Snap::now();
@@ -2591,10 +2594,10 @@ fn s8_sleep_skip_transitions(rows: &mut Vec<Row>, tree: bool) {
         cfg.parallel_broadphase = false;
         cfg.parallel_narrowphase = false;
         cfg.sleeping = true;
-        if tree {
-            cfg.broadphase_select = BroadphaseSelectMode::Manual;
-            cfg.broadphase = BroadphaseKind::Tree;
-        }
+        // Both arms name their kind: since the tree broadphase's C4 the default is the Tree, and
+        // S8 is the census's one scene on the verbatim AllPairs arm (cfg-A's path).
+        cfg.broadphase_select = BroadphaseSelectMode::Manual;
+        cfg.broadphase = if tree { BroadphaseKind::Tree } else { BroadphaseKind::AllPairs };
     }
     if tree {
         world.resource_mut::<BroadphaseTree>().set_brute_max_rows(0);

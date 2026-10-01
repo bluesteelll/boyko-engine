@@ -1,0 +1,64 @@
+G4 p0 r0 attempt original: valid True [] clean_why [] rb 1.03 ra 2.5 witness 0.99
+G4 p0 r1 attempt original: valid True [] clean_why [] rb 2.5 ra 2.16 witness 1.04
+G4 p0 r2 attempt original: valid True [] clean_why [] rb 2.16 ra 1.5 witness 1.06
+processes: 3
+=== tree
+  all_pairs / tree, uniform (ratio > 1: tree faster); flags r/i/s
+      128: tree 11.154 us, all_pairs 11.374 us, ratio 1.0197 (+1.97 %) nYY bars r 3.02 i 1.51 s 1.16
+      136: tree 11.919 us, all_pairs 12.785 us, ratio 1.0727 (+7.27 %) YYY bars r 1.31 i 0.65 s 0.52
+      144: tree 12.532 us, all_pairs 14.154 us, ratio 1.1294 (+12.94 %) YYY bars r 3.35 i 1.67 s 1.32
+      152: tree 13.042 us, all_pairs 15.613 us, ratio 1.1971 (+19.71 %) YYY bars r 2.58 i 1.29 s 0.93
+      160: tree 13.577 us, all_pairs 17.306 us, ratio 1.2747 (+27.47 %) YYY bars r 4.48 i 2.24 s 1.73
+      176: tree 14.786 us, all_pairs 20.694 us, ratio 1.3995 (+39.95 %) YYY bars r 7.16 i 3.58 s 2.82
+      256: tree 21.120 us, all_pairs 42.934 us, ratio 2.0329 (+103.29 %) YYY bars r 3.20 i 1.60 s 1.28
+     1000: tree 85.810 us, all_pairs 636.788 us, ratio 7.4209 (+642.09 %) YYY bars r 1.85 i 0.93 s 0.74
+  all_pairs / tree, disparity (ratio > 1: tree faster); flags r/i/s
+      128: tree 14.305 us, all_pairs 13.630 us, ratio 0.9528 (-4.72 %) nYY bars r 8.05 i 4.02 s 3.12
+      136: tree 14.309 us, all_pairs 15.125 us, ratio 1.0571 (+5.71 %) YYY bars r 5.05 i 2.53 s 2.04
+      144: tree 15.324 us, all_pairs 16.862 us, ratio 1.1003 (+10.03 %) YYY bars r 4.72 i 2.36 s 1.89
+      152: tree 16.123 us, all_pairs 18.431 us, ratio 1.1432 (+14.32 %) YYY bars r 6.41 i 3.21 s 2.61
+      160: tree 16.930 us, all_pairs 20.227 us, ratio 1.1947 (+19.47 %) YYY bars r 6.31 i 3.16 s 2.37
+      176: tree 17.804 us, all_pairs 23.965 us, ratio 1.3460 (+34.60 %) YYY bars r 8.56 i 4.28 s 3.50
+      256: tree 25.751 us, all_pairs 48.002 us, ratio 1.8641 (+86.41 %) YYY bars r 4.44 i 2.22 s 1.71
+     1000: tree 107.905 us, all_pairs 661.113 us, ratio 6.1268 (+512.68 %) YYY bars r 1.18 i 0.59 s 0.49
+   LO/HI under ruling1: {'uniform': (None, 128, [128, 136, 144, 152, 160, 176, 256, 1000]), 'disparity': (128, 136, [136, 144, 152, 160, 176, 256, 1000])}
+   LO/HI under w7: {'uniform': (128, 136, [136, 144, 152, 160, 176, 256, 1000]), 'disparity': (128, 136, [136, 144, 152, 160, 176, 256, 1000])}
+   log-log crossover: {'uniform': 'below 128 (ratio at 128 already > 1)', 'disparity': 131.6631752524123}
+   threshold legs uniform: 144 all_pairs claimed slower? ruling1 True w7 True; 152 tree claimed faster? ruling1 True w7 True
+   threshold legs disparity: 144 all_pairs claimed slower? ruling1 True w7 True; 152 tree claimed faster? ruling1 True w7 True
+=== tree_kd
+  all_pairs / tree_kd, uniform (ratio > 1: tree_kd faster); flags r/i/s
+      128: tree_kd 11.381 us, all_pairs 11.374 us, ratio 0.9994 (-0.06 %) nnn bars r 8.42 i 4.21 s 3.05
+      136: tree_kd 11.971 us, all_pairs 12.785 us, ratio 1.0680 (+6.80 %) YYY bars r 1.49 i 0.74 s 0.55
+      144: tree_kd 12.917 us, all_pairs 14.154 us, ratio 1.0958 (+9.58 %) YYY bars r 3.34 i 1.67 s 1.31
+      152: tree_kd 13.126 us, all_pairs 15.613 us, ratio 1.1895 (+18.95 %) YYY bars r 2.40 i 1.20 s 0.88
+      160: tree_kd 14.243 us, all_pairs 17.306 us, ratio 1.2150 (+21.50 %) YYY bars r 3.75 i 1.87 s 1.48
+      176: tree_kd 15.607 us, all_pairs 20.694 us, ratio 1.3260 (+32.60 %) YYY bars r 3.70 i 1.85 s 1.47
+      256: tree_kd 22.349 us, all_pairs 42.934 us, ratio 1.9211 (+92.11 %) YYY bars r 2.36 i 1.18 s 0.95
+     1000: tree_kd 99.997 us, all_pairs 636.788 us, ratio 6.3681 (+536.81 %) YYY bars r 0.86 i 0.43 s 0.32
+  all_pairs / tree_kd, disparity (ratio > 1: tree_kd faster); flags r/i/s
+      128: tree_kd 13.951 us, all_pairs 13.630 us, ratio 0.9770 (-2.30 %) YYY bars r 1.98 i 0.99 s 0.74
+      136: tree_kd 14.213 us, all_pairs 15.125 us, ratio 1.0642 (+6.42 %) YYY bars r 3.34 i 1.67 s 1.35
+      144: tree_kd 14.772 us, all_pairs 16.862 us, ratio 1.1415 (+14.15 %) YYY bars r 3.48 i 1.74 s 1.33
+      152: tree_kd 16.222 us, all_pairs 18.431 us, ratio 1.1362 (+13.62 %) YYY bars r 2.79 i 1.40 s 1.06
+      160: tree_kd 16.464 us, all_pairs 20.227 us, ratio 1.2286 (+22.86 %) YYY bars r 1.29 i 0.64 s 0.47
+      176: tree_kd 18.429 us, all_pairs 23.965 us, ratio 1.3004 (+30.04 %) YYY bars r 1.93 i 0.96 s 0.77
+      256: tree_kd 26.930 us, all_pairs 48.002 us, ratio 1.7824 (+78.24 %) YYY bars r 6.63 i 3.31 s 2.61
+     1000: tree_kd 122.950 us, all_pairs 661.113 us, ratio 5.3771 (+437.71 %) YYY bars r 4.57 i 2.29 s 1.67
+   LO/HI under ruling1: {'uniform': (128, 136, [136, 144, 152, 160, 176, 256, 1000]), 'disparity': (128, 136, [136, 144, 152, 160, 176, 256, 1000])}
+   LO/HI under w7: {'uniform': (128, 136, [136, 144, 152, 160, 176, 256, 1000]), 'disparity': (128, 136, [136, 144, 152, 160, 176, 256, 1000])}
+   log-log crossover: {'uniform': 128.06951531374727, 'disparity': 130.12755992976983}
+=== bp_g4_scene tree_kd / tree (ratio < 1: kd faster)
+     j100: tree 197.19 [186.26-198.25] kd 143.70 [142.87-143.89] us ratio 0.7287 YYY bars r 12.24 i 6.12 s 4.90  kd slower claimed(ruling1)? False
+          tree values [186.26, 197.19, 198.25] kd values [142.87, 143.7, 143.89]
+     1240: tree 153.61 [151.69-179.57] kd 139.19 [138.93-139.47] us ratio 0.9061 nnn bars r 36.31 i 18.15 s 14.67  kd slower claimed(ruling1)? False
+          tree values [151.69, 153.61, 179.57] kd values [138.93, 139.19, 139.47]
+    10000: tree 2838.41 [2837.29-2840.69] kd 2497.89 [2495.82-2499.29] us ratio 0.8800 YYY bars r 0.37 i 0.18 s 0.13  kd slower claimed(ruling1)? False
+          tree values [2837.29, 2838.41, 2840.69] kd values [2495.82, 2497.89, 2499.29]
+   100000: tree 34891.25 [34849.77-34976.64] kd 31679.80 [31612.90-31985.48] us ratio 0.9080 YYY bars r 2.46 i 1.23 s 0.95  kd slower claimed(ruling1)? False
+          tree values [34849.77, 34891.25, 34976.64] kd values [31612.9, 31679.8, 31985.48]
+=== tree_rowwalk / tree at 144, 256
+   uniform 144: rowwalk/tree 0.9790 nYY
+   uniform 256: rowwalk/tree 1.0796 YYY
+   disparity 144: rowwalk/tree 1.1483 YYY
+   disparity 256: rowwalk/tree 1.2377 YYY

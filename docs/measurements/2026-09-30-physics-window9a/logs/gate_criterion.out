@@ -1,0 +1,7 @@
+2026-09-30T15:36:09.755+03:00 === gate9a criterion start
+2026-09-30T15:43:37.577+03:00 criterion C4-BR      g4r7   exit 0 ids on disk 8 stdout 8 of 8 PASS
+2026-09-30T15:58:14.626+03:00 criterion C4-BR      g4r8b  exit 0 ids on disk 8 stdout 8 of 8 PASS
+2026-09-30T16:07:05.703+03:00 criterion C4-BR      g4rT   exit 0 ids on disk 8 stdout 8 of 8 PASS
+2026-09-30T16:26:31.415+03:00 criterion C4-G4      g4rT   exit 0 ids on disk 36 stdout 36 of 36 PASS
+2026-09-30T16:42:54.878+03:00 criterion C4-G4-kd   g4rT   exit 0 ids on disk 6 stdout 6 of 6 PASS
+2026-09-30T16:42:54.881+03:00 === gate9a criterion end

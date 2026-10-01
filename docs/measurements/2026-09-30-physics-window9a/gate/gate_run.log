@@ -1,0 +1,191 @@
+2026-09-30T15:21:50.202+03:00 === gate9a fixtures start
+2026-09-30T15:21:56.385+03:00 fixture JT500   pose 0x30c5438bc6ad9ffa known 0x30c5438bc6ad9ffa == 8b bytes True OK
+2026-09-30T15:22:07.343+03:00 fixture JA500   pose 0x30c5438bc6ad9ffa known 0x30c5438bc6ad9ffa == 8b bytes True OK
+2026-09-30T15:22:11.336+03:00 fixture RT500   pose 0x6cbe24bf8fafda26 known 0x6cbe24bf8fafda26 == 8b bytes True OK
+2026-09-30T15:22:11.372+03:00 fixture S16500  pose 0x4470add61a854f4c known None == 8b bytes None OK
+2026-09-30T15:22:11.374+03:00 === gate9a fixtures end
+2026-09-30T15:22:17.419+03:00 === gate9a rows start
+2026-09-30T15:22:26.192+03:00 row C4-JA          parent W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 144 setup None/None canary None PASS
+2026-09-30T15:22:29.555+03:00 row C4-JA          parent W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 144 setup None/None canary None PASS
+2026-09-30T15:22:32.977+03:00 row C4-JA          parent W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 144 setup None/None canary None PASS
+2026-09-30T15:22:42.666+03:00 row C4-JA          tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 128 setup None/None canary None PASS
+2026-09-30T15:22:46.209+03:00 row C4-JA          tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 128 setup None/None canary None PASS
+2026-09-30T15:22:50.031+03:00 row C4-JA          tip    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 128 setup None/None canary None PASS
+2026-09-30T15:22:53.014+03:00 row C4-JT          parent W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 144 setup None/None canary None PASS
+2026-09-30T15:22:54.298+03:00 row C4-JT          parent W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 144 setup None/None canary None PASS
+2026-09-30T15:22:55.688+03:00 row C4-JT          parent W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 144 setup None/None canary None PASS
+2026-09-30T15:22:58.518+03:00 row C4-JT          tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-09-30T15:22:59.840+03:00 row C4-JT          tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-09-30T15:23:01.433+03:00 row C4-JT          tip    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-09-30T15:23:09.218+03:00 row C4-jolt56      j56    W1  exit 0 jolt hash 0xb8522b4e3fc62cfe threads 1 frames 500 patch "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0," PASS
+2026-09-30T15:23:13.174+03:00 row C4-jolt56      j56    W2  exit 0 jolt hash 0xb8522b4e3fc62cfe threads 2 frames 500 patch "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0," PASS
+2026-09-30T15:23:15.837+03:00 row C4-jolt56      j56    W4  exit 0 jolt hash 0xb8522b4e3fc62cfe threads 4 frames 500 patch "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0," PASS
+2026-09-30T15:23:17.897+03:00 row C4-jolt56      j56    W8  exit 0 jolt hash 0xb8522b4e3fc62cfe threads 8 frames 500 patch "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0," PASS
+2026-09-30T15:23:19.640+03:00 row C4-jolt56      j56    W16 exit 0 jolt hash 0xb8522b4e3fc62cfe threads 16 frames 500 patch "boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=0," PASS
+2026-09-30T15:23:22.482+03:00 row C4-JD          tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-09-30T15:23:24.400+03:00 row C4-JD          tip    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-09-30T15:23:25.791+03:00 row C4-JD          tip    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-09-30T15:23:27.073+03:00 row C4-JD          tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-09-30T15:23:28.428+03:00 row C4-JD          tip    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-09-30T15:23:31.872+03:00 row C4-JDap        tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 128 setup None/None canary None PASS
+2026-09-30T15:23:34.661+03:00 row C4-JDap        tip    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 128 setup None/None canary None PASS
+2026-09-30T15:23:36.979+03:00 row C4-JDap        tip    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 128 setup None/None canary None PASS
+2026-09-30T15:23:39.177+03:00 row C4-JDap        tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 128 setup None/None canary None PASS
+2026-09-30T15:23:41.499+03:00 row C4-JDap        tip    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 128 setup None/None canary None PASS
+2026-09-30T15:23:45.119+03:00 row C4-JDpar       parent W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 144 setup None/None canary None PASS
+2026-09-30T15:23:47.943+03:00 row C4-JDpar       parent W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 144 setup None/None canary None PASS
+2026-09-30T15:23:50.284+03:00 row C4-JDpar       parent W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 144 setup None/None canary None PASS
+2026-09-30T15:23:52.517+03:00 row C4-JDpar       parent W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 144 setup None/None canary None PASS
+2026-09-30T15:23:54.829+03:00 row C4-JDpar       parent W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 144 setup None/None canary None PASS
+2026-09-30T15:23:56.134+03:00 row C4-rung        tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary 60000 PASS
+2026-09-30T15:23:57.624+03:00 row C4-rung        tip    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary 60000 PASS
+2026-09-30T15:24:00.512+03:00 row C4-JD-armed    tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup 0/0 canary None PASS
+2026-09-30T15:24:02.070+03:00 row C4-JD-armed    tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup 500/15980 canary None PASS
+2026-09-30T15:24:05.820+03:00 row C4-JDap-armed  tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 128 setup 0/0 canary None PASS
+2026-09-30T15:24:08.264+03:00 row C4-JDap-armed  tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 128 setup 500/15980 canary None PASS
+2026-09-30T15:24:12.031+03:00 row C4-R           tip    W1  exit 0 pose 0x6cbe24bf8fafda26 expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-09-30T15:24:13.985+03:00 row C4-R           tip    W8  exit 0 pose 0x6cbe24bf8fafda26 expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-09-30T15:24:18.813+03:00 row C4-Rap         tip    W1  exit 0 pose 0x6cbe24bf8fafda26 expect match void 0 bp AllPairs brute 128 setup None/None canary None PASS
+2026-09-30T15:24:21.956+03:00 row C4-Rap         tip    W8  exit 0 pose 0x6cbe24bf8fafda26 expect match void 0 bp AllPairs brute 128 setup None/None canary None PASS
+2026-09-30T15:24:21.992+03:00 row C4-S16         tip    W1  exit 0 pose 0x4470add61a854f4c expect match void 0 bp Tree brute 128 setup None/None canary None FAIL TreeDiag {'static_rebuilds': 0, 'sleeper_rebuilds': 0, 'evictions': 0, 'translations': 0, 'patches': 0, 'hint_candidates': 0, 'wide_rows': 0, 'excluded_rows': 0, 'locator_resets': 0, 'members': 0, 'leaf_list_leaves': 0, 'fallback_leaves': 0, 'row_walk_leaves': 0, 'kd_order_builds': 0, 'bp_kernel': 'LeafList'} != {'static_rebuilds': 1, 'members': 1, 'evictions': 0}; Tree row without a tree_diag_expect
+2026-09-30T15:24:22.029+03:00 row C4-S16ap       tip    W1  exit 0 pose 0x4470add61a854f4c expect match void 0 bp AllPairs brute 128 setup None/None canary None PASS
+2026-09-30T15:24:22.032+03:00 rows gate: 44 processes, 1 failing
+2026-09-30T15:24:22.033+03:00 === gate9a rows end
+2026-09-30T15:25:21.446+03:00 === gate9a rows start
+2026-09-30T15:25:21.506+03:00 row C4-S16         tip    W1  exit 0 pose 0x4470add61a854f4c expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-09-30T15:25:21.564+03:00 row C4-S16ap       tip    W1  exit 0 pose 0x4470add61a854f4c expect match void 0 bp AllPairs brute 128 setup None/None canary None PASS
+2026-09-30T15:25:21.571+03:00 rows gate: 2 processes, 0 failing
+2026-09-30T15:25:21.571+03:00 === gate9a rows end
+2026-09-30T15:25:32.972+03:00 === gate9a preflight start
+2026-09-30T15:25:37.635+03:00 preflight tip-flagless     W1  exit 0 bp Tree brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:25:43.067+03:00 preflight tip-allpairs     W1  exit 0 bp AllPairs brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:25:47.598+03:00 preflight parent-flagless  W1  exit 0 bp AllPairs brute 144 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:25:47.598+03:00 preflight bytes W1: TIP --broadphase allpairs == PARENT flagless True; TIP flagless == PARENT flagless True
+2026-09-30T15:25:50.448+03:00 preflight tip-flagless     W2  exit 0 bp Tree brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:25:54.273+03:00 preflight tip-allpairs     W2  exit 0 bp AllPairs brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:25:58.077+03:00 preflight parent-flagless  W2  exit 0 bp AllPairs brute 144 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:25:58.078+03:00 preflight bytes W2: TIP --broadphase allpairs == PARENT flagless True; TIP flagless == PARENT flagless True
+2026-09-30T15:26:00.223+03:00 preflight tip-flagless     W4  exit 0 bp Tree brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:03.696+03:00 preflight tip-allpairs     W4  exit 0 bp AllPairs brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:07.008+03:00 preflight parent-flagless  W4  exit 0 bp AllPairs brute 144 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:07.009+03:00 preflight bytes W4: TIP --broadphase allpairs == PARENT flagless True; TIP flagless == PARENT flagless True
+2026-09-30T15:26:08.698+03:00 preflight tip-flagless     W8  exit 0 bp Tree brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:11.552+03:00 preflight tip-allpairs     W8  exit 0 bp AllPairs brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:14.134+03:00 preflight parent-flagless  W8  exit 0 bp AllPairs brute 144 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:14.134+03:00 preflight bytes W8: TIP --broadphase allpairs == PARENT flagless True; TIP flagless == PARENT flagless True
+2026-09-30T15:26:15.693+03:00 preflight tip-flagless     W16 exit 0 bp Tree brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:18.082+03:00 preflight tip-allpairs     W16 exit 0 bp AllPairs brute 128 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:20.506+03:00 preflight parent-flagless  W16 exit 0 bp AllPairs brute 144 pose 0x30c5438bc6ad9ffa PASS
+2026-09-30T15:26:20.507+03:00 preflight bytes W16: TIP --broadphase allpairs == PARENT flagless True; TIP flagless == PARENT flagless True
+2026-09-30T15:26:23.427+03:00 preflight tip-armed W1: exit 0 void_steps 0 setup 0/0 PASS
+2026-09-30T15:26:24.899+03:00 preflight tip-armed W8: exit 0 void_steps 0 setup 500/15980 PASS
+2026-09-30T15:26:24.901+03:00 preflight: PASS
+2026-09-30T15:26:24.901+03:00 === gate9a preflight end
+2026-09-30T15:26:25.150+03:00 === gate9a red start
+2026-09-30T15:26:28.874+03:00 red 501-steps-vs-JT500           parent exit 4 expect_pose mismatch: 64480 vs 64480 bytes, first differing body Some(0) PASS (red as required)
+2026-09-30T15:26:33.805+03:00 red contact-reuse-off-vs-JT500   parent exit 4 expect_pose mismatch: 64480 vs 64480 bytes, first differing body Some(0) PASS (red as required)
+2026-09-30T15:26:37.022+03:00 red 501-steps-vs-JT500           tip    exit 4 expect_pose mismatch: 64480 vs 64480 bytes, first differing body Some(0) PASS (red as required)
+2026-09-30T15:26:40.906+03:00 red contact-reuse-off-vs-JT500   tip    exit 4 expect_pose mismatch: 64480 vs 64480 bytes, first differing body Some(0) PASS (red as required)
+2026-09-30T15:26:40.907+03:00 === gate9a red end
+2026-09-30T15:26:41.134+03:00 === gate9a r4 start
+2026-09-30T15:26:41.135+03:00 R4 C4-S16 vs C4-S16ap W1: equal
+2026-09-30T15:26:41.137+03:00 === gate9a r4 end
+2026-09-30T15:26:41.364+03:00 === gate9a list start
+2026-09-30T15:29:49.231+03:00 list C4-BR      g4r7   exit 0 listed 8 expected 8 missing [] unexpected [] PASS
+2026-09-30T15:32:32.050+03:00 list C4-BR      g4r8b  exit 0 listed 8 expected 8 missing [] unexpected [] PASS
+2026-09-30T15:35:12.014+03:00 list C4-BR      g4rT   exit 0 listed 8 expected 8 missing [] unexpected [] PASS
+2026-09-30T15:36:09.755+03:00 === gate9a criterion start
+2026-09-30T15:38:04.011+03:00 list C4-G4      g4rT   exit 0 listed 36 expected 36 missing [] unexpected [] PASS
+2026-09-30T15:43:37.577+03:00 criterion C4-BR      g4r7   exit 0 ids on disk 8 stdout 8 of 8 PASS
+2026-09-30T15:44:14.664+03:00 === gate9a list start
+2026-09-30T15:45:13.583+03:00 === gate9a list start
+2026-09-30T15:47:50.984+03:00 === gate9a estimates start
+2026-09-30T15:47:50.988+03:00 estimate C4-BR#g4r7@W0: 218.0 s
+2026-09-30T15:47:50.988+03:00 estimate C4-BR#g4r8b@W0: 218.0 s
+2026-09-30T15:47:50.989+03:00 estimate C4-BR#g4rT@W0: 218.0 s
+2026-09-30T15:47:50.990+03:00 estimate C4-G4#g4rT@W0: 456.0 s
+2026-09-30T15:47:50.991+03:00 estimate C4-G4-kd#g4rT@W0: 201.0 s
+2026-09-30T15:47:50.992+03:00 === gate9a estimates end
+2026-09-30T15:58:14.626+03:00 criterion C4-BR      g4r8b  exit 0 ids on disk 8 stdout 8 of 8 PASS
+2026-09-30T15:58:39.319+03:00 list C4-G4-kd   g4rT   exit 0 listed 6 expected 6 missing [] unexpected [] PASS
+2026-09-30T15:58:39.320+03:00 === gate9a list end
+2026-09-30T16:02:16.281+03:00 === gate9a estimates start
+2026-09-30T16:02:16.284+03:00 estimate C4-BR#g4r7@W0: 218.0 s
+2026-09-30T16:02:16.285+03:00 estimate C4-BR#g4r8b@W0: 218.0 s
+2026-09-30T16:02:16.286+03:00 estimate C4-BR#g4rT@W0: 218.0 s
+2026-09-30T16:02:16.286+03:00 estimate C4-G4#g4rT@W0: 456.0 s
+2026-09-30T16:02:16.287+03:00 estimate C4-G4-kd#g4rT@W0: 201.0 s
+2026-09-30T16:02:16.287+03:00 === gate9a estimates end
+2026-09-30T16:05:12.772+03:00 === gate9a estimates start
+2026-09-30T16:05:12.776+03:00 estimate C4-BR#g4r7@W0: 317.8 s
+2026-09-30T16:05:12.777+03:00 estimate C4-BR#g4r8b@W0: 317.8 s
+2026-09-30T16:05:12.778+03:00 estimate C4-BR#g4rT@W0: 317.8 s
+2026-09-30T16:05:12.778+03:00 estimate C4-G4#g4rT@W0: 502.6 s
+2026-09-30T16:05:12.779+03:00 estimate C4-G4-kd#g4rT@W0: 304.6 s
+2026-09-30T16:05:12.779+03:00 === gate9a estimates end
+2026-09-30T16:06:56.576+03:00 === gate9a rapier start
+2026-09-30T16:07:05.703+03:00 criterion C4-BR      g4rT   exit 0 ids on disk 8 stdout 8 of 8 PASS
+2026-09-30T16:07:20.657+03:00 rapier RAP-matched          rapier   W1  exit 0 PASS
+2026-09-30T16:07:36.159+03:00 rapier RAP-matched          rapier   W2  exit 0 PASS
+2026-09-30T16:07:43.903+03:00 rapier RAP-matched          rapier   W4  exit 0 PASS
+2026-09-30T16:07:48.383+03:00 rapier RAP-matched          rapier   W8  exit 0 PASS
+2026-09-30T16:07:54.791+03:00 rapier RAP-matched          rapier   W16 exit 0 PASS
+2026-09-30T16:07:54.793+03:00 === gate9a rapier end
+2026-09-30T16:08:02.312+03:00 === gate9a list start
+2026-09-30T16:17:50.658+03:00 list C4-BR      g4r7   exit 0 listed 8 expected 8 missing [] unexpected [] PASS
+2026-09-30T16:26:31.415+03:00 criterion C4-G4      g4rT   exit 0 ids on disk 36 stdout 36 of 36 PASS
+2026-09-30T16:30:39.087+03:00 list C4-BR      g4r8b  exit 0 listed 8 expected 8 missing [] unexpected [] PASS
+2026-09-30T16:42:54.878+03:00 criterion C4-G4-kd   g4rT   exit 0 ids on disk 6 stdout 6 of 6 PASS
+2026-09-30T16:42:54.881+03:00 === gate9a criterion end
+2026-09-30T16:44:01.743+03:00 list C4-BR      g4rT   exit 0 listed 8 expected 8 missing [] unexpected [] PASS
+2026-09-30T16:47:46.018+03:00 list C4-G4      g4rT   exit 0 listed 36 expected 36 missing [] unexpected [] PASS
+2026-09-30T16:47:46.019+03:00 === gate9a list end
+2026-09-30T16:48:30.596+03:00 === gate9a estimates start
+2026-09-30T16:48:30.598+03:00 estimate C4-BR#g4r7@W0: 317.8 s
+2026-09-30T16:48:30.599+03:00 estimate C4-BR#g4r8b@W0: 317.8 s
+2026-09-30T16:48:30.599+03:00 estimate C4-BR#g4rT@W0: 317.8 s
+2026-09-30T16:48:30.599+03:00 estimate C4-G4#g4rT@W0: 502.6 s
+2026-09-30T16:48:30.600+03:00 estimate C4-G4-kd#g4rT@W0: 304.6 s
+2026-09-30T16:48:30.600+03:00 === gate9a estimates end
+2026-09-30T16:56:47.487+03:00 === gate9a rows start
+2026-09-30T16:56:54.021+03:00 row C4-JD-armed    tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup 0/0 canary None PASS
+2026-09-30T16:56:59.421+03:00 row C4-JD-armed    tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup 500/15980 canary None PASS
+2026-09-30T16:57:09.869+03:00 row C4-JDap-armed  tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 128 setup 0/0 canary None PASS
+2026-09-30T16:57:16.961+03:00 row C4-JDap-armed  tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp AllPairs brute 128 setup 500/15980 canary None PASS
+2026-09-30T16:57:16.969+03:00 rows gate: 4 processes, 0 failing
+2026-09-30T16:57:16.970+03:00 === gate9a rows end
+2026-09-30T18:37:55.935+03:00 === gate9a rapier start
+2026-09-30T18:38:00.101+03:00 rapier RP-D                 rs8      W1  exit 0 PASS
+2026-09-30T18:38:03.710+03:00 rapier RP-D                 rs8      W2  exit 0 PASS
+2026-09-30T18:38:06.278+03:00 rapier RP-D                 rs8      W4  exit 0 PASS
+2026-09-30T18:38:08.652+03:00 rapier RP-D                 rs8      W8  exit 0 PASS
+2026-09-30T18:38:10.951+03:00 rapier RP-D                 rs8      W16 exit 0 PASS
+2026-09-30T18:38:16.832+03:00 rapier RP-D                 rs4      W1  exit 0 PASS
+2026-09-30T18:38:20.056+03:00 rapier RP-D                 rs4      W2  exit 0 PASS
+2026-09-30T18:38:22.255+03:00 rapier RP-D                 rs4      W4  exit 0 PASS
+2026-09-30T18:38:24.135+03:00 rapier RP-D                 rs4      W8  exit 0 PASS
+2026-09-30T18:38:26.136+03:00 rapier RP-D                 rs4      W16 exit 0 PASS
+2026-09-30T18:38:33.280+03:00 rapier RP-M                 rs8      W1  exit 0 PASS
+2026-09-30T18:38:37.850+03:00 rapier RP-M                 rs8      W2  exit 0 PASS
+2026-09-30T18:38:42.454+03:00 rapier RP-M                 rs8      W4  exit 0 PASS
+2026-09-30T18:38:45.430+03:00 rapier RP-M                 rs8      W8  exit 0 PASS
+2026-09-30T18:38:49.869+03:00 rapier RP-M                 rs8      W16 exit 0 PASS
+2026-09-30T18:38:57.879+03:00 rapier RP-M                 rs4      W1  exit 0 PASS
+2026-09-30T18:39:02.105+03:00 rapier RP-M                 rs4      W2  exit 0 PASS
+2026-09-30T18:39:05.875+03:00 rapier RP-M                 rs4      W4  exit 0 PASS
+2026-09-30T18:39:08.669+03:00 rapier RP-M                 rs4      W8  exit 0 PASS
+2026-09-30T18:39:11.637+03:00 rapier RP-M                 rs4      W16 exit 0 PASS
+2026-09-30T18:39:11.639+03:00 === gate9a rapier end
+2026-10-01T02:42:41.051+03:00 === gate9a rows start
+2026-10-01T02:42:43.764+03:00 row C4-JDcgu       tip    W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:42:45.623+03:00 row C4-JDcgu       tip    W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:42:47.000+03:00 row C4-JDcgu       tip    W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:42:48.238+03:00 row C4-JDcgu       tip    W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:42:49.567+03:00 row C4-JDcgu       tip    W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:42:52.279+03:00 row C4-JDcgu       tipcgu1 W1  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:42:54.502+03:00 row C4-JDcgu       tipcgu1 W2  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:42:56.496+03:00 row C4-JDcgu       tipcgu1 W4  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:42:58.928+03:00 row C4-JDcgu       tipcgu1 W8  exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:43:01.542+03:00 row C4-JDcgu       tipcgu1 W16 exit 0 pose 0x30c5438bc6ad9ffa expect match void 0 bp Tree brute 128 setup None/None canary None PASS
+2026-10-01T02:43:01.548+03:00 rows gate: 10 processes, 0 failing
+2026-10-01T02:43:01.549+03:00 === gate9a rows end

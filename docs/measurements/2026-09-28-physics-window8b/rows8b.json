@@ -1,0 +1,1556 @@
+{
+ "window": "physics window 8b (2026-09-28), trunk 16191fda",
+ "protocol": {
+  "ruling": "RULINGS-2026-09-27-W8.md ruling 1 (pre-registered before any 8b data)",
+  "k_per_cell": 9,
+  "passes": 3,
+  "rounds_per_pass": 3,
+  "order": "pass 0 REVERSED, pass 1 forward, pass 2 REVERSED (ruling 1: \"p0 reversed, p1, p2 reversed\"). The forward list: W ascending, inside a W group row by row (this file's order), each row's binaries in order (S4-AB: parent then tip, so the two exes are adjacent in every round). One untimed warm-up per pass.",
+  "receipt_s_between_processes": 5.0,
+  "receipt_s_before_pass": 10.0,
+  "busy_pct_limit": 5.0,
+  "others_busy_pct_limit": 2.0,
+  "rerun_once_at_end_of_pass": "receipt before/after > 5 %, OR the during-process witness others_busy_pct > 2 %, OR invalid; a slot whose re-run is also hot is dropped by the reduction",
+  "void_pass_on_build_process": true,
+  "placement": "P-none",
+  "placement_receipt": "per process, RECORDED, NEVER used to drop a process: the per-logical-CPU busy share over the process lifetime (window 8 analysis's reading: the top CPU and its share) plus the main thread's own CPU time (GetThreadTimes on the thread the process was created with); main_share_top_est = top CPU busy seconds / main-thread CPU seconds, capped at 1. Exact at W1 on an idle machine; an upper bound at W >= 2 (workers share the CPUs).",
+  "claim_rule": "the analysis: IQR (i) AND SE (s) in every clean block and pooled; min-max (r) reported beside, \"STRONG\" when it also passes",
+  "idle_rule": "tools/wait_idle8b.ps1 (window 8 wait_idle8.ps1 + the 8b exe names): 0 build procs AND 0 procs under D:/wt/_targets or D:/wt/mq-* on 3 consecutive 60-s polls, 10-s cpu < 5 %; up to 30 polls per wait; a timeout STOPS the window (exit 3)",
+  "hard_stop": "--cutoff HH:MM (no process starts whose estimated end passes it); the STOP flag file win8b/STOP; a block that does not fit before the cutoff is skipped WHOLE",
+  "windowed_hang_s": 300,
+  "own_k": "F3-G4 keeps the Q3 recipe's own K = 3 (one pass x three rounds, no separate warm-up: criterion warms every benchmark); DM1 keeps ruling 9's ABBA x 2 per row (one pass, 8 processes per row)"
+ },
+ "binaries": {
+  "tip": {
+   "exe": "bin/runner_tip_16191fda.exe",
+   "commit": "16191fda6de68ab377391c3e781d4709b7a3ecd7",
+   "kind": "runner",
+   "s4": "on",
+   "what": "TIP: jolt_parity_pyramid --profile parity from an export of 16191fda, unmodified"
+  },
+  "parent": {
+   "exe": "bin/runner_parent_16191fda_s4off.exe",
+   "commit": "16191fda6de68ab377391c3e781d4709b7a3ecd7 + bin/parent.patch",
+   "kind": "runner",
+   "s4": "off",
+   "what": "PARENT: the same export with ONE edit, SETUP_MAX_TASKS 32 -> 1 (S4 needs >= 2 ranges, so it never dispatches); bin/parent.patch"
+  },
+  "g4ref": {
+   "exe": "bin/broadphase_g4ref_16191fda.exe",
+   "commit": "16191fda6de68ab377391c3e781d4709b7a3ecd7 + bin/g4ref.patch",
+   "kind": "criterion",
+   "what": "the G4 instrument: benches/broadphase.rs with G4_SIZES replaced (tree-f3/window_cmds.md \u00a71), cargo bench --no-run --locked (bench profile)"
+  },
+  "dmA": {
+   "exe": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/238150a2-5c92-4147-8309-b6428586e8a7/scratchpad/win8/bin/dm1_A.exe",
+   "commit": "cad5439b61ba6f07739523901aab90edf7079433",
+   "kind": "dm1",
+   "what": "window 8's DM1 A (host-visible table), reused by sha256 (win8/bin/SHA256SUMS)"
+  },
+  "dmB": {
+   "exe": "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/238150a2-5c92-4147-8309-b6428586e8a7/scratchpad/win8/bin/dm1_B.exe",
+   "commit": "97ee830f754e008032992fcd8a928cd29c04936f",
+   "kind": "dm1",
+   "what": "window 8's DM1 B = C6 (device-local table), reused by sha256"
+  }
+ },
+ "blocks": [
+  {
+   "name": "S4-AB",
+   "item": "S4",
+   "priority": 1,
+   "warmup": [
+    "S4-JT",
+    "tip",
+    8
+   ]
+  },
+  {
+   "name": "SPLIT",
+   "item": "W8S",
+   "priority": 2,
+   "warmup": [
+    "SPLIT-J-T",
+    "parent",
+    8
+   ]
+  },
+  {
+   "name": "F3",
+   "item": "F3",
+   "priority": 3,
+   "warmup": [
+    "F3-JT-leaflist",
+    "tip",
+    8
+   ]
+  },
+  {
+   "name": "F3-G4",
+   "item": "F3",
+   "priority": 4,
+   "passes": 1,
+   "rounds": 3,
+   "note": "the Q3 recipe: K 3, one pass x three rounds, no separate warm-up (criterion warms each benchmark)"
+  },
+  {
+   "name": "J-Son-T",
+   "item": "L10",
+   "priority": 5,
+   "warmup": [
+    "JSonT",
+    "tip",
+    8
+   ]
+  },
+  {
+   "name": "DM1",
+   "item": "DM1",
+   "priority": 6,
+   "warmup": [
+    "dm-vb-1920x1080-idle",
+    "dmA",
+    0
+   ],
+   "passes": 1,
+   "rounds": 1,
+   "order": [
+    [
+     "dm-vb-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmB",
+     0
+    ],
+    [
+     "dm-deferred-1920x1080-idle",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmA",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmB",
+     0
+    ],
+    [
+     "dm-vb-1920x1080-edit100",
+     "dmA",
+     0
+    ]
+   ]
+  }
+ ],
+ "rows": [
+  {
+   "id": "S4-JT",
+   "blocks": [
+    "S4-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "parent",
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null
+  },
+  {
+   "id": "S4-JT-a",
+   "blocks": [
+    "S4-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "parent",
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null
+  },
+  {
+   "id": "S4-rung",
+   "blocks": [
+    "S4-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "1",
+    "--canary-ref-ns",
+    "60000"
+   ],
+   "workers": [
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "canary": true,
+   "note": "S4's own resolution evidence: its reference is S4-JT#tip@W8, same block and round",
+   "bp_kernel": null
+  },
+  {
+   "id": "S4-zone-N30000",
+   "blocks": [
+    "S4-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-zone",
+    "phys_solve_build",
+    "--canary-ns",
+    "30000"
+   ],
+   "workers": [
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "zone_canary": [
+    "phys_solve_build",
+    30000
+   ],
+   "note": "the zone canary; its reference is S4-JT-a#tip@W8, same block and round",
+   "bp_kernel": null
+  },
+  {
+   "id": "S4-zone-N60000",
+   "blocks": [
+    "S4-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off",
+    "--canary-zone",
+    "phys_solve_build",
+    "--canary-ns",
+    "60000"
+   ],
+   "workers": [
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "zone_canary": [
+    "phys_solve_build",
+    60000
+   ],
+   "note": "the zone canary; its reference is S4-JT-a#tip@W8, same block and round",
+   "bp_kernel": null
+  },
+  {
+   "id": "SPLIT-J-T",
+   "blocks": [
+    "SPLIT"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "parent"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    1,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null
+  },
+  {
+   "id": "SPLIT-J-T-a",
+   "blocks": [
+    "SPLIT"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "parent"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    1,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null
+  },
+  {
+   "id": "F3-TD-armed-leaflist",
+   "blocks": [
+    "F3"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--bp-kernel",
+    "leaflist"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": "leaflist"
+  },
+  {
+   "id": "F3-TD-armed-kd",
+   "blocks": [
+    "F3"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--bp-kernel",
+    "leaflist-kd"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": "leaflist-kd",
+   "r4_twin": "F3-TD-armed-leaflist"
+  },
+  {
+   "id": "F3-TA-armed-leaflist",
+   "blocks": [
+    "F3"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree",
+    "--bp-kernel",
+    "leaflist"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JTA500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": "leaflist"
+  },
+  {
+   "id": "F3-TA-armed-kd",
+   "blocks": [
+    "F3"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree",
+    "--bp-kernel",
+    "leaflist-kd"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JTA500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": "leaflist-kd",
+   "r4_twin": "F3-TA-armed-leaflist"
+  },
+  {
+   "id": "F3-TR-armed",
+   "blocks": [
+    "F3"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--bp-kernel",
+    "rowwalk"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": "rowwalk",
+   "note": "optional in window_cmds.md: the bridge to windows 4 and 6"
+  },
+  {
+   "id": "F3-JT-leaflist",
+   "blocks": [
+    "F3"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--bp-kernel",
+    "leaflist"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": "leaflist"
+  },
+  {
+   "id": "F3-JT-kd",
+   "blocks": [
+    "F3"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--bp-kernel",
+    "leaflist-kd"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": "leaflist-kd",
+   "r4_twin": "F3-JT-leaflist"
+  },
+  {
+   "id": "F3-RT-leaflist",
+   "blocks": [
+    "F3"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "rest",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--bp-kernel",
+    "leaflist"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "RT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": "leaflist"
+  },
+  {
+   "id": "F3-RT-kd",
+   "blocks": [
+    "F3"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "rest",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--bp-kernel",
+    "leaflist-kd"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "RT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": "leaflist-kd",
+   "r4_twin": "F3-RT-leaflist"
+  },
+  {
+   "id": "G4",
+   "blocks": [
+    "F3-G4"
+   ],
+   "kind": "criterion",
+   "binaries": [
+    "g4ref"
+   ],
+   "workers": [
+    0
+   ],
+   "args": [
+    "--bench",
+    "--noplot",
+    "^bp_g4_(uniform|disparity)/((all_pairs|tree|tree_kd)/(128|136|144|152|160|176|256|1000)|tree_rowwalk/(144|256))$|^bp_g4_scene/(tree|tree_kd)/(j100|1240|10000|100000)$"
+   ],
+   "armed": false,
+   "expect": [
+    "bp_g4_disparity/all_pairs/1000",
+    "bp_g4_disparity/all_pairs/128",
+    "bp_g4_disparity/all_pairs/136",
+    "bp_g4_disparity/all_pairs/144",
+    "bp_g4_disparity/all_pairs/152",
+    "bp_g4_disparity/all_pairs/160",
+    "bp_g4_disparity/all_pairs/176",
+    "bp_g4_disparity/all_pairs/256",
+    "bp_g4_disparity/tree/1000",
+    "bp_g4_disparity/tree/128",
+    "bp_g4_disparity/tree/136",
+    "bp_g4_disparity/tree/144",
+    "bp_g4_disparity/tree/152",
+    "bp_g4_disparity/tree/160",
+    "bp_g4_disparity/tree/176",
+    "bp_g4_disparity/tree/256",
+    "bp_g4_disparity/tree_kd/1000",
+    "bp_g4_disparity/tree_kd/128",
+    "bp_g4_disparity/tree_kd/136",
+    "bp_g4_disparity/tree_kd/144",
+    "bp_g4_disparity/tree_kd/152",
+    "bp_g4_disparity/tree_kd/160",
+    "bp_g4_disparity/tree_kd/176",
+    "bp_g4_disparity/tree_kd/256",
+    "bp_g4_disparity/tree_rowwalk/144",
+    "bp_g4_disparity/tree_rowwalk/256",
+    "bp_g4_scene/tree/10000",
+    "bp_g4_scene/tree/100000",
+    "bp_g4_scene/tree/1240",
+    "bp_g4_scene/tree/j100",
+    "bp_g4_scene/tree_kd/10000",
+    "bp_g4_scene/tree_kd/100000",
+    "bp_g4_scene/tree_kd/1240",
+    "bp_g4_scene/tree_kd/j100",
+    "bp_g4_uniform/all_pairs/1000",
+    "bp_g4_uniform/all_pairs/128",
+    "bp_g4_uniform/all_pairs/136",
+    "bp_g4_uniform/all_pairs/144",
+    "bp_g4_uniform/all_pairs/152",
+    "bp_g4_uniform/all_pairs/160",
+    "bp_g4_uniform/all_pairs/176",
+    "bp_g4_uniform/all_pairs/256",
+    "bp_g4_uniform/tree/1000",
+    "bp_g4_uniform/tree/128",
+    "bp_g4_uniform/tree/136",
+    "bp_g4_uniform/tree/144",
+    "bp_g4_uniform/tree/152",
+    "bp_g4_uniform/tree/160",
+    "bp_g4_uniform/tree/176",
+    "bp_g4_uniform/tree/256",
+    "bp_g4_uniform/tree_kd/1000",
+    "bp_g4_uniform/tree_kd/128",
+    "bp_g4_uniform/tree_kd/136",
+    "bp_g4_uniform/tree_kd/144",
+    "bp_g4_uniform/tree_kd/152",
+    "bp_g4_uniform/tree_kd/160",
+    "bp_g4_uniform/tree_kd/176",
+    "bp_g4_uniform/tree_kd/256",
+    "bp_g4_uniform/tree_rowwalk/144",
+    "bp_g4_uniform/tree_rowwalk/256"
+   ],
+   "test_filter": "^bp_g4_uniform/tree_kd/128$",
+   "test_expect": [
+    "bp_g4_uniform/tree_kd/128"
+   ],
+   "note": "CRITERION_HOME per process; the rehearsal (--test) runs one id at 0.1 s + 0.2 s"
+  },
+  {
+   "id": "JSonT",
+   "blocks": [
+    "J-Son-T"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "on"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ],
+    [
+     274,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JSonT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "sleeper_rebuilds": 1,
+    "evictions": 0,
+    "members": 1241
+   },
+   "expect_first_frozen": 274,
+   "bp_kernel": null
+  },
+  {
+   "id": "JSonT-a",
+   "blocks": [
+    "J-Son-T"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "on"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ],
+    [
+     274,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JSonT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "sleeper_rebuilds": 1,
+    "evictions": 0,
+    "members": 1241
+   },
+   "expect_first_frozen": 274,
+   "bp_kernel": null
+  },
+  {
+   "id": "JSoffT",
+   "blocks": [
+    "J-Son-T"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ],
+    [
+     274,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JSoffT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null
+  },
+  {
+   "id": "JSoffT-a",
+   "blocks": [
+    "J-Son-T"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ],
+    [
+     274,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JSoffT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null
+  },
+  {
+   "id": "dm-vb-1920x1080-idle",
+   "blocks": [
+    "DM1"
+   ],
+   "kind": "dm1",
+   "binaries": [
+    "dmA",
+    "dmB"
+   ],
+   "args": [
+    "dm1_material_table_timing",
+    "--exact",
+    "--ignored",
+    "--test-threads=1",
+    "--nocapture"
+   ],
+   "env": {
+    "BOYKO_DISABLE_VALIDATION": "1",
+    "BOYKO_VB_ZONE": "1",
+    "BOYKO_VB_BENCH_FRAMES": "220",
+    "BOYKO_DM1_PATH": "vb",
+    "BOYKO_DM1_RES": "1920x1080",
+    "BOYKO_DM1_EDIT_ROWS": "0"
+   },
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "res": "1920x1080",
+   "path": "vb",
+   "edit_rows": 0,
+   "grow_at": null,
+   "need_zones": {
+    "VB_SHADE": 2,
+    "VB_EARLY_CULL": 4,
+    "VB_RUN": 9,
+    "VB_PRODUCE_NET": 14
+   },
+   "present_mode": "fifo"
+  },
+  {
+   "id": "dm-deferred-1920x1080-idle",
+   "blocks": [
+    "DM1"
+   ],
+   "kind": "dm1",
+   "binaries": [
+    "dmA",
+    "dmB"
+   ],
+   "args": [
+    "dm1_material_table_timing",
+    "--exact",
+    "--ignored",
+    "--test-threads=1",
+    "--nocapture"
+   ],
+   "env": {
+    "BOYKO_DISABLE_VALIDATION": "1",
+    "BOYKO_VB_ZONE": "1",
+    "BOYKO_VB_BENCH_FRAMES": "220",
+    "BOYKO_DM1_PATH": "deferred",
+    "BOYKO_DM1_RES": "1920x1080",
+    "BOYKO_DM1_EDIT_ROWS": "0"
+   },
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "res": "1920x1080",
+   "path": "deferred",
+   "edit_rows": 0,
+   "grow_at": null,
+   "need_zones": {
+    "GBUF_DEFERRED_RESOLVE": 17
+   },
+   "present_mode": "fifo"
+  },
+  {
+   "id": "dm-vb-1920x1080-edit100",
+   "blocks": [
+    "DM1"
+   ],
+   "kind": "dm1",
+   "binaries": [
+    "dmA",
+    "dmB"
+   ],
+   "args": [
+    "dm1_material_table_timing",
+    "--exact",
+    "--ignored",
+    "--test-threads=1",
+    "--nocapture"
+   ],
+   "env": {
+    "BOYKO_DISABLE_VALIDATION": "1",
+    "BOYKO_VB_ZONE": "1",
+    "BOYKO_VB_BENCH_FRAMES": "220",
+    "BOYKO_DM1_PATH": "vb",
+    "BOYKO_DM1_RES": "1920x1080",
+    "BOYKO_DM1_EDIT_ROWS": "100"
+   },
+   "workers": [
+    0
+   ],
+   "armed": false,
+   "res": "1920x1080",
+   "path": "vb",
+   "edit_rows": 100,
+   "grow_at": null,
+   "need_zones": {
+    "VB_SHADE": 2,
+    "VB_EARLY_CULL": 4,
+    "VB_RUN": 9,
+    "VB_PRODUCE_NET": 14
+   },
+   "present_mode": "fifo"
+  }
+ ],
+ "jsont_freeze": {
+  "per_process": {
+   "JSonT@W1": {
+    "first_zero_awake_csv_row": 273,
+    "csv_first_frozen_step": 274,
+    "summary_first_frozen_step": 274,
+    "awake_stays_zero": true,
+    "rows": 500
+   },
+   "JSonT@W8": {
+    "first_zero_awake_csv_row": 273,
+    "csv_first_frozen_step": 274,
+    "summary_first_frozen_step": 274,
+    "awake_stays_zero": true,
+    "rows": 500
+   },
+   "JSonT-a@W1": {
+    "first_zero_awake_csv_row": 273,
+    "csv_first_frozen_step": 274,
+    "summary_first_frozen_step": 274,
+    "awake_stays_zero": true,
+    "rows": 500
+   },
+   "JSonT-a@W8": {
+    "first_zero_awake_csv_row": 273,
+    "csv_first_frozen_step": 274,
+    "summary_first_frozen_step": 274,
+    "awake_stays_zero": true,
+    "rows": 500
+   }
+  },
+  "consistent": true,
+  "first_frozen_step": 274,
+  "post_freeze_window": [
+   274,
+   500
+  ],
+  "note": "the post-freeze window starts at the first step of the frozen pile (first_frozen_step), window 8's [274, 500) convention"
+ },
+ "reserved": [
+  {
+   "block": "S7-AB",
+   "how": "rows8b.extra.json (PREP.md)"
+  },
+  {
+   "block": "omega_b v2",
+   "how": "rows8b.extra.json (PREP.md)"
+  }
+ ]
+}

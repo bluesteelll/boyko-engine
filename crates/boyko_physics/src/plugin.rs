@@ -43,8 +43,8 @@ use boyko_scene::FixedSet;
 use crate::broadphase_policy::{PhysicsStats, select_broadphase};
 use crate::broadphase_tree::BroadphaseTree;
 use crate::resources::{
-    BroadphaseGrid, BroadphaseKind, ConstraintGraph, ContactPairs, IntegrationMode, IslandSleep,
-    Manifolds, PhysicsConfig, SolverScratch,
+    BroadphaseGrid, BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs,
+    IntegrationMode, IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
 };
 use crate::scene_sync::{
     debug_assert_dynamic_bodies_are_roots, sync_body_to_transform, sync_transform_to_body,
@@ -609,18 +609,26 @@ fn insert_physics_resources<S: RigidSolver + Default>(world: &mut EcsMaster, opt
         // SP2 M1: the coupled soft step's `deepest_contact` walks the
         // `BroadphaseGrid`'s CSR cell slices + oversized list, which are populated
         // ONLY when `physics_broadphase` takes the `BroadphaseKind::Grid` arm
-        // (`grid.build`). The default `AllPairs` arm never touches the grid, so
+        // (`grid.build`). Neither the AllPairs nor the Tree arm touches the grid, so
         // coupling would read empty slices ⇒ zero contacts ⇒ a silent no-op. The
         // grid is a HARD PREREQUISITE for coupling, so force it on the coupling path
         // (it is O2's proven path, bit-identical to all-pairs post-filter — safe to
         // mandate). `broadphase` runs `.after(gather)` and the coupled step
         // `.after(solve)` (itself after broadphase), so the grid is built before the
-        // coupled step reads it. Off the coupling path the default `AllPairs` is
+        // coupled step reads it. Off the coupling path the default kind is
         // preserved (the 0%-gate).
         broadphase: if coupling {
             BroadphaseKind::Grid
         } else {
             PhysicsConfig::default().broadphase
+        },
+        // The tree broadphase's D7: the forced Grid carries a Manual pin, because the Auto
+        // policy writes `broadphase` every step and would replace the prerequisite on the first
+        // one. Off the coupling path the default select mode is kept.
+        broadphase_select: if coupling {
+            BroadphaseSelectMode::Manual
+        } else {
+            PhysicsConfig::default().broadphase_select
         },
         ..PhysicsConfig::default()
     });
@@ -629,7 +637,7 @@ fn insert_physics_resources<S: RigidSolver + Default>(world: &mut EcsMaster, opt
     world.insert_resource(SolverScratch::with_capacity(INITIAL_BODY_CAPACITY));
     // O2: the grid broadphase scratch (capacity-reused). Inserted unconditionally
     // so `physics_broadphase`'s `ResMut<BroadphaseGrid>` param always resolves; it
-    // stays untouched while `PhysicsConfig::broadphase` is the default `AllPairs`.
+    // stays untouched while `PhysicsConfig::broadphase` is not `Grid`.
     world.insert_resource(BroadphaseGrid::with_capacity(INITIAL_BODY_CAPACITY));
     // The tree broadphase's state (capacity-reused). Inserted unconditionally so
     // `physics_broadphase`'s `ResMut<BroadphaseTree>` param always resolves; it
@@ -638,10 +646,10 @@ fn insert_physics_resources<S: RigidSolver + Default>(world: &mut EcsMaster, opt
     // P3: the cold broadphase-policy cost-model carrier (the `select_broadphase`
     // density selector's situation key + hysteresis band). Inserted unconditionally
     // so the policy's `ResMut<PhysicsStats>` param always resolves; it cold-starts
-    // with the band OFF (AllPairs), matching `PhysicsConfig::broadphase`'s default,
-    // and stays inert in the default `Manual` select mode (the 0%-gate). The Grid
-    // CSR buffers above are preallocated to `INITIAL_BODY_CAPACITY`, so an Auto
-    // AllPairs→Grid flip is a FILL, not a frame-path `Vec::new`/grow (Principle 5).
+    // with the band OFF (AllPairs below `AUTO_TREE_HI`), and stays inert in the
+    // default `Manual` select mode (the 0%-gate). The Tree's columns above are
+    // reserved at `INITIAL_BODY_CAPACITY`, so an Auto AllPairs→Tree flip fills them,
+    // not a frame-path `Vec::new`/grow (Principle 5).
     world.insert_resource(PhysicsStats::default());
     // L10 D9b: the step record every broadphase variant latches its inputs into and every later
     // stage reads. Inserted unconditionally: every pipeline registers a broadphase.

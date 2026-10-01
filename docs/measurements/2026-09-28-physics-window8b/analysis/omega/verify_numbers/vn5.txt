@@ -1,0 +1,26 @@
+b=1P net us: 0.346-0.416 | omega(8)/net 7.93-9.53x | / warm-per-participant (1.043 us) 33-40 % | / integrate-per-participant (1.651 us) 21-25 %
+b=2P net us: 0.502-0.679 | omega(8)/net 4.86-6.58x | / warm-per-participant (1.043 us) 48-65 % | / integrate-per-participant (1.651 us) 30-41 %
+b=4P net us: 0.857-1.073 | omega(8)/net 3.08-3.85x | / warm-per-participant (1.043 us) 82-103 % | / integrate-per-participant (1.651 us) 52-65 %
+overall net range 0.346-1.073 us; omega(8)/net 3.08-9.53x
+warm apply per stage 8.34 us serial, 1.043 us per participant; integrate 13.21 us / stage, 1.651 per participant
+w=3.0 (window 8 v1)    bundle 0.1115 ms = 5.48 % of T(8); S2 on S1 0.1172 ms
+net min                bundle 0.4869 ms = 23.92 % of T(8); S2 on S1 0.2139 ms
+net max                bundle 0.3841 ms = 18.87 % of T(8); S2 on S1 0.1874 ms
+raw slope b=4P w=3.144: bundle 0.0911 ms = 4.48 %
+raw slope b=4P w=3.369: bundle 0.0593 ms = 2.91 %
+5 % build-if crossed at w = 3.069 us
+S2i (warm apply on today scope path) gain 0.1062 ms; S2-on-S1 minus S2i: 0.081..0.108 ms
+
+## H1 (post hoc): per-process least-squares slope_net? fit slope = a + c x bpp over bpp 1,2,4; c - work
+  P2 worker   spin a 64  c 601  c-work 30 (ns, medians)
+  P2 worker   park a 68  c 600  c-work 29 (ns, medians)
+  P2 external spin a 72  c 599  c-work 24 (ns, medians)
+  P2 external park a 75  c 597  c-work 24 (ns, medians)
+  P4 worker   spin a 187  c 648  c-work 77 (ns, medians)
+  P4 worker   park a 51  c 678  c-work 104 (ns, medians)
+  P4 external spin a 224  c 613  c-work 42 (ns, medians)
+  P4 external park a 94  c 640  c-work 69 (ns, medians)
+  P8 worker   spin a 137  c 818  c-work 244 (ns, medians)
+  P8 worker   park a 119  c 810  c-work 236 (ns, medians)
+  P8 external spin a 283  c 723  c-work 151 (ns, medians)
+  P8 external park a 183  c 741  c-work 169 (ns, medians)

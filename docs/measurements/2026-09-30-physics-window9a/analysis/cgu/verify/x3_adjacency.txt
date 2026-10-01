@@ -1,0 +1,40 @@
+== pairs with a re-run member: executed neighbours ==
+p0 r0 W1  tip rerun1 cgu1 rerun1 executed-index distance 1 start gap 7.3 s
+p0 r0 W2  tip original0 cgu1 rerun1 executed-index distance 25 start gap 163.5 s
+p0 r0 W16 tip rerun1 cgu1 rerun1 executed-index distance 1 start gap 6.2 s
+p0 r2 W16 tip rerun2 cgu1 original0 executed-index distance 16 start gap 104.8 s
+p1 r1 W1  tip rerun1 cgu1 original0 executed-index distance 19 start gap 122.6 s
+p1 r1 W8  tip rerun1 cgu1 rerun1 executed-index distance 1 start gap 6.0 s
+p1 r1 W16 tip rerun1 cgu1 original0 executed-index distance 14 start gap 90.7 s
+p1 r2 W2  tip rerun1 cgu1 original0 executed-index distance 11 start gap 69.2 s
+p1 r2 W16 tip rerun1 cgu1 rerun1 executed-index distance 1 start gap 6.2 s
+p2 r0 W2  tip original0 cgu1 rerun2 executed-index distance 30 start gap 195.4 s
+p2 r0 W4  tip rerun1 cgu1 original0 executed-index distance 27 start gap 176.4 s
+p2 r0 W16 tip rerun1 cgu1 original0 executed-index distance 30 start gap 194.7 s
+p2 r1 W16 tip rerun1 cgu1 original0 executed-index distance 23 start gap 148.8 s
+p2 r2 W2  tip original0 cgu1 rerun2 executed-index distance 11 start gap 72.3 s
+p2 r2 W4  tip rerun1 cgu1 original0 executed-index distance 11 start gap 71.9 s
+p2 r2 W16 tip original0 cgu1 rerun1 executed-index distance 13 start gap 84.0 s
+original-original used pairs: 29 start gap s min/median/max 6.0 6.2 7.4
+
+== position effect, original-original used pairs, [100,500) (post hoc) ==
+cgu1-first n 19 median 0.9963 mean 0.9954 | tip-first n 10 median 1.0008 mean 1.0038
+position effect (second slower by) median-based +0.23 %, mean-based +0.42 %; imbalance shift = (30-15)/45 x pos = +0.141 % (mean-based)
+
+== receipt medians, used processes ==
+p0 before 1.23 after 1.23 combined 1.23 mean-of-pair 1.46 max-of-pair 2.17 witness 0.57
+p1 before 1.08 after 1.12 combined 1.11 mean-of-pair 1.22 max-of-pair 1.46 witness 0.44
+p2 before 1.57 after 1.10 combined 1.22 mean-of-pair 1.38 max-of-pair 2.02 witness 0.47
+pooled before 1.145 after 1.14
+W1 before 1.71 after 1.25 witness 0.60
+W2 before 1.46 after 2.08 witness 0.69
+W4 before 0.96 after 0.96 witness 0.46
+W8 before 1.15 after 0.97 witness 0.35
+W16 before 1.10 after 1.10 witness 0.45
+tip before 1.13 after 1.11 witness 0.43
+tipcgu1 before 1.17 after 1.33 witness 0.54
+
+== waited_s on the first record of each pass ==
+p0 first warmup tip W 8 waited_s 0.0 start 2026-10-01T03:40:01.462+03:00
+p1 first warmup tip W 8 waited_s 0.0 start 2026-10-01T03:47:25.509+03:00
+p2 first warmup tip W 8 waited_s 0.0 start 2026-10-01T03:53:57.399+03:00

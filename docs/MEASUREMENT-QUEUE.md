@@ -1928,6 +1928,271 @@ From 8b on, a claim needs IQR and SE in every clean block and pooled, with K = 9
 
 ---
 
+## 17. Physics — S4-AB, S7-AB, the per-wave split, omega_b v2, F3 and the tree thresholds, J-Son-T, and DM1 C6 — TIMED 2026-09-29 (window 8b)
+
+**RESULT, 2026-09-29, window 8b.** K = 9 per cell over three passes, under ruling 1. Flags are i/s/r, pooled and then per
+pass; STRONG means r also flags; a pass-cell with K < 3 sets no flag (the "letter"). Window [0,500) unless marked.
+- **S4 holds and stays.** At W8 on J-T the trunk is **0.1705 ms (8.58 %) faster** than its S4-off parent: wall 1.9859
+  [1.9780–2.0244] → 1.8154 [1.7937–1.8472] ms, n = 9/9, STRONG, YYY everywhere. The claim rests on the pre-registered span
+  route: `phys_solve_build` 0.3038 → 0.1144 ms (−0.1894, −62.34 %), CLAIMED STRONG. No W is claimed slower:
+  - the block's own rung (0.060 ms) is NOT CLAIMED, +0.0475 ms (+2.62 %), pooled nYn (p0 nnn, p1 YYY, p2 YYn);
+  - the zone canaries are CLAIMED STRONG: +0.0303 ms for 0.030 injected, +0.0604 ms for 0.060;
+  - W1 holds (4.4217 → 4.4500; +0.64 %; nnn); W2 TIP claimed faster (3.0807 → 2.9998; −2.62 %; YYn); W4 TIP claimed faster
+    (2.3529 → 2.1981; −6.58 %; YYn pooled, YYY per pass); W16 holds (2.2203 → 2.0502; −7.66 %; p2 nYn). Poses equal.
+- **S7's partial form FAILS and does not merge** (n = 9 per cell, split 3/3/3):
+  - C1: T(16) is claimed slower than T(8), STRONG, YYY pooled and in every pass: J-T 1.8112 [1.8003–1.8536] → 2.1902
+    [2.1816–2.2341] ms, +20.92 % (+0.3790); J-A 5.3040 → 5.8658 ms, +10.59 % (+0.5617);
+  - C2 holds (T(8) not slower than P(8)): J-T −0.22 %, J-A −0.08 %, nnn everywhere;
+  - C3 REFUTED, STRONG, YYY everywhere: P(16) 2.0502 → T(16) 2.1902 ms, **+6.83 % (+0.1400) on J-T** against a predicted
+    gain of 0.166–0.175; on J-A the W16 cost is +0.6579 ms (+12.63 %);
+  - resolution: R_8 = 0.060 ms (F0.5 +0.0337 not seen; F1 +0.0660, F1.5 +0.0911 and F2 +0.1257 seen, F2 STRONG) and
+    R_16 = 0.0525 ms (+0.0545 / +0.1139 / +0.1599 / +0.2146, all seen, F1–F2 STRONG). The J-A rung at W16 (0.105 ms) was NOT
+    SEEN (+0.1095, pass 0 nnn); the W1 pair is not claimed (+0.87 %, nnn);
+  - the outcome branch is "C1 fails without C3": report, do not merge. T is slower than P in 9 of 9 paired rounds at W16
+    on both rows.
+- **F3 is not the default** (tip, A = leaflist, B = leaflist-kd):
+  - R1 CLAIMED, STRONG: t_q(kd) 167.88 µs [164.17–169.45], n = 9, −9.74 % against the 0.186 ms bar (c_q 135.4 ns);
+  - R2 (kd/leaflist query at W1, 201.98 → 167.88 µs, −16.88 %, −34.10 µs, pooled YYY) is **NOT CLAIMED by the letter**,
+    because pass 1 of the leaflist cell kept K = 2 (n = 8, 3/2/3). Under a K = 2 reading it is STRONG;
+  - R3a NOT CLAIMED (225.26 → 218.81 µs, −2.86 %, pooled nYn); R3b holds (−0.60 %); R3c holds in 10 of 10 cells (ratios
+    0.9879–1.0246, nnn); R3d holds (kd claimed faster, STRONG, 0.8800 / 0.9080). **R3 NOT CLAIMED**. R4 holds: 171 of 171
+    pose compares equal. The kd build grows 22.87 → 50.92 µs at W1 and 22.29 → 54.37 µs at W8;
+  - **the thresholds 144/152 are NOT REPRODUCED**: all_pairs/tree is 1.1294 (uniform) and 1.1003 (disparity) at 144, YYY,
+    and 1.1971 / 1.1432 at 152, so the 144 leg is REFUTED in both families, STRONG. The recipe reads disparity 128/136;
+    uniform reads HI 128 with LO below the grid under ruling 1, and 128/136 under window 7's rule. Post hoc, the move comes
+    from all_pairs being slower in this binary than in window 7's instrument while the tree barely moved.
+- **J-Son-T** (tip, cfg a, tree; A = sleeping off, B = on): the awake cost holds in all four rows (+0.17 % / +0.11 % /
+  +0.65 % / +0.32 %; the pooled i bar alone is 1.65 % at W1 and 12.93 % at W8).
+  - [100,500), armed, CLAIMED STRONG: 14.7674 → 6.5397 ms (−55.71 %) at W1 and 3.9420 → 1.7813 ms (−54.81 %) at W8, n = 9/9;
+  - [274,500), armed, CLAIMED STRONG: 14.6551 → 0.1277 ms (−99.13 %) and 3.9985 → 0.1334 ms (−96.66 %);
+  - the disarmed twins are **NOT CLAIMED by the letter** (OFF n = 8, 2/3/3) and STRONG under a K = 2 reading: [100,500)
+    −55.82 % / −55.24 %, [274,500) −99.14 % / −96.54 %.
+- **DM1 C6 is KEPT:** median(B−A) is ≤ 0 or inside its band in every gated zone. Idle: VB_EARLY_CULL −6.94 µs (band
+  15.22), VB_RUN −6.14 (17.41), VB_SHADE −23.04 (71.17), VB_PRODUCE_NET −24.06 (72.19), GBUF_DEFERRED_RESOLVE −87.81
+  (130.05); with the 100-row edit VB_EARLY_CULL +2.42 µs (inside 23.01) and VB_RUN +2.05 µs (inside 23.04). Window 8's
+  +22.3 µs did not reproduce. VB_SHADE, VB_PRODUCE_NET and GBUF_DEFERRED_RESOLVE still have bands of 21.9–25.4 % of the zone.
+- **omega_b v2** (ns; n = 9 per cell): the pre-registered slope at 8 participants and b = 4P is worker spin 3353
+  [3247–3608] / park 3369 [3192–3692], external spin 3144 [2922–3647] / park 3183 [3003–3694]. It contains four blocks of
+  about 572 ns of work, so the net barrier is **0.35–0.42 µs a stage at b = 1P, 0.50–0.68 at 2P and 0.86–1.07 at 4P**.
+  - no void rule fired (0 of 8 gap cells void); the first helper arrives 3.4–3.7 µs after the scope opens once the pool has
+    parked, against 0.3–0.9 µs when it is awake;
+  - spin-then-park costs what spin costs at back-to-back stages (PARK-0 NOT CLAIMED in 6 of 6 P8 cells); after a serial
+    stretch of 20 or 80 µs it costs +6022 ns (+26.0 %) / +6258 ns (+27.5 %) at gap 20 (worker / external) and +6261 /
+    +6174 ns at gap 80, **NOT CLAIMED by the letter** (only pass 0 has K = 2) and STRONG under a K = 2 reading;
+  - waking the pool, ω(80) − ω(0), is CLAIMED in all four cells, STRONG except at W8 worker (W8 worker +2000, W8 external
+    +6200, W16 worker +10200, W16 external +17000), and ω(80) − ω(5) is CLAIMED STRONG ×4 (+6300 / +6600 / +9600 / +15600);
+  - the v1 continuity row (K = 2) is NOT CLAIMED: P8 worker 2994.4 (window 8 published 3000), external 3194.4 (2825).
+- **The S1 inputs against the 5 % build-if.** The colour waves carry 23.36 tasks a scope, 2.92 blocks per participant, and
+  today's dispatch cost per colour wave (ramp + join) is 0.907 µs on the parent and 0.949 µs on the tip. On the design's formula the S1 bundle
+  is 19.6–24.8 % of the parent's T(8) at net ω_b (12.6–17.7 % with the colour-wave term capped by the split), and S1's increment
+  over an S4-pattern interim (S2i + S3i) is +4.2 to +10.1 % if the interim pays ω(8) per wave and −1.4 to +4.5 % if it pays
+  only the dispatch cost. The build decision turns on how the interim is priced. Arithmetic, not claims.
+- **The split of the parent's L_wide at W8 (319.5 µs a step):** ramp 60.8, join 26.3, imbalance 69.0, in-wave remainder
+  163.4 (51.1 %). The twelve pass-first ramps average 2960 ns, 9.8× the other waves' 302 ns.
+- **The standing against Jolt 5.6 is not re-measured:** 8b has no Jolt row. Our trunk, J-T disarmed, n = 9 each: T(W) =
+  4.4500 / 2.9998 / 2.1981 / 1.8154 / 2.0502 ms and 943.6 / 643.4 / 476.3 / 397.0 / 450.4 ns per manifold over [100,500) at W
+  1/2/4/8/16. W16 is claimed slower than W8 on the trunk, STRONG, +12.95 %.
+
+**Protocol.** Window 8's (section 16), with ruling 1 replacing the claim rule: K = 9 per cell (three passes, p0 reversed, p1
+forward, p2 reversed), a claim needs IQR and SE pooled and in every pass, STRONG when min–max also flags. Nine blocks, in
+priority order: S4-AB, S7-AB, SPLIT, omega-v2, F3, F3-G4 (its own K = 3), J-Son-T, DM1 (ABBAABBA per row, one pass) and
+omega-v1-cont (K = 3). S7-AB and the omega blocks were added on 2026-09-29 through the rows overlay.
+
+**Where and when.** The owner's workstation. One launch at 17:21:02, timed 17:23:23–21:09:15 +03:00 (228.3 min), complete
+(`WINDOW_DONE` exit 0). The idle rule took 21 waits: 18 at the 130.4–130.5 s floor, and S7-AB p1 (250.5 s), omega-v2 p0
+(190.5 s) and omega-v2 p2 (490.5 s); 54.7 min in all.
+
+**Binaries** (sha256 prefixes, `bin/SHA256SUMS`):
+- the trunk `16191fda` `aa34fadf` and its S4-off parent `9c6690ac` (a one-line patch);
+- the G4 bench with the 28-size grid `b887850f`;
+- the S7 partial `a3adc827` (not on the trunk; tag `phys/s7-partial-frozen`) `c4232eae`, and its omega_b v2 bench `48e9486a`;
+- window 8's DM1 A `47cb2c9b` and B `79bba864`.
+
+**Counts.** 1,106 records: 914 processes (20 warm-ups, 786 originals, 108 re-runs), 171 R4 pose compares and 21 pass
+markers. 894 timed processes, 0 invalid, 0 voided passes, R4 171 of 171 equal.
+- 134 of 894 were unclean (`claude.exe` 99, `browser.exe` 17, `Telegram.exe` 12 as the witness's top other process); 82 of
+  108 re-runs were used and **26 of 786 slots were dropped** (F3 16, omega-v1-cont 4, omega-v2 2, J-Son-T 2, DM1 2). Pass-cells
+  with K = 2: F3 16 of 81, omega-v1-cont 4, omega-v2 2, J-Son-T 2.
+- **The F3 block ran slow**, post hoc: its leaflist J-T row reads 4–11 % above S4-AB's same binary at every W (1.0417 / 1.0521 /
+  1.0779 / 1.1066 / 1.0824), and no receipt sees it. Every F3 verdict is within-block.
+
+**Moved to window 9** (the rulings after 8b, `levers/00-RULINGS.md`; `analysis.md` § 6):
+- a K < 3 pass-cell stays non-gating, and the driver re-runs a dropped slot until K = 3 (PC-8b-1);
+- G4 is re-read at 96–128 before tree C4 wires `AUTO_TREE_LO/HI`, after checking the all_pairs slowdown (PC-8b-4);
+- Jolt 5.6 is restated in-block on the S4 trunk (PC-8b-10);
+- DM1's power (clock control, more ABBA repeats, a non-FIFO present mode), a sentinel row in every block, and a placement
+  receipt that samples the thread that runs the step are asked for (PC-8b-8, PC-8b-9).
+
+**Not measured:**
+- the standing against Jolt 5.6 (no row);
+- the cause of S7's W16 regression (three candidates, `analysis/s7.md` § 4);
+- S4's block-own resolution (S4-AB has no in-block ladder at W8/W16 and no rungs at W 1/2/4; its one W8 rung was not seen);
+- the DM1 grow frame, and any DM1 reading above 1920×1080 or off FIFO.
+
+**Correction to section 16 (PC-8b-7):** window 8's per-wave table was in TSC ticks, not ns, so its "162 % of ω" and "W16
+growth mostly in the tail, ~0.16 ms" need correction notes where cited. Window 8's verdicts are unchanged.
+
+**Receipts:** `docs/measurements/2026-09-28-physics-window8b/` (the directory is dated by the preparation; the window ran on
+2026-09-29):
+- `README.md`: the protocol, the binaries, the blocks and rows, the timeline, the counts, the gate, the layout;
+- `analysis.md` and `analysis/{s7,s4split,omega,f3,jsondm1}.md`: the analyst's synthesis and group appendices, verbatim;
+- `prep.md`, `rows8b.json`, `rows8b.extra.json`, `run_window8b.sh`, `dryrun*.txt`, `wait_log.txt`, `progress.txt`, `WINDOW_DONE`;
+- `bin/` (hashes, commits and the two patches), `logs/`, `gate/` (the seven fixtures included), `tools/`, `analysis/`;
+- `raw/`, without the pose dumps and with `runs.jsonl` gzipped: `skipped.sha256` lists every file not committed.
+
+---
+
+## 18. Physics — tree C4's merge gate with Jolt 5.6 in-block, Rapier 0.36 against ours, the G5 broadphase profile, then codegen-units, the G4 threshold re-read and the all_pairs bracket — TIMED 2026-09-30 (window 9a), resumed 2026-10-01
+
+**RESULT, 2026-09-30, window 9a** (the first run: C4-AB with Jolt 5.6, C4-RAPIER, C4-G5). K = 9 per cell over three passes;
+flags are i/s/r, pooled and then per pass; the letter is "a pass-cell with K < 3 sets no flag" (ruling 8 of window 8b).
+**Almost nothing is claimed by the letter**: C4-AB's pass 0 was contaminated, so 30 of its 34 pass-0 pass-cells (30 of 102 in
+all) have K < 3. Passes 1 and 2 are clean at K = 3 everywhere, and the post hoc readings below use them.
+
+**The headline** (J-T pyramid, 1,240 boxes, 500 steps; [100,500); ours = `C4-JD#tip`, the Tree default; Rapier's faster build,
+simd8, in all ten cells):
+
+| W | ours ms | ours/Jolt wall | ours/Jolt per velocity row | ours/Jolt per manifold | ours/Rapier-default wall | ours/Rapier-matched wall | ours/Rapier-matched per row |
+|---|---|---|---|---|---|---|---|
+| 1 | 4.3504 | 0.435 | 0.413 | 0.826 | 0.884 | 0.564 | 1.013 |
+| 2 | 2.9392 | 0.506 | 0.480 | 0.961 | 0.987 | 0.658 | 1.182 |
+| 4 | 2.1605 | 0.586 | 0.556 | 1.113 | 1.073 | 0.677 | 1.216 |
+| 8 | 1.7878 | 0.696 | 0.660 | 1.322 | 1.266 | 0.701 | 1.260 |
+| 16 | 2.0486 | 0.818 | 0.776 | 1.554 | 1.298 | 0.733 | 1.317 |
+
+- Jolt 10.0044 / 5.8123 / 3.6881 / 2.5702 / 2.5056 ms; Rapier default (RP-D, simd8) 4.9213 / 2.9767 / 2.0129 / 1.4127 /
+  1.5780 ms; Rapier matched (RP-M, simd8) 7.7172 / 4.4683 / 3.1927 / 2.5494 / 2.7958 ms. On [0,500) the ours/Jolt wall ratio is
+  0.4505 / 0.5270 / 0.6117 / 0.7221 / 0.8513. The equal-work unit is the velocity row-iteration: Jolt does 0.949× our rows, and
+  Rapier matched to our configuration does 1.80× our rows (so it is outside the 0.90–1.10 equal-work band). Per manifold
+  the plan rates the unit unfair, because Jolt carries 1.90× our manifolds.
+- **Against Jolt 5.6 ours is faster at every W**, on the wall and per row, in medians. **Against Rapier's defaults ours is faster
+  only at W1 and W2.** On equal work Rapier is ahead from W2 (per row 1.18–1.32), and the loss grows with W.
+- Scaling T1/TW at W2/4/8/16, [0,500): ours 1.488 / 2.044 / 2.500 / 2.188; Jolt 1.741 / 2.776 / 4.008 / 4.134; RP-D rs8 1.655 /
+  2.430 / 3.423 / 3.034; RP-M rs8 1.708 / 2.406 / 3.015 / 2.780.
+- **The letter claims one thing:** Jolt's per-manifold lead at W16 is CLAIMED STRONG (ours/Jolt 1.5536, Jolt cheaper). Every
+  other ours/Jolt cell is NOT CLAIMED, because the pass-0 pass-cell has K < 3. Post hoc (passes 1–2): ours faster STRONG at
+  W1–W4 on the wall and at W1–W8 per row, CLAIMED at W8 on the wall; Jolt cheaper per manifold CLAIMED at W4 and STRONG at W8.
+  In paired rounds ours was faster at every W (5/5, 7/7, 6/6, 5/5, 6/6). Jolt's W16 is bimodal (IQR 22.6 %).
+- **Fidelity.** Every "ours faster" is at unequal quality: the pre-V2 pile deforms (26 boxes past 0.5 m, 2.18 m maximum drift)
+  where Jolt and Rapier hold theirs. V2 (ruled in) gives points ×1.857–1.868 and manifolds 8,496–8,501 (Jolt 8,489); by
+  arithmetic our standing after V2 is 0.93–1.30× Jolt at W8, 1.09–1.53× at W16 and 1.68–2.36× Rapier's default at W8.
+
+**C4-AB: the merge gate M7** (A = AllPairs, B = `C4-JD#tip`, [0,500); n pooled with the pass split; flags i/s/r):
+
+| W | J-D against J-Dap (same binary): A → B ms, B − A | flags | J-D against J-Dpar (the parent's default): A → B ms, B − A | flags |
+|---|---|---|---|---|
+| 1 | 6.1501 → 4.5692 (7: 1/3/3 each), −1.5809 | YYn; p0 nnn (separated), p1 YYY, p2 YYn | 6.2008 (8) → 4.5692 (7), −1.6316 | YYY; p0 nnn (separated), p1 YYY, p2 YYY |
+| 2 | 4.7129 → 3.0706 (8: 2/3/3 each), −1.6423 | YYY | 4.6971 → 3.0706 (8), −1.6265 | YYY |
+| 4 | 3.9106 → 2.2356 (7), −1.6750 | YYY | 3.8845 → 2.2356 (7), −1.6489 | YYY |
+| 8 | 3.4851 → 1.8277 (7), −1.6574 | YYY | 3.5206 → 1.8277 (7), −1.6929 | YYY |
+| 16 | 3.7003 (8) → 2.0887 (9: 3/3/3), −1.6116 | YYY | 3.7023 (8) → 2.0887 (9), −1.6136 | YYY |
+
+- **"J-D not claimed slower": HOLDS in all 10 comparisons.** Post hoc J-D is claimed faster, STRONG in nine, and CLAIMED against
+  J-Dap at W1. By the letter "J-D claimed faster" is NOT CLAIMED, because of pass 0; the difference is 93–100 % of the plan's
+  −1.70 ms, and every J-D process is below every AllPairs process even in pass 0's short cells.
+- Controls (parent against tip, not claimed different, nnn): J-A W1/W8/W16 0.9991 / 1.0006 / 0.9997; J-T 1.0102 / 0.9876 / 0.9923.
+  The rung at W8 (+0.0914 ms, +5.00 %; bars i 16.56 / s 5.22 %) and at W16 (+0.0407 ms) is NOT SEEN.
+- Poses, hashes, void steps hold (222 runner and 38 Jolt used processes). G5 is recorded (30 of 30 pass-cells at K = 3).
+  **M7: C4 merges.**
+
+**C4-RAPIER** (rs8 = simd8, rs4 = 4 lanes; K = 9, 3/3/3 everywhere; Rapier's rows are not adjacent to ours, so every
+comparison is cross-block):
+- R-ARM (rs4/rs8; above 1 = rs8 faster; [100,500)): RP-D 1.168 (NOT CLAIMED) / 1.144 (CLAIMED rs8) / 1.136 (CLAIMED rs8) / 1.111 /
+  1.077 (NOT CLAIMED) at W 1/2/4/8/16; RP-M 1.303 (STRONG rs8) / 1.256 (CLAIMED) / 1.169 (CLAIMED) / 1.073 / 1.057 (NOT CLAIMED).
+  rs4 is claimed faster nowhere, and rs8's median is lower in 10 of 10 cells.
+- R-WALL-D, R-WALL-M, R-ROW-D, R-ROW-M ([100,500), ours/Rapier, rs8 ; rs4): **NOT CLAIMED ×5 each, and all 20 [0,100) claims
+  NOT CLAIMED**, only because our pass-0 pass-cell has K 1–2. No void (V1–V9: 0 of 214 processes) and nothing REFUTED. Values:
+  R-WALL-D 0.886 / 0.987 / 1.073 / 1.281 / 1.279 (rs8); R-WALL-M 0.565 / 0.658 / 0.677 / 0.710 / 0.722; R-ROW-D 0.528 / 0.588 /
+  0.639 / 0.763 / 0.761; R-ROW-M 1.016 / 1.182 / 1.216 / 1.276 / 1.297. Post hoc, ours-first: W1 ours faster and W8 Rapier faster
+  (both builds) on the wall against the defaults; ours cheaper per row at every W against the defaults (STRONG W1–W8);
+  **Rapier cheaper per row against matched** at W4 (rs8), W8 (rs4) and W16 (both). With our one full cell (J-D at W16) as the
+  comparator the letter gives R-ROW-M "Rapier cheaper" CLAIMED against both builds (ours/Rapier 1.317 / 1.246). Per-row parity at
+  W1 and a loss that grows with W make it a scaling loss, not a kernel loss.
+
+**C4-G5** (tip, single binary; K = 3 in all 30 pass-cells):
+- B1: the four `phys_bp_*` spans on C4-JD-armed, median over [100,500): 0.2502 ms [0.2486–0.2522] at W1 against the 0.36 bar
+  (−30.50 %), 0.2608 ms [0.2602–0.2617] at W8 against 0.35 (−25.48 %), n = 9, YYY ×4: PASS, STRONG.
+- B2: the realised Δbp(8) = 1.8390 − 0.2611 = **+1.5779 ms** (per pass 1.5780 / 1.5780 / 1.5773) against 1.03: PASS, STRONG.
+- B3: C4-R (Tree) claimed faster than C4-Rap on the rest scene, 7.8501 → 6.2638 ms at W1 (−20.21 %) and 4.1626 → 2.5136 ms at W8
+  (−39.61 %), STRONG. B4: C4-S16 not claimed slower than C4-S16ap (30.142 → 30.621 µs, +1.59 %, nnn): HOLDS. B5 holds.
+- The S5 input: t_q(W8) is 0.2076 ms (mean over steps), +0.33 % against 8b's 0.2069 ms (not claimed different, cross-window);
+  the query is 78.5 % of the four spans and 11.1 % of the armed step (≥ 5 %: CLAIMED STRONG). t_q at W16 and the spans at
+  W 2/4/16 are NOT MEASURED.
+
+**RESULT, 2026-10-01, the resume of window 9a** (C4-CGU, C4-BR, C4-G4, C4-G4-kd; 8 of 8 passes closed, 134 timed processes, 0
+invalid, 0 slots dropped; all 37 pass-cells K = 3, so every pre-registered comparison gates):
+- **C4-CGU: the profile stays at codegen-units 16.** cgu1/cgu16, [100,500), n = 9 (3/3/3), flags nnn pooled and in every pass at
+  every W: W1 0.9967 (−0.33 %), W2 1.0053, W4 0.9990, **W8 0.9903 (−0.97 %; the unpaired i bar is 11.22 %)**, W16 1.0060.
+  CGU-W8 NOT CLAIMED, CGU-NOSLOWER holds (0 of 5 claimed slower), so CGU-PROFILE (cgu 1 claimed faster at W8 and not slower
+  anywhere) is NOT CLAIMED: "the profile moves to cgu 1" is NO, and nothing is refuted. [0,500): 0.9919 / 1.0010 / 1.0026 /
+  1.0032 / 1.0105, nnn. Post hoc, paired: the geometric mean of cgu1/cgu16 over 45 same-round pairs is 0.9996 (cgu 1 faster in 21
+  of 45), and 1.0022 at W8 (cgu 1 faster in 3 of 9), so the effect is bounded to about 1 %.
+- **C4-G4: the thresholds are MEASURED at 128/136.** all_pairs/tree (uniform ; disparity): all_pairs is STRONG faster at 96 / 104 /
+  112 / 120 (0.6553 / 0.7455 / 0.8031 / 0.8800 ; 0.6555 / 0.6935 / 0.7402 / 0.8140, YYY ×4, min-max separated); **at 128 nothing
+  is claimed** (1.0067, nnn ×4 ; 0.9758, pooled nYn, p0 YYY, p1 nnn, p2 YYY), so LO = 128; **the tree is STRONG faster at 136**
+  (1.0500 ; 1.0537, YYY ×4), so HI = 136, and at 144 / 152 / 160 (1.1164 / 1.1773 / 1.2517 ; 1.0793 / 1.1265 / 1.1901). The
+  recipe gives LO 128 / HI 136 in both families, monotone: `TREE_BRUTE_MAX_ROWS` 128 and `AUTO_TREE_LO/HI` 128/136 equal the
+  provisional values, which stand. **Window 7's 144/152 is REFUTED** (all_pairs STRONG claimed slower at 136 and 144).
+- **C4-G4-kd (its own K = 3, recorded, not gating): F3 is FREEZE-AND-REMOVE.** kd/all_pairs at 96 / 112 / 128: 1.4730 / 1.2553 /
+  1.0055 (uniform) and 1.4445 / 1.2721 / 1.0333 (disparity), so below the threshold all_pairs beats kd by 25–47 %, and at 128 kd
+  is not faster than either arm; kd/tree 0.9653 YYn (uniform 96) … 1.0123 YYn (uniform 128).
+- **C4-BR (diagnostic only, K = 3, one pass, n = 3 per cell): a binary (placement) term, not a window term.** all_pairs
+  g4r8b/g4r7 1.1302 / 1.1184 / 1.1200 / 1.1145 (median 1.1192) at uniform 144, uniform 256, disparity 144, disparity 256, YYY 4/4,
+  separated 4/4; g4rT/g4r7 1.1289 / 1.1183 / 1.1239 / 1.1177 (1.1211); g4rT/g4r8b nnn (≤ 0.35 % apart); the tree control moves ≤ +2.7 %.
+  Nothing is claimed; verdict (b) of M9 (placement) is CONSISTENT, not proven. The loop head of `all_pairs_into` sits at 0 mod 64
+  in g4r7 and at 32 mod 64 in g4rT and g4r8b (same RVA in the last two).
+- **Post hoc caution:** the same tip exe with the same args ran about 5 % slower at W ≥ 8 in the resume than in the first run
+  (W8 +5.62 %, W16 +5.32 %, [100,500), neither run claims a difference), and no receipt catches it. In-block A/Bs are unaffected,
+  and the first run's T(8) = 1.7878 ms is not a baseline for a later bar.
+
+**Protocol.** Window 8b's (section 17), with ruling 8's re-run waves implemented in the driver: unclean slots are re-run in waves until
+the pass-cell has K = 3 or the pass ends, the first clean valid re-run is used, and a pass-cell with K < 3 does not gate.
+Seven blocks: C4-AB (with Jolt 5.6, W 1/2/4/8/16), C4-RAPIER (two builds × two configurations), C4-G5, C4-BR (K = 3, diagnostic),
+C4-CGU (added on 2026-10-01; pre-registered claim "cgu1 claimed faster than cgu16 at W8 AND not claimed slower at any W", primary
+window [100,500) fixed before any C4-CGU datum), C4-G4 (K = 9) and C4-G4-kd (its own K = 3). The pre-V2 trunk was measured: V2 is
+not on it, so the precondition of the Rapier comparison is not met.
+
+**Where and when.** The owner's workstation. The first run launched 2026-09-30 19:13:54 (timed 19:16:15–22:02:05; ended 22:16:27, 182.6
+min, exit 3: the disk guard fired with D: at 0.1 GB, during C4-BR's only pass); the resume launched 2026-10-01 03:37:40 (timed
+03:40:01–05:48:51; ended 05:48:56, 131.3 min, exit 0, `complete`). The idle rule reached quiet at the 130.5 s floor in all 10
+first-run passes (21.7 min) and in all 8 resume waits (3 polls each).
+
+**Binaries** (sha256 prefixes, `bin/SHA256SUMS`):
+- the tip `50e31f1a` (`u/phys-tree-c4`, the Tree default) `8d6e7d41`, and the parent `3d9433ae` (AllPairs default) `a09fca08`;
+- the G4 benches g4rT `19c9eb1f` (the tip's bench with the 28-size grid), g4r7 `f96a9c11` (window 7's) and g4r8b `b887850f`
+  (window 8b's);
+- Jolt v5.6.0 `918fd2b7`, run in place; Rapier 0.36's simd8 `736c2a06` and simd4 `1e5136ca` (the harness at revision 2,
+  recorded in `rapier-harness/`; the `det` receipt build `f34291c5` was not timed);
+- the tip with codegen-units 1, `tipcgu1` `3e1f72ba`.
+
+**Counts.** First run: 696 timed processes (379 + 214 + 95 + 8) and 12 warm-ups, 0 invalid, 0 voided passes, R4 13 of 13 equal;
+C4-AB lost 46 slots, all in pass 0, and the 50 used re-runs read 1.0378× their cell's originals. The 8 C4-BR records of the aborted pass
+have no `pass_done` and are not analysed. Resume: 134 timed (113 + 9 + 9 + 3), 23 re-runs, 6 warm-ups; the 23 unclean
+processes were all C4-CGU originals with `claude.exe` as the top other process; the used re-runs read 0.9990× their originals.
+
+**Moved to window 9b** (rulings 6–10 of 2026-10-01): C4-BR, C4-G4, C4-G4-kd and the cgu 1 twin are dropped (measured); window 9b is
+V2-AB/SPAN/RES with Jolt 5.6 in-block, Rapier's fastest holding configuration in-block and adjacent to our rows, the SR and S5 A/B when
+they exist, and an armed C4-JD W16 row for S5. Every bar is formed in-block.
+
+**Not measured:**
+- V2's cost; SR and S5 on the V2 trunk; an armed C4-JD row at W16;
+- a Rapier standing that can be claimed (every Rapier row is cross-block, the matched configuration does 1.80× our rows, and our
+  pass-0 cells are short);
+- the bench-shipped G4 reading (fat LTO): the stake is under 1 µs per step, so it was not taken;
+- Rapier's own sensitivity to codegen-units.
+
+**Receipts:** `docs/measurements/2026-09-30-physics-window9a/`:
+- `README.md`: the protocol, the binaries, the blocks and rows, the two runs' timelines, the counts, the gate, the layout;
+- `analysis.md`: the analyst's synthesis, verbatim, both parts (the first run, and "Resume 2026-10-01");
+- `prep.md`, `rows9a.json`, `rows9a.extra.json`, `run_window9a.sh`, `dryrun*.txt`, `wait_log.txt`, `progress.txt`, `WINDOW_DONE`,
+  `WINDOW_DONE.run1`;
+- `bin/` (hashes, commits and the G4 patch), `logs/`, `gate/` (the eight fixtures included), `tools/`, `analysis/`;
+- `rapier-harness/`: the Rapier 0.36 harness at revision 2 (sources, build recipe, the three arm hashes), which lives outside the
+  repository;
+- `raw/`, without the pose dumps and with `runs.jsonl` gzipped: `skipped.sha256` lists every file not committed.
+
+---
+
 ## When an entry is done
 
 Strike it with the date and the receipt's location, rather than deleting it. An entry that was run

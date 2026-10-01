@@ -440,9 +440,9 @@ Amended on 2026-09-29 (the next section): S7's partial form (ruling 4) is reject
 ## After window 8b: S7's partial form rejected and frozen, S4 kept, F3 not the default, the tree thresholds not reproduced, helpers spin (2026-09-29)
 
 Window 8b ran on 2026-09-29 under ruling 1 of the previous section (K = 9 over three passes; a claim needs IQR AND SE,
-and a claim that also passes min–max is STRONG): 894 timed processes, 0 invalid, 0 voided passes, and 26 of 786 slots
-dropped because the desktop and agent sessions were busy. Its numbers are recorded in the window 8b measurement record
-(to be committed). 8b carried no Jolt row, so the standing against Jolt 5.6 is not re-measured.
+and a claim that also passes min–max is STRONG): 894 timed processes, 0 invalid, 0 voided passes, and 26 of 786 slots dropped
+because the desktop and agent sessions were busy. Its numbers are recorded in the window 8b measurement record
+(`docs/measurements/2026-09-28-physics-window8b/`). 8b carried no Jolt row, so the standing against Jolt 5.6 is not re-measured.
 - **1. Owner value: helpers SPIN.** This answers the owner-value question of 2026-09-26. The S1 region, and any later
   region-style scheduler, keeps its helpers in active waiting between stages; spin-then-park is not the default, and
   laptop energy is accepted as the price. The park path of the ω_b v2 bench stays a measurement axis only.
@@ -470,3 +470,200 @@ dropped because the desktop and agent sessions were busy. Its numbers are record
 - **10. Owner (2026-09-29): "find out why we are slower than Jolt and solve it."** A diagnosis precedes any new lever:
   equal work first (manifold counts 4467 against 8489, iteration budgets), then the stage map, ours against Jolt, at
   W 1/8/16, then a ranked lever plan.
+
+Amended on 2026-10-01 (the next section): tree C4 merges as the whole lane before ruling 5's G4 re-read, with its
+thresholds marked PROVISIONAL until window 9b.
+
+## After window 9a (2026-09-30): V2 ruled in (speculative contacts at 20 mm, K3, the approach-velocity margin), the SAT hysteresis sign fix dropped, tree C4 merged whole, the Rapier bar, the iteration budget, model routing
+
+Window 9a ran on 2026-09-30 (19:13–22:16, 182.6 min) with the tip `u/phys-tree-c4` `50e31f1a` (the Tree the default
+broadphase, value-neutral) against the parent, the trunk `3d9433ae` (AllPairs the default). Three blocks closed all
+three passes: C4-AB with Jolt 5.6 in-block, C4-RAPIER (Rapier 0.36) and C4-G5. C4-BR aborted in its only pass (the
+machine was never idle), and C4-G4 and C4-G4-kd never ran. There were 696 timed process records, 0 invalid and 0
+voided passes, but a busy desktop left 30 of C4-AB's 102 pass-cells, all in pass 0, at K < 3, so almost nothing is
+claimed by the letter; the one claim is Jolt's per-manifold lead at W16 (STRONG). Its numbers are recorded in the
+window 9a measurement record (`docs/measurements/2026-09-30-physics-window9a/`). Unclaimed, and at unequal fidelity
+(the pre-V2 pile deforms, 26 boxes past 0.5 m and 2.18 m maximum drift, where Jolt and Rapier hold theirs), ours/Jolt
+5.6 on the wall reads 0.435 / 0.506 / 0.586 / 0.696 / 0.818 at W 1/2/4/8/16, and ours/Rapier's default (its simd8
+build) 0.884 / 0.987 / 1.073 / 1.266 / 1.298.
+
+The rulings were taken in two sittings. Those of 2026-09-30 came before the window, after the Jolt-gap diagnosis F0
+(verdict: DEFECT yes, REGRESSION no) and on the Jolt-gap plan (PLAN rev 3): owner values, then the V2 flip rulings.
+Those of 2026-10-01 answer the window's questions. The F0 verdict, the Jolt-gap plan and the V2 lane's implementation
+report are not yet on the trunk. In rulings 3 and 6, S5 and S20 name the 5 mm and 20 mm margins, not the scaling lever
+S5.
+
+**2026-09-30 (owner values after F0, and the V2 flip rulings):**
+- **1. Owner V2a: speculative contacts become our contact rule** (the Jolt / Box2D v3 form): a contact point is kept
+  while its separation is ≤ d, and the solver treats s > 0 as a bias s/h with no push. Every contact pose pin moves
+  once, re-derived by its own rule; the window gate fixtures (the JT500 / JA500 / JToff500 family) and the census
+  counters are re-recorded.
+- **2. Owner V2b: the default margin is 20 mm**, a `PhysicsConfig` value (Jolt's `mSpeculativeContactDistance` = 0.02,
+  Box2D v3.1's `B2_SPECULATIVE_DISTANCE` = 0.02 m).
+- **3. The production form is the F0 verdict's (a)–(f):** both kernels (scalar and the AVX2 cohort, branch-free
+  select); the current separation from each body's accumulated step movement (Box2D v3's `s = s0 + dot(d, n)`),
+  written in the existing integrate, with no new serial stage; every pair type (box-box's five sites, sphere-sphere,
+  sphere-box, SDF); d/2 added to each body's broadphase radius at gather (the C4 / S5 kernels untouched); the SAT
+  axis-hysteresis sign fix for negative depths (dropped by ruling 10 (a)); and a fidelity gate that can fail (J-T, 8
+  one-ulp-seeded trajectories, reuse on AND off, 0 boxes > 0.5 m and a maximum drift < 0.5 m in 8/8; red on today's
+  trunk; the `slow:` ignore class). K3 (the current-separation form applied to every point) was to be included only
+  if F0e(ii) showed it tightens the pile; ruling 6 includes it.
+- **4. The order is bugs first:** V2 lands on the trunk before any SR or S5 merge; those lanes rebase, re-run the M1
+  census and re-pin, and window 9 (M7) measures the V2 trunk. C4 is value-neutral and keeps its own merge (window 9).
+- **5. Owner, model routing: "both steps".** (a) Now: Sonnet 5.5 runs scouting and inventory, window preparation, the
+  transcription of finished results into docs, and re-runs of existing gates with exit-code reports, each checked by
+  an Opus verifier or a hard oracle; the architect, critic, code-reviewer, verifiers, results-analyst and the
+  developer on kernel / unsafe work stay on Opus. (b) A judgment benchmark (≥ 25 historical cases with known answers,
+  confident-wrong scored separately) decides the tester and part of the developer. `effort: low` on Opus is NOT used
+  (the retrieval bench: 4 confident-wrong). Ruling 7 applies (b).
+- **6. The F0e verdict (verified): K3 IS INCLUDED, default ON for every point.** K3 recomputes each contact point's
+  separation after every substep's integrate, in Box2D v3's exact form
+  `s = s0 + dot((dp_B + dq_B r_B − r_B) − (dp_A + dq_A r_A − r_A), n)`, and the kernel branches on the current s.
+  - At gap 0.5: K3 alone holds 0/8 (not a fix by itself); S20 holds 8/8 with 65–92 boxes > 0.1 m; **K3 + S20 holds
+    8/8 with 106–153 mm maximum drift and 2–6 boxes > 0.1 m** (Jolt 51 mm / 0), reuse on and off, at +7 % rows over
+    S20 with the colour passes unchanged. The XS controls show that the gain comes from K3 reaching penetrating
+    points. The V2 lane therefore ships S20 + K3 as the default; the const that selects "speculative points only"
+    stays as a documented switch, off.
+  - At the harsher drop, gap 1.0: S5 and S20 alone fail (layer 2 / layers 3–4 outer ring, flat deep landings — a
+    different mechanism from the trunk's layer-8 grazing failure). **K3 + S20 holds 8/8 with reuse on and 0/8 with
+    reuse off** (one layer-2 outer-ring box past 0.5 m in every trajectory).
+  - The fidelity gate therefore has TWO arms: gap 0.5 (reuse on and off, 8/8) and gap 1.0 with reuse on (8/8). Gap
+    1.0 with reuse off is recorded as a known limitation with its numbers, not gated, and goes to a follow-up
+    diagnosis (F0f: does Jolt 5.6 hold at gap 1.0; the low-layer deep-landing mechanism). K3 + S5 is rejected (5/8, a
+    layer-3 failure). Ruling 9 replaces the two arms with the gap sweep.
+- **7. Model routing after the judgment benchmark** (47 historical cases: Sonnet 5.5 caught 45, missed 1, was
+  confidently wrong on 1; Opus 5.5 46 / 0 / 1; tokens per task, Sonnet −13 %). The tester runs on Sonnet 5.5 from the
+  next lane on, with the Opus code-reviewer still beside it. The developer stays on Opus for kernel / unsafe /
+  numerics and uses Sonnet for mechanical work. The architect, critic, code-reviewer, results-analyst and verifiers
+  stay on Opus. The running lanes (tree-c4, v2-spec) are not switched mid-flight. CLAUDE.md's "Model routing" section
+  is rewritten in a doc commit with both measurements.
+- **8. The SR cut's questions, answered by the orchestrator:**
+  - Q1: Phase B (the physics half) starts only after V2 is on the trunk. Phase A (`region.rs`, its panic / epoch
+    tests, loom M-R1..M-R13, the `Scope::new` debug guard, ω_b v3) may be implemented first.
+  - Q2: the lock set extends to `profiling.rs`, `scope.rs`, the new physics test files, and V2's files once V2 has
+    merged.
+  - Q3: the critique's W8 is fixed by reserving the whole epoch range at region entry, gated by the native
+    caught-poison test at P = 2/8/16 and loom M-R13 with the red mutation.
+  - Q4: the merge bar is a FORMULA fixed now: SR merges iff W8 J-T ≥ 0.6 × SR's predicted Δ on the contact set of the
+    trunk it lands on, with no W slower (W16 included); the value is computed at window prep from that trunk's census.
+  - Q5: V2's per-step delta reset folds into SR's first gravity stage.
+  - Q6, the policy defaults: the orchestrator pure-spins; helpers never park inside a region (the owner's "active
+    waiting"): PAUSE, then `yield_now` between PAUSE bursts, never a sleep or park. PAUSE-only against PAUSE + yield
+    is an ω_b v3 axis.
+  - Q7: add `--scene pairs` for the one-wide-colour sweep arm.
+  - Q8: build behind a switch; one final commit flips it, deletes the old path and re-pins the census once.
+  - Q9: M5b's per-block owner receipt stays out of this lane.
+  - Q10: V2's spec forbids a new serial stage for K3 (the per-body delta is written inside integrate). If V2
+    nevertheless lands K3 as its own pass, SR carries it as one parallel per-substep stage; this is confirmed at the
+    trunk sync.
+  - Implementation timing: SR's implementation starts after window 9a (C4 + V2 + G4 + the Rapier / Jolt rows), so
+    that its builds do not break the quiet window.
+- **9. The approach-velocity margin (VMARGIN) is PART OF V2** (F0g, verified HOLDS).
+  - Evidence: a FIXED margin only moves the partial-landing boundary (F0f). Over the gap sweep, K3 + S20 holds 35/88
+    runs, Jolt 5.6 37/44, and **K3 + S20 + VMARGIN 88/88** (11 gaps {0.5, 0.75, 0.9, 0.95, 1.0, 1.02, 1.05, 1.1, 1.25,
+    1.5, 2.0} × reuse on / off × 4 seeds), with a maximum drift of 56–427 mm (gap 0.5: 56–72 mm against Jolt's 49–52).
+    It costs +3.5–5.6 % rows in the steady state with the colours unchanged; box 433: 786 → 24 mm.
+  - **The rule:** `d_eff = d + min(cap, max(0, approach) * h)`, with h the step length, cap 0.5 m (never reached in
+    F0g), gravity not included, and the velocities the two bodies' step-start velocities. It applies per POINT
+    (linear + angular, `v(p) = v + w × (p − c)`, both bodies at the incident point) at the clip keep in `face_patch`
+    and at the reuse `refresh_face` keep; per AXIS, with the conservative bound
+    `−(v_B − v_A)·n + |w_A| R_A + |w_B| R_B` (R the circumradius), at the SAT early-out `separates` (which also covers
+    `sep_still_holds`) and at `refresh_edge`; and as the same term on every other pair type (sphere-sphere,
+    sphere-box, SDF).
+  - **The broadphase:** each body's bounding radius grows by d/2 + min(cap, (|v| + |w| R) * h) inside
+    `body_bounding_radius`, which every broadphase reads.
+  - **The production form:** the velocities reach the contact sites through the call path (arguments / the pair
+    record), with NO thread-local context; the prototype's per-thread context is not shipped.
+  - **The fidelity gate becomes the gap SWEEP** (the 11 gaps above) × reuse on / off (no seed, plus one 1-ulp seed at
+    gaps 0.5 and 1.0): every run must hold, and the gate is RED on the parent. A red control, "the velocity term
+    capped at 1 mm → gap 1.5 with reuse on FAILS" (F0g measured 19 boxes, 9,447 mm), proves that the gate sees the
+    term. d = 0 AND the velocity term off must still reproduce today's rule byte for byte (the d = 0 identity pins).
+- **10. The V2 flip rulings** (the orchestrator, answering §2–§3 of the V2 lane's implementation report):
+  - (a) **The SAT axis-hysteresis sign fix (spec item (e), ruling 3) is DROPPED from V2.** The rule stays
+    `best.depth >= last.depth / 1.05` for every depth. With the fix and K3, A7-R1 with reuse off creeps 13.294 mm
+    (the bound is 10 mm and is never relaxed); without it, 0.72 / 0.53 mm. The gap sweep holds 13/13 either way, and
+    every F0 prototype that held ran without it. The C2 unit test `n2_a_separated_hint_holds_under_the_hysteresis` is
+    inverted or removed with a note citing this ruling. Follow-up PC-V2-HYST (after V2): why the sign-correct
+    hysteresis creeps with reuse off, with a test that can decide which form is right.
+  - (b) G5 / G6 (premise P2), the G-L9b-7 tipping and the sleep-skip S3 voids go as §3 of the report plans. The
+    overlap-only arm runs at d = 0 and cap = 0 against its old premise, plus a V2 twin that tests the V2 rule's own
+    boundary. S3's cross-pairs / move-in rows settle longer or are re-placed so that the void guard has material (the
+    run-against-run comparison unchanged). Grow-clear prefers a V2-native placement (the pair lifted past d_eff), else
+    the overlap-only arm.
+  - (c) The pins that move by their own rule: the pyramid `PINNED_FINAL_HASH` (the four new values in §3 of the
+    report); the census S1c / S1e envelopes (195..=195, dispatch 391; debug 392), with the S1f d = 0 twin keeping the
+    old pins; `bp_query_counts` (the overlap-only arms keep the model figures, and `j_snapshot` gains the (reuse,
+    overlap-only) form); the fidelity anchors, from the C6 fixture recordings; the window fixtures, via the V2 lane's
+    `tools/record_v2_fixtures.sh`; and the `_v2` pose-gate scripts.
+  - (d) `alloc_frame_attribution` row D: the pinned "32 tasks at W = 8 fit one 4 KiB block" is a property of the
+    pre-V2 contact set. The row is re-expressed as a derived expectation, with a red mutation: chunks == scope
+    frames + the number of colour scopes whose task count at W = 8 exceeds one block's capacity (computed from the
+    step's colour task counts). It must also prove that there is no per-step heap growth in the steady state (the second
+    block is reused). SR later cuts the per-wave scopes to 3 per step.
+  - (e) The G2 / G7 flicker-budget generator re-run is REQUIRED at the flip (critique W2b), with the budgets
+    re-derived by the generator's own rule.
+  - (f) Timing resumes after window 9a; the lane's builds must not run during the window.
+
+**2026-10-01 (the owner's answers after window 9a, and the orchestrator's decisions):**
+- **1. Owner: "beat Rapier" means Rapier's FASTEST settings against OUR fastest settings.** It is fair only under one
+  fidelity bar for both: each engine's fastest configuration that still passes the SAME fidelity gate (the V2 gap
+  sweep × reuse on / off, 0 boxes > 0.5 m and a maximum drift < 0.5 m in every run) on the J-T scene. Rapier's harness
+  gains a gap flag and a configuration search (solver iterations, stabilisation, friction model, prediction
+  distance, …) to find its fastest holding configuration; ours does likewise, via ruling 2.
+- **2. Owner: the solver iteration budget may be a COMPILE-TIME parameter, with ADEQUATE values.** Today it is 4
+  substeps × (1 biased + 2 relax) = 12 sweeps. The design: the budget as compile-time constants (const generics or a
+  feature-selected preset, at zero runtime cost); the shipped default is the cheapest budget that passes the full
+  fidelity bar (the gap sweep with reuse on and off, the pile tests, the existing solver oracles) with margin; values
+  outside the validated set are refused at compile time. It lands after V2, where the fidelity gate lives.
+- **3. Owner: codegen-units = 1 is acceptable for the shipped build profile if it measures faster.** Window 9b carries
+  a cgu = 1 twin of our tip against the cgu = 16 parity profile; the profile changes only on a claimed gain.
+- **4. Orchestrator: tree C4 merges now as the whole lane**: C4-1 the thresholds 128 / 136 (PROVISIONAL), C4-2 Auto
+  opt-in with Manual the default, C4-3 the flip, C4-4 the record (`broadphase/07-C4-RECORD.md`). Window 9a met its
+  merge rule, M7: J-D is 1.58–1.69 ms faster than the parent's default at every W, no W is slower, and G5 is recorded
+  with every bar STRONG. C4-G4 was not measured, so ruling 5 of 2026-09-29 (G4 re-read at 96–128 before C4 wires
+  `AUTO_TREE_LO/HI`) is not met at the merge; the flip reads only `TREE_BRUTE_MAX_ROWS`, and Auto is opt-in. The
+  constants stay marked PROVISIONAL until window 9b's C4-G4 re-read.
+- **5. Orchestrator: window 9b** = C4-BR + C4-G4 + C4-G4-kd (unmeasured in 9a) + V2's cost (V2-AB / SPAN / RES) + the
+  cgu = 1 twin + Rapier's fastest holding configuration and Jolt 5.6 in-block, adjacent to our rows + the SR / S5 A/B
+  when they exist. The desktop must be quiet: the owner's question 1 from 9a is still open (Telegram, the browser and
+  other Claude sessions made C4-AB's pass 0 unusable).
+
+Amended on 2026-10-01 (the next section): the build profile stays at codegen-units 16, the tree thresholds are measured
+at 128/136 and their PROVISIONAL marks are lifted (ruling 4 above waited for window 9b's re-read, which the resume
+made), F3 is frozen and removed, and window 9b's list (ruling 5 above) drops the blocks that are measured.
+
+## After the window 9a resume (2026-10-01): the build profile stays at codegen-units 16, the tree thresholds measured at 128/136, F3 frozen and removed, C4-BR a binary term, window 9b's list
+
+The resume of window 9a ran on 2026-10-01 (03:37–05:49, 131.3 min) with the same tip (`u/phys-tree-c4` `50e31f1a`,
+merged as `d6521a43`) and four blocks: C4-CGU (codegen-units 1 against 16, added after the owner's ruling 3 above),
+C4-BR (the all_pairs bracket, K = 3, diagnostic only), C4-G4 (the threshold re-read, K = 9) and C4-G4-kd (F3's keep or
+freeze, with its own K = 3). All 8 passes closed and every pass-cell has K = 3, so every pre-registered comparison
+gates: 134 timed processes, 0 invalid, 0 slots dropped. Its numbers are recorded in the window 9a measurement record
+(`docs/measurements/2026-09-30-physics-window9a/`), in the section "Resume 2026-10-01" of its `analysis.md`, whose three
+group reports were each verified (AGREE ×3). The rulings below were taken after the analyst's report, at about 06:45 the
+same morning. "Owner ruling 3" in ruling 6 is ruling 3 of 2026-10-01 in the previous section.
+
+**2026-10-01, after the resume (the orchestrator's decisions):**
+- **6. The build profile stays at codegen-units 16.** C4-CGU: codegen-units 1 is not claimed faster at W8 (0.9903, below
+  the rule's resolution of about 11 %; the paired geometric mean over 45 pairs is 0.9996) and is not claimed slower
+  anywhere. The condition of owner ruling 3 (a claimed gain) was not met. The twin is not re-measured in window 9b,
+  because the paired data bound any effect to about 1 %.
+- **7. The tree thresholds are MEASURED: `TREE_BRUTE_MAX_ROWS` 128 and `AUTO_TREE_LO/HI` 128/136.** G4 at K = 9, in both
+  families: all_pairs is STRONG faster at 96–120, nothing is claimed at 128, and the tree is STRONG faster at 136–160;
+  window 7's 144/152 is REFUTED. The PROVISIONAL marks are lifted now: ruling 4's "until window 9b's re-read" is
+  satisfied by the resume's re-read. It is a doc-only commit on the trunk, after the C4 merge verify, and no value or
+  pin moves.
+- **8. F3 (`LeafListKd`) is FREEZE-AND-REMOVE,** by the clause of ruling 4 of the section "After window 8b" ("if C4 does
+  not use it, it is frozen and removed"). C4 never selects kd; below the threshold all_pairs beats kd by 25–47 %, and at
+  128 kd is faster than neither arm. The code is frozen under an annotated tag on the kd commit and a registry line, and
+  then removed as its own small lane. The return condition is a kd build form that claims t_qb lower at J W1 and is not
+  slower at W8.
+- **9. C4-BR: a binary (placement) term, and no fix lane opens.** all_pairs g4r8b/g4r7 reads 1.119 at 4 of 4 ids, and
+  the tree control moves by at most +2.7 %; that is consistent with verdict (b) of M9. The bench-shipped G4 reading (the
+  trigger of the C4 cut's Q2) is NOT taken: the stake is under 1 µs per step.
+- **10. Window 9b's contents (amends ruling 5 of 2026-10-01).** C4-BR, C4-G4, C4-G4-kd and the cgu 1 twin are DROPPED,
+  because they are measured. Window 9b is V2-AB / SPAN / RES, Jolt 5.6 in-block, Rapier's fastest holding configuration
+  in-block and adjacent to our rows, the SR and S5 A/B when they exist, and an armed C4-JD W16 row for S5. Every bar is
+  formed IN-BLOCK: the resume read the same tip exe about 5 % slower at W ≥ 8 than the first run, so cross-run baselines
+  are void. No agent session may run during the window (`claude.exe` was the only source of uncleanness: 23 of the 113
+  C4-CGU processes), and the orchestrator reads no more than the progress file.

@@ -4,8 +4,9 @@
 //! # What it asserts
 //!
 //! The default world (`add_physics_systems::<DefaultRigidSolver>`, default
-//! `PhysicsConfig`: the colored solve with the O7 AVX2 cohort kernel on, `AllPairs`
-//! broadphase, sleeping off, contact reuse on since L9 C4) runs Jolt's `PyramidScene` through
+//! `PhysicsConfig`: the colored solve with the O7 AVX2 cohort kernel on, the `Tree`
+//! broadphase since the tree broadphase's C4, sleeping off, contact reuse on since L9 C4) runs
+//! Jolt's `PyramidScene` through
 //! the real schedule. The per-frame FNV-1a hash of every `RigidBody` bit must be identical
 //! across:
 //!
@@ -37,12 +38,20 @@
 //! [`PINNED_FINAL_HASH_REUSE_OFF_D0`]: the trajectories from before V2's speculative contacts,
 //! which `speculative_distance = 0` has to reproduce bit for bit whatever the default is.
 //!
+//! **The AllPairs arm (the tree broadphase's C4).** The default broadphase is the Tree since C4,
+//! so the reference and every arm above run it. One more run, the reference configuration with
+//! `broadphase = AllPairs`, must equal the reference on EVERY frame and end in the same
+//! [`PINNED_FINAL_HASH`]: the in-cargo proof that the flip moved no value (every kind emits
+//! AllPairs' pair set in `(min, max)` order), and the pin that keeps the shipped all-pairs arm,
+//! which the default no longer runs, under a pinned hash. It is asserted after the pins, so
+//! a Tree defect that moves the default world reads as the reference pin.
+//!
 //! # Scene size per profile
 //!
 //! Release runs Jolt's full pyramid (height 15, 1240 dynamic boxes) for 120 frames —
 //! the collapse of every 0.5 m layer gap onto the layer below, then settling. Debug runs
 //! height 10 (385 boxes) for 60 frames so the file stays in the ordinary debug run: the
-//! default `AllPairs` broadphase is O(n²), and an unoptimised 1240-box world is minutes.
+//! AllPairs arm is O(n²), and an unoptimised 1240-box world is minutes.
 //!
 //! # Non-vacuity
 //!
@@ -73,7 +82,9 @@ use boyko_physics::components::{
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_systems;
-use boyko_physics::resources::{ConstraintGraph, Manifolds, PhysicsConfig};
+use boyko_physics::resources::{
+    BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, Manifolds, PhysicsConfig,
+};
 use boyko_physics::solver::DefaultRigidSolver;
 
 /// Jolt's `cBoxSize`: the pitch between neighbouring boxes in a layer.
@@ -311,17 +322,19 @@ fn run_with_reuse(
     simd_solve: bool,
     reuse: Option<bool>,
 ) -> Run {
-    run_with(workers, parallel_solve, simd_solve, reuse, None)
+    run_with(workers, parallel_solve, simd_solve, reuse, None, None)
 }
 
-/// [`run_with_reuse`], with `speculative_distance` set to `speculative` and the approach-velocity
-/// margin off (`speculative_velocity_cap = 0`) when it is `Some`: `Some(0.0)` is the overlap-only
-/// rule.
+/// [`run_with_reuse`], with the broadphase set to `kind` under the `Manual` select mode when it
+/// is `Some` (the default's otherwise), and `speculative_distance` set to `speculative` with the
+/// approach-velocity margin off (`speculative_velocity_cap = 0`) when it is `Some`: `Some(0.0)` is
+/// V2's overlap-only rule.
 fn run_with(
     workers: usize,
     parallel_solve: bool,
     simd_solve: bool,
     reuse: Option<bool>,
+    kind: Option<BroadphaseKind>,
     speculative: Option<f32>,
 ) -> Run {
     let mut world = EcsMaster::new();
@@ -340,6 +353,10 @@ fn run_with(
         cfg.simd_solve = simd_solve;
         if let Some(reuse) = reuse {
             cfg.contact_reuse = reuse;
+        }
+        if let Some(kind) = kind {
+            cfg.broadphase_select = BroadphaseSelectMode::Manual;
+            cfg.broadphase = kind;
         }
         if let Some(d) = speculative {
             cfg.speculative_distance = d;
@@ -426,11 +443,16 @@ fn default_world_pyramid_is_run_to_run_worker_count_and_scalar_identical() {
     let reuse_off_final = reuse_off.hashes.last().copied().unwrap_or(0);
     println!("  reuse off (1w parallel_solve=false): final hash {reuse_off_final:#018x}");
     // The overlap-only rule (V2's d = 0), reuse on and off: pinned on their own.
-    let d0_final = run_with(1, false, true, None, Some(0.0)).hashes.last().copied().unwrap_or(0);
+    let d0_final =
+        run_with(1, false, true, None, None, Some(0.0)).hashes.last().copied().unwrap_or(0);
     let d0_reuse_off_final =
-        run_with(1, false, true, Some(false), Some(0.0)).hashes.last().copied().unwrap_or(0);
+        run_with(1, false, true, Some(false), None, Some(0.0)).hashes.last().copied().unwrap_or(0);
     println!("  d = 0 (1w parallel_solve=false): final hash {d0_final:#018x}");
     println!("  d = 0, reuse off (1w parallel_solve=false): final hash {d0_reuse_off_final:#018x}");
+    // The tree broadphase's C4: the AllPairs arm the default no longer runs (module docs).
+    let all_pairs = run_with(1, false, true, None, Some(BroadphaseKind::AllPairs), None);
+    let all_pairs_final = all_pairs.hashes.last().copied().unwrap_or(0);
+    println!("  AllPairs (1w parallel_solve=false): final hash {all_pairs_final:#018x}");
     // Before the value gates, so a moved pin is read beside the census that names or clears the
     // face bound as its cause.
     #[cfg(feature = "narrowphase-counts")]
@@ -482,6 +504,23 @@ fn default_world_pyramid_is_run_to_run_worker_count_and_scalar_identical() {
              the overlap-only rule from before V2, bit for bit: a V2 leak, never a re-pin"
         );
     }
+    let all_pairs_first = all_pairs
+        .hashes
+        .iter()
+        .zip(&reference.hashes)
+        .position(|(a, b)| a != b)
+        .map(|i| i + 1);
+    assert_eq!(
+        all_pairs_first, None,
+        "the AllPairs arm diverged from the default world (first differing frame shown): every \
+         broadphase kind must emit AllPairs' pair set in (min, max) order, so a kind flip moves no \
+         value"
+    );
+    assert_eq!(
+        all_pairs_final, PINNED_FINAL_HASH,
+        "the AllPairs arm's pyramid moved: final hash {all_pairs_final:#018x}, pinned \
+         {PINNED_FINAL_HASH:#018x} (height {PYRAMID_HEIGHT}, {FRAMES} frames)"
+    );
 }
 
 /// The box-box fallback census of every run above (`narrowphase-counts` only; the `thinbox`

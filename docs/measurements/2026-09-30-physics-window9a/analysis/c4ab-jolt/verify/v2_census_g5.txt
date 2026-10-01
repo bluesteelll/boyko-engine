@@ -1,0 +1,14 @@
+C4-G5 pass_done: [0, 1, 2]; processes 95 (Counter({'original': 90, 'rerun': 5})); driver-invalid 0
+C4-G5 pass-cells 30; k_clean==3: 30
+G5 used slots 90 of 90
+armed processes 36: void_steps census {('C4-JDap-armed', 0): 18, ('C4-JD-armed', 0): 18}
+C4-JD-armed used processes: 18; W split Counter({8: 9, 1: 9})
+distinct (points, np_manifolds, manifolds, hash): [(16553.755, 4467.665, 4467.665, '0x30c5438bc6ad9ffa')]
+ours: points 16553.755 manifolds 4467.665 -> velocity row-iterations 595,935.2 (DOSSIER 595,935)
+Jolt (DOSSIER): velocity 565,789.6 (565,790) + position 62,223.9 (62,224)
+Jolt/ours: velocity rows 0.9494; all rows 1.0538; manifolds 1.9001
+W1: [100,500) ours 4.3504 Jolt 10.0044 ms | ns/manifold ours 973.7 Jolt 1178.5 | ns/vrow ours 7.30 Jolt 17.68
+W2: [100,500) ours 2.9392 Jolt 5.8123 ms | ns/manifold ours 657.9 Jolt 684.7 | ns/vrow ours 4.93 Jolt 10.27
+W4: [100,500) ours 2.1605 Jolt 3.6881 ms | ns/manifold ours 483.6 Jolt 434.5 | ns/vrow ours 3.63 Jolt 6.52
+W8: [100,500) ours 1.7878 Jolt 2.5702 ms | ns/manifold ours 400.2 Jolt 302.8 | ns/vrow ours 3.00 Jolt 4.54
+W16: [100,500) ours 2.0486 Jolt 2.5056 ms | ns/manifold ours 458.5 Jolt 295.2 | ns/vrow ours 3.44 Jolt 4.43

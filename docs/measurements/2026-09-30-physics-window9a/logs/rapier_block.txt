@@ -1,0 +1,189 @@
+RAPIER_STEPS = 500
+RAPIER_BODIES = 1240
+RAPIER_CSV_HEADER = 'step,wall_ns,pool_threads'
+RAPIER_TARGET_FEATURES = ('avx2', 'fma', 'bmi2')
+
+
+def _is_int(x, want):
+    """x is the integer `want` (a JSON true is not the integer 1: bool is excluded)."""
+    return type(x) is int and x == want
+
+
+def rapier_check(pins, arm, cfg, workers, log_text, csv_text, pose_raw, fixture_raw, exe_sha256, rc, timed_out=False,
+                 launch_args=None, steps=RAPIER_STEPS, test=False):
+    """Window 9a's void rules V1-V9 (gate/rapier/window9a_rows.md, "Void rules") for ONE timed Rapier process; pure. Returns
+    {rule: [reasons]}; an empty dict is a valid process. Written from the rules' text, not from the harness's void_check.py: the two are
+    cross-checked (tools/xcheck_rapier9a.py) on the harness's own gate outputs and on mutated copies of them, so a rule one of them
+    reads differently shows there. `steps` is 500 (12 under --test); `test` skips V7 only (a rehearsal has no 500-step fixture).
+    Where the rules' text is silent, the choice is the stricter one and is listed here: V3 also requires the SUMMARY's `workers` and
+    `threads.pool_threads_requested` to equal W (a process that reports another request than the one it was given is not the process
+    asked for); V4 also requires target_env msvc and debug_assertions false; V6 also requires 1241 colliders; V7 also requires the
+    SUMMARY pose_hash to be the pin's; an empty pose file or fixture is a V7 failure (two empty files must not compare equal);
+    V9 also reads receipt_gates.awake_min (a --receipt run fills it)."""
+    bad = {}
+
+    def flag(rule, why):
+        bad.setdefault(rule, []).append(why)
+
+    ap = pins['arms'][arm]
+    cp = ap['cfgs'][cfg]
+
+    # V1: exit != 0 (2 usage, 3 receipt gate, 4 pose mismatch), a crash, or a hang.
+    if timed_out:
+        flag('V1', 'hang: terminated by the driver')
+    if rc != 0:
+        flag('V1', f'exit code {rc}')
+
+    # V2: exactly one parsable SUMMARY line.
+    lines = [l for l in log_text.splitlines() if l.startswith('SUMMARY ')]
+    s = None
+    if len(lines) != 1:
+        flag('V2', f'{len(lines)} SUMMARY lines, want exactly 1')
+    else:
+        try:
+            s = json.loads(lines[0][len('SUMMARY '):])
+        except ValueError as e:
+            flag('V2', f'the SUMMARY line is not JSON: {e}')
+        if s is not None and not isinstance(s, dict):
+            flag('V2', 'the SUMMARY line is JSON but not an object')
+            s = None
+
+    # V8: the CSV is exactly the header + `steps` rows, steps 0..steps-1, wall_ns > 0 (only the sign of a timing value is read).
+    csv_lines = csv_text.splitlines()
+    head = csv_lines[0] if csv_lines else ''
+    cells = [l.split(',') for l in csv_lines[1:]]
+    if head != RAPIER_CSV_HEADER:
+        flag('V8', f'CSV header {head!r}, want {RAPIER_CSV_HEADER!r}')
+    if len(cells) != steps:
+        flag('V8', f'{len(cells)} CSV rows, want {steps}')
+    try:
+        if [int(c[0]) for c in cells] != list(range(len(cells))):
+            flag('V8', 'CSV steps are not 0..N-1')
+        if any(int(c[1]) <= 0 for c in cells):
+            flag('V8', 'a CSV row has wall_ns <= 0')
+    except (ValueError, IndexError):
+        flag('V8', 'CSV rows are not parsable')
+
+    # V3 (CSV clause; independent of the SUMMARY): pool_threads is W on every row.
+    try:
+        if len(cells) != steps or any(int(c[2]) != workers for c in cells):
+            flag('V3', f'CSV pool_threads is not {workers} on all {steps} rows')
+    except (ValueError, IndexError):
+        flag('V3', 'CSV pool_threads column missing or unparsable')
+
+    # V7 (bytes; independent of the SUMMARY): the final pose is the arm's fixture.
+    if not test:
+        if not pose_raw or not fixture_raw:
+            flag('V7', 'final pose or fixture missing or empty')
+        elif pose_raw != fixture_raw:
+            flag('V7', 'final pose bytes != fixture')
+
+    if s is None:
+        return bad
+
+    # V3 (SUMMARY clauses): the pool-size receipt is W.
+    th = s.get('threads') if isinstance(s.get('threads'), dict) else {}
+    if not (_is_int(th.get('pool_threads_min'), workers) and _is_int(th.get('pool_threads_max'), workers)):
+        flag('V3', f'pool_threads_min/max {th.get("pool_threads_min")}/{th.get("pool_threads_max")}, want {workers}/{workers}')
+    if th.get('install_receipt') != [workers, workers]:
+        flag('V3', f'install_receipt {th.get("install_receipt")}, want {[workers, workers]}')
+    if th.get('loop_on_pool_worker') is not True:
+        flag('V3', f'loop_on_pool_worker {th.get("loop_on_pool_worker")}, want true')
+    if not (_is_int(th.get('pool_threads_requested'), workers) and _is_int(s.get('workers'), workers)):
+        flag('V3', f'requested workers {th.get("pool_threads_requested")} / workers {s.get("workers")}, want {workers}')
+
+    # V4: the build receipt is the arm's.
+    if s.get('engine') != 'rapier3d' or s.get('rapier_version') != pins['rapier_version']:
+        flag('V4', f'engine/version {s.get("engine")} {s.get("rapier_version")}, want rapier3d {pins["rapier_version"]}')
+    if s.get('features') != ap['features']:
+        flag('V4', f'features {s.get("features")}, want {ap["features"]}')
+    if s.get('arm') != arm or not _is_int(s.get('simd_lanes'), ap['lanes']):
+        flag('V4', f'arm/lanes {s.get("arm")}/{s.get("simd_lanes")}, want {arm}/{ap["lanes"]}')
+    tf = s.get('target_features') if isinstance(s.get('target_features'), dict) else {}
+    if any(tf.get(k) is not True for k in RAPIER_TARGET_FEATURES):
+        flag('V4', f'target_features {s.get("target_features")}, want avx2 fma bmi2 all true')
+    if s.get('debug_assertions') is not False:
+        flag('V4', f'debug_assertions {s.get("debug_assertions")}, want false')
+    if s.get('target_env') != 'msvc':
+        flag('V4', f'target_env {s.get("target_env")}, want msvc')
+    if exe_sha256 != pins['exe_sha256'][arm]:
+        flag('V4', f'exe sha256 {exe_sha256} != the arm\'s pin {pins["exe_sha256"][arm]}')
+    if s.get('source_fnv1a64') != pins['source_fnv1a64']:
+        flag('V4', 'source_fnv1a64 differs from the pinned sources')
+
+    # V5: the config object is the (arm, cfg) timed pin, counters_enabled false included.
+    if s.get('cfg') != cfg or s.get('install') != 'loop':
+        flag('V5', f'cfg/install {s.get("cfg")}/{s.get("install")}, want {cfg}/loop')
+    conf = s.get('config') if isinstance(s.get('config'), dict) else {}
+    if conf != cp['config_timed']:
+        diff = sorted(k for k in set(conf) | set(cp['config_timed']) if conf.get(k) != cp['config_timed'].get(k))
+        flag('V5', f'config differs from the timed pin in {diff}')
+
+    # V6: scene identity all true, the spawn hash, no perturbation, the run does not report itself void.
+    si = s.get('scene_identity') if isinstance(s.get('scene_identity'), dict) else {}
+    ident = (_is_int(si.get('dynamic_bodies'), RAPIER_BODIES) and _is_int(si.get('fixed_bodies'), 1)
+             and _is_int(si.get('colliders'), RAPIER_BODIES + 1)
+             and si.get('first_equals_ours') is True and si.get('last_equals_ours') is True
+             and si.get('aabb_equals_expected') is True and si.get('uniform_boxes') is True
+             and _is_int(si.get('inv_mass_ulps_vs_ours'), 0) and si.get('inv_inertia_ulps_vs_ours') == [0, 0, 0])
+    if not ident:
+        flag('V6', 'scene identity is not all-true (1240 + 1 bodies, 1241 colliders, first/last/AABB, uniform boxes, 0-ulp mass and inertia)')
+    if si.get('spawn_hash') != pins['spawn_hash']:
+        flag('V6', f'spawn hash {si.get("spawn_hash")}, want {pins["spawn_hash"]}')
+    if s.get('perturb') is not None:
+        flag('V6', f'perturb {s.get("perturb")}, want null')
+    if s.get('void') is not False:
+        flag('V6', f'the run reports itself void: {s.get("voids")}')
+
+    # V7 (the harness's own verdict and the hash): the exe's --expect-pose said match, and the pose hash is the pin's.
+    if not test and (s.get('expect_pose') != 'match' or s.get('pose_hash') != cp['pose_hash']):
+        flag('V7', f'expect_pose {s.get("expect_pose")!r}, pose_hash {s.get("pose_hash")}, want match / {cp["pose_hash"]}')
+
+    # V9: no --receipt (the counting walk between steps changes the cache state the next step starts from), and the prep twin passed.
+    sargs = s.get('args') if isinstance(s.get('args'), list) else []
+    rg = s.get('receipt_gates') if isinstance(s.get('receipt_gates'), dict) else {}
+    if '--receipt' in sargs or '--receipt' in (launch_args or []) or rg.get('awake_min') is not None:
+        flag('V9', 'a timed row ran with --receipt')
+    if cp['twin_ok'].get(str(workers)) is not True:
+        flag('V9', f'the prep twin of ({arm}, {cfg}, W{workers}) did not pass')
+    return bad
+
+
+def rapier_process_files(rec, row):
+    """(log_text, csv_text, pose_raw, fixture_raw) of a rapier process record: stdout.txt + stderr.txt (the SUMMARY may be on either;
+    the harness's own gates merge them), run.csv, pose.bin under the record's cwd, and the row's fixture for the record's binary.
+    A missing file reads as empty, which the rules turn red (nothing passes because a file is absent)."""
+    cwd = rec.get('cwd') or ''
+
+    def rd(path, text):
+        try:
+            with open(path, 'rb') as f:
+                raw = f.read()
+        except OSError:
+            raw = b''
+        return raw.decode('utf-8', errors='replace') if text else raw
+    log_text = rd(os.path.join(cwd, 'stdout.txt'), True) + '\n' + rd(os.path.join(cwd, 'stderr.txt'), True)
+    ref = pose_ref_of(row, rec.get('binary'))
+    fixture = rd(os.path.join(FIX, f'{ref}.pose'), False) if ref else b''
+    return log_text, rd(os.path.join(cwd, 'run.csv'), True), rd(os.path.join(cwd, 'pose.bin'), False), fixture
+
+
+def validate_rapier(rec, row, w):
+    """A rapier process's invalid reasons: window 9a's void rules V1-V9 (rapier_check), each reason prefixed with its rule. The
+    inputs are the process's own files (rapier_process_files), the exe's sha256 computed NOW from the file that ran, the row's arm /
+    config and the frozen pins (gate/rapier/pins.json, sha256-pinned by the overlay)."""
+    key = rec.get('binary')
+    arm = (BINS.get(key) or {}).get('arm')
+    cfg = rapier_cfg(row)
+    try:
+        RAPIER_PINS['arms'][arm]['cfgs'][cfg]
+    except (KeyError, TypeError):
+        return [f'V4: no pins for binary {key!r} arm {arm!r} cfg {cfg!r}']
+    log_text, csv_text, pose_raw, fixture_raw = rapier_process_files(rec, row)
+    path = BINS[key]['path']
+    exe_sha = D.sha256(path) if os.path.exists(path) else 'MISSING'
+    bad = rapier_check(RAPIER_PINS, arm, cfg, w, log_text, csv_text, pose_raw, fixture_raw, exe_sha, rec.get('exit'),
+                       bool(rec.get('hang')), rec.get('args'), steps_of(row), TEST)
+    return [f'{rule}: {why}' for rule in sorted(bad) for why in bad[rule]]
+
+

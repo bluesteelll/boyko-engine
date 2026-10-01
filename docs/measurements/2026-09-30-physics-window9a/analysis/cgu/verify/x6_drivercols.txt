@@ -1,0 +1,1 @@
+window means compared: 238 mismatches: 0

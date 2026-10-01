@@ -1,0 +1,22 @@
+C4-AB closed passes [(0, 0), (1, 0), (2, 0)]
+C4-JD#tip records 53 {'original': 45, 'rerun': 8} pass_attempts {(0, 0): 21, (1, 0): 15, (2, 0): 17}
+AB slots 45 used 38 dropped 7
+
+== window [100,500) : CGU/AB (post hoc) ==
+W1  AB n [1, 3, 3] med 4.3504 | CGU tip med 4.3096 -> CGU/AB -0.94 % pooled nnn p0:K1 p1:nnn p2:nnn | cgu1/ABtip -1.26 %
+W2  AB n [2, 3, 3] med 2.9392 | CGU tip med 2.9569 -> CGU/AB +0.60 % pooled nnn p0:nnn p1:nnn p2:nnn | cgu1/ABtip +1.13 %
+W4  AB n [1, 3, 3] med 2.1605 | CGU tip med 2.2015 -> CGU/AB +1.90 % pooled nnn p0:K1 p1:nnn p2:nnn | cgu1/ABtip +1.80 %
+W8  AB n [1, 3, 3] med 1.7878 | CGU tip med 1.8884 -> CGU/AB +5.62 % pooled nYn p0:K1 p1:nnn p2:nnn | cgu1/ABtip +4.60 %
+W16 AB n [3, 3, 3] med 2.0486 | CGU tip med 2.1576 -> CGU/AB +5.32 % pooled nYn p0:nnn p1:nnn p2:YYY | cgu1/ABtip +5.95 %
+
+== window [0,500) : CGU/AB (post hoc) ==
+W1  AB n [1, 3, 3] med 4.5692 | CGU tip med 4.5499 -> CGU/AB -0.42 % pooled nnn p0:K1 p1:nnn p2:nnn | cgu1/ABtip -1.23 %
+W2  AB n [2, 3, 3] med 3.0706 | CGU tip med 3.0922 -> CGU/AB +0.70 % pooled nnn p0:nnn p1:nnn p2:nnn | cgu1/ABtip +0.81 %
+W4  AB n [1, 3, 3] med 2.2356 | CGU tip med 2.2706 -> CGU/AB +1.56 % pooled nnn p0:K1 p1:nnn p2:nnn | cgu1/ABtip +1.82 %
+W8  AB n [1, 3, 3] med 1.8277 | CGU tip med 1.9269 -> CGU/AB +5.43 % pooled nYn p0:K1 p1:nYn p2:nnn | cgu1/ABtip +5.77 %
+W16 AB n [3, 3, 3] med 2.0887 | CGU tip med 2.1885 -> CGU/AB +4.78 % pooled nYn p0:nnn p1:nYn p2:YYn | cgu1/ABtip +5.88 %
+
+== W8 / W16: per-step quantiles over [100,500) pooled over used tip processes; CPU/wall ==
+W8 CGU vs AB step quantiles: p10 +0.2 % p50 +2.2 % p90 +4.9 % | proc CPU/wall median AB 4.59 CGU 3.64
+W16 CGU vs AB step quantiles: p10 +0.9 % p50 +4.4 % p90 +4.7 % | proc CPU/wall median AB 7.30 CGU 7.65
+AB used witness median 0.605 CGU tip used witness median 0.43

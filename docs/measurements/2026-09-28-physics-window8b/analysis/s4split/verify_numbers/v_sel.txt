@@ -1,0 +1,25 @@
+bin parent runner_parent_16191fda_s4off.exe 9c6690ac116cba029f8ec810e9d947bf2b1a366031f02a38bcb94d87671fc8a4 SHA256SUMS match
+bin tip runner_tip_16191fda.exe aa34fadff73923bcc69daa3e517bbbf1de693f01659ab86900460f84e0a371a1 SHA256SUMS match
+records (S4-AB, SPLIT, no pass markers): 215 Counter({('S4-AB', 'original'): 153, ('SPLIT', 'original'): 54, ('S4-AB', 'warmup'): 3, ('SPLIT', 'warmup'): 3, ('S4-AB', 'rerun'): 2})
+slots 207 used 207 dropped 0 []
+S4-AB slots 153 processes 155 used 153
+SPLIT slots 54 processes 54 used 54
+rejected candidates (valid-why, clean-why):
+   (('S4-AB', 0, 1, 'S4-JT', 'parent', 8), 'original', [], ['witness 2.16'])
+   (('S4-AB', 1, 1, 'S4-JT-a', 'parent', 16), 'original', [], ['witness 3.08'])
+invalid candidates (own check): 0
+rerun slot ('S4-AB', 0, 1, 'S4-JT', 'parent', 8) orig witness 2.16 top [{'name': 'claude.exe', 'pid': 30828, 'cpu_s': 0.031}, {'name': 'browser.exe', 'pid': 19888, 'cpu_s': 0.031}, {'name': 'Discord.exe', 'pid': 11324, 'cpu_s': 0.031}, {'name': 'steamwebhelper.exe', 'pid': 21608, 'cpu_s': 0.016}, {'name': 'nvsphelper64.exe', 'pid': 14208, 'cpu_s': 0.016}] mean_ms 1.9873741999999999 | rerun witness 0.88 mean_ms 1.982892
+rerun slot ('S4-AB', 1, 1, 'S4-JT-a', 'parent', 16) orig witness 3.08 top [{'name': 'Discord.exe', 'pid': 11324, 'cpu_s': 0.609}, {'name': 'claude.exe', 'pid': 29552, 'cpu_s': 0.031}] mean_ms 2.4410094 | rerun witness 0.23 mean_ms 2.448367
+used receipts max: before 4.08 after 4.08 witness 1.22
+poses: Counter({('0x30c5438bc6ad9ffa', 'match'): 207})
+  setup counters ('S4-AB', 'S4-JT-a', 'parent', 16, 0, 0) n 9
+  setup counters ('S4-AB', 'S4-JT-a', 'parent', 8, 0, 0) n 9
+  setup counters ('S4-AB', 'S4-JT-a', 'tip', 16, 500, 15980) n 9
+  setup counters ('S4-AB', 'S4-JT-a', 'tip', 8, 500, 15980) n 9
+  setup counters ('S4-AB', 'S4-zone-N30000', 'tip', 8, 500, 15980) n 9
+  setup counters ('S4-AB', 'S4-zone-N60000', 'tip', 8, 500, 15980) n 9
+  setup counters ('SPLIT', 'SPLIT-J-T-a', 'parent', 1, 0, 0) n 9
+  setup counters ('SPLIT', 'SPLIT-J-T-a', 'parent', 16, 0, 0) n 9
+  setup counters ('SPLIT', 'SPLIT-J-T-a', 'parent', 8, 0, 0) n 9
+cells x pass with n != 3: {}
+cells: 23

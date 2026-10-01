@@ -1,0 +1,6 @@
+[0,100) p1 S7-ladder8-F2#s7p@W8: [2.099, 2.1293, 2.2605] range 7.58 %
+[0,100) p1 S7-JT#s7p@W8: [1.9797, 1.9829, 2.0072] range 1.39 %
+armed pre-flight JT W8: P 2.8453 T 3.3439 T/P 1.1752 (n = 1 each)
+armed pre-flight JT W16: P 2.8936 T 3.2159 T/P 1.1114 (n = 1 each)
+armed pre-flight JA W8: P 7.4802 T 8.5009 T/P 1.1365 (n = 1 each)
+armed pre-flight JA W16: P 7.3065 T 7.8164 T/P 1.0698 (n = 1 each)

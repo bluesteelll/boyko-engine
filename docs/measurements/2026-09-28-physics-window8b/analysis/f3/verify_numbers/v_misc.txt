@@ -1,0 +1,13 @@
+used W1 processes: 77
+main_share_top_est values: [1.0]
+top-CPU busy % at W1: min 64.7 max 95.3
+lowest share process: F3-TA-armed-leaflist 1 1 original [10, 64.7]
+  F3-TA-armed-leaflist t_q_us: median 209.61 max 244.28 (+16.54 %) at p1 r1 top [10, 64.7]
+  F3-TA-armed-leaflist t_b_us: median 25.67 max 27.25 (+6.17 %) at p1 r1 top [10, 64.7]
+  F3-TA-armed-leaflist t_qb_us: median 235.47 max 272.39 (+15.68 %) at p1 r1 top [10, 64.7]
+  F3-TA-armed-leaflist four_us: median 272.52 max 317.00 (+16.32 %) at p1 r1 top [10, 64.7]
+  F3-TA-armed-leaflist wall: median 14.9823 max 15.0550 (+0.48 %) p1 r1
+  post hoc, process MEAN statistic, W1 t_q: leaflist 212.57 kd 176.50 ratio 0.8303 YYY
+  post hoc, process MEAN statistic, W1 t_qb: leaflist 236.86 kd 230.82 ratio 0.9745 nnY
+  post hoc, process MEAN statistic, W8 t_q: leaflist 213.47 kd 178.94 ratio 0.8382 YYY
+  post hoc, process MEAN statistic, W8 t_qb: leaflist 236.73 kd 235.71 ratio 0.9957 nnn
