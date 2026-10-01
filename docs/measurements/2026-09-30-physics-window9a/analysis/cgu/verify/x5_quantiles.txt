@@ -1,0 +1,8 @@
+W8 pooled steps: p10 +0.2 % p50 +2.2 % p90 +4.9 %
+W8 median of per-process quantile: p10 +1.9 % p50 +4.5 % p90 +10.1 %
+W8 mean of per-process quantile: p10 +0.7 % p50 +2.0 % p90 +2.6 %
+W8 pooled steps, passes 1-2 only: p10 +0.1 % p50 +2.0 % p90 +5.5 %
+W16 pooled steps: p10 +0.9 % p50 +4.4 % p90 +4.7 %
+W16 median of per-process quantile: p10 +1.1 % p50 +5.5 % p90 +8.1 %
+W16 mean of per-process quantile: p10 +1.5 % p50 +3.1 % p90 +6.2 %
+W16 pooled steps, passes 1-2 only: p10 +1.2 % p50 +5.7 % p90 +7.1 %

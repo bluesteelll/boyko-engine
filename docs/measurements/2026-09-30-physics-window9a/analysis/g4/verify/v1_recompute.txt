@@ -1,0 +1,133 @@
+g4rT pin 19c9eb1f67cc728505525b5d669adfd2db133a1ae461217fcab7f386bc7c0bcf; SHA256SUMS 19c9eb1f67cc728505525b5d669adfd2db133a1ae461217fcab7f386bc7c0bcf; file on disk 19c9eb1f67cc728505525b5d669adfd2db133a1ae461217fcab7f386bc7c0bcf; equal True
+records with block C4-G4*: 20; run tags ['033740']
+pass_done for G4*: [('033740', 'C4-G4', 0, 0), ('033740', 'C4-G4', 1, 0), ('033740', 'C4-G4', 2, 0), ('033740', 'C4-G4-kd', 0, 0)]
+voided_pass records for G4*: 0
+process records: 12; attempts ['original']; timed [True]
+  passcell C4-G4 p0: k_clean 3/3 reruns 0 gates True
+  passcell C4-G4 p1: k_clean 3/3 reruns 0 gates True
+  passcell C4-G4 p2: k_clean 3/3 reruns 0 gates True
+  passcell C4-G4-kd p0: k_clean 3/3 reruns 0 gates True
+
+## Per-process validity / cleanliness
+- C4-G4 p0 r0 seq1 original: closed True valid True [] clean True [] | driver valid True contaminated False | ids 36 printed-vs-recomp 4.38e-05 drv-vs-recomp 4.38e-05 | receipts 2.12/1.73 witness 1.02 | kernel keys 60 base!=new 0 oracle-ok 21 | 04:28:37-04:35:56
+- C4-G4 p0 r1 seq2 original: closed True valid True [] clean True [] | driver valid True contaminated False | ids 36 printed-vs-recomp 4.33e-05 drv-vs-recomp 4.33e-05 | receipts 1.73/2.34 witness 0.98 | kernel keys 60 base!=new 0 oracle-ok 21 | 04:36:01-04:43:06
+- C4-G4 p0 r2 seq3 original: closed True valid True [] clean True [] | driver valid True contaminated False | ids 36 printed-vs-recomp 4.19e-05 drv-vs-recomp 4.19e-05 | receipts 2.34/0.84 witness 1.05 | kernel keys 60 base!=new 0 oracle-ok 21 | 04:43:11-04:50:17
+- C4-G4 p1 r0 seq1 original: closed True valid True [] clean True [] | driver valid True contaminated False | ids 36 printed-vs-recomp 3.97e-05 drv-vs-recomp 3.97e-05 | receipts 2.95/1.77 witness 1.04 | kernel keys 60 base!=new 0 oracle-ok 21 | 04:52:42-04:59:49
+- C4-G4 p1 r1 seq2 original: closed True valid True [] clean True [] | driver valid True contaminated False | ids 36 printed-vs-recomp 4.66e-05 drv-vs-recomp 4.66e-05 | receipts 1.77/0.76 witness 1.06 | kernel keys 60 base!=new 0 oracle-ok 21 | 04:59:54-05:07:08
+- C4-G4 p1 r2 seq3 original: closed True valid True [] clean True [] | driver valid True contaminated False | ids 36 printed-vs-recomp 4.59e-05 drv-vs-recomp 4.59e-05 | receipts 0.76/0.61 witness 1.06 | kernel keys 60 base!=new 0 oracle-ok 21 | 05:07:13-05:14:31
+- C4-G4 p2 r0 seq1 original: closed True valid True [] clean True [] | driver valid True contaminated False | ids 36 printed-vs-recomp 3.77e-05 drv-vs-recomp 3.77e-05 | receipts 2.37/2.04 witness 1.05 | kernel keys 60 base!=new 0 oracle-ok 21 | 05:16:56-05:24:03
+- C4-G4 p2 r1 seq2 original: closed True valid True [] clean True [] | driver valid True contaminated False | ids 36 printed-vs-recomp 4.20e-05 drv-vs-recomp 4.20e-05 | receipts 2.04/3.99 witness 1.04 | kernel keys 60 base!=new 0 oracle-ok 21 | 05:24:08-05:31:15
+- C4-G4 p2 r2 seq3 original: closed True valid True [] clean True [] | driver valid True contaminated False | ids 36 printed-vs-recomp 4.59e-05 drv-vs-recomp 4.59e-05 | receipts 3.99/1.42 witness 1.03 | kernel keys 60 base!=new 0 oracle-ok 21 | 05:31:20-05:38:37
+- C4-G4-kd p0 r0 seq1 original: closed True valid True [] clean True [] | driver valid True contaminated False | ids 6 printed-vs-recomp 4.18e-05 drv-vs-recomp 4.18e-05 | receipts 2.47/2.71 witness 1.23 | kernel keys 60 base!=new 0 oracle-ok 21 | 05:41:02-05:43:37
+- C4-G4-kd p0 r1 seq2 original: closed True valid True [] clean True [] | driver valid True contaminated False | ids 6 printed-vs-recomp 4.42e-05 drv-vs-recomp 4.42e-05 | receipts 2.71/2.32 witness 1.23 | kernel keys 60 base!=new 0 oracle-ok 21 | 05:43:42-05:46:14
+- C4-G4-kd p0 r2 seq3 original: closed True valid True [] clean True [] | driver valid True contaminated False | ids 6 printed-vs-recomp 4.37e-05 drv-vs-recomp 4.37e-05 | receipts 2.32/0.62 witness 1.29 | kernel keys 60 base!=new 0 oracle-ok 21 | 05:46:19-05:48:51
+
+slot rule: C4-G4 slots 9 used 9; C4-G4-kd slots 3 used 3
+  C4-G4 K per pass {0: 3, 1: 3, 2: 3}
+  C4-G4-kd K per pass {0: 3}
+
+## all_pairs/tree under ruling 1, per-process statistic = v (A = tree, B = all_pairs)
+- uniform 96: all_pairs 5.966 [5.940-6.111] i 0.70 s 0.45 n=9 | tree 9.103 [9.003-9.266] i 1.28 s 0.37 n=9 | ratio 0.6553 (-3.138 us) bars 2.91/1.15/8.14 | pooled YYY p0:YYY(0.6519,n3/3) p1:YYY(0.6543,n3/3) p2:YYY(0.6575,n3/3) | R1 STRONG CLAIMED ap faster | swapped True/True | w7 True | sep True
+- uniform 104: all_pairs 7.008 [6.995-7.046] i 0.28 s 0.10 n=9 | tree 9.400 [9.373-9.471] i 0.48 s 0.16 n=9 | ratio 0.7455 (-2.392 us) bars 1.12/0.37/2.52 | pooled YYY p0:YYY(0.7470,n3/3) p1:YYY(0.7455,n3/3) p2:YYY(0.7422,n3/3) | R1 STRONG CLAIMED ap faster | swapped True/True | w7 True | sep True
+- uniform 112: all_pairs 8.046 [8.039-8.082] i 0.33 s 0.08 n=9 | tree 10.018 [9.941-10.201] i 1.24 s 0.38 n=9 | ratio 0.8031 (-1.973 us) bars 2.57/0.77/5.30 | pooled YYY p0:YYY(0.8053,n3/3) p1:YYY(0.8041,n3/3) p2:YYY(0.8019,n3/3) | R1 STRONG CLAIMED ap faster | swapped True/True | w7 True | sep True
+- uniform 120: all_pairs 9.205 [9.171-9.231] i 0.37 s 0.11 n=9 | tree 10.461 [10.427-10.520] i 0.42 s 0.14 n=9 | ratio 0.8800 (-1.256 us) bars 1.13/0.35/2.22 | pooled YYY p0:YYY(0.8827,n3/3) p1:YYY(0.8771,n3/3) p2:YYY(0.8800,n3/3) | R1 STRONG CLAIMED ap faster | swapped True/True | w7 True | sep True
+- uniform 128: all_pairs 11.274 [11.260-11.534] i 0.41 s 0.43 n=9 | tree 11.199 [11.121-11.363] i 0.58 s 0.32 n=9 | ratio 1.0067 (+0.075 us) bars 1.42/1.07/6.50 | pooled nnn p0:nnn(1.0027,n3/3) p1:nnn(1.0067,n3/3) p2:nnn(1.0095,n3/3) | R1 NOT CLAIMED ap slower | swapped False/False | w7 False | sep False
+- uniform 136: all_pairs 12.590 [12.579-12.638] i 0.27 s 0.07 n=9 | tree 11.991 [11.881-12.097] i 0.92 s 0.28 n=9 | ratio 1.0500 (+0.599 us) bars 1.91/0.58/3.73 | pooled YYY p0:YYY(1.0495,n3/3) p1:YYY(1.0543,n3/3) p2:YYY(1.0566,n3/3) | R1 STRONG CLAIMED ap slower | swapped True/True | w7 True | sep True
+- uniform 144: all_pairs 14.041 [14.034-14.098] i 0.07 s 0.06 n=9 | tree 12.577 [12.414-12.786] i 0.79 s 0.41 n=9 | ratio 1.1164 (+1.464 us) bars 1.58/0.82/5.98 | pooled YYY p0:YYY(1.1123,n3/3) p1:YYY(1.1288,n3/3) p2:YYY(1.1170,n3/3) | R1 STRONG CLAIMED ap slower | swapped True/True | w7 True | sep True
+- uniform 152: all_pairs 15.457 [15.437-15.459] i 0.11 s 0.03 n=9 | tree 13.129 [13.002-13.446] i 0.89 s 0.42 n=9 | ratio 1.1773 (+2.328 us) bars 1.79/0.84/6.76 | pooled YYY p0:YYY(1.1760,n3/3) p1:YYY(1.1773,n3/3) p2:YYY(1.1792,n3/3) | R1 STRONG CLAIMED ap slower | swapped True/True | w7 True | sep True
+- uniform 160: all_pairs 17.124 [17.103-17.367] i 0.11 s 0.26 n=9 | tree 13.681 [13.528-13.841] i 0.53 s 0.31 n=9 | ratio 1.2517 (+3.444 us) bars 1.08/0.81/5.52 | pooled YYY p0:YYY(1.2527,n3/3) p1:YYY(1.2670,n3/3) p2:YYY(1.2513,n3/3) | R1 STRONG CLAIMED ap slower | swapped True/True | w7 True | sep True
+- disparity 96: all_pairs 7.126 [7.080-7.144] i 0.61 s 0.15 n=9 | tree 10.870 [10.834-11.218] i 0.23 s 0.45 n=9 | ratio 0.6555 (-3.744 us) bars 1.30/0.95/7.30 | pooled YYY p0:YYY(0.6545,n3/3) p1:YYY(0.6570,n3/3) p2:YYY(0.6527,n3/3) | R1 STRONG CLAIMED ap faster | swapped True/True | w7 True | sep True
+- disparity 104: all_pairs 8.110 [8.084-8.321] i 0.61 s 0.38 n=9 | tree 11.695 [11.590-11.866] i 1.64 s 0.38 n=9 | ratio 0.6935 (-3.585 us) bars 3.50/1.07/7.52 | pooled YYY p0:YYY(0.6852,n3/3) p1:YYY(0.6993,n3/3) p2:YYY(0.6963,n3/3) | R1 STRONG CLAIMED ap faster | swapped True/True | w7 True | sep True
+- disparity 112: all_pairs 9.294 [9.288-9.577] i 0.09 s 0.42 n=9 | tree 12.557 [12.347-12.731] i 1.32 s 0.39 n=9 | ratio 0.7402 (-3.263 us) bars 2.64/1.15/8.73 | pooled YYY p0:YYY(0.7403,n3/3) p1:YYY(0.7462,n3/3) p2:YYY(0.7353,n3/3) | R1 STRONG CLAIMED ap faster | swapped True/True | w7 True | sep True
+- disparity 120: all_pairs 10.579 [10.571-10.661] i 0.49 s 0.13 n=9 | tree 12.996 [12.898-13.219] i 1.15 s 0.36 n=9 | ratio 0.8140 (-2.418 us) bars 2.50/0.77/5.23 | pooled YYY p0:YYY(0.8064,n3/3) p1:YYY(0.8199,n3/3) p2:YYY(0.8140,n3/3) | R1 STRONG CLAIMED ap faster | swapped True/True | w7 True | sep True
+- disparity 128: all_pairs 13.466 [13.447-13.530] i 0.27 s 0.10 n=9 | tree 13.800 [13.684-14.267] i 1.48 s 0.57 n=9 | ratio 0.9758 (-0.335 us) bars 3.00/1.15/8.54 | pooled nYn p0:YYY(0.9705,n3/3) p1:nnn(0.9838,n3/3) p2:YYY(0.9793,n3/3) | R1 NOT CLAIMED ap faster | swapped False/False | w7 False | sep True
+- disparity 136: all_pairs 14.974 [14.949-15.028] i 0.11 s 0.06 n=9 | tree 14.211 [14.063-14.354] i 0.54 s 0.24 n=9 | ratio 1.0537 (+0.763 us) bars 1.09/0.49/4.23 | pooled YYY p0:YYY(1.0527,n3/3) p1:YYY(1.0574,n3/3) p2:YYY(1.0546,n3/3) | R1 STRONG CLAIMED ap slower | swapped True/True | w7 True | sep True
+- disparity 144: all_pairs 16.501 [16.489-16.607] i 0.04 s 0.11 n=9 | tree 15.288 [15.206-15.534] i 1.10 s 0.31 n=9 | ratio 1.0793 (+1.213 us) bars 2.21/0.65/4.53 | pooled YYY p0:YYY(1.0724,n3/3) p1:YYY(1.0839,n3/3) p2:YYY(1.0841,n3/3) | R1 STRONG CLAIMED ap slower | swapped True/True | w7 True | sep True
+- disparity 152: all_pairs 18.244 [18.200-18.288] i 0.32 s 0.08 n=9 | tree 16.196 [16.020-16.336] i 0.56 s 0.26 n=9 | ratio 1.1265 (+2.049 us) bars 1.30/0.55/4.03 | pooled YYY p0:YYY(1.1308,n3/3) p1:YYY(1.1258,n3/3) p2:YYY(1.1291,n3/3) | R1 STRONG CLAIMED ap slower | swapped True/True | w7 True | sep True
+- disparity 160: all_pairs 20.045 [20.025-20.387] i 0.23 s 0.24 n=9 | tree 16.843 [16.739-16.972] i 0.46 s 0.18 n=9 | ratio 1.1901 (+3.202 us) bars 1.03/0.61/4.55 | pooled YYY p0:YYY(1.1900,n3/3) p1:YYY(1.1891,n3/3) p2:YYY(1.1937,n3/3) | R1 STRONG CLAIMED ap slower | swapped True/True | w7 True | sep True
+
+## all_pairs/tree under ruling 1, per-process statistic = med (A = tree, B = all_pairs)
+- uniform 96: ratio 0.6578 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- uniform 104: ratio 0.7456 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- uniform 112: ratio 0.8047 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- uniform 120: ratio 0.8807 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- uniform 128: ratio 1.0048 pooled nnn p0:nnn p1:nnn p2:nnn R1 NOT CLAIMED
+- uniform 136: ratio 1.0520 pooled YYn p0:YYY p1:YYY p2:YYY R1 CLAIMED
+- uniform 144: ratio 1.1120 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- uniform 152: ratio 1.1783 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- uniform 160: ratio 1.2512 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- disparity 96: ratio 0.6584 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- disparity 104: ratio 0.6948 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- disparity 112: ratio 0.7422 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- disparity 120: ratio 0.8141 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- disparity 128: ratio 0.9746 pooled nYn p0:YYY p1:nnn p2:YYn R1 NOT CLAIMED
+- disparity 136: ratio 1.0570 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- disparity 144: ratio 1.0822 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- disparity 152: ratio 1.1274 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- disparity 160: ratio 1.1932 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+
+## all_pairs/tree under ruling 1, per-process statistic = printed (A = tree, B = all_pairs)
+- uniform 96: ratio 0.6553 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- uniform 104: ratio 0.7455 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- uniform 112: ratio 0.8031 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- uniform 120: ratio 0.8800 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- uniform 128: ratio 1.0067 pooled nnn p0:nnn p1:nnn p2:nnn R1 NOT CLAIMED
+- uniform 136: ratio 1.0500 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- uniform 144: ratio 1.1164 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- uniform 152: ratio 1.1773 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- uniform 160: ratio 1.2517 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- disparity 96: ratio 0.6555 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- disparity 104: ratio 0.6935 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- disparity 112: ratio 0.7401 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- disparity 120: ratio 0.8140 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- disparity 128: ratio 0.9758 pooled nYn p0:YYY p1:nnn p2:YYY R1 NOT CLAIMED
+- disparity 136: ratio 1.0537 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- disparity 144: ratio 1.0793 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- disparity 152: ratio 1.1265 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+- disparity 160: ratio 1.1901 pooled YYY p0:YYY p1:YYY p2:YYY R1 STRONG CLAIMED
+
+## The recipe
+- stat v, rule r1: uniform LO 128 HI 136 monotone True; disparity LO 128 HI 136 monotone True => T 128, AUTO (128, 136); edges none
+- stat v, rule swapped: uniform LO 128 HI 136 monotone True; disparity LO 128 HI 136 monotone True => T 128, AUTO (128, 136); edges none
+- stat v, rule w7: uniform LO 128 HI 136 monotone True; disparity LO 128 HI 136 monotone True => T 128, AUTO (128, 136); edges none
+- stat med, rule r1: uniform LO 128 HI 136 monotone True; disparity LO 128 HI 136 monotone True => T 128, AUTO (128, 136); edges none
+- stat med, rule swapped: uniform LO 128 HI 136 monotone True; disparity LO 128 HI 136 monotone True => T 128, AUTO (128, 136); edges none
+- stat med, rule w7: uniform LO 136 HI 144 monotone True; disparity LO 128 HI 136 monotone True => T 128, AUTO (128, 144); edges none
+- stat printed, rule r1: uniform LO 128 HI 136 monotone True; disparity LO 128 HI 136 monotone True => T 128, AUTO (128, 136); edges none
+- stat printed, rule swapped: uniform LO 128 HI 136 monotone True; disparity LO 128 HI 136 monotone True => T 128, AUTO (128, 136); edges none
+- stat printed, rule w7: uniform LO 128 HI 136 monotone True; disparity LO 128 HI 136 monotone True => T 128, AUTO (128, 136); edges none
+
+## log-log crossover (8b g4.py method, label n)
+- uniform: 127.59058545694212
+- disparity: 130.50192391840272
+
+## Paired per-process all_pairs/tree (post hoc)
+- uniform 120: 0.8788 0.8760 0.8836 0.8776 0.8726 0.8816 0.8800 0.8754 0.8840  (min 0.8726 max 0.8840, below one: 9/9)
+- uniform 128: 1.0125 0.9911 1.0074 1.0047 1.0067 1.0337 1.0326 0.9916 1.0099  (min 0.9911 max 1.0337, below one: 2/9)
+- uniform 136: 1.0464 1.0528 1.0498 1.0529 1.0421 1.0637 1.0408 1.0581 1.0594  (min 1.0408 max 1.0637, below one: 0/9)
+- disparity 120: 0.8085 0.7997 0.8111 0.8199 0.8201 0.8215 0.8162 0.8067 0.8136  (min 0.7997 max 0.8215, below one: 9/9)
+- disparity 128: 0.9705 0.9688 0.9692 0.9838 0.9432 0.9856 0.9744 0.9849 0.9821  (min 0.9432 max 0.9856, below one: 9/9)
+- disparity 136: 1.0572 1.0539 1.0510 1.0536 1.0566 1.0639 1.0591 1.0546 1.0470  (min 1.0470 max 1.0639, below one: 0/9)
+
+## tree_kd (C4-G4-kd, own K 3, not gating; cross-block)
+- uniform 96: kd 8.788 [8.743-8.866] i 0.70 s 0.52 n=3 | kd/tree X9 0.9653 (-0.316 us) YYn | kd/tree X3 0.9708 YYn | kd/all_pairs 1.4730 YYY (+47.3 pct)
+- uniform 112: kd 10.099 [9.986-10.243] i 1.27 s 0.92 n=3 | kd/tree X9 1.0081 (+0.081 us) nnn | kd/tree X3 1.0071 nnn | kd/all_pairs 1.2553 YYY (+25.5 pct)
+- uniform 128: kd 11.336 [11.310-11.348] i 0.16 s 0.12 n=3 | kd/tree X9 1.0123 (+0.137 us) YYn | kd/tree X3 1.0149 nYn | kd/all_pairs 1.0055 nnn (+0.6 pct)
+- disparity 96: kd 10.293 [10.245-10.415] i 0.82 s 0.62 n=3 | kd/tree X9 0.9469 (-0.577 us) YYn | kd/tree X3 0.9469 YYn | kd/all_pairs 1.4445 YYY (+44.4 pct)
+- disparity 112: kd 11.823 [11.820-11.856] i 0.16 s 0.12 n=3 | kd/tree X9 0.9416 (-0.734 us) YYn | kd/tree X3 0.9354 YYY | kd/all_pairs 1.2721 YYY (+27.2 pct)
+- disparity 128: kd 13.915 [13.847-14.117] i 0.97 s 0.73 n=3 | kd/tree X9 1.0083 (+0.114 us) nnn | kd/tree X3 1.0129 nnn | kd/all_pairs 1.0333 YYn (+3.3 pct)
+
+## rows per label (kernel receipts, first G4 process)
+- uniform: 96->96 rows/204 pairs, 104->104 rows/223 pairs, 112->112 rows/243 pairs, 120->120 rows/262 pairs, 128->128 rows/275 pairs, 136->136 rows/296 pairs, 144->144 rows/315 pairs, 152->152 rows/331 pairs, 160->160 rows/352 pairs
+- disparity: 96->100 rows/613 pairs, 104->108 rows/664 pairs, 112->116 rows/717 pairs, 120->124 rows/772 pairs, 128->132 rows/820 pairs, 136->140 rows/875 pairs, 144->148 rows/930 pairs, 152->156 rows/978 pairs, 160->164 rows/1033 pairs
+kernel receipt tuples differing from the first process: 0; keys per process [60]
+
+## per-pass medians (drift, post hoc)
+- bp_g4_uniform/all_pairs/128: 11.261 11.274 11.275  spread 0.13 pct
+- bp_g4_uniform/all_pairs/136: 12.588 12.607 12.585  spread 0.17 pct
+- bp_g4_uniform/tree/128: 11.231 11.199 11.170  spread 0.55 pct
+- bp_g4_uniform/tree/136: 11.994 11.958 11.911  spread 0.69 pct
+- bp_g4_disparity/all_pairs/128: 13.493 13.466 13.453  spread 0.29 pct
+- bp_g4_disparity/all_pairs/136: 14.974 14.961 14.988  spread 0.18 pct
+- bp_g4_disparity/tree/128: 13.903 13.688 13.738  spread 1.57 pct
+- bp_g4_disparity/tree/136: 14.225 14.149 14.212  spread 0.54 pct

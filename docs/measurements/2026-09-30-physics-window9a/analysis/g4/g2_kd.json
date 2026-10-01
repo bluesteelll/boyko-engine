@@ -1,0 +1,194 @@
+{
+ "uniform/96": {
+  "X9": {
+   "ratio": 0.9653247332315412,
+   "delta": -0.31565554968850407,
+   "flags": "YYn",
+   "label": "claimed kd FASTER",
+   "sep": true,
+   "bars": [
+    0.029125142590227943,
+    0.012654161390622998,
+    0.06419487881094611
+   ]
+  },
+  "X3": {
+   "ratio": 0.9708210769491992,
+   "delta": -0.2641174613400459,
+   "flags": "YYn",
+   "label": "claimed kd FASTER",
+   "sep": true,
+   "bars": [
+    0.02829026851000077,
+    0.02263672778011969,
+    0.05658053702000188
+   ]
+  },
+  "vs_all_pairs": {
+   "ratio": 1.4730288687836952,
+   "delta": 2.821911829141424,
+   "flags": "YYY",
+   "label": "STRONG claimed kd SLOWER than all_pairs"
+  }
+ },
+ "uniform/112": {
+  "X9": {
+   "ratio": 1.0081167851409245,
+   "delta": 0.08131497867320547,
+   "flags": "nnn",
+   "label": "not claimed",
+   "sep": false,
+   "bars": [
+    0.035502694936561045,
+    0.019877098381483733,
+    0.07257141601165866
+   ]
+  },
+  "X3": {
+   "ratio": 1.007122139206433,
+   "delta": 0.07142095668189263,
+   "flags": "nnn",
+   "label": "not claimed",
+   "sep": false,
+   "bars": [
+    0.03626741466493934,
+    0.026511913148367244,
+    0.07253482932987843
+   ]
+  },
+  "vs_all_pairs": {
+   "ratio": 1.25527665326023,
+   "delta": 2.0538512861996114,
+   "flags": "YYY",
+   "label": "STRONG claimed kd SLOWER than all_pairs"
+  }
+ },
+ "uniform/128": {
+  "X9": {
+   "ratio": 1.012254284779778,
+   "delta": 0.13723395450720766,
+   "flags": "YYn",
+   "label": "claimed kd SLOWER",
+   "sep": false,
+   "bars": [
+    0.01212643979962398,
+    0.006910051977812902,
+    0.043625752358988155
+   ]
+  },
+  "X3": {
+   "ratio": 1.0149073653530436,
+   "delta": 0.1665090044474269,
+   "flags": "nYn",
+   "label": "not claimed",
+   "sep": false,
+   "bars": [
+    0.017998046218348693,
+    0.014830369830549457,
+    0.03599609243669769
+   ]
+  },
+  "vs_all_pairs": {
+   "ratio": 1.0055154190311604,
+   "delta": 0.06218032844980392,
+   "flags": "nnn",
+   "label": "not claimed"
+  }
+ },
+ "disparity/96": {
+  "X9": {
+   "ratio": 0.9469039295556448,
+   "delta": -0.5771539510304251,
+   "flags": "YYn",
+   "label": "claimed kd FASTER",
+   "sep": true,
+   "bars": [
+    0.01710791013598383,
+    0.015247546681550563,
+    0.07798105450955312
+   ]
+  },
+  "X3": {
+   "ratio": 0.9469039295556448,
+   "delta": -0.5771539510304251,
+   "flags": "YYn",
+   "label": "claimed kd FASTER",
+   "sep": true,
+   "bars": [
+    0.03609214068660689,
+    0.029487648599050457,
+    0.07218428137321346
+   ]
+  },
+  "vs_all_pairs": {
+   "ratio": 1.444484319984525,
+   "delta": 3.167224324699803,
+   "flags": "YYY",
+   "label": "STRONG claimed kd SLOWER than all_pairs"
+  }
+ },
+ "disparity/112": {
+  "X9": {
+   "ratio": 0.9415502252879271,
+   "delta": -0.7339465139122368,
+   "flags": "YYn",
+   "label": "claimed kd FASTER",
+   "sep": true,
+   "bars": [
+    0.026543843488396446,
+    0.00819208390521094,
+    0.06153397114843002
+   ]
+  },
+  "X3": {
+   "ratio": 0.9353915517632546,
+   "delta": -0.8166217244931264,
+   "flags": "YYY",
+   "label": "STRONG claimed kd FASTER",
+   "sep": true,
+   "bars": [
+    0.020176345724707848,
+    0.01481450845064567,
+    0.040352691449415695
+   ]
+  },
+  "vs_all_pairs": {
+   "ratio": 1.2721044574317453,
+   "delta": 2.528936611972897,
+   "flags": "YYY",
+   "label": "STRONG claimed kd SLOWER than all_pairs"
+  }
+ },
+ "disparity/128": {
+  "X9": {
+   "ratio": 1.0082955088974364,
+   "delta": 0.11448206986814746,
+   "flags": "nnn",
+   "label": "not claimed",
+   "sep": false,
+   "bars": [
+    0.03536191346657939,
+    0.01853373907956858,
+    0.09300672619193744
+   ]
+  },
+  "X3": {
+   "ratio": 1.012869586752685,
+   "delta": 0.17680451172820177,
+   "flags": "nnn",
+   "label": "not claimed",
+   "sep": true,
+   "bars": [
+    0.02081287926624619,
+    0.015605630314699958,
+    0.04162575853249262
+   ]
+  },
+  "vs_all_pairs": {
+   "ratio": 1.0333475108096621,
+   "delta": 0.4490547520995847,
+   "flags": "YYn",
+   "label": "claimed kd SLOWER than all_pairs"
+  }
+ }
+}

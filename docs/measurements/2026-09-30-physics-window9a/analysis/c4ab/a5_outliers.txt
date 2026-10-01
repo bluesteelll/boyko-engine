@@ -1,0 +1,61 @@
+
+## C4-jolt56 W16 (used)
+  2.3440 ms  p2 r0 original witness 1.0 % before 0.31 after 0.28 start 20:17:24
+  2.3603 ms  p2 r1 original witness 0.41 % before 3.24 after 2.88 start 20:21:35
+  2.3606 ms  p1 r1 original witness 0.9 % before 0.47 after 0.45 start 20:09:27
+  2.4323 ms  p0 r2 original witness 0.48 % before 3.26 after 3.23 start 19:39:08
+  2.4535 ms  p1 r2 original witness 1.49 % before 2.75 after 2.09 start 20:13:39
+  2.8361 ms  p1 r0 original witness 0.88 % before 0.41 after 2.01 start 20:05:16
+  2.9158 ms  p0 r0 rerun1 witness 1.79 % before 2.96 after 2.35 start 19:53:00
+  2.9189 ms  p0 r1 rerun1 witness 1.12 % before 1.04 after 2.95 start 19:58:28
+  2.9357 ms  p2 r2 rerun1 witness 1.32 % before 1.29 after 1.97 start 20:38:45
+
+## C4-jolt56 W1 (used)
+  9.4989 ms  p1 r2 original witness 0.64 % before 0.82 after 0.61 start 20:10:41
+  9.5402 ms  p1 r1 original witness 0.31 % before 1.65 after 1.09 start 20:06:30
+  9.5760 ms  p2 r0 original witness 0.39 % before 2.2 after 0.68 start 20:20:17
+  10.0312 ms  p0 r1 original witness 1.44 % before 2.15 after 4.73 start 19:31:35
+  10.2559 ms  p2 r2 rerun2 witness 1.96 % before 3.38 after 1.27 start 20:41:58
+  10.7331 ms  p0 r0 original witness 1.99 % before 2.25 after 2.21 start 19:21:26
+  10.8283 ms  p1 r0 original witness 0.97 % before 1.93 after 1.31 start 20:02:17
+  10.9129 ms  p2 r1 original witness 1.79 % before 1.91 after 2.42 start 20:24:54
+
+## C4-jolt56 W8 (used)
+  2.4772 ms  p1 r1 original witness 1.32 % before 0.75 after 0.74 start 20:08:28
+  2.4909 ms  p2 r1 original witness 1.02 % before 0.96 after 2.48 start 20:22:35
+  2.5288 ms  p1 r0 original witness 0.69 % before 0.39 after 1.76 start 20:04:16
+  2.5334 ms  p2 r0 original witness 0.31 % before 0.47 after 0.53 start 20:18:24
+  2.5785 ms  p1 r2 original witness 0.3 % before 1.43 after 2.22 start 20:12:39
+  2.7301 ms  p2 r2 rerun1 witness 1.42 % before 1.82 after 4.34 start 20:40:11
+
+## C4-JD W1 (used)
+  4.4430 ms  p2 r1 original witness 0.84 % before 2.36 after 1.91 start 20:24:47
+  4.5034 ms  p1 r2 original witness 0.39 % before 0.61 after 0.93 start 20:10:51
+  4.5338 ms  p1 r1 original witness 0.64 % before 1.09 after 1.54 start 20:06:40
+  4.5692 ms  p2 r0 original witness 1.11 % before 2.42 after 2.2 start 20:20:10
+  4.7965 ms  p1 r0 original witness 1.21 % before 1.31 after 1.44 start 20:02:28
+  4.9397 ms  p0 r0 rerun1 witness 0.55 % before 1.93 after 2.32 start 19:57:26
+  4.9939 ms  p2 r2 rerun1 witness 1.6 % before 1.56 after 2.82 start 20:40:46
+
+## C4-JD W8 (used)
+  1.8135 ms  p2 r0 original witness 0.33 % before 0.2 after 0.47 start 20:18:18
+  1.8139 ms  p1 r1 original witness 0.32 % before 0.74 after 0.78 start 20:08:34
+  1.8263 ms  p1 r2 original witness 0.32 % before 2.22 after 1.52 start 20:12:45
+  1.8277 ms  p1 r0 original witness 0.52 % before 1.76 after 0.35 start 20:04:22
+  1.8967 ms  p0 r2 original witness 0.91 % before 3.54 after 2.64 start 19:42:33
+  1.9019 ms  p2 r1 original witness 1.64 % before 3.86 after 0.96 start 20:22:29
+  2.0274 ms  p2 r2 rerun1 witness 0.67 % before 2.2 after 1.82 start 20:40:05
+
+## C4-JD W16 (used)
+  2.0503 ms  p1 r1 original witness 0.29 % before 0.45 after 0.61 start 20:09:34
+  2.0553 ms  p1 r2 original witness 0.38 % before 2.09 after 1.4 start 20:13:45
+  2.0711 ms  p2 r0 original witness 0.1 % before 0.43 after 0.31 start 20:17:18
+  2.0811 ms  p2 r2 original witness 1.21 % before 2.9 after 2.45 start 20:26:32
+  2.0887 ms  p0 r2 original witness 1.75 % before 2.78 after 3.26 start 19:39:02
+  2.1093 ms  p2 r1 original witness 1.65 % before 3.01 after 3.24 start 20:21:29
+  2.1619 ms  p1 r0 original witness 0.27 % before 2.01 after 1.35 start 20:05:22
+  2.2310 ms  p0 r1 rerun1 witness 0.51 % before 1.89 after 1.04 start 19:58:22
+  2.2770 ms  p0 r0 rerun1 witness 1.19 % before 4.52 after 2.96 start 19:52:54
+
+## dropped C4-AB slots by pass
+Counter({0: 46})

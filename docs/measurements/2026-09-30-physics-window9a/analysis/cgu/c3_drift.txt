@@ -1,0 +1,37 @@
+# C4-CGU tip vs C4-AB C4-JD#tip (POST HOC, cross-block)
+W1: p0:nnn(K1/3 0.9143,sep) p1:nnn(K3/3 0.9962) p2:nnn(K3/3 1.0023)  pooled nnn bars i 16.15 s 5.06
+W2: p0:nnn(K2/3 1.0087) p1:nnn(K3/3 1.0117) p2:nnn(K3/3 1.0058)  pooled nnn bars i 5.12 s 1.70
+W4: p0:nnn(K1/3 0.9885,sep) p1:nnn(K3/3 1.0099) p2:nnn(K3/3 1.0229)  pooled nnn bars i 6.81 s 2.18
+W8: p0:nnn(K1/3 1.0260) p1:nnn(K3/3 1.0308,sep) p2:nnn(K3/3 1.0305)  pooled nYn bars i 10.39 s 4.33
+W16: p0:nnn(K3/3 0.9956) p1:nnn(K3/3 1.0490) p2:YYY(K3/3 1.0768,sep)  pooled nYn bars i 11.46 s 3.59
+
+per W, medians over used processes: receipt before / after %, witness %, main_cycle_frac, top_share_of_proc, proc_cpu_s / wall_s, wall_s
+  W1  AB  tip  n=7: rb 1.56 ra 1.91 wit 0.84 mainfrac 0.0161 topshare 0.938 cpu/wall 1.01 wall 2.302 s
+  W1  CGU tip  n=9: rb 1.37 ra 1.04 wit 0.26 mainfrac 0.0172 topshare 0.895 cpu/wall 1.01 wall 2.293 s
+  W1  CGU cgu1 n=9: rb 2.07 ra 2.08 wit 0.64 mainfrac 0.0169 topshare 0.879 cpu/wall 1.01 wall 2.273 s
+  W2  AB  tip  n=8: rb 1.52 ra 1.45 wit 0.66 mainfrac 0.0151 topshare 0.544 cpu/wall 1.67 wall 1.553 s
+  W2  CGU tip  n=9: rb 1.60 ra 1.31 wit 0.69 mainfrac 0.0158 topshare 0.531 cpu/wall 1.68 wall 1.564 s
+  W2  CGU cgu1 n=9: rb 1.31 ra 2.59 wit 1.00 mainfrac 0.0150 topshare 0.549 cpu/wall 1.69 wall 1.565 s
+  W4  AB  tip  n=7: rb 1.25 ra 1.23 wit 0.50 mainfrac 0.0131 topshare 0.344 cpu/wall 2.71 wall 1.135 s
+  W4  CGU tip  n=9: rb 0.80 ra 1.11 wit 0.51 mainfrac 0.0137 topshare 0.338 cpu/wall 2.71 wall 1.154 s
+  W4  CGU cgu1 n=9: rb 1.11 ra 0.80 wit 0.42 mainfrac 0.0132 topshare 0.349 cpu/wall 2.71 wall 1.156 s
+  W8  AB  tip  n=7: rb 2.20 ra 0.96 wit 0.52 mainfrac 0.0098 topshare 0.197 cpu/wall 4.59 wall 0.930 s
+  W8  CGU tip  n=9: rb 1.04 ra 1.14 wit 0.30 mainfrac 0.0102 topshare 0.233 cpu/wall 3.64 wall 0.982 s
+  W8  CGU cgu1 n=9: rb 1.17 ra 0.80 wit 0.40 mainfrac 0.0099 topshare 0.220 cpu/wall 4.11 wall 0.983 s
+  W16 AB  tip  n=9: rb 2.09 ra 1.40 wit 0.51 mainfrac 0.0048 topshare 0.098 cpu/wall 7.30 wall 1.071 s
+  W16 CGU tip  n=9: rb 1.13 ra 1.07 wit 0.42 mainfrac 0.0048 topshare 0.100 cpu/wall 7.65 wall 1.112 s
+  W16 CGU cgu1 n=9: rb 1.07 ra 1.13 wit 0.54 mainfrac 0.0046 topshare 0.104 cpu/wall 7.31 wall 1.122 s
+
+per-step distribution inside [100,500) (ms): median over processes of the step p10 / p50 / p90 and of the window mean
+  W1  AB  tip : p10 4.2130 p50 4.2439 p90 4.6252 mean 4.3504
+  W1  CGU tip : p10 4.1674 p50 4.2270 p90 4.5626 mean 4.3096
+  W1  CGU cgu1: p10 4.1421 p50 4.2104 p90 4.5371 mean 4.2956
+  W8  AB  tip : p10 1.7421 p50 1.7624 p90 1.8583 mean 1.7878
+  W8  CGU tip : p10 1.7752 p50 1.8414 p90 2.0501 mean 1.8884
+  W8  CGU cgu1: p10 1.7723 p50 1.8409 p90 2.0119 mean 1.8699
+  W16 AB  tip : p10 1.9691 p50 2.0300 p90 2.1564 mean 2.0486
+  W16 CGU tip : p10 1.9917 p50 2.1413 p90 2.3302 mean 2.1576
+  W16 CGU cgu1: p10 2.0452 p50 2.1460 p90 2.3189 mean 2.1705
+
+power plan lines in the window log (first and resumed run):
+  2026-09-30T19:16:05.351+03:00 C4-AB-p0:  ... ': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}

@@ -1,0 +1,902 @@
+{
+ "window": "physics window 9a (2026-09-30): PARENT trunk 3d9433ae vs TIP u/phys-tree-c4 50e31f1a; Jolt 5.6 in C4-AB",
+ "protocol": {
+  "ruling": "RULINGS-2026-09-27-W8.md ruling 1 (K 9 = 3 passes x 3 rounds; IQR AND SE claim rule; min-max reported) + RULINGS-2026-09-29-W8B.md ruling 8 (a pass-cell with K < 3 does not gate; a dropped slot is re-run until the cell has K = 3 or the pass ends)",
+  "k_per_cell": 9,
+  "passes": 3,
+  "rounds_per_pass": 3,
+  "order": "pass 0 REVERSED, pass 1 forward, pass 2 REVERSED (ruling 1: \"p0 reversed, p1, p2 reversed\"). The forward list: W ascending, inside a W group row by row (this file's order), each row's binaries in order (C4-AB: the binaries of a row are adjacent; the Jolt row sits between the JT (Tree) pair and C4-JD, so it is adjacent to the tip J-D and J-T rows in every round). One untimed warm-up per pass.",
+  "receipt_s_between_processes": 5.0,
+  "receipt_s_before_pass": 10.0,
+  "busy_pct_limit": 5.0,
+  "others_busy_pct_limit": 2.0,
+  "void_pass_on_build_process": true,
+  "placement": "P-none",
+  "placement_receipt": "per process, RECORDED, NEVER used to drop a process: the per-logical-CPU busy share over the process lifetime (window 8 analysis's reading: the top CPU and its share) plus the main thread's own CPU time (GetThreadTimes on the thread the process was created with); main_share_top_est = top CPU busy seconds / main-thread CPU seconds, capped at 1. Exact at W1 on an idle machine; an upper bound at W >= 2 (workers share the CPUs).",
+  "claim_rule": "the analysis: IQR (i) AND SE (s) in every clean block and pooled; min-max (r) reported beside, \"STRONG\" when it also passes",
+  "idle_rule": "tools/wait_idle9a.ps1 (= wait_idle8b.ps1; the 9a cargo exe names are 8b's): 0 build procs AND 0 procs under D:/wt/_targets or D:/wt/mq-* on 3 consecutive 60-s polls, 10-s cpu < 5 %; up to 30 polls per wait; a timeout STOPS the window (exit 3)",
+  "hard_stop": "--cutoff HH:MM (no process starts whose estimated end passes it); the STOP flag file win9a/STOP; a block that does not fit before the cutoff is skipped WHOLE",
+  "windowed_hang_s": 300,
+  "own_k": "C4-G4-kd (F3 keep/freeze, not gating) keeps the Q3 recipe's own K = 3 (one pass x three rounds). C4-BR and C4-G4 run the letter (K = 9); C4-BR may be cut to K = 3 by setting its block \"passes\" to 1 (the lane's Q5 recommendation).",
+  "rerun_rule": "RULING 8, implemented in tools/window9a_run.py (run_pass, pending_reruns, passcell_table): the re-run STAGE at the end of each pass. A slot is unclean when its latest attempt has receipt before/after > 5 %, OR the during-process witness others_busy_pct > 2 %, OR a build process during the run, OR is invalid. Wave a re-runs every unclean slot (original order); a slot leaves the stage at its first clean valid attempt. \"The pass ends\" = RERUN_MAX_WAVES (4) waves, or RERUN_STAGE_FRAC (0.5) x the pass's own timed wall spent on re-runs, or the cutoff / STOP flag. Records: attempt \"rerun\" + rerun_no 1.., rerun_reason; one {\"passcell\": true, pc_row, pc_binary, pc_W, k_target, k_clean, gates (k_clean >= 3), short} record per (pass, cell). The reduction's slot rule: the original if clean and valid, else the FIRST clean valid re-run, else drop the slot; a pass-cell with fewer than 3 clean slots does not gate.",
+  "criterion": "CRITERION_HOME per process; every expected id and no other, on stdout AND on disk (criterion_check); criterion warms each benchmark, so no separate warm-up process"
+ },
+ "binaries": {
+  "tip": {
+   "exe": "bin/runner_tip_50e31f1a.exe",
+   "commit": "50e31f1a78bd53adf31628a3fa03ff28c2647275",
+   "kind": "runner",
+   "s4": "on",
+   "sha256_pin": "8d6e7d4173857ca83b47cd350890b8e178451fb48f030ac3d25aaef33cd268c3",
+   "expect_config": {
+    "tree_brute_max_rows": 128,
+    "broadphase_select": "Manual"
+   },
+   "what": "TIP = u/phys-tree-c4 @ 50e31f1a (the Tree is the default), jolt_parity_pyramid --profile parity from a git-archive export"
+  },
+  "parent": {
+   "exe": "bin/runner_parent_3d9433ae.exe",
+   "commit": "3d9433aed2d2251d3bc4cc2ca59692027ddb2494",
+   "kind": "runner",
+   "s4": "on",
+   "sha256_pin": "a09fca085613f966e09b3e8cd78ed711aa1c51f069cfab649834d93f88988478",
+   "expect_config": {
+    "tree_brute_max_rows": 144,
+    "broadphase_select": "Manual"
+   },
+   "what": "PARENT = git merge-base u/phys-tree-c4 integ/unified = trunk 3d9433ae (AllPairs is the default), the same build from its own export"
+  },
+  "g4rT": {
+   "exe": "bin/broadphase_g4rT_50e31f1a.exe",
+   "commit": "50e31f1a78bd53adf31628a3fa03ff28c2647275 + bin/g4ref.patch",
+   "kind": "criterion",
+   "sha256_pin": "19c9eb1f67cc728505525b5d669adfd2db133a1ae461217fcab7f386bc7c0bcf",
+   "what": "benches/broadphase.rs of the TIP export with the 28-size G4_SIZES line (bin/g4ref.patch, by content), cargo bench --no-run --locked (bench profile)"
+  },
+  "g4r7": {
+   "exe": "bin/bpbench_g4ref_93b2615b.exe",
+   "commit": "93b2615b + window 7 variant/g4ref.diff (27 sizes, 17..256)",
+   "kind": "criterion",
+   "sha256_pin": "f96a9c11ebd72d4d581784cf37728fd6da15bc63b28414d7e895667753033fd4",
+   "what": "window 7 wave 2's Q3 instrument, a byte copy (sha256 checked) of 7dc37fc3.../win7b/bin/bpbench_g4ref_93b2615b.exe"
+  },
+  "g4r8b": {
+   "exe": "bin/broadphase_g4ref_16191fda.exe",
+   "commit": "16191fda + win8b/bin/g4ref.patch",
+   "kind": "criterion",
+   "sha256_pin": "b887850f38633d62419344c41080d1bada92bc931c3307989b6f6fb314a33b6d",
+   "what": "window 8b's G4 instrument, a byte copy (sha256 checked) of win8b/bin/broadphase_g4ref_16191fda.exe"
+  },
+  "j56": {
+   "exe": "D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe",
+   "commit": "Jolt v5.6.0 (wt-v5.6.0-parity, repository patch)",
+   "kind": "jolt",
+   "sha256_pin": "918fd2b70ecc634cc0574cb676c56a3c929a46a51173cf9aa76fdd628e2ef0ad",
+   "what": "windows 7/8's j56 (P0 Distribution build), run in place"
+  }
+ },
+ "blocks": [
+  {
+   "name": "C4-BR",
+   "item": "tree C4 / M9",
+   "priority": 3,
+   "passes": 1,
+   "rounds": 3,
+   "note": "the all_pairs bracket (M9 verdict b: placement only): g4r7, g4r8b, g4rT adjacent in every round, one process per exe per round, CRITERION_HOME per process. K 9 (the letter); passes 1 = the lane's Q5 recommendation (K 3, saves ~30 min)"
+  },
+  {
+   "name": "C4-G4",
+   "item": "tree C4 thresholds",
+   "priority": 4,
+   "passes": 3,
+   "rounds": 3,
+   "note": "sizes 96..160 step 8, all_pairs and tree, uniform and disparity: 36 ids; K 9"
+  },
+  {
+   "name": "C4-G4-kd",
+   "item": "tree C4 / F3 keep-freeze",
+   "priority": 5,
+   "passes": 1,
+   "rounds": 3,
+   "note": "tree_kd at 96/112/128 (6 ids), the Q3 recipe's own K = 3, recorded for F3's keep/freeze, not gating"
+  },
+  {
+   "name": "C4-AB",
+   "item": "tree C4 merge gate + Jolt 5.6",
+   "priority": 1,
+   "warmup": [
+    "C4-JD",
+    "tip",
+    8
+   ]
+  },
+  {
+   "name": "C4-G5",
+   "item": "tree C4 G5",
+   "priority": 2,
+   "warmup": [
+    "C4-JD-armed",
+    "tip",
+    8
+   ]
+  }
+ ],
+ "rows": [
+  {
+   "id": "C4-BR",
+   "blocks": [
+    "C4-BR"
+   ],
+   "kind": "criterion",
+   "binaries": [
+    "g4r7",
+    "g4r8b",
+    "g4rT"
+   ],
+   "workers": [
+    0
+   ],
+   "args": [
+    "--bench",
+    "--noplot",
+    "^bp_g4_(uniform|disparity)/(all_pairs|tree)/(144|256)$"
+   ],
+   "armed": false,
+   "expect": [
+    "bp_g4_disparity/all_pairs/144",
+    "bp_g4_disparity/all_pairs/256",
+    "bp_g4_disparity/tree/144",
+    "bp_g4_disparity/tree/256",
+    "bp_g4_uniform/all_pairs/144",
+    "bp_g4_uniform/all_pairs/256",
+    "bp_g4_uniform/tree/144",
+    "bp_g4_uniform/tree/256"
+   ],
+   "read": "all_pairs(g4r8b)/all_pairs(g4r7) and all_pairs(g4rT)/all_pairs(g4r7), same window; tree is the in-binary control",
+   "test_filter": "^bp_g4_uniform/all_pairs/144$",
+   "test_expect": [
+    "bp_g4_uniform/all_pairs/144"
+   ]
+  },
+  {
+   "id": "C4-G4",
+   "blocks": [
+    "C4-G4"
+   ],
+   "kind": "criterion",
+   "binaries": [
+    "g4rT"
+   ],
+   "workers": [
+    0
+   ],
+   "args": [
+    "--bench",
+    "--noplot",
+    "^bp_g4_(uniform|disparity)/(all_pairs|tree)/(96|104|112|120|128|136|144|152|160)$"
+   ],
+   "armed": false,
+   "rule": "LO = largest n with all_pairs NOT claimed slower than tree; HI = smallest n with tree claimed faster; per family; TREE_BRUTE_MAX_ROWS = min LO; AUTO_TREE_LO/HI = (min LO, max HI); LO >= T (const-asserted). Grid 96..160 step 8 (critique W2: both the window-7 reading 144/152 and the window-8b reading 128/136 are decidable in this one window; every size is in g4ref.patch's 28). Bottom edge: LO < 96 -> report, keep the provisional 128/136, extend the grid down next window. Top edge: LO >= 160, or no size claims the tree faster (HI not in the grid) -> report, keep the provisional 128/136 marked NOT RE-READ, extend the grid up (168..256 are in the patch) next window; never set a constant from an edge.",
+   "note": "36 ids, about 7.8 min per process at 8b's 13 s per id; K = 9 -> about 70 min (was 24 ids / 48 min at 96..136)",
+   "expect": [
+    "bp_g4_disparity/all_pairs/104",
+    "bp_g4_disparity/all_pairs/112",
+    "bp_g4_disparity/all_pairs/120",
+    "bp_g4_disparity/all_pairs/128",
+    "bp_g4_disparity/all_pairs/136",
+    "bp_g4_disparity/all_pairs/144",
+    "bp_g4_disparity/all_pairs/152",
+    "bp_g4_disparity/all_pairs/160",
+    "bp_g4_disparity/all_pairs/96",
+    "bp_g4_disparity/tree/104",
+    "bp_g4_disparity/tree/112",
+    "bp_g4_disparity/tree/120",
+    "bp_g4_disparity/tree/128",
+    "bp_g4_disparity/tree/136",
+    "bp_g4_disparity/tree/144",
+    "bp_g4_disparity/tree/152",
+    "bp_g4_disparity/tree/160",
+    "bp_g4_disparity/tree/96",
+    "bp_g4_uniform/all_pairs/104",
+    "bp_g4_uniform/all_pairs/112",
+    "bp_g4_uniform/all_pairs/120",
+    "bp_g4_uniform/all_pairs/128",
+    "bp_g4_uniform/all_pairs/136",
+    "bp_g4_uniform/all_pairs/144",
+    "bp_g4_uniform/all_pairs/152",
+    "bp_g4_uniform/all_pairs/160",
+    "bp_g4_uniform/all_pairs/96",
+    "bp_g4_uniform/tree/104",
+    "bp_g4_uniform/tree/112",
+    "bp_g4_uniform/tree/120",
+    "bp_g4_uniform/tree/128",
+    "bp_g4_uniform/tree/136",
+    "bp_g4_uniform/tree/144",
+    "bp_g4_uniform/tree/152",
+    "bp_g4_uniform/tree/160",
+    "bp_g4_uniform/tree/96"
+   ],
+   "test_filter": "^bp_g4_uniform/all_pairs/128$",
+   "test_expect": [
+    "bp_g4_uniform/all_pairs/128"
+   ]
+  },
+  {
+   "id": "C4-G4-kd",
+   "blocks": [
+    "C4-G4-kd"
+   ],
+   "kind": "criterion",
+   "binaries": [
+    "g4rT"
+   ],
+   "workers": [
+    0
+   ],
+   "args": [
+    "--bench",
+    "--noplot",
+    "^bp_g4_(uniform|disparity)/tree_kd/(96|112|128)$"
+   ],
+   "armed": false,
+   "own_k": 3,
+   "note": "recorded for F3's keep/freeze (ruling 4); not gating",
+   "expect": [
+    "bp_g4_disparity/tree_kd/112",
+    "bp_g4_disparity/tree_kd/128",
+    "bp_g4_disparity/tree_kd/96",
+    "bp_g4_uniform/tree_kd/112",
+    "bp_g4_uniform/tree_kd/128",
+    "bp_g4_uniform/tree_kd/96"
+   ],
+   "test_filter": "^bp_g4_uniform/tree_kd/128$",
+   "test_expect": [
+    "bp_g4_uniform/tree_kd/128"
+   ]
+  },
+  {
+   "id": "C4-JA",
+   "blocks": [
+    "C4-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "parent",
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "a"
+   ],
+   "workers": [
+    1,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JA500",
+   "broadphase": "AllPairs",
+   "tree_diag_expect": null,
+   "bp_kernel": null,
+   "note": "control: AllPairs cfg-A in both binaries; expected not claimed different"
+  },
+  {
+   "id": "C4-JT",
+   "blocks": [
+    "C4-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "parent",
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--broadphase",
+    "tree",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    1,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null,
+   "note": "control: Tree in both binaries; in TIP an A/A twin of C4-JD"
+  },
+  {
+   "id": "C4-jolt56",
+   "blocks": [
+    "C4-AB"
+   ],
+   "kind": "jolt",
+   "binaries": [
+    "j56"
+   ],
+   "args": [
+    "-s=Pyramid",
+    "-q=Discrete",
+    "-f"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": null,
+   "broadphase": null,
+   "jolt_hash": "0xb8522b4e3fc62cfe",
+   "note": "Jolt 5.6 in-block (orchestrator instruction): -s=Pyramid -q=Discrete -f, -t=W -i=500; the driver checks the parity patch banner (receipt=0, allow_sleep=0 = sleeping off), one stat line, threads = W and the hash 0xb8522b4e3fc62cfe on every process"
+  },
+  {
+   "id": "C4-JD",
+   "blocks": [
+    "C4-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null,
+   "note": "the new default (flagless but for --sleeping off, pinned against a later C1b)"
+  },
+  {
+   "id": "C4-JDap",
+   "blocks": [
+    "C4-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--sleeping",
+    "off",
+    "--broadphase",
+    "allpairs"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "AllPairs",
+   "tree_diag_expect": null,
+   "bp_kernel": null,
+   "note": "the parent default's configuration in the same binary: the row of record for the merge gate"
+  },
+  {
+   "id": "C4-JDpar",
+   "blocks": [
+    "C4-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "parent"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "AllPairs",
+   "tree_diag_expect": null,
+   "bp_kernel": null,
+   "note": "the literal parent default (two-binary)"
+  },
+  {
+   "id": "C4-rung",
+   "blocks": [
+    "C4-AB"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--sleeping",
+    "off",
+    "--canary-frac",
+    "1",
+    "--canary-ref-ns",
+    "60000"
+   ],
+   "workers": [
+    8,
+    16
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "canary": true,
+   "note": "PC-8b-3's in-block rung; its reference is C4-JD#tip at the same W, block and round",
+   "bp_kernel": null
+  },
+  {
+   "id": "C4-JD-armed",
+   "blocks": [
+    "C4-G5"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null,
+   "gate": "sum of phys_bp_verify/build/query/assemble per step, median over [100, 500): <= 0.36 ms (W1) / 0.35 ms (W8); void_steps 0"
+  },
+  {
+   "id": "C4-JDap-armed",
+   "blocks": [
+    "C4-G5"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "jolt",
+    "--gap",
+    "0.5",
+    "--cfg",
+    "default",
+    "--sleeping",
+    "off",
+    "--broadphase",
+    "allpairs"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": true,
+   "pose_ref": "JT500",
+   "broadphase": "AllPairs",
+   "tree_diag_expect": null,
+   "bp_kernel": null,
+   "gate": "realized dbp(8) = broadphase system span (physics_broadphase_colored) of this row minus C4-JD-armed's at W8 >= 1.03 ms (recipe g4_g5_recipe.md:205)"
+  },
+  {
+   "id": "C4-R",
+   "blocks": [
+    "C4-G5"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "rest",
+    "--cfg",
+    "default",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "RT500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 1,
+    "members": 1,
+    "evictions": 0
+   },
+   "bp_kernel": null
+  },
+  {
+   "id": "C4-Rap",
+   "blocks": [
+    "C4-G5"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "rest",
+    "--cfg",
+    "default",
+    "--sleeping",
+    "off",
+    "--broadphase",
+    "allpairs"
+   ],
+   "workers": [
+    1,
+    8
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "RT500",
+   "broadphase": "AllPairs",
+   "tree_diag_expect": null,
+   "bp_kernel": null
+  },
+  {
+   "id": "C4-S16",
+   "blocks": [
+    "C4-G5"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "s16",
+    "--cfg",
+    "default",
+    "--sleeping",
+    "off"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "S16500",
+   "broadphase": "Tree",
+   "tree_diag_expect": {
+    "static_rebuilds": 0,
+    "members": 0,
+    "evictions": 0
+   },
+   "bp_kernel": null,
+   "r4_twin": "C4-S16ap",
+   "note": "16 rows: the Tree's brute path; hash recorded at pre-flight; no claimed regression"
+  },
+  {
+   "id": "C4-S16ap",
+   "blocks": [
+    "C4-G5"
+   ],
+   "kind": "runner",
+   "binaries": [
+    "tip"
+   ],
+   "args": [
+    "--scene",
+    "s16",
+    "--cfg",
+    "default",
+    "--sleeping",
+    "off",
+    "--broadphase",
+    "allpairs"
+   ],
+   "workers": [
+    1
+   ],
+   "steps": 500,
+   "window": [
+    0,
+    500
+   ],
+   "metric_windows": [
+    [
+     0,
+     100
+    ],
+    [
+     100,
+     500
+    ]
+   ],
+   "armed": false,
+   "pose_ref": "S16500",
+   "broadphase": "AllPairs",
+   "tree_diag_expect": null,
+   "bp_kernel": null
+  }
+ ],
+ "reserved": [
+  {
+   "block": "rapier",
+   "how": "rows9a.extra.json (PREP.md, \"Adding the Rapier rows\"); example: rows9a.extra.example.json"
+  }
+ ],
+ "lane_rules": {
+  "C4-G4": "LO = largest n with all_pairs NOT claimed slower than tree; HI = smallest n with tree claimed faster; per family; TREE_BRUTE_MAX_ROWS = min LO; AUTO_TREE_LO/HI = (min LO, max HI); LO >= T (const-asserted). Grid 96..160 step 8 (critique W2: both the window-7 reading 144/152 and the window-8b reading 128/136 are decidable in this one window; every size is in g4ref.patch's 28). Bottom edge: LO < 96 -> report, keep the provisional 128/136, extend the grid down next window. Top edge: LO >= 160, or no size claims the tree faster (HI not in the grid) -> report, keep the provisional 128/136 marked NOT RE-READ, extend the grid up (168..256 are in the patch) next window; never set a constant from an edge.",
+  "C4-BR": "all_pairs(g4r8b)/all_pairs(g4r7) and all_pairs(g4rT)/all_pairs(g4r7), same window; tree is the in-binary control"
+ },
+ "_derived": {
+  "from": "tree-c4/window9_c4_rows.json (amended)",
+  "deviations": [
+   "g4r7 and g4r8b are byte copies under bin/ (the lane file pointed into two other sessions' scratchpads); sha256 equal",
+   "tip/parent/g4rT carry sha256_pin and (runner) expect_config: tree_brute_max_rows 128 (tip) / 144 (parent) is checked on every process",
+   "BLOCK ORDER differs from the cut (BR, G4, G4-kd, AB, G5): AB, G5 first, then BR, G4, G4-kd. Reason: the merge gate (AB + G5, ~70 min, deterministic cost) must not be the block a cutoff skips when the criterion blocks run long (a criterion process costs a per-process startup of minutes and its wall swings 2x with machine load); a cut criterion block is re-runnable (--resume). Ruling 5 (\"check the all-pairs slowdown against window 7 first\") is about reading G4, and BR still precedes G4. --lane-order restores the order of the cut.",
+   "C4-JOLT is not a block: its row is folded into C4-AB (W 1/2/4/8/16, K 9, adjacent to C4-JD each round) by the orchestrator's instruction",
+   "C4-G4-kd is its own block (own K 3): the driver takes K from the block, and the lane's file put it in the K-9 block",
+   "C4-G5 is included although the task text names only C4-AB, C4-G4 and C4-BR: the lane's merge gate reads \"C4-JD not slower ... AND G5 recorded\" (cut.md \u00a75)",
+   "C4-S16 / C4-S16ap get pose_ref S16500 (a fixture recorded at pre-flight on TIP --broadphase allpairs; the lane's file had null, which would make the driver pass --expect-pose None.pose: a runner row must have a pose gate)",
+   "C4-S16 expects TreeDiag static_rebuilds 0 / members 0 (16 rows <= tree_brute_max_rows 128: the Tree never builds - that IS the brute-path proof); the lane file had null, which the driver reads as the default {1,1,0} and reds",
+   "armed rows: --arm-profiler is removed from the lane args (the driver appends it once for row[\"armed\"]; the lane file had it twice on the command line)"
+  ]
+ }
+}

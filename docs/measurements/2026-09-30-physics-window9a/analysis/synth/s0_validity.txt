@@ -1,0 +1,82 @@
+# 1. Records
+runs.jsonl lines 922: {'process': 708, 'passcell': 192, 'pass_done': 9, 'r4': 13}
+  C4-AB      {'warmup': 3, 'original': 306, 'driver_unclean': 119, 'rerun': 73}
+  C4-RAPIER  {'warmup': 6, 'original': 180, 'driver_unclean': 34, 'rerun': 34}
+  C4-G5      {'warmup': 3, 'original': 90, 'driver_unclean': 5, 'rerun': 5}
+  C4-BR      {'original': 8, 'driver_unclean': 1, 'aborted': 1}
+  C4-G4      NO RECORDS (never ran)
+  C4-G4-kd   NO RECORDS (never ran)
+  timed process records (originals + re-runs, all blocks): 696; re-runs 112; warm-ups 12
+
+# 2. Closed-pass blocks: independent validity, clean, slots, K
+C4-AB: processes 379 (originals 306, re-runs 73); invalid: mine 0, driver 0; unclean: mine 119, driver 119, agree 379/379; slots 306: used 260 (50 re-runs), dropped 46
+   unclean by pass: p0: 84 of 140, p1: 3 of 105, p2: 32 of 134
+   dropped slots by pass: {0: 46}
+   pass-cells 102; my K == driver k_clean on 102/102; short (K<3) 30; by pass {0: 30}
+   pass-0 pass-cells with K = 3: [('C4-JA', 'tip', 1), ('C4-JD', 'tip', 16), ('C4-jolt56', 'j56', 16), ('C4-rung', 'tip', 8)]
+   pass-0 pass-cells with K = 0: [(0, 'C4-jolt56', 'j56', 8, 0)]
+   p0: used n 56: receipt before 2.47 %, after 2.65 %, witness 0.95 % | all processes witness median 2.15 %
+   p1: used n 102: receipt before 1.14 %, after 1.14 %, witness 0.42 % | all processes witness median 0.43 %
+   p2: used n 102: receipt before 2.00 %, after 1.94 %, witness 0.84 % | all processes witness median 1.06 %
+   top other process on unclean runs: [('Telegram.exe', 47), ('browser.exe', 41), ('claude.exe', 24), ('CurseForge.exe', 4), ('gh.exe', 1)]
+   used runner pose hashes: ['0x30c5438bc6ad9ffa']; void_steps values {0: 222}; Jolt hashes {'0xb8522b4e3fc62cfe': 38}
+C4-RAPIER: processes 214 (originals 180, re-runs 34); invalid: mine 0, driver 0; unclean: mine 34, driver 34, agree 214/214; slots 180: used 180 (27 re-runs), dropped 0
+   unclean by pass: p0: 31 of 91, p1: 2 of 62, p2: 1 of 61
+   dropped slots by pass: {}
+   pass-cells 60; my K == driver k_clean on 60/60; short (K<3) 0; by pass {}
+   p0: used n 60: receipt before 1.08 %, after 1.47 %, witness 0.68 % | all processes witness median 1.15 %
+   p1: used n 60: receipt before 0.62 %, after 0.62 %, witness 0.50 % | all processes witness median 0.50 %
+   p2: used n 60: receipt before 0.61 %, after 0.58 %, witness 0.31 % | all processes witness median 0.31 %
+   top other process on unclean runs: [('claude.exe', 21), ('browser.exe', 5), ('CurseForge.exe', 5), ('Telegram.exe', 1), ('audiodg.exe', 1)]
+   used Rapier processes with a V1-V9-shaped failure: 0; processes with any: 0
+C4-G5: processes 95 (originals 90, re-runs 5); invalid: mine 0, driver 0; unclean: mine 5, driver 5, agree 95/95; slots 90: used 90 (5 re-runs), dropped 0
+   unclean by pass: p0: 1 of 31, p1: 0 of 30, p2: 4 of 34
+   dropped slots by pass: {}
+   pass-cells 30; my K == driver k_clean on 30/30; short (K<3) 0; by pass {}
+   p0: used n 30: receipt before 0.70 %, after 0.63 %, witness 0.16 % | all processes witness median 0.16 %
+   p1: used n 30: receipt before 0.56 %, after 0.62 %, witness 0.20 % | all processes witness median 0.20 %
+   p2: used n 30: receipt before 0.70 %, after 0.70 %, witness 0.17 % | all processes witness median 0.19 %
+   top other process on unclean runs: [('claude.exe', 3), ('RuntimeBroker.exe', 1), ('browser.exe', 1)]
+   used runner pose hashes: ['0x30c5438bc6ad9ffa', '0x4470add61a854f4c', '0x6cbe24bf8fafda26']; void_steps values {0: 90}; Jolt hashes {}
+
+# 3. Timeline and idle waits (raw/window_log.txt)
+  C4-AB-p0       idle wait 130.484 s; start 19:13:54; end 19:59:09; 45.2 min; re-run waves 1
+  C4-AB-p1       idle wait 130.506 s; start 19:59:09; end 20:14:31; 15.4 min; re-run waves 2
+  C4-AB-p2       idle wait 130.467 s; start 20:14:31; end 20:43:29; 29.0 min; re-run waves 4
+  C4-RAPIER-p0   idle wait 130.495 s; start 20:43:29; end 21:01:10; 17.7 min; re-run waves 3
+  C4-RAPIER-p1   idle wait 130.458 s; start 21:01:10; end 21:12:35; 11.4 min; re-run waves 1
+  C4-RAPIER-p2   idle wait 130.488 s; start 21:12:35; end 21:22:09; 9.6 min; re-run waves 1
+  C4-G5-p0       idle wait 130.476 s; start 21:22:09; end 21:28:10; 6.0 min; re-run waves 1
+  C4-G5-p1       idle wait 130.456 s; start 21:28:10; end 21:34:06; 5.9 min; re-run waves -
+  C4-G5-p2       idle wait 130.478 s; start 21:34:06; end 21:40:51; 6.7 min; re-run waves 1
+  C4-BR-p0       idle wait 130.485 s; start 21:40:51; end ABORTED; -; re-run waves -
+  idle waits total 21.7 min
+  window start 19:13:54
+  2026-09-30T19:59:09.617+03:00 C4-AB-p0: re-run stage ended after 1 wave(s) (allowance spent (425 s = max(0.5 x pass wall, 4 waves x 1.3 x the longest process))); 30 pass-cell(s) short of their slots (k_clean < k_target; K < 3 does not gate): [('C4-JA', 'parent', 1, 2, 3), ('C4-JA', 'parent', 8, 1, 3), ('C4-JA', 'parent', 16, 2, 
+  2026-09-30T22:09:16.632+03:00   quiet budget exhausted before C4-BR#g4r8b W=0; running the idle rule
+  2026-09-30T22:16:27.610+03:00   C4-BR-p0 r2 [  8] C4-BR#g4r8b W=0: ABORTED (machine never idle (wait_idle exit 3))
+  2026-09-30T22:16:27.669+03:00 WINDOW END exit 3: ABORT in C4-BR-p0: machine never idle (wait_idle exit 3); counters {'timed': 695, 'rerun': 112, 'warm': 12, 'voided_processes': 0, 'r4_differ': 0}; binaries after all match
+
+# 4. C4-BR (NOT analysed: its only pass has no pass_done record)
+  r0 g4rT   exit 0 aborted None contaminated False
+  r0 g4r8b  exit 0 aborted None contaminated False
+  r0 g4r7   exit 0 aborted None contaminated False
+  r1 g4rT   exit 0 aborted None contaminated False
+  r1 g4r8b  exit 0 aborted None contaminated False
+  r1 g4r7   exit 0 aborted None contaminated False
+  r2 g4rT   exit 0 aborted None contaminated True
+  r2 g4r8b  exit None aborted machine never idle (wait_idle exit 3) contaminated None
+  pass_done for C4-BR: False
+
+# 5. The last idle attempt (wait_log.txt, from 22:09)
+  # wait_idle9a.ps1 start 2026-09-30T22:09:17.1970998+03:00; poll every 60 s, max 30 polls; quiet = build procs 0 AND lane-target procs 0 AND cpu10 < 5 % AND 100 <= proc count <= 999; need 3 consecutive
+  poll 1 22:09:17 cpu10 88.99 % D_free 5 GB top steam(9412)=51.16s
+  poll 2 22:10:17 cpu10 71.12 % D_free 5 GB top steam(9412)=29.83s
+  poll 3 22:11:17 cpu10 57.38 % D_free 5 GB top steam(9412)=27.94s
+  poll 4 22:12:17 cpu10 55.40 % D_free 5 GB top steam(9412)=48.95s
+  poll 5 22:13:17 cpu10 44.08 % D_free 5 GB top steam(9412)=16.25s
+  poll 6 22:14:17 cpu10 45.79 % D_free 5 GB top steam(9412)=29.63s
+  poll 7 22:15:17 cpu10 10.08 % D_free 5 GB top steamwebhelper(20424)=4.47s
+  poll 8 22:16:17 cpu10 11.55 % D_free 0.1 GB top steamwebhelper(20424)=3.64s
+  # STOP: D: free 0.1 GB < 2 GB at 2026-09-30T22:16:27.5685599+03:00
+  STOP flag mtime 22:03:29

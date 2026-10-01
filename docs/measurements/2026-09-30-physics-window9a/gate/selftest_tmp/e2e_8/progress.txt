@@ -1,0 +1,2 @@
+03:07:36 re-run rule rehearsal RERUN-T p0: 1 pass-cell(s) with unclean slots after the re-run stage: RR-a#tip@W1 K=2/3
+03:07:36 re-run rule rehearsal RR-a p0 done

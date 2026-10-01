@@ -1,0 +1,112 @@
+# C4-CGU validity (run tag 033740)
+records in block: 152; process records 119 (timed 113, warm-ups 6); passcell 30; pass_done 3 -> passes [(0, 0), (1, 0), (2, 0)]
+run tags of block records: Counter({'033740': 152})
+voided records in block: 0
+originals 90, re-runs 23, deepest re-run 2
+
+## 1. Binaries: every record's exe and sha256 against its key's pin
+tip: pin(rows) 8d6e7d4173857ca8.. pin(const) 8d6e7d4173857ca8.. SHA256SUMS 8d6e7d4173857ca8.. file-now 8d6e7d4173857ca8.. manifest pin 8d6e7d4173857ca8.. manifest sha 8d6e7d4173857ca8.. all equal: True
+tipcgu1: pin(rows) 3e1f72babf769872.. pin(const) 3e1f72babf769872.. SHA256SUMS 3e1f72babf769872.. file-now 3e1f72babf769872.. manifest pin 3e1f72babf769872.. manifest sha 3e1f72babf769872.. all equal: True
+process records checked 119 (incl. warm-ups and re-runs): sha == pin AND exe filename == the key exe AND role == key AND commit field: 119 OK, 0 BAD []
+per key: {('tip', '8d6e7d41'): 61, ('tipcgu1', '3e1f72ba'): 58}
+the two pins differ: True
+
+## 2. Poses: every process (incl. warm-ups, re-runs, unclean) against JT500
+JT500 fixture hash 0x30c5438bc6ad9ffa, 64480 bytes. pose_hash == fixture AND expect_pose match AND pose.bin bytes == fixture: 119 of 119; bad []
+void_steps != 0: 0; exit != 0: 0; hang: 0; driver invalid: 0
+profile_name in SUMMARY (a runner label): {('tip', 'dev'): 61, ('tipcgu1', 'dev'): 58}
+final_manifolds / final_pairs: {(4468, 9545): 119}
+
+## 3. Independent validity (lib9a.load_process), clean (ruling 8), slot rule
+timed processes in closed passes: 113; independently invalid: 0 []
+unclean: 23; used slots 90 (originals 70, re-runs 20); dropped 0
+unclean reasons (a process may carry several): {'witness': 23, 'receipt after': 1}
+my clean flag vs the driver contaminated flag: disagree on 0 []
+
+pass-cell K (mine vs driver k_clean):
+  p0 tip      W1 : K mine 3 driver 3 gates True short False reruns 1
+  p0 tip      W2 : K mine 3 driver 3 gates True short False reruns 0
+  p0 tip      W4 : K mine 3 driver 3 gates True short False reruns 0
+  p0 tip      W8 : K mine 3 driver 3 gates True short False reruns 0
+  p0 tip      W16: K mine 3 driver 3 gates True short False reruns 3
+  p0 tipcgu1  W1 : K mine 3 driver 3 gates True short False reruns 1
+  p0 tipcgu1  W2 : K mine 3 driver 3 gates True short False reruns 1
+  p0 tipcgu1  W4 : K mine 3 driver 3 gates True short False reruns 0
+  p0 tipcgu1  W8 : K mine 3 driver 3 gates True short False reruns 0
+  p0 tipcgu1  W16: K mine 3 driver 3 gates True short False reruns 1
+  p1 tip      W1 : K mine 3 driver 3 gates True short False reruns 1
+  p1 tip      W2 : K mine 3 driver 3 gates True short False reruns 1
+  p1 tip      W4 : K mine 3 driver 3 gates True short False reruns 0
+  p1 tip      W8 : K mine 3 driver 3 gates True short False reruns 1
+  p1 tip      W16: K mine 3 driver 3 gates True short False reruns 2
+  p1 tipcgu1  W1 : K mine 3 driver 3 gates True short False reruns 0
+  p1 tipcgu1  W2 : K mine 3 driver 3 gates True short False reruns 0
+  p1 tipcgu1  W4 : K mine 3 driver 3 gates True short False reruns 0
+  p1 tipcgu1  W8 : K mine 3 driver 3 gates True short False reruns 1
+  p1 tipcgu1  W16: K mine 3 driver 3 gates True short False reruns 1
+  p2 tip      W1 : K mine 3 driver 3 gates True short False reruns 0
+  p2 tip      W2 : K mine 3 driver 3 gates True short False reruns 0
+  p2 tip      W4 : K mine 3 driver 3 gates True short False reruns 2
+  p2 tip      W8 : K mine 3 driver 3 gates True short False reruns 0
+  p2 tip      W16: K mine 3 driver 3 gates True short False reruns 2
+  p2 tipcgu1  W1 : K mine 3 driver 3 gates True short False reruns 0
+  p2 tipcgu1  W2 : K mine 3 driver 3 gates True short False reruns 4
+  p2 tipcgu1  W4 : K mine 3 driver 3 gates True short False reruns 0
+  p2 tipcgu1  W8 : K mine 3 driver 3 gates True short False reruns 0
+  p2 tipcgu1  W16: K mine 3 driver 3 gates True short False reruns 1
+K mismatches: 0 of 30; pass-cells with K < 3: 0
+used re-runs per cell: {('tipcgu1', 16): 3, ('tip', 16): 6, ('tipcgu1', 2): 3, ('tipcgu1', 1): 1, ('tip', 1): 2, ('tip', 8): 1, ('tipcgu1', 8): 1, ('tip', 2): 1, ('tip', 4): 2}
+
+## 4. Order: which exe ran first in each (pass, round, W) pair of ORIGINALS (executed order by seq), and the used pairs
+original pairs 45; non-adjacent or malformed pairs: []
+first-of-pair by pass: {(0, 'tipcgu1'): 15, (1, 'tip'): 15, (2, 'tipcgu1'): 15}  (expected: p0 and p2 tipcgu1 first, p1 tip first, 30 to 15)
+W order of round 0 by pass: {0: [16, 8, 4, 2, 1], 1: [1, 2, 4, 8, 16], 2: [16, 8, 4, 2, 1]}
+used (pass, round, W) pairs: 45; both members originals (adjacent): 29; at least one member a re-run (not adjacent: re-run at the end of its pass): 16
+  non-adjacent used pair p0 r0 W1: start gap 7 s, {'tipcgu1': 'rerun', 'tip': 'rerun'}
+  non-adjacent used pair p0 r0 W2: start gap 163 s, {'tipcgu1': 'rerun', 'tip': 'original'}
+  non-adjacent used pair p0 r0 W16: start gap 6 s, {'tipcgu1': 'rerun', 'tip': 'rerun'}
+  non-adjacent used pair p0 r2 W16: start gap 105 s, {'tipcgu1': 'original', 'tip': 'rerun'}
+  non-adjacent used pair p1 r1 W1: start gap 123 s, {'tip': 'rerun', 'tipcgu1': 'original'}
+  non-adjacent used pair p1 r1 W8: start gap 6 s, {'tip': 'rerun', 'tipcgu1': 'rerun'}
+  non-adjacent used pair p1 r1 W16: start gap 91 s, {'tip': 'rerun', 'tipcgu1': 'original'}
+  non-adjacent used pair p1 r2 W2: start gap 69 s, {'tip': 'rerun', 'tipcgu1': 'original'}
+  non-adjacent used pair p1 r2 W16: start gap 6 s, {'tip': 'rerun', 'tipcgu1': 'rerun'}
+  non-adjacent used pair p2 r0 W2: start gap 195 s, {'tipcgu1': 'rerun', 'tip': 'original'}
+  non-adjacent used pair p2 r0 W4: start gap 176 s, {'tipcgu1': 'original', 'tip': 'rerun'}
+  non-adjacent used pair p2 r0 W16: start gap 195 s, {'tipcgu1': 'original', 'tip': 'rerun'}
+  non-adjacent used pair p2 r1 W16: start gap 149 s, {'tipcgu1': 'original', 'tip': 'rerun'}
+  non-adjacent used pair p2 r2 W2: start gap 72 s, {'tipcgu1': 'rerun', 'tip': 'original'}
+  non-adjacent used pair p2 r2 W4: start gap 72 s, {'tipcgu1': 'original', 'tip': 'rerun'}
+  non-adjacent used pair p2 r2 W16: start gap 84 s, {'tipcgu1': 'rerun', 'tip': 'original'}
+
+## 5. Receipts and timeline of the block
+p0: 03:40:01-03:44:59; processes 39 (warm-ups 2, re-runs 7); used: receipt before median 1.23 max 4.17, after median 1.23 max 3.75, witness median 0.57 max 1.86; witness median over all timed 0.96
+p1: 03:47:25-03:51:31; processes 39 (warm-ups 2, re-runs 7); used: receipt before median 1.08 max 3.16, after median 1.12 max 3.16, witness median 0.44 max 1.95; witness median over all timed 0.69
+p2: 03:53:57-03:58:16; processes 41 (warm-ups 2, re-runs 9); used: receipt before median 1.57 max 3.22, after median 1.10 max 3.22, witness median 0.47 max 1.77; witness median over all timed 0.82
+top other process on unclean timed runs: {'claude.exe': 23}
+  2026-10-01T03:37:40.922+03:00 C4-CGU-p0: idle rule (wait_idle9a.ps1, up to 30 polls)
+  2026-10-01T03:39:51.395+03:00 C4-CGU-p0: idle reached; {'time': '2026-10-01T03:39:51.394+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+  2026-10-01T03:40:01.461+03:00 C4-CGU-p0: opening receipt 3.91% (build procs busy [], presence {'build': [], 'lane': []})
+  2026-10-01T03:44:18.957+03:00 C4-CGU-p0: re-run wave 1: 6 slot(s) unclean: [(0, 'C4-JDcgu', 'tipcgu1', 16, 'contaminated'), (0, 'C4-JDcgu', 'tip', 16, 'contaminated'), (0, 'C4-JDcgu', 'tipcgu1', 2, 'c
+  2026-10-01T03:44:58.785+03:00 C4-CGU-p0: re-run wave 2: 1 slot(s) unclean: [(2, 'C4-JDcgu', 'tip', 16, 'contaminated')]
+  2026-10-01T03:45:05.002+03:00 C4-CGU-p0: re-run stage ended after 2 wave(s); 0 pass-cell(s) short of their slots (k_clean < k_target; K < 3 does not gate): []
+  2026-10-01T03:45:05.004+03:00 C4-CGU-p1: idle rule (wait_idle9a.ps1, up to 30 polls)
+  2026-10-01T03:47:15.445+03:00 C4-CGU-p1: idle reached; {'time': '2026-10-01T03:47:15.445+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+  2026-10-01T03:47:25.508+03:00 C4-CGU-p1: opening receipt 2.52% (build procs busy [], presence {'build': [], 'lane': []})
+  2026-10-01T03:50:52.302+03:00 C4-CGU-p1: re-run wave 1: 7 slot(s) unclean: [(1, 'C4-JDcgu', 'tip', 1, 'contaminated'), (1, 'C4-JDcgu', 'tip', 8, 'contaminated'), (1, 'C4-JDcgu', 'tipcgu1', 8, 'contami
+  2026-10-01T03:51:36.887+03:00 C4-CGU-p1: re-run stage ended after 1 wave(s); 0 pass-cell(s) short of their slots (k_clean < k_target; K < 3 does not gate): []
+  2026-10-01T03:51:36.888+03:00 C4-CGU-p2: idle rule (wait_idle9a.ps1, up to 30 polls)
+  2026-10-01T03:53:47.335+03:00 C4-CGU-p2: idle reached; {'time': '2026-10-01T03:53:47.335+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+  2026-10-01T03:53:57.398+03:00 C4-CGU-p2: opening receipt 0.37% (build procs busy [], presence {'build': [], 'lane': []})
+  2026-10-01T03:57:24.198+03:00 C4-CGU-p2: re-run wave 1: 7 slot(s) unclean: [(0, 'C4-JDcgu', 'tip', 16, 'contaminated'), (0, 'C4-JDcgu', 'tip', 4, 'contaminated'), (0, 'C4-JDcgu', 'tipcgu1', 2, 'contam
+  2026-10-01T03:58:08.485+03:00 C4-CGU-p2: re-run wave 2: 2 slot(s) unclean: [(0, 'C4-JDcgu', 'tipcgu1', 2, 'contaminated'), (2, 'C4-JDcgu', 'tipcgu1', 2, 'contaminated')]
+  2026-10-01T03:58:21.737+03:00 C4-CGU-p2: re-run stage ended after 2 wave(s); 0 pass-cell(s) short of their slots (k_clean < k_target; K < 3 does not gate): []
+
+## 6. Args: C4-JDcgu vs C4-JD (rows), and per record (output paths stripped)
+row args C4-JDcgu ['--scene', 'jolt', '--gap', '0.5', '--cfg', 'default', '--sleeping', 'off'] == C4-JD ['--scene', 'jolt', '--gap', '0.5', '--cfg', 'default', '--sleeping', 'off']: True
+distinct stripped arg vectors: 5 (5 W values); both binaries identical at each W: True
+C4-AB C4-JD#tip records 56: exe sha {'8d6e7d41': 56}; stripped args equal to C4-CGU at the same W: True
+
+## 7. Pre-registration
+manifest generated 2026-10-01T03:37:40.694+03:00; first C4-CGU process start 2026-10-01T03:40:01.462+03:00; claim sentence present in the manifest: True
+row metric windows [[100, 500], [0, 500]]; PREP addendum: [100,500) PRIMARY, [0,500) beside

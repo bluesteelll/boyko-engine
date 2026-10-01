@@ -1,0 +1,19 @@
+## 6. The recipe read in rows (post hoc; the pre-registered reading uses the bench label n, as window 8b did)
+- uniform: label LO 128 / HI 136 = rows 128 / 136
+- disparity: label LO 128 / HI 136 = rows 132 / 140
+- in rows: TREE_BRUTE_MAX_ROWS = min LO = 128, AUTO_TREE_LO/HI = 128/140 (label reading: 128 / 128/136)
+- log-log crossover in rows: {'uniform': 127.6, 'disparity': 134.5}
+
+## 7. Arithmetic: all_pairs at the window-7 binary speed (BR, 144: g4rT/g4r7 = 1.1289 uniform, 1.1239 disparity; applied to every size - an ASSUMPTION, not measured below 144)
+- uniform: scaled all_pairs/tree 96 0.581 104 0.660 112 0.711 120 0.779 128 0.892 136 0.930 144 0.989 152 1.043 160 1.109; log-log crossover 145.6
+- disparity: scaled all_pairs/tree 96 0.583 104 0.617 112 0.659 120 0.724 128 0.868 136 0.938 144 0.960 152 1.002 160 1.059; log-log crossover 151.6
+
+## 8. C4-BR tree arm, g4rT/g4r7 and g4r8b/g4r7 at 144 and 256 (diagnostic, n=3 each; another group owns BR)
+- uniform 144: all_pairs g4r8b/g4r7 1.1302 YYY; all_pairs g4rT/g4r7 1.1289 YYY; tree g4r8b/g4r7 1.0093 nnn; tree g4rT/g4r7 1.0092 nnn
+- uniform 256: all_pairs g4r8b/g4r7 1.1184 YYY; all_pairs g4rT/g4r7 1.1183 YYY; tree g4r8b/g4r7 0.9934 nnn; tree g4rT/g4r7 1.0038 nnn
+- disparity 144: all_pairs g4r8b/g4r7 1.1200 YYY; all_pairs g4rT/g4r7 1.1239 YYY; tree g4r8b/g4r7 1.0218 YYY; tree g4rT/g4r7 1.0265 YYn
+- disparity 256: all_pairs g4r8b/g4r7 1.1145 YYY; all_pairs g4rT/g4r7 1.1177 YYY; tree g4r8b/g4r7 1.0270 YYY; tree g4rT/g4r7 1.0239 nnn
+
+## 9. Other-process CPU during the used G4 / kd processes (witness %, and the top other process CPU-seconds)
+- C4-G4: witness 0.98-1.06 % (median 1.04); top-5 others summed by name per process (CPU-s per wall-s = cores): claude.exe median 0.144 max 0.145 (in 9 of 9); NVIDIA Overlay.exe median 0.009 max 0.009 (in 9 of 9)
+- C4-G4-kd: witness 1.23-1.29 % (median 1.23); top-5 others summed by name per process (CPU-s per wall-s = cores): claude.exe median 0.172 max 0.182 (in 3 of 3); NVIDIA Overlay.exe median 0.010 max 0.012 (in 3 of 3); FvContainer.exe median 0.005 max 0.005 (in 1 of 3)

@@ -1,0 +1,65 @@
+== re-runs ==
+p0 seq 01 tipcgu1 W16 rerun_no 1 clean=True used=True top_other=claude.exe
+p0 seq 02 tip W16 rerun_no 1 clean=True used=True top_other=None
+p0 seq 07 tipcgu1 W2 rerun_no 1 clean=True used=True top_other=NVIDIA Overlay.exe
+p0 seq 09 tipcgu1 W1 rerun_no 1 clean=True used=True top_other=claude.exe
+p0 seq 10 tip W1 rerun_no 1 clean=True used=True top_other=claude.exe
+p0 seq 22 tip W16 rerun_no 1 clean=False used=False top_other=claude.exe
+p0 seq 22 tip W16 rerun_no 2 clean=True used=True top_other=claude.exe
+p1 seq 11 tip W1 rerun_no 1 clean=True used=True top_other=claude.exe
+p1 seq 17 tip W8 rerun_no 1 clean=True used=True top_other=claude.exe
+p1 seq 18 tipcgu1 W8 rerun_no 1 clean=True used=True top_other=claude.exe
+p1 seq 19 tip W16 rerun_no 1 clean=True used=True top_other=claude.exe
+p1 seq 23 tip W2 rerun_no 1 clean=True used=True top_other=claude.exe
+p1 seq 29 tip W16 rerun_no 1 clean=True used=True top_other=claude.exe
+p1 seq 30 tipcgu1 W16 rerun_no 1 clean=True used=True top_other=claude.exe
+p2 seq 02 tip W16 rerun_no 1 clean=True used=True top_other=claude.exe
+p2 seq 06 tip W4 rerun_no 1 clean=True used=True top_other=claude.exe
+p2 seq 07 tipcgu1 W2 rerun_no 1 clean=False used=False top_other=claude.exe
+p2 seq 07 tipcgu1 W2 rerun_no 2 clean=True used=True top_other=claude.exe
+p2 seq 12 tip W16 rerun_no 1 clean=True used=True top_other=claude.exe
+p2 seq 21 tipcgu1 W16 rerun_no 1 clean=True used=True top_other=nvcontainer.exe
+p2 seq 26 tip W4 rerun_no 1 clean=True used=True top_other=claude.exe
+p2 seq 27 tipcgu1 W2 rerun_no 1 clean=False used=False top_other=claude.exe
+p2 seq 27 tipcgu1 W2 rerun_no 2 clean=True used=True top_other=claude.exe
+unclean attempts (each triggers a re-run): 23 witness-unclean among them: 23 top other process names: {'claude.exe': 23}
+pairs with a re-run member: 16  non-adjacent used pairs: 12  gaps s min/max: 69.2 195.4
+original pairs adjacent by seq: 45 of 45  order: {(0, 'cgu1 first'): 15, (1, 'tip first'): 15, (2, 'cgu1 first'): 15}
+
+== paired cgu1/cgu16 per (pass, round, W), window [100,500) ==
+W1  paired median 0.9937 IQR 0.40 % SEmed 0.37 % mean 0.9958 cgu1 faster 7/9 sign p 0.180  ratios 0.9961 0.9894 1.0027 0.9943 0.9937 1.0159 0.9851 0.9930 0.9921
+W2  paired median 1.0009 IQR 0.28 % SEmed 0.68 % mean 1.0008 cgu1 faster 3/9 sign p 0.508  ratios 0.9946 0.9655 0.9999 1.0009 1.0261 1.0001 1.0020 1.0027 1.0156
+W4  paired median 0.9988 IQR 0.94 % SEmed 0.38 % mean 0.9975 cgu1 faster 5/9 sign p 1.000  ratios 1.0038 0.9934 0.9882 1.0008 0.9946 0.9988 1.0126 0.9825 1.0028
+W8  paired median 1.0022 IQR 0.71 % SEmed 0.31 % mean 0.9991 cgu1 faster 3/9 sign p 0.508  ratios 1.0034 1.0055 0.9851 1.0009 0.9886 1.0061 1.0022 0.9963 1.0032
+W16 paired median 1.0002 IQR 1.94 % SEmed 0.97 % mean 1.0054 cgu1 faster 3/9 sign p 0.508  ratios 0.9826 1.0185 1.0002 1.0001 1.0468 1.0075 1.0262 0.9678 0.9991
+all W: n 45 geomean 0.9996 cgu1 faster 21/45 sign p 0.766
+
+== paired cgu1/cgu16 per (pass, round, W), window [0,500) ==
+W1  paired median 0.9943 IQR 0.77 % SEmed 0.31 % mean 0.9929 cgu1 faster 8/9 sign p 0.039  ratios 0.9943 0.9893 0.9956 0.9870 0.9951 1.0088 0.9875 0.9950 0.9833
+W2  paired median 1.0014 IQR 0.91 % SEmed 0.69 % mean 0.9985 cgu1 faster 4/9 sign p 1.000  ratios 0.9867 0.9637 0.9983 1.0014 1.0245 1.0052 1.0036 0.9961 1.0067
+W4  paired median 0.9968 IQR 0.71 % SEmed 0.36 % mean 0.9998 cgu1 faster 5/9 sign p 1.000  ratios 1.0100 0.9961 0.9907 1.0011 0.9968 0.9957 1.0154 0.9894 1.0029
+W8  paired median 1.0029 IQR 0.78 % SEmed 0.29 % mean 1.0022 cgu1 faster 4/9 sign p 1.000  ratios 1.0048 1.0035 0.9937 1.0086 0.9949 1.0154 0.9970 1.0029 0.9987
+W16 paired median 1.0023 IQR 1.26 % SEmed 0.70 % mean 1.0035 cgu1 faster 4/9 sign p 1.000  ratios 0.9888 1.0105 0.9990 1.0023 1.0330 1.0100 1.0155 0.9740 0.9979
+all W: n 45 geomean 0.9993 cgu1 faster 25/45 sign p 0.551
+
+== W8 / W16 levels, [100,500), per pair (tip/cgu1) ==
+W8 p0 r0: 1.9096/1.9162  r1: 1.8188/1.8289  r2: 1.8981/1.8699
+W8 p1 r0: 1.8029/1.8046  r1: 1.8379/1.8169  r2: 1.8897/1.9012
+W8 p2 r0: 1.8884/1.8926  r1: 1.8071/1.8004  r2: 1.8888/1.8948
+W16 p0 r0: 2.1576/2.1201  r1: 2.1030/2.1419  r2: 2.1982/2.1986
+W16 p1 r0: 2.1178/2.1180  r1: 2.0734/2.1705  r2: 2.2025/2.2191
+W16 p2 r0: 2.1488/2.2052  r1: 2.2059/2.1348  r2: 2.2116/2.2096
+
+== re-run bias ([100,500)) ==
+vs cell originals: n 20 median 0.999 above 1: 10 | vs pass-cell originals: n 20 median 0.9944 above 1: 7
+
+== originals-only (post hoc) ==
+[100,500) W1 0.9932 K [2, 2, 3]/[2, 3, 3] pooled nnn NOT CLAIMED | W2 1.0004 K [3, 2, 3]/[2, 3, 1] pooled nnn NOT CLAIMED | W4 0.9990 K [3, 3, 1]/[3, 3, 3] pooled nnn NOT CLAIMED | W8 0.9961 K [3, 2, 3]/[3, 2, 3] pooled nnn NOT CLAIMED | W16 1.0181 K [1, 1, 1]/[2, 2, 2] pooled nnn NOT CLAIMED
+[0,500) W1 0.9914 K [2, 2, 3]/[2, 3, 3] pooled nnn NOT CLAIMED | W2 1.0020 K [3, 2, 3]/[2, 3, 1] pooled nnn NOT CLAIMED | W4 1.0026 K [3, 3, 1]/[3, 3, 3] pooled nnn NOT CLAIMED | W8 1.0019 K [3, 2, 3]/[3, 2, 3] pooled nnn NOT CLAIMED | W16 1.0093 K [1, 1, 1]/[2, 2, 2] pooled nnn NOT CLAIMED
+
+== timeline / receipts ==
+first process start ('2026-10-01T03:40:01.462+03:00', 0, 'warmup', 'tip', 8)  last ('2026-10-01T03:58:15.110+03:00', 2, 'rerun', 'tipcgu1', 2)
+manifest has claim sentence: True  manifest keys: ['generated', 'rows_json', 'rows_extra', 'binaries', 'fixtures', 'protocol', 'blocks', 'cutoff', 'test', 'resume']
+p0 used n 30 receipt_before med 1.23 receipt_after med 1.23 witness med 0.57
+p1 used n 30 receipt_before med 1.08 receipt_after med 1.12 witness med 0.44
+p2 used n 30 receipt_before med 1.57 receipt_after med 1.10 witness med 0.47

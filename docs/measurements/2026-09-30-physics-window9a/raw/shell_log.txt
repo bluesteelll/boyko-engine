@@ -1,0 +1,6 @@
+2026-09-30 19:13:54 run_window9a.sh start: --cutoff 00:26
+2026-09-30 22:16:27 driver exit 3
+2026-09-30 22:16:28 WINDOW_DONE written: exit 3 ABORT in C4-BR-p0: machine never idle (wait_idle exit 3) 
+2026-10-01 03:37:40 run_window9a.sh start: --resume --cutoff 07:03
+2026-10-01 05:48:56 driver exit 0
+2026-10-01 05:48:57 WINDOW_DONE written: exit 0 complete 

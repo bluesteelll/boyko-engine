@@ -1,0 +1,5 @@
+MUTATION waves1: exit 1 ; failing e2e cases: 3 ; other failing: 1
+MUTATION gatesTrue: exit 1 ; failing e2e cases: 2 ; other failing: 2
+MUTATION rerunall: exit 1 ; failing e2e cases: 5 ; other failing: 1
+MUTATION nounclean_counted: exit 1 ; failing e2e cases: 2 ; other failing: 2
+done

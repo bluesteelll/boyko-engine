@@ -1,0 +1,43 @@
+{
+ "_comment": "TEMPLATE for the reserved RAPIER block (PREP.md 'Adding the Rapier rows'). Copy to rows9a.extra.json and edit; the driver merges it over rows9a.json at start (binaries by key, rows by id, blocks by name, ordered by priority). Fill every '<FILL: ...>' from D:/tmp/rapier-parity/window9a_rows.md; a '<FILL' left in place makes the gate and the driver RED (the pose_hash check cannot pass), it never passes silently. The exe must also get a line in bin/SHA256SUMS and its sha256 in sha256_pin. Keys shown are the ones the 2026-09-30 pre-fix harness prints (SUMMARY: engine, cfg, install, workers, target_env, void, voids, threads.pool_threads_min/max, pose_hash, receipt_gates, rapier_version).",
+ "binaries": {
+  "rapier": {
+   "exe": "bin/rapier_parity_simd8_<FILL: short sha>.exe",
+   "commit": "<FILL: rapier-parity source state, e.g. the SOURCES.sha256 line>",
+   "kind": "rapier",
+   "sha256_pin": "<FILL: sha256 of the exe>",
+   "what": "Rapier 0.36 parity harness, simd8 arm, run by path"
+  }
+ },
+ "blocks": [
+  {
+   "name": "C4-RAPIER",
+   "item": "Rapier 0.36 vs boyko J-T",
+   "priority": 4.5,
+   "warmup": ["RAP-matched", "rapier", 8]
+  }
+ ],
+ "rows": [
+  {
+   "id": "RAP-matched",
+   "blocks": ["C4-RAPIER"],
+   "kind": "rapier",
+   "binaries": ["rapier"],
+   "args": ["--cfg", "matched", "--install", "loop"],
+   "workers": [1, 2, 4, 8, 16],
+   "steps": 500,
+   "window": [0, 500],
+   "metric_windows": [[0, 100], [100, 500]],
+   "armed": false,
+   "pose_ref": null,
+   "expect_summary": {
+    "engine": "rapier3d", "cfg": "matched", "install": "loop", "workers": "$W", "target_env": "msvc",
+    "void": false, "voids": [],
+    "threads.pool_threads_min": "$W", "threads.pool_threads_max": "$W",
+    "pose_hash": "<FILL: the final-pose hash window9a_rows.md gives for this cfg (identical at every W for the simd8 arm)>"
+   },
+   "expect_present": ["receipt_gates", "rapier_version"],
+   "note": "one row per cfg: copy this row for rapier-default (id RAP-default, --cfg rapier-default, its own pose_hash). To run a Rapier row adjacent to J-D each round instead of in its own block, set \"blocks\": [\"C4-AB\"] (and drop the block above): it then shares C4-AB's K 9 and passes."
+  }
+ ]
+}

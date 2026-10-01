@@ -1,0 +1,4 @@
+exit 3
+ABORT in C4-BR-p0: machine never idle (wait_idle exit 3)
+2026-09-30T22:16:27.671+03:00
+counts exit 0 (raw/counts.txt)

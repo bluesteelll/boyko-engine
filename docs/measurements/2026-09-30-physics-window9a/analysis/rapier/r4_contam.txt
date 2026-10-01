@@ -1,0 +1,6 @@
+C4-AB-p0: processes 67, unclean 42; top offenders [('Telegram.exe', 21), ('claude.exe', 7), ('receipt_after:claude.exe', 7), ('browser.exe', 4), ('receipt_after:Telegram.exe', 3), ('receipt_after:browser.exe', 3)]
+C4-AB-p1: processes 48, unclean 0; top offenders []
+C4-AB-p2: processes 65, unclean 17; top offenders [('browser.exe', 12), ('receipt_after:browser.exe', 4), ('receipt_after:claude.exe', 2), ('explorer.exe', 1), ('claude.exe', 1), ('receipt_after:Telegram.exe', 1)]
+C4-RAPIER-p0: processes 91, unclean 31; top offenders [('claude.exe', 20), ('CurseForge.exe', 5), ('browser.exe', 4), ('receipt_after:claude.exe', 3), ('receipt_after:browser.exe', 3), ('Telegram.exe', 1)]
+C4-RAPIER-p1: processes 62, unclean 2; top offenders [('sdiagnhost.exe', 1), ('receipt_after:cleanmgr.exe', 1), ('receipt_after:claude.exe', 1)]
+C4-RAPIER-p2: processes 61, unclean 1; top offenders [('browser.exe', 1)]

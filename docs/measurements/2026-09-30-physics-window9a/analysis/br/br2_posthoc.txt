@@ -1,0 +1,59 @@
+## 1. The same exe in two windows (cross-window: no claim; flags i/s/r printed for scale only)
+### g4r7: 9a / window 7 wave 2 (Q3)
+- bp_g4_uniform/all_pairs/144    12.421 [12.375-12.450] -> 12.440 [12.413-12.575]: 1.0016 (+0.16 %) nnn
+- bp_g4_uniform/all_pairs/256    37.992 [37.828-38.165] -> 37.921 [37.900-37.989]: 0.9981 (-0.19 %) nnn
+- bp_g4_disparity/all_pairs/144  14.757 [14.746-14.774] -> 14.741 [14.723-14.773]: 0.9989 (-0.11 %) nnn
+- bp_g4_disparity/all_pairs/256  42.475 [42.391-42.612] -> 42.535 [42.506-42.552]: 1.0014 (+0.14 %) nnn
+  all_pairs: median 1.0002, range 0.9981-1.0016
+- bp_g4_uniform/tree/144         12.327 [12.301-12.452] -> 12.475 [12.364-12.499]: 1.0120 (+1.20 %) nnn
+- bp_g4_uniform/tree/256         21.027 [20.997-21.111] -> 21.005 [20.900-21.044]: 0.9990 (-0.10 %) nnn
+- bp_g4_disparity/tree/144       14.863 [14.858-15.032] -> 14.950 [14.848-14.988]: 1.0059 (+0.59 %) nnn
+- bp_g4_disparity/tree/256       25.059 [25.036-25.212] -> 25.074 [25.053-25.088]: 1.0006 (+0.06 %) nnn
+  tree: median 1.0032, range 0.9990-1.0120
+### g4r8b: 9a / window 8b (F3-G4)
+- bp_g4_uniform/all_pairs/144    14.154 [14.151-14.329] -> 14.060 [14.024-14.066]: 0.9933 (-0.67 %) nnn sep
+- bp_g4_uniform/all_pairs/256    42.934 [42.899-43.355] -> 42.410 [42.392-42.424]: 0.9878 (-1.22 %) YYn sep
+- bp_g4_disparity/all_pairs/144  16.862 [16.668-16.904] -> 16.510 [16.489-16.566]: 0.9791 (-2.09 %) YYn sep
+- bp_g4_disparity/all_pairs/256  48.002 [47.874-48.365] -> 47.405 [47.394-47.424]: 0.9876 (-1.24 %) YYn sep
+  all_pairs: median 0.9877, range 0.9791-0.9933
+- bp_g4_uniform/tree/144         12.532 [12.446-12.585] -> 12.591 [12.489-12.708]: 1.0047 (+0.47 %) nnn
+- bp_g4_uniform/tree/256         21.120 [21.095-21.348] -> 20.866 [20.844-21.259]: 0.9880 (-1.20 %) nnn
+- bp_g4_disparity/tree/144       15.324 [15.309-15.600] -> 15.276 [15.253-15.316]: 0.9969 (-0.31 %) nnn
+- bp_g4_disparity/tree/256       25.751 [25.665-26.173] -> 25.751 [25.733-25.763]: 1.0000 (+0.00 %) nnn
+  tree: median 0.9984, range 0.9880-1.0047
+
+## 2. Decomposition of window 8b's cross-window shift on the 4 BR ids (log-additive: X87 = window term of g4r8b
+##    (8b / 9a) x binary term in 9a (g4r8b / g4r7) x window term of g4r7 (9a / window 7))
+- bp_g4_uniform/all_pairs/144    8b/7 1.1396 = window(g4r8b, 8b/9a) 1.0067 x binary(9a, g4r8b/g4r7) 1.1302 x window(g4r7, 9a/7) 1.0016 (check 1.1396); binary share of the log shift 93.7 %
+- bp_g4_uniform/all_pairs/256    8b/7 1.1301 = window(g4r8b, 8b/9a) 1.0124 x binary(9a, g4r8b/g4r7) 1.1184 x window(g4r7, 9a/7) 0.9981 (check 1.1301); binary share of the log shift 91.5 %
+- bp_g4_disparity/all_pairs/144  8b/7 1.1426 = window(g4r8b, 8b/9a) 1.0213 x binary(9a, g4r8b/g4r7) 1.1200 x window(g4r7, 9a/7) 0.9989 (check 1.1426); binary share of the log shift 85.0 %
+- bp_g4_disparity/all_pairs/256  8b/7 1.1301 = window(g4r8b, 8b/9a) 1.0126 x binary(9a, g4r8b/g4r7) 1.1145 x window(g4r7, 9a/7) 1.0014 (check 1.1301); binary share of the log shift 88.6 %
+  all_pairs medians: 8b/7 1.1348; binary 1.1192; window g4r8b 1.0125; window g4r7 1.0002
+- bp_g4_uniform/tree/144         8b/7 1.0166 = window(g4r8b, 8b/9a) 0.9954 x binary(9a, g4r8b/g4r7) 1.0093 x window(g4r7, 9a/7) 1.0120 (check 1.0166); binary share of the log shift 55.9 %
+- bp_g4_uniform/tree/256         8b/7 1.0044 = window(g4r8b, 8b/9a) 1.0122 x binary(9a, g4r8b/g4r7) 0.9934 x window(g4r7, 9a/7) 0.9990 (check 1.0044); binary share of the log shift -151.5 %
+- bp_g4_disparity/tree/144       8b/7 1.0310 = window(g4r8b, 8b/9a) 1.0032 x binary(9a, g4r8b/g4r7) 1.0218 x window(g4r7, 9a/7) 1.0059 (check 1.0310); binary share of the log shift 70.5 %
+- bp_g4_disparity/tree/256       8b/7 1.0276 = window(g4r8b, 8b/9a) 1.0000 x binary(9a, g4r8b/g4r7) 1.0270 x window(g4r7, 9a/7) 1.0006 (check 1.0276); binary share of the log shift 97.8 %
+  tree medians: 8b/7 1.0221; binary 1.0155; window g4r8b 1.0016; window g4r7 1.0032
+
+## 3. Per-round paired ratios (adjacent processes of one round; min / median / max over the 3 rounds)
+- all_pairs g4r8b/g4r7: u 144 1.1152/1.1302/1.1332; u 256 1.1159/1.1184/1.1194; d 144 1.1186/1.1213/1.1214; d 256 1.1138/1.1149/1.1153
+- all_pairs g4rT/g4r7: u 144 1.1168/1.1241/1.1313; u 256 1.1158/1.1183/1.1195; d 144 1.1190/1.1253/1.1317; d 256 1.1145/1.1173/1.1199
+- all_pairs g4rT/g4r8b: u 144 0.9946/0.9984/1.0014; u 256 1.0000/1.0000/1.0001; d 144 1.0004/1.0035/1.0092; d 256 0.9996/1.0031/1.0042
+- tree      g4r8b/g4r7: u 144 0.9992/1.0183/1.0186; u 256 0.9905/0.9984/1.0121; d 144 1.0218/1.0219/1.0272; d 256 1.0263/1.0269/1.0279
+- tree      g4rT/g4r7: u 144 1.0082/1.0092/1.0238; u 256 1.0019/1.0043/1.0442; d 144 1.0265/1.0311/1.0363; d 256 1.0219/1.0247/1.0917
+- tree      g4rT/g4r8b: u 144 0.9901/0.9908/1.0246; u 256 1.0059/1.0116/1.0317; d 144 1.0037/1.0046/1.0141; d 256 0.9951/0.9970/1.0637
+
+## 4. The all_pairs shift net of the tree control (ratio_all_pairs / ratio_tree, cell medians)
+- g4r8b/g4r7: 1.1198 1.1259 1.0961 1.0852; median 1.1080
+- g4rT/g4r7: 1.1185 1.1141 1.0949 1.0916; median 1.1045
+
+## 5. Per pair test (all_pairs = n(n-1)/2 sphere tests; uniform rows = n, disparity rows from the receipts)
+- uniform 144 (rows 144, 10296 tests): g4r7 1.2082, g4r8b 1.3655, g4rT 1.3639 ns per test
+- uniform 256 (rows 256, 32640 tests): g4r7 1.1618, g4r8b 1.2993, g4rT 1.2993 ns per test
+- disparity 144 (rows 148, 10878 tests): g4r7 1.3551, g4r8b 1.5177, g4rT 1.5230 ns per test
+- disparity 256 (rows 260, 33670 tests): g4r7 1.2633, g4r8b 1.4079, g4rT 1.4120 ns per test
+
+## 6. Static placement of all_pairs_into (M9 place.py over the bin/ byte copies; loop = object offsets 0xe0..0x192)
+- g4r7  all_pairs_into at RVA 0x92da0 (mod 64 = 32); loop head mod 64 = 0; loop spans 3 x 64-B lines, 6 x 32-B blocks; jcc crossing / ending on a 32-B boundary: 0
+- g4r8b all_pairs_into at RVA 0xab080 (mod 64 = 0); loop head mod 64 = 32; loop spans 4 x 64-B lines, 6 x 32-B blocks; jcc crossing / ending on a 32-B boundary: 0
+- g4rT  all_pairs_into at RVA 0xab080 (mod 64 = 0); loop head mod 64 = 32; loop spans 4 x 64-B lines, 6 x 32-B blocks; jcc crossing / ending on a 32-B boundary: 0

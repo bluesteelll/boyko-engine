@@ -1,0 +1,35 @@
+# 1. M7: J-D#tip not claimed slower (A = the AllPairs row, B = J-D#tip), [0,500) ms
+  C4-JDap#tip W1: A 6.1501 [6.0101-6.6297] n=7 (1/3/3) | B 4.5692 [4.4430-4.9939] n=7 (1/3/3) | B/A 0.7429 B-A -1.5809 | LETTER NOT CLAIMED [B<A] GATING-ONLY CLAIMED | p0 every J-D below every AllPairs: True | claimed slower in any reading: False
+  C4-JDap#tip W2: A 4.7129 [4.6224-4.7774] n=8 (2/3/3) | B 3.0706 [2.9863-3.1163] n=8 (2/3/3) | B/A 0.6515 B-A -1.6423 | LETTER NOT CLAIMED [B<A] GATING-ONLY CLAIMED STRONG | p0 every J-D below every AllPairs: True | claimed slower in any reading: False
+  C4-JDap#tip W4: A 3.9106 [3.8587-4.0755] n=7 (1/3/3) | B 2.2356 [2.1959-2.3091] n=7 (1/3/3) | B/A 0.5717 B-A -1.6750 | LETTER NOT CLAIMED [B<A] GATING-ONLY CLAIMED STRONG | p0 every J-D below every AllPairs: True | claimed slower in any reading: False
+  C4-JDap#tip W8: A 3.4851 [3.4581-3.5862] n=7 (1/3/3) | B 1.8277 [1.8135-2.0274] n=7 (1/3/3) | B/A 0.5244 B-A -1.6574 | LETTER NOT CLAIMED [B<A] GATING-ONLY CLAIMED STRONG | p0 every J-D below every AllPairs: True | claimed slower in any reading: False
+  C4-JDap#tip W16: A 3.7003 [3.6462-3.8975] n=8 (2/3/3) | B 2.0887 [2.0503-2.2770] n=9 (3/3/3) | B/A 0.5645 B-A -1.6116 | LETTER NOT CLAIMED [B<A] GATING-ONLY CLAIMED STRONG | p0 every J-D below every AllPairs: True | claimed slower in any reading: False
+  C4-JDpar#parent W1: A 6.2008 [6.0390-6.3550] n=8 (2/3/3) | B 4.5692 [4.4430-4.9939] n=7 (1/3/3) | B/A 0.7369 B-A -1.6316 | LETTER NOT CLAIMED [B<A] GATING-ONLY CLAIMED STRONG | p0 every J-D below every AllPairs: True | claimed slower in any reading: False
+  C4-JDpar#parent W2: A 4.6971 [4.6364-4.7735] n=8 (2/3/3) | B 3.0706 [2.9863-3.1163] n=8 (2/3/3) | B/A 0.6537 B-A -1.6265 | LETTER NOT CLAIMED [B<A] GATING-ONLY CLAIMED STRONG | p0 every J-D below every AllPairs: True | claimed slower in any reading: False
+  C4-JDpar#parent W4: A 3.8845 [3.8567-3.9813] n=7 (1/3/3) | B 2.2356 [2.1959-2.3091] n=7 (1/3/3) | B/A 0.5755 B-A -1.6489 | LETTER NOT CLAIMED [B<A] GATING-ONLY CLAIMED STRONG | p0 every J-D below every AllPairs: True | claimed slower in any reading: False
+  C4-JDpar#parent W8: A 3.5206 [3.4741-3.7428] n=7 (1/3/3) | B 1.8277 [1.8135-2.0274] n=7 (1/3/3) | B/A 0.5191 B-A -1.6929 | LETTER NOT CLAIMED [B<A] GATING-ONLY CLAIMED STRONG | p0 every J-D below every AllPairs: True | claimed slower in any reading: False
+  C4-JDpar#parent W16: A 3.7023 [3.6391-3.8934] n=8 (2/3/3) | B 2.0887 [2.0503-2.2770] n=9 (3/3/3) | B/A 0.5642 B-A -1.6136 | LETTER NOT CLAIMED [B<A] GATING-ONLY CLAIMED STRONG | p0 every J-D below every AllPairs: True | claimed slower in any reading: False
+  largest B-A over the 10 comparisons: -1.5809 ms (negative = J-D faster everywhere)
+
+# 2. Controls, parent (A) vs tip (B), [0,500)
+  C4-JA W1: B/A 0.9991 (-0.09 %) LETTER NOT CLAIMED GATING-ONLY NOT CLAIMED
+  C4-JA W8: B/A 1.0006 (+0.06 %) LETTER NOT CLAIMED GATING-ONLY NOT CLAIMED
+  C4-JA W16: B/A 0.9997 (-0.03 %) LETTER NOT CLAIMED GATING-ONLY NOT CLAIMED
+  C4-JT W1: B/A 1.0102 (+1.02 %) LETTER NOT CLAIMED GATING-ONLY NOT CLAIMED
+  C4-JT W8: B/A 0.9876 (-1.24 %) LETTER NOT CLAIMED GATING-ONLY NOT CLAIMED
+  C4-JT W16: B/A 0.9923 (-0.77 %) LETTER NOT CLAIMED GATING-ONLY NOT CLAIMED
+
+# 3. G5 bars through lib_g5 (median over steps [100,500), ms)
+  B1 W1: sum4 0.2502 [0.2486-0.2522] n=9 per pass [0.2506, 0.25, 0.2502]; bar 0.36; headroom 0.1098
+  B1 W8: sum4 0.2608 [0.2602-0.2617] n=9 per pass [0.2608, 0.2606, 0.261]; bar 0.35; headroom 0.0892
+  B2: SYS JD-armed 0.2611, JDap-armed 1.8390, dbp(8) +1.5779 (bar 1.03); per pass p0 +1.5780, p1 +1.5780, p2 +1.5773
+  t_q(W8) mean over steps 0.2076 ms; armed wall [100,500) 1.8586; share 0.1117; of the disarmed C4-JD#tip T(8) [100,500) 1.7878: 0.1161
+  S5 re-price (scale_design s6.5 formula as the G5 group used it: t_q x 0.745 - 0.01): 0.1447 ms
+
+# 4. The LETTER claim: ours/Jolt per manifold at W16 (A = Jolt, B = ours, [100,500))
+  scale 1.9001; ours/Jolt per manifold 1.5536; LETTER CLAIMED STRONG [B>A]; pooled YYY; passes YYY(K3/3) YYY(K3/3) YYY(K3/3)
+  Jolt W16 [0,500) process means: [2.344, 2.36, 2.361, 2.432, 2.454, 2.836, 2.916, 2.919, 2.936]
+
+# 5. Figures reported on different bases
+  ours T1/T8: C4-AB basis (J-D, [0,500)) 2.500; Rapier basis (J-T/J-D, [100,500)) 2.410
+  ours/Jolt W1: J-D [0,500) 0.4505; J-T [100,500) 0.4360
