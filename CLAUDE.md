@@ -440,7 +440,74 @@ In [.claude/agents/](.claude/agents/) the following are defined:
 
 The main Claude in the chat acts as the **orchestrator** — chooses the right agents for each task and runs the iteration loops.
 
-**Model routing** (set via each agent's `model:` frontmatter): **every role runs on Opus** — owner decision, 2026-07-26, and as of 2026-09-07 there is finally a MEASURED diff behind it rather than only a judgement.
+**Model routing — the current routing** (owner decision "both steps", 2026-09-30; rulings 5 and 7 of
+the section "After window 9a (2026-09-30)" of
+[`docs/physics/perf-campaign/levers/00-RULINGS.md`](docs/physics/perf-campaign/levers/00-RULINGS.md)).
+The `model:` frontmatter of all nine agent files stays `opus`; the orchestrator's lane scripts
+choose the tier per call, as below.
+
+- **`tester`: Sonnet 5.5**, from the lanes started after 2026-09-30. The lanes already running then
+  (tree-c4, v2-spec) were not switched mid-flight. Its GREEN is still crossed by the Opus
+  `code-reviewer`, which runs beside it.
+- **`developer`: Opus for kernel, `unsafe` and numerics work; Sonnet for mechanical work** — re-pins
+  by rule, doc and registry merges, window records.
+- **Sonnet 5.5 also takes** scouting and inventory, window preparation, the transcription of
+  finished results into docs, and re-runs of existing gates with exit-code reports, each checked by
+  an Opus verifier or a hard oracle (ruling 5 (a)).
+- **Opus: `architect`, `architecture-critic`, `code-reviewer`, `results-analyst` and every
+  verifier.** `researcher`, `project-analyst` and `doc-writer` keep their frontmatter, Opus; nothing
+  in the rulings moves them.
+- **`effort: low` on Opus is NOT used.** On the retrieval benchmark below it is the worst arm: 4
+  confidently wrong answers, against Sonnet 5.5's 1.
+- **The escape-rate watch.** A Sonnet tester GREEN that is later overturned by the code-reviewer or
+  by a window is logged. One escape that Opus would have caught reopens this routing.
+- **A tier change needs a measured diff:** at least ~25 items, with *confident-but-wrong* scored
+  separately from *missed*. The routing above rests on the two measurements of 2026-09-30; any
+  further move needs its own.
+
+**The measurements of 2026-09-30 — what moved the routing.** Both were run on this repository's own
+material, and both score the confident-but-wrong answer apart from the miss, because that is the
+failure a downstream reader cannot detect.
+
+*The retrieval benchmark, re-run.* The 2026-09-07 benchmark below was repeated exactly: the same 27
+ground-truthed questions, the same brief and the same tree snapshot (`c20f6883`), on three arms.
+
+| arm | found | rank-1 | TIGHT MRR | **confidently WRONG** | tokens per task (cache reads) |
+|---|---|---|---|---|---|
+| Sonnet 5.5 | 26/27 | 24 | 0.907 | **1** | 475k |
+| Opus 5.5 | **27/27** | **26** | **0.975** | **0** | 475k |
+| Opus 5.5, `effort: low` | 23/27 | 23 | 0.852 | **4** | 313k |
+| (2026-09-07 Sonnet, for comparison) | 23/27 | 22 | 0.833 | 4 | — |
+
+- Sonnet 5.5 closed most of the old gap (4 → 1 confidently wrong). The remaining difference is one
+  question, which n = 27 cannot separate from noise; Sonnet's one confident miss named the wrong
+  file.
+- Sonnet does **not** use fewer tokens per task (475k, the same as Opus). Any saving is the
+  per-token weight against the subscription limit, not the volume.
+- `effort: low` on Opus is the **worst** arm on this faculty: 34 % fewer tokens and 4 confidently
+  wrong. The 2026-09-07 advice below to "optimise effort instead of the tier" is refuted for search
+  and verification.
+
+*The judgment benchmark.* Retrieval is not the faculty a `tester` or a `code-reviewer` uses
+(catching a gate that cannot fail, a false claim), so 47 historical cases with known answers were
+mined from this repository's own post-mortems and fix commits: vacuous gates 8, false claims 13,
+vacuous passes 6, wrong unit 4, wrong tree 2, `unsafe` / ordering 3, other 11. The reviewer reads
+the pre-fix commit through `git show`, and a model-blind Opus judge scores the answers.
+
+| arm | caught | missed | confidently wrong | tokens per task (reads) |
+|---|---|---|---|---|
+| Sonnet 5.5 | 45/47 | 1 | 1 (a vacuous gate: a trybuild floor that does not guard the glob) | 1.37 M |
+| Opus 5.5 | **46/47** | **0** | 1 (a unit case: a GCD quantum read as an upper bound) | 1.56 M |
+
+- Sonnet 5.5 used 13 % fewer tokens per task here.
+- ⚠️ **Ceiling effect.** The task points at the artifact, so it measures spotting a defect given its
+  place, not discovery among many artifacts. Both benchmarks together put Sonnet 5.5 within one or
+  two answers of Opus on n = 27 + 47.
+
+**History: the measurements of 2026-09-07.** From 2026-07-26 until 2026-09-30 every role ran on Opus
+(owner decision, 2026-07-26), and from 2026-09-07 there was a MEASURED diff behind it rather than
+only a judgement. The two measurements below are kept as they were written; their "sonnet" is the
+Sonnet of that date, and for Sonnet 5.5 they are superseded by the re-run above.
 
 **The measurement (2026-09-07).** 27 retrieval questions over this tree, each with a ripgrep-verified
 ground-truth passage and phrased WITHOUT the target's own distinctive vocabulary, run through an
@@ -490,16 +557,19 @@ capability, but self-scepticism.** Opus's edge is knowing when its own output is
 precisely the axis this repository's entire failure taxonomy runs along ("a check that could not
 fail", "green from emptiness", "a confident wrong answer").
 
-**So the downgrade question is answered in the negative, with numbers, for the one role that can be
-measured cheaply — and the roles above it are protected LESS, not more.** Only facts are gated
-downstream, never judgement: `cargo` catches code that does not compile but not UB in an `unsafe`
-block; a `tester`'s pass/fail is gated while a test that *cannot fail* reads as green; a
-`doc-writer`'s output is gated by nothing at all (repairing doc rot introduced new falsehoods in 3
-of 5 measured attempts). Do not downgrade any role on the argument that it is "mechanical" — that
-premise was tested here and failed. **Optimise effort, batch size and redundant arms instead of the
-tier** (`effort:` is a per-call knob on Opus and keeps its judgement).
+**So, on 2026-09-07, the downgrade question was answered in the negative, with numbers, for the one
+role that could be measured cheaply — and the roles above it are protected LESS, not more.** Only
+facts are gated downstream, never judgement: `cargo` catches code that does not compile but not UB
+in an `unsafe` block; a `tester`'s pass/fail is gated while a test that *cannot fail* reads as
+green; a `doc-writer`'s output is gated by nothing at all (repairing doc rot introduced new
+falsehoods in 3 of 5 measured attempts). Do not downgrade any role on the argument that it is
+"mechanical" — that premise was tested here and failed. **Optimise effort, batch size and redundant
+arms instead of the tier** (`effort:` is a per-call knob on Opus and keeps its judgement). ⚠️ The
+effort advice is refuted for search and verification by the `effort: low` arm of 2026-09-30 above,
+and the argument against "mechanical" still stands: the 2026-09-30 move rests on a measured diff,
+not on that argument.
 
-The previous split put `developer`, `tester`, `researcher`, `doc-writer` and `project-analyst` on Sonnet as "mechanical / gathering" roles. The previous split put `developer`, `tester`, `researcher`, `doc-writer` and `project-analyst` on Sonnet as "mechanical / gathering" roles. That premise did not survive contact with this codebase: the roles it called mechanical are the ones that catch the campaign's defects. On the VB-SV0 stage alone, implementers refuted the orchestrator's own prescriptions **nine times** — a ULP tolerance that was wrong in form because the leaf ends in a cancellation, a `-D`-push route replaced by an `OpArrayLength` bound the orchestrator had not considered, a z-range check whose prescribed site would have panicked at boot in every process, and a NaN claim corrected on the wrong leaf. None of that is transcription work. Do not downgrade any role without a measured before/after quality diff — this applies to all nine now, not only to `code-reviewer` (which remains the last line against `unsafe`/atomics UB). The orchestrator itself stays on the session model.
+The previous split put `developer`, `tester`, `researcher`, `doc-writer` and `project-analyst` on Sonnet as "mechanical / gathering" roles. That premise did not survive contact with this codebase: the roles it called mechanical are the ones that catch the campaign's defects. On the VB-SV0 stage alone, implementers refuted the orchestrator's own prescriptions **nine times** — a ULP tolerance that was wrong in form because the leaf ends in a cancellation, a `-D`-push route replaced by an `OpArrayLength` bound the orchestrator had not considered, a z-range check whose prescribed site would have panicked at boot in every process, and a NaN claim corrected on the wrong leaf. None of that is transcription work. Do not downgrade any role without a measured before/after quality diff — this applies to all nine now, not only to `code-reviewer` (which remains the last line against `unsafe`/atomics UB). The orchestrator itself stays on the session model.
 
 ## Orchestration discipline
 
