@@ -50,6 +50,14 @@
 //!   unchanged" or "latch lost". Every kind is a defect that blocks the commit — a
 //!   "count changed" wake on knife-edge pairs only included.
 //!
+//!   **Under V2** (speculative contacts, `PhysicsConfig::speculative_distance`, 20 mm by default)
+//!   a box-box manifold exists when the poses are within `d`, so an exactly touching pile has no
+//!   knife-edge pair left: every touching pair carries a speculative manifold. G5 and G6
+//!   therefore run the overlap-only rule (`speculative_distance = 0`, the velocity term off),
+//!   the rule their premise P2 is about, and each has a V2 twin (G5-V2, G6-V2) whose pile stands
+//!   its layer neighbours half a [`TOUCH_GAP`] past `d`, so the knife-edge pairs are the ones at
+//!   V2's own boundary (rulings 2026-09-30, item 10b).
+//!
 //! **Defect A7.** A resting box pyramid crept sideways with a fixed (-x, -z) bias and its
 //! contact set kept changing at rest, so piles of height 7 or more never reached a 60-step
 //! quiet window. It was two narrowphase defects. **A7a:** clipped face-contact points
@@ -133,14 +141,14 @@
 //!
 //! # Legs
 //!
-//! * G1, G3, G4, G5 (height-4 piles, 30 boxes) and G8 (height 6, 91 boxes) run in both
-//!   profiles, in the ordinary `cargo test -p boyko-physics --test sleep_settles_box_piles`
+//! * G1, G3, G4, G5 and G5-V2 (height-4 piles, 30 boxes) and G8 (height 6, 91 boxes) run in
+//!   both profiles, in the ordinary `cargo test -p boyko-physics --test sleep_settles_box_piles`
 //!   run. G8 takes 2.4 s in debug.
-//! * G2, G6 (height 5, 55 boxes), G7 (sixteen height-4 draws), A7-R1 and A7-R2 (height 15,
+//! * G2, G6 and G6-V2 (height 5, 55 boxes), G7 (sixteen height-4 draws), A7-R1 and A7-R2 (height 15,
 //!   1240 boxes) run ONLY in release, as part of the physics release run that `CLAUDE.md`
 //!   names as their leg: `cargo test --release -p boyko-physics --no-fail-fast` (this file
 //!   alone: `cargo test --release -p boyko-physics --test sleep_settles_box_piles`). There
-//!   this binary prints `running 13 tests` and `12 passed; 0 failed; 1 ignored` (the
+//!   this binary prints `running 15 tests` and `14 passed; 0 failed; 1 ignored` (the
 //!   generator). In a debug build they are ignored, and `-- --ignored` in a debug build is NOT
 //!   their leg. A7-R1 is the long one: ~73 s in release, ~80 s for the whole binary before
 //!   the SIMD on/off differential below was added (it runs A7-R1's scene twice more; its
@@ -224,7 +232,8 @@ use boyko_physics::narrowphase::box_box::fallback_census;
 use boyko_physics::narrowphase::{feature_face_clip, feature_face_face};
 use boyko_physics::plugin::add_physics_colored_solve;
 use boyko_physics::resources::{
-    ConstraintGraph, ContactPairs, IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
+    ConstraintGraph, ContactPairs, DEFAULT_SPECULATIVE_DISTANCE, DEFAULT_SPECULATIVE_VELOCITY_CAP,
+    IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
 };
 
 // ── Scene constants ──────────────────────────────────────────────────────────
@@ -519,18 +528,26 @@ fn serial_pool() -> Arc<ThreadPool> {
 
 /// The Jolt pyramid loop with a height parameter: box centres in spawn order.
 fn pyramid_positions(height: usize) -> Vec<Vec3> {
+    pyramid_positions_with_gap(height, 0.0)
+}
+
+/// [`pyramid_positions`] with every layer's neighbours `lateral_gap` apart (pitch
+/// `BOX_SIZE + lateral_gap`, each odd layer centred over the junction below). At `0.0` it is
+/// [`pyramid_positions`] bit for bit: the pitch is `2.0 + 0.0` and the odd offset `0.5 · 2.0`.
+fn pyramid_positions_with_gap(height: usize, lateral_gap: f32) -> Vec<Vec3> {
     let h = height as i32;
+    let pitch = BOX_SIZE + lateral_gap;
     let mut out = Vec::new();
     for i in 0..h {
         let lo = i / 2;
         let hi = h - (i + 1) / 2;
         for j in lo..hi {
             for k in lo..hi {
-                let odd = if i & 1 != 0 { HALF_BOX } else { 0.0 };
+                let odd = if i & 1 != 0 { 0.5 * pitch } else { 0.0 };
                 out.push(Vec3::new(
-                    -(h as f32) + BOX_SIZE * j as f32 + odd,
+                    -(h as f32) + pitch * j as f32 + odd,
                     1.0 + (BOX_SIZE + BOX_SEPARATION) * i as f32,
-                    -(h as f32) + BOX_SIZE * k as f32 + odd,
+                    -(h as f32) + pitch * k as f32 + odd,
                 ));
             }
         }
@@ -656,6 +673,17 @@ impl Harness {
             plain,
             entities: Vec::new(),
             pairs: PairTracker::default(),
+        }
+    }
+
+    /// Sets the contact rule: `None` keeps the configuration's default, `Some(0.0)` is the
+    /// overlap-only rule (the approach-velocity margin off too), and any other `Some(d)` is V2's
+    /// rule at distance `d` with the owner-ruled velocity cap.
+    fn set_speculative(&mut self, distance: Option<f32>) {
+        if let Some(d) = distance {
+            let cfg = self.world.resource_mut::<PhysicsConfig>();
+            cfg.speculative_distance = d;
+            cfg.speculative_velocity_cap = if d == 0.0 { 0.0 } else { DEFAULT_SPECULATIVE_VELOCITY_CAP };
         }
     }
 
@@ -1221,11 +1249,23 @@ fn face_face_reference_face(feature_id: u32) -> Option<u32> {
 /// `last` names a pile index (Jolt loop order) that is spawned after the rest of the pile.
 /// Returns the pile ids, in spawn order.
 fn spawn_scene(h: &mut Harness, height: usize, lone: bool, last: Option<usize>) -> Vec<u32> {
+    spawn_scene_with_gap(h, height, lone, last, 0.0)
+}
+
+/// [`spawn_scene`] with the pile's layer neighbours `lateral_gap` apart
+/// ([`pyramid_positions_with_gap`]).
+fn spawn_scene_with_gap(
+    h: &mut Harness,
+    height: usize,
+    lone: bool,
+    last: Option<usize>,
+    lateral_gap: f32,
+) -> Vec<u32> {
     h.spawn_floor();
     if lone {
         h.spawn_box(LONE_ID, Vec3::new(40.0, 1.0, 0.0));
     }
-    let positions = pyramid_positions(height);
+    let positions = pyramid_positions_with_gap(height, lateral_gap);
     let mut order: Vec<usize> = (0..positions.len()).collect();
     if let Some(index) = last {
         order.retain(|&i| i != index);
@@ -2330,7 +2370,7 @@ fn swap_remove_scene(
     let before = h.lateral_reference_boxes(mover, &pile);
     if mover_index.is_some() && before.lateral == 0 {
         let manifolds = h.manifolds_of(mover);
-        let touching: Vec<(u32, u32, [f32; 3])> = touching_no_contact_pairs(&mut h, &pile)
+        let touching: Vec<(u32, u32, [f32; 3])> = knife_edge_no_contact_pairs(&mut h, &pile, ShiftRule::OverlapOnly)
             .into_iter()
             .filter(|&(a, b, _)| a == mover || b == mover)
             .collect();
@@ -2471,9 +2511,37 @@ fn a_frozen_box_pile_whose_bottom_corner_reverses_its_pair_order_takes_no_contac
 
 // ── G5, G6: a spawn shifts every pile row by one ─────────────────────────────
 
-/// Candidate box pairs of the pile that produced no manifold on the last step although their
-/// settled centres touch (every axis-aligned gap at most [`TOUCH_GAP`]): `(id, id, gaps)`.
-fn touching_no_contact_pairs(h: &mut Harness, pile: &[u32]) -> Vec<(u32, u32, [f32; 3])> {
+/// The contact rule a shift scene runs, which fixes where its knife-edge pairs sit (V2,
+/// rulings 2026-09-30, item 10b).
+#[derive(Clone, Copy, Debug)]
+enum ShiftRule {
+    /// The overlap-only rule (`speculative_distance = 0`, the velocity term off) on the exactly
+    /// touching pile: the knife-edge pairs are the touching pairs with no manifold — premise P2
+    /// as written before V2. Under V2 a touching pair is within `d`, so it always has a
+    /// manifold and this premise has no material; it is a property of the overlap-only rule.
+    OverlapOnly,
+    /// V2's rule at the owner's values on a pile whose layer neighbours stand
+    /// [`V2_LATERAL_GAP`] apart, half a [`TOUCH_GAP`] past the speculative boundary: the
+    /// knife-edge pairs are the face-separated pairs with no manifold whose gap is within
+    /// [`TOUCH_GAP`] of `d` — the pairs whose existence a non-pose input could flip under V2's
+    /// own rule.
+    Speculative,
+}
+
+/// The V2 shift twins' lateral gap: half a [`TOUCH_GAP`] past the speculative boundary, so every
+/// layer neighbour pair of the settled pile sits just outside `d` with no manifold.
+const V2_LATERAL_GAP: f32 = DEFAULT_SPECULATIVE_DISTANCE + 0.5 * TOUCH_GAP;
+
+/// Candidate box pairs of the pile that produced no manifold on the last step although they sit
+/// at `rule`'s contact boundary, `(id, id, gaps)` with `gaps` the settled centres' axis-aligned
+/// gaps: under [`ShiftRule::OverlapOnly`] every gap is at most [`TOUCH_GAP`] (the centres
+/// touch); under [`ShiftRule::Speculative`] exactly one gap is positive (a face-separated pair)
+/// and it is within [`TOUCH_GAP`] of [`DEFAULT_SPECULATIVE_DISTANCE`].
+fn knife_edge_no_contact_pairs(
+    h: &mut Harness,
+    pile: &[u32],
+    rule: ShiftRule,
+) -> Vec<(u32, u32, [f32; 3])> {
     let walk = h.walk_ids();
     let centres: Vec<Vec3> = h
         .world
@@ -2505,7 +2573,15 @@ fn touching_no_contact_pairs(h: &mut Harness, pile: &[u32]) -> Vec<(u32, u32, [f
             d.y.abs() - BOX_SIZE,
             d.z.abs() - BOX_SIZE,
         ];
-        if gaps.iter().all(|&g| g <= TOUCH_GAP) {
+        let at_boundary = match rule {
+            ShiftRule::OverlapOnly => gaps.iter().all(|&g| g <= TOUCH_GAP),
+            ShiftRule::Speculative => {
+                let widest = gaps.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                gaps.iter().filter(|&&g| g > 0.0).count() == 1
+                    && (widest - DEFAULT_SPECULATIVE_DISTANCE).abs() <= TOUCH_GAP
+            }
+        };
+        if at_boundary {
             out.push((ia, ib, gaps));
         }
     }
@@ -2522,11 +2598,28 @@ enum ClearBound {
     Pairs,
 }
 
-/// The shared body of G5 and G6: floor and pile in `plain`; settle; hold 5; spawn a far
-/// sphere into `marked`, which shifts every `plain` row by one with the order kept; hold 60.
-fn shift_scene(what: &'static str, height: usize, settle_limit: usize, bound: ClearBound) {
+/// The shared body of G5 and G6 and their V2 twins: floor and pile in `plain`; settle; hold 5;
+/// spawn a far sphere into `marked`, which shifts every `plain` row by one with the order kept;
+/// hold 60. `rule` sets the contact rule and the pile's lateral gap ([`ShiftRule`]).
+fn shift_scene(
+    what: &'static str,
+    height: usize,
+    settle_limit: usize,
+    bound: ClearBound,
+    rule: ShiftRule,
+) {
     let mut h = Harness::new();
-    let pile = spawn_scene(&mut h, height, false, None);
+    let lateral_gap = match rule {
+        ShiftRule::OverlapOnly => {
+            h.set_speculative(Some(0.0));
+            0.0
+        }
+        ShiftRule::Speculative => {
+            h.set_speculative(Some(DEFAULT_SPECULATIVE_DISTANCE));
+            V2_LATERAL_GAP
+        }
+    };
+    let pile = spawn_scene_with_gap(&mut h, height, false, None, lateral_gap);
     // The rows stay fixed until the far sphere spawns.
     h.track_pairs();
     if let ClearBound::Rows = bound {
@@ -2569,20 +2662,21 @@ fn shift_scene(what: &'static str, height: usize, settle_limit: usize, bound: Cl
          {off_island:?}",
         h.n_islands()
     );
-    // P2: at least one touching box pair with no manifold. These knife-edge pairs are the
-    // ones a narrowphase input other than the poses could flip. Before A7b the axis hint was
-    // such an input (A4's Known behaviour 2); since A7b a box-box manifold exists exactly
-    // when the poses overlap, except on a zero-extent reference face (A7-N11 pins it), so a
-    // row shift must leave every one of them without a manifold — the property this scene
-    // holds the pile to.
-    let n_set = touching_no_contact_pairs(&mut h, &pile);
+    // P2: at least one box pair at the rule's contact boundary with no manifold. These
+    // knife-edge pairs are the ones a narrowphase input other than the poses could flip. Before
+    // A7b the axis hint was such an input (A4's Known behaviour 2); since A7b a box-box manifold
+    // exists exactly when the poses overlap (under V2, when they are within `d`), except on a
+    // zero-extent reference face (A7-N11 pins it), so a row shift must leave every one of them
+    // without a manifold — the property this scene holds the pile to.
+    let n_set = knife_edge_no_contact_pairs(&mut h, &pile, rule);
     assert!(
         !n_set.is_empty(),
-        "scene-fitness: the settled pile has no touching no-contact box pair, so {what} holds no \
-         pair whose existence a non-pose input could flip — escalate"
+        "scene-fitness ({rule:?}): the settled pile has no box pair at the contact boundary \
+         without a manifold, so {what} holds no pair whose existence a non-pose input could flip \
+         — escalate"
     );
     println!(
-        "{what}: {} touching no-contact pairs (first ids and gaps: {:?})",
+        "{what}: {} knife-edge no-contact pairs at the {rule:?} boundary (first ids and gaps: {:?})",
         n_set.len(),
         &n_set[..n_set.len().min(8)]
     );
@@ -2664,7 +2758,8 @@ fn shift_scene(what: &'static str, height: usize, settle_limit: usize, bound: Cl
     );
 }
 
-/// G5: a height-4 pile, every row shifted by one.
+/// G5: a height-4 pile, every row shifted by one, under the overlap-only rule (its premise P2
+/// is that rule's: [`ShiftRule::OverlapOnly`]).
 #[test]
 #[cfg_attr(
     miri,
@@ -2673,7 +2768,21 @@ fn shift_scene(what: &'static str, height: usize, settle_limit: usize, bound: Cl
 )]
 fn a_frozen_box_pile_ignores_a_spawn_that_shifts_every_row_it_holds() {
     under_watchdog("G5", SMALL_TIMEOUT, || {
-        shift_scene("G5", SMALL, SMALL_SETTLE_LIMIT, ClearBound::Rows);
+        shift_scene("G5", SMALL, SMALL_SETTLE_LIMIT, ClearBound::Rows, ShiftRule::OverlapOnly);
+    });
+}
+
+/// G5's V2 twin: the height-4 pile with its layer neighbours just past the speculative boundary
+/// ([`ShiftRule::Speculative`]), every row shifted by one under V2's rule.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: runs the real physics schedule on a boyko_threadpool until a 30-box pile \
+              freezes; intractable under Miri"
+)]
+fn a_frozen_box_pile_ignores_a_spawn_that_shifts_every_row_it_holds_under_speculative_contacts() {
+    under_watchdog("G5-V2", SMALL_TIMEOUT, || {
+        shift_scene("G5-V2", SMALL, SMALL_SETTLE_LIMIT, ClearBound::Rows, ShiftRule::Speculative);
     });
 }
 
@@ -2689,6 +2798,20 @@ fn a_frozen_box_pile_ignores_a_spawn_that_shifts_every_row_it_holds() {
 )]
 fn a_height_5_box_pyramid_ignores_a_spawn_that_shifts_every_row_it_holds() {
     under_watchdog("G6", MEDIUM_TIMEOUT, || {
-        shift_scene("G6", MEDIUM, MEDIUM_SETTLE_LIMIT, ClearBound::Pairs);
+        shift_scene("G6", MEDIUM, MEDIUM_SETTLE_LIMIT, ClearBound::Pairs, ShiftRule::OverlapOnly);
+    });
+}
+
+/// G6's V2 twin: the height-5 pile with its layer neighbours just past the speculative boundary
+/// ([`ShiftRule::Speculative`]), every row shifted by one under V2's rule.
+#[test]
+#[cfg_attr(
+    any(miri, debug_assertions),
+    ignore = "slow: a 55-box pile through the real schedule until frozen; release only, \
+              intractable under Miri"
+)]
+fn a_height_5_box_pyramid_ignores_a_spawn_that_shifts_every_row_it_holds_under_speculative_contacts() {
+    under_watchdog("G6-V2", MEDIUM_TIMEOUT, || {
+        shift_scene("G6-V2", MEDIUM, MEDIUM_SETTLE_LIMIT, ClearBound::Pairs, ShiftRule::Speculative);
     });
 }
