@@ -208,12 +208,13 @@ use boyko_ecs::ecs::core::system::Entities;
 use boyko_ecs::prelude::*;
 use boyko_macros::{Bundle, Component, Resource};
 
+use boyko_physics::Manifold;
 use boyko_physics::components::{
     Collider, ColliderShape, RigidBody, RigidBodyBundle, RigidBodyMass, Simulated,
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::{add_physics_colored_solve, add_physics_systems};
-use boyko_physics::resources::{Manifolds, PhysicsConfig};
+use boyko_physics::resources::{ConstraintGraph, Manifolds, PhysicsConfig};
 use boyko_physics::solver::{ColoredSoftStepSolver, SoftStepSolver};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -320,6 +321,10 @@ static C_SCOPE: AtomicU64 = AtomicU64::new(0);
 static C_CHUNK: AtomicU64 = AtomicU64::new(0);
 static C_INJ: AtomicU64 = AtomicU64::new(0);
 static C_OTHER: AtomicU64 = AtomicU64::new(0);
+/// Releases of the two dispatch objects, charged by the same layout predicates: row D's
+/// steady-state proof that no scope frame and no block a step acquires outlives the step.
+static F_SCOPE: AtomicU64 = AtomicU64::new(0);
+static F_CHUNK: AtomicU64 = AtomicU64::new(0);
 
 const CHUNK0: usize = 4096;
 const CHUNK_ALIGN: usize = 64;
@@ -338,17 +343,30 @@ enum Class {
     Other,
 }
 
+/// The layout class of `layout`, from the predicates above alone (no counting).
+#[inline]
+fn class_of(layout: Layout) -> Class {
+    let (size, align) = (layout.size(), layout.align());
+    if align == SCOPE_SHARED_ALIGN && size == SCOPE_SHARED_BYTES {
+        Class::Scope
+    } else if align == CHUNK_ALIGN && size.is_power_of_two() && size >= CHUNK0 {
+        Class::Chunk
+    } else if size == INJECTOR_BLOCK_BYTES && align == 8 {
+        Class::Inj
+    } else {
+        Class::Other
+    }
+}
+
 #[inline]
 fn classify(layout: Layout) -> Class {
     let (size, align) = (layout.size(), layout.align());
-    let (class, counter) = if align == SCOPE_SHARED_ALIGN && size == SCOPE_SHARED_BYTES {
-        (Class::Scope, &C_SCOPE)
-    } else if align == CHUNK_ALIGN && size.is_power_of_two() && size >= CHUNK0 {
-        (Class::Chunk, &C_CHUNK)
-    } else if size == INJECTOR_BLOCK_BYTES && align == 8 {
-        (Class::Inj, &C_INJ)
-    } else {
-        (Class::Other, &C_OTHER)
+    let class = class_of(layout);
+    let counter = match class {
+        Class::Scope => &C_SCOPE,
+        Class::Chunk => &C_CHUNK,
+        Class::Inj => &C_INJ,
+        Class::Other => &C_OTHER,
     };
     counter.fetch_add(1, Ordering::Relaxed);
     if class == Class::Other && OTHER_LOG_ON.load(Ordering::Relaxed) {
@@ -488,6 +506,15 @@ unsafe impl GlobalAlloc for CountingAlloc {
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         N_DEALLOC.fetch_add(1, Ordering::Relaxed);
+        match class_of(layout) {
+            Class::Scope => {
+                F_SCOPE.fetch_add(1, Ordering::Relaxed);
+            }
+            Class::Chunk => {
+                F_CHUNK.fetch_add(1, Ordering::Relaxed);
+            }
+            Class::Inj | Class::Other => {}
+        }
         // SAFETY: forwarded verbatim to the system allocator.
         unsafe { System.dealloc(ptr, layout) }
     }
@@ -679,6 +706,9 @@ struct Snap {
     chunk: u64,
     inj: u64,
     other: u64,
+    /// Releases of the scope and chunk classes ([`F_SCOPE`], [`F_CHUNK`]).
+    scope_freed: u64,
+    chunk_freed: u64,
 }
 
 impl Snap {
@@ -692,6 +722,8 @@ impl Snap {
             chunk: C_CHUNK.load(Ordering::SeqCst),
             inj: C_INJ.load(Ordering::SeqCst),
             other: C_OTHER.load(Ordering::SeqCst),
+            scope_freed: F_SCOPE.load(Ordering::SeqCst),
+            chunk_freed: F_CHUNK.load(Ordering::SeqCst),
         }
     }
     fn since(self, base: Snap) -> Snap {
@@ -704,6 +736,8 @@ impl Snap {
             chunk: self.chunk - base.chunk,
             inj: self.inj - base.inj,
             other: self.other - base.other,
+            scope_freed: self.scope_freed - base.scope_freed,
+            chunk_freed: self.chunk_freed - base.chunk_freed,
         }
     }
     /// Heap ACQUISITIONS: a realloc is an acquisition too.
@@ -2020,7 +2054,113 @@ impl Pile {
     fn contacts(&self) -> usize {
         self.world.resource::<Manifolds>().manifolds().len()
     }
+    /// Row D's derived expectation for the step just run on `lanes` workers: the colour scopes
+    /// one pass dispatches and, of those, the blocks past each one's first ([`colour_dispatch`]).
+    fn colour_dispatch(&self, lanes: usize, simd: bool) -> ColourDispatch {
+        colour_dispatch(
+            self.world.resource::<ConstraintGraph>(),
+            self.world.resource::<Manifolds>().solver_manifolds(),
+            lanes,
+            simd,
+        )
+    }
 }
+
+// ── Row D's model: the colour scopes a pass dispatches, and their blocks ──
+//
+// The census's "Why not pin EXACTLY against the dispatched colour count" objects to a replica of
+// the dispatch decision: it drifts with the solver, and the gate then checks the replica. Row D
+// answers the objection by OBSERVING the replica, never trusting it: on every frame the replica's
+// dispatched-colour count must equal the one the scope counter shows (`scope - 1 - setup` over the
+// pass count), and its block count must equal the chunk counter exactly. A replica that drifted
+// reds on the first frame it disagrees on; it cannot pass by checking itself.
+
+/// The colored solver's dispatch constants, as `solver/colored.rs` states them (private there):
+/// `MIN_PARALLEL_SLOTS_PER_COLOR`, `CHUNKS_PER_WORKER`, `MIN_SLOTS_PER_CHUNK` and the cohort width
+/// the SIMD cut walk snaps to.
+const MODEL_MIN_PARALLEL_SLOTS_PER_COLOR: u32 = 256;
+const MODEL_CHUNKS_PER_WORKER: usize = 6;
+const MODEL_MIN_SLOTS_PER_CHUNK: usize = 64;
+const MODEL_COHORT: usize = 8;
+/// One colour task's scope cell: the 104 B `CohortSolveView` closure plus the 16 B cell header
+/// (L11 C2; the D4 comment).
+const COLOUR_TASK_CELL_BYTES: usize = 120;
+
+/// One pass's colour dispatch, as the model derives it from the step's colours.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ColourDispatch {
+    /// Colours that open a `pool.scope`.
+    scopes: u64,
+    /// Blocks past the first, summed over those scopes.
+    extra_blocks: u64,
+    /// The largest task count of one dispatched colour.
+    max_tasks: u64,
+}
+
+/// The blocks a scope of `tasks` colour-task cells takes: a 4 KiB first block, each next one
+/// twice the last (the `ScopeBlock` chunk rule section A prices).
+fn scope_blocks(tasks: usize) -> u64 {
+    let (mut blocks, mut capacity, mut block_bytes) = (0u64, 0usize, CHUNK0);
+    while capacity < tasks {
+        capacity += block_bytes / COLOUR_TASK_CELL_BYTES;
+        block_bytes *= 2;
+        blocks += 1;
+    }
+    blocks
+}
+
+/// The colour scopes one pass of the colored solve dispatches for `graph`'s colours over
+/// `manifolds` (the stream it indexes) on `lanes` workers, and their blocks: the solve's own
+/// gates and cut walk (`solve_color_parallel`), restated over the public graph. A manifold is a
+/// group of its live points; a colour below the slot floor, or whose chunk count is under two,
+/// runs inline; the whole solve dispatches only on two or more lanes and a colour at the floor.
+fn colour_dispatch(graph: &ConstraintGraph, manifolds: &[Manifold], lanes: usize, simd: bool) -> ColourDispatch {
+    let slots_of = |c: u32| -> u32 {
+        graph.color(c).iter().map(|&mi| u32::from(manifolds[mi as usize].count)).sum()
+    };
+    let widest = (0..graph.n_colors()).map(slots_of).max().unwrap_or(0);
+    let mut out = ColourDispatch::default();
+    if lanes < 2 || widest < MODEL_MIN_PARALLEL_SLOTS_PER_COLOR {
+        return out;
+    }
+    for c in 0..graph.n_colors() {
+        let total = slots_of(c);
+        if total < MODEL_MIN_PARALLEL_SLOTS_PER_COLOR {
+            continue;
+        }
+        // The colour's groups: its solved manifolds' point counts, in colour order.
+        let groups = || graph.color(c).iter().map(|&mi| usize::from(manifolds[mi as usize].count)).filter(|&n| n > 0);
+        let n_groups = groups().count();
+        let by_lanes = lanes * MODEL_CHUNKS_PER_WORKER;
+        let by_work = (total as usize / MODEL_MIN_SLOTS_PER_CHUNK).max(1);
+        let n_chunks = by_lanes.min(by_work).clamp(1, n_groups);
+        if n_chunks < 2 {
+            continue;
+        }
+        let target = (total as usize).div_ceil(n_chunks).max(1);
+        let step = if simd { MODEL_COHORT } else { 1 };
+        // The cut walk: from a chunk's first group, whole steps of `step` groups until the run of
+        // points reaches `target` or the colour ends.
+        let mut tasks = 0usize;
+        let (mut g, mut run, mut in_chunk) = (0usize, 0usize, 0usize);
+        for points in groups() {
+            run += points;
+            g += 1;
+            in_chunk += 1;
+            let at_step_boundary = in_chunk.is_multiple_of(step);
+            if g == n_groups || (at_step_boundary && run >= target) {
+                tasks += 1;
+                run = 0;
+                in_chunk = 0;
+            }
+        }
+        out.scopes += 1;
+        out.extra_blocks += scope_blocks(tasks) - 1;
+        out.max_tasks = out.max_tasks.max(tasks as u64);
+    }
+    out
+}
+
 
 /// Two windows of the same configuration as one row.
 fn merge(a: &Meas, b: &Meas) -> Meas {
@@ -2353,13 +2493,28 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
     // at W=16), not `8 * CHUNKS_PER_WORKER` = 48, because the widest colour here
     // (2,880 slots) is 45 cuts by work and cohort snapping rounds each cut up to whole
     // cohorts, 32 in all; 32 x 120 = 3,840 B fits the first block. Every dispatching
-    // row reads 272.125 with `chunk == scope` on every frame (measured 2026-09-21,
-    // release, W = 2 / 4 / 8 / 16), and THAT is what is pinned here, with no headroom:
-    // it reds if the closure grows past 4096 / 32 - 16 = 112 B (8 B of headroom at
-    // W=8's 32 tasks) or a colour's task count crosses 34. The scope means of the
-    // three dispatching rows are asserted equal as well: the dispatch decision reads
-    // only the contact set and the trajectory is bit-identical across lane counts, so
-    // the same colours dispatch on the same frames at every W.
+    // row read 272.125 with `chunk == scope` on every frame (measured 2026-09-21,
+    // release, W = 2 / 4 / 8 / 16), and that was pinned here with no headroom.
+    //
+    // V2 (speculative contacts, 2026-09-30) made that pin a property of the pre-V2
+    // contact set: its colours are wider (a 1240-box pile at rest keeps every pair within
+    // 20 mm), the widest colour cuts into more than 34 cohort-snapped tasks at W=8, and
+    // that scope takes a second block — 206 chunks for 194 scope frames on one frame
+    // (rulings 2026-09-30, item 10d). The row is therefore DERIVED, per frame and exact:
+    // `colour_dispatch` restates the solve's gates and cut walk over the step's public
+    // colours, and every dispatching frame must read `scope == 1 + setup + passes x
+    // (the model's dispatched colours)` and `chunk == scope + passes x (the model's blocks
+    // past each scope's first)`. The model is observed, not trusted (the comment above
+    // `colour_dispatch`): its colour count is checked against the scope counter and its
+    // block count against the chunk counter on the same frame. It reds if the closure
+    // grows past 120 B (a 34-cell first block holds fewer, and a scope the model gives one
+    // block takes two) or a colour cuts into more tasks than the model's walk. And every
+    // dispatching frame releases every scope frame and every block it acquired
+    // (`scope_freed == scope`, `chunk_freed == chunk`): a second block is acquired and
+    // released inside its step, so it never grows the heap from one step to the next.
+    // The scope means of the three dispatching rows are asserted equal as well: the
+    // dispatch decision reads only the contact set and the trajectory is bit-identical
+    // across lane counts, so the same colours dispatch on the same frames at every W.
     //
     // The property the first form asserted — fan-out grows with lanes once a scope
     // exceeds one chunk — is still asserted, where the model predicts it: with
@@ -2383,7 +2538,7 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
             p.step();
         }
         p.set_parallel_solve(true);
-        let per_frame = frames(4, PHYS_REPS, || p.step());
+        let (per_frame, logs) = model_frames(&mut p, w, true);
         let m = summarise(&per_frame);
         lane_points.push((w, m));
         push(
@@ -2394,18 +2549,7 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
             verdict::SHOULD_NOT,
         );
         if w >= 2 {
-            for (i, f) in per_frame.iter().enumerate() {
-                assert!(
-                    f.chunk == f.scope,
-                    "D: W={w}, frame {i}: {} chunks for {} scope frames — since L11 C2 every \
-                     colour scope's task cells (at most 32 x 120 B, at W=8) fit its first 4 KiB \
-                     block, so a dispatching frame holds exactly one chunk per scope; a second \
-                     block means the spawned closure grew past 112 B or a colour's task count \
-                     crossed 34 (see the D4 comment)",
-                    f.chunk,
-                    f.scope
-                );
-            }
+            assert_row_d_frames(&format!("W={w}"), &per_frame, &logs);
         }
     }
     say_inline!("  ⇒ by worker count: ");
@@ -2416,7 +2560,10 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
             m.chunk / m.scope.max(1.0)
         );
     }
-    say!("acquisitions a step; chunk == scope on every frame of every dispatching row");
+    say!(
+        "acquisitions a step; every dispatching frame's chunks are its scopes plus the model's \
+         blocks past each scope's first, and it releases every scope frame and block it acquired"
+    );
     let (two, four, eight) = (lane_points[1].1, lane_points[2].1, lane_points[3].1);
     assert!(
         two.scope == four.scope && four.scope == eight.scope,
@@ -2441,7 +2588,9 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
         }
         p.set_parallel_solve(true);
         p.set_simd_solve(false);
-        let m = window(4, PHYS_REPS, || p.step());
+        let (per_frame, logs) = model_frames(&mut p, w, false);
+        assert_row_d_frames(&format!("W={w}, simd_solve OFF"), &per_frame, &logs);
+        let m = summarise(&per_frame);
         scalar_points.push((w, m));
         push(
             rows,
@@ -2495,6 +2644,93 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
     }
 
     (off_mean, on_mean)
+}
+
+/// Per-frame logs a row D window keeps beside its counter readings: the solve setup's counter
+/// after every step, and the model's dispatch for every step ([`colour_dispatch`]). Pre-sized
+/// for every step [`frames`] runs, so a push never allocates inside a measured frame.
+struct ModelLogs {
+    setup: Vec<u64>,
+    model: Vec<ColourDispatch>,
+    passes: u64,
+}
+
+/// Runs one row D window (4 warm-up steps, then [`PHYS_REPS`] measured) on `p`, logging S4's
+/// counter and the model's dispatch after every step (a resource read allocates nothing).
+fn model_frames(p: &mut Pile, lanes: usize, simd: bool) -> (Vec<Snap>, ModelLogs) {
+    let passes = {
+        let cfg = p.world.resource::<PhysicsConfig>();
+        u64::from(cfg.substeps * (1 + cfg.relax_iterations))
+    };
+    let mut setup: Vec<u64> = Vec::with_capacity(5 + PHYS_REPS);
+    let mut model: Vec<ColourDispatch> = Vec::with_capacity(4 + PHYS_REPS);
+    setup.push(p.setup_dispatches());
+    let per_frame = frames(4, PHYS_REPS, || {
+        p.step();
+        setup.push(p.setup_dispatches());
+        model.push(p.colour_dispatch(lanes, simd));
+    });
+    (per_frame, ModelLogs { setup, model, passes })
+}
+
+/// Row D's per-frame derivation (the D4 comment): on every frame of a dispatching window the
+/// scope count is the install frame, S4's setup scope when it ran, and one scope per pass per
+/// colour the model dispatches; the chunk count is one per scope plus the model's blocks past
+/// each scope's first; and every scope frame and block acquired is released within the frame.
+fn assert_row_d_frames(what: &str, per_frame: &[Snap], logs: &ModelLogs) {
+    let mut over_frames = 0usize;
+    let mut max_tasks = 0u64;
+    for (i, f) in per_frame.iter().enumerate() {
+        // Frame i is step 4 + i; `setup[k]` is the counter after step k (`setup[0]` before any).
+        let setup = logs.setup[5 + i] - logs.setup[4 + i];
+        let model = logs.model[4 + i];
+        assert!(
+            setup <= 1,
+            "D ({what}): frame {i} moved `setup_dispatches` by {setup}; the solve builds once per step"
+        );
+        assert_eq!(
+            f.scope,
+            1 + setup + logs.passes * model.scopes,
+            "D ({what}): frame {i} opened {} scope frames, against 1 install + {setup} setup + {} \
+             passes x {} colour scope(s) the model dispatches — the model's colour gates no longer \
+             describe the solve's (or a scope was added or lost)",
+            f.scope,
+            logs.passes,
+            model.scopes
+        );
+        assert_eq!(
+            f.chunk,
+            f.scope + logs.passes * model.extra_blocks,
+            "D ({what}): frame {i}: {} chunks for {} scope frames, against one block per scope plus \
+             {} passes x {} block(s) past the first the model derives (widest colour {} tasks, \
+             {COLOUR_TASK_CELL_BYTES} B cells, {} to a first block) — the colour task's cell grew \
+             past {COLOUR_TASK_CELL_BYTES} B, or a colour cut into more tasks than the model's walk",
+            f.chunk,
+            f.scope,
+            logs.passes,
+            model.extra_blocks,
+            model.max_tasks,
+            CHUNK0 / COLOUR_TASK_CELL_BYTES
+        );
+        assert!(
+            f.scope_freed == f.scope && f.chunk_freed == f.chunk,
+            "D ({what}): frame {i} released {} of its {} scope frames and {} of its {} chunks — a \
+             dispatch object outlived its step, so the heap grows from one step to the next",
+            f.scope_freed,
+            f.scope,
+            f.chunk_freed,
+            f.chunk
+        );
+        over_frames += usize::from(model.extra_blocks > 0);
+        max_tasks = max_tasks.max(model.max_tasks);
+    }
+    say!(
+        "  ⇒ D ({what}): chunk == scope + passes x blocks past the first on all {} frames; {over_frames} \
+         frame(s) with a second block (widest colour {max_tasks} tasks against {} cells to a first \
+         block); every scope frame and block released inside its frame",
+        per_frame.len(),
+        CHUNK0 / COLOUR_TASK_CELL_BYTES
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
