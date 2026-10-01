@@ -116,6 +116,21 @@ pub use tls::{
     try_with_active_pool,
 };
 
+// The region (SR) is declared here, below the re-exports above rather than in the module list:
+// `docs/SYSTEMS.md` (a UG-10 gated document) cites the three `pub use` lines above by number, and a
+// line added above them would move all three.
+mod region;
+#[cfg(not(loom))]
+pub use region::{RegionFrame, RegionLines};
+#[cfg(miri)]
+#[doc(hidden)]
+pub use region::region_on_threads;
+pub use region::{
+    Ladder, REGION_MAX_BLOCKS_PER_PARTICIPANT, REGION_STALL_NS, RegionExit, RegionLine,
+    RegionPolicy, RegionReceipt, RegionReport, RegionStages, RegionWaitBound, SchedItem,
+    StageEntry, V2Policy, claim_lines, link_hints,
+};
+
 /// Miri-only: how many times `ScopeShared::complete_task`'s release probe has
 /// fired since process start — one per `pending -> 0` transition.
 ///
