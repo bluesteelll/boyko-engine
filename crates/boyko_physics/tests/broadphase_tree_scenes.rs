@@ -22,18 +22,36 @@
 //! The sleeping-on churn arms of the design's G2 table are not built here: L10's plan for C3c
 //! names the J-Son and R-S rows (its T7) only.
 //!
-//! # G-TH1: the brute threshold's band (window 7 wave 2, Q3; `levers/broadphase/06-DESIGN-F3.md`)
+//! # G-TH1: the brute threshold's band (`levers/broadphase/06-DESIGN-F3.md`, re-scened at C4)
 //!
-//! The one rig here at the DEFAULT `brute_max_rows` ([`TREE_BRUTE_MAX_ROWS`]): ten three-layer
-//! rest piles (141 rows) and a script that spawns one box every [`BAND_PERIOD`] steps up to 150
-//! rows and despawns back, twice, so the row count crosses the threshold both ways, with sleeping
-//! off and on. On every step the oracle and the pose bytes of the AllPairs twin hold, and the
-//! path derived from the row count against `brute_max_rows()` is the path the step took — a
-//! tree-path step answers leaf-list leaves or holds sleepers, a brute step moves no counter and
-//! holds no sleeper (T6). Void unless brute and tree steps both ran, the crossings happened, and
-//! (sleeping on) a descent crossed with a live sleeper set. Shown red: at the provisional 64 (no
-//! brute step); with `all_pairs_into`'s inner loop reversed (the pose: the stream's order reaches
-//! it); with `n < brute_max_rows` in `step_hinted` (the step at 144 rows takes the tree path).
+//! The one rig here at the DEFAULT `brute_max_rows` ([`TREE_BRUTE_MAX_ROWS`]). The scene is
+//! derived from the constants: [`BAND_BASE_ROWS`] (the threshold − 4; three-layer rest piles plus
+//! loose floor boxes) and a script that spawns one box every [`BAND_PERIOD`] steps up to
+//! [`BAND_TOP_ROWS`] (`AUTO_TREE_HI` + 1) and despawns back, twice, so the row count crosses the
+//! threshold both ways, with sleeping off and on. At the provisional 128 / 136 that is 124 → 137
+//! rows. On every step the oracle and the pose bytes of the AllPairs twin hold, and the path
+//! derived from the row count against `brute_max_rows()` is the path the step took — a tree-path
+//! step answers leaf-list leaves or holds sleepers, a brute step moves no counter and holds no
+//! sleeper (T6). Void unless brute and tree steps both ran, the crossings happened, and (sleeping
+//! on) a descent crossed with a live sleeper set. Shown red at C4: the rig's threshold set to 64
+//! (no brute step); `all_pairs_into`'s inner loop reversed (the pose: the stream's order reaches
+//! it); `n < brute_max_rows` in `step_hinted` (the step at exactly the threshold takes the tree
+//! path). F3's scene (141 → 150 rows across 144) was shown blind to 128 before it was re-scened.
+//!
+//! # G-AUTO1: Auto's Tree band (the tree broadphase's C4)
+//!
+//! G-TH1's rig and script, with the Tree world set to `BroadphaseSelectMode::Auto` against a
+//! Manual AllPairs twin, sleeping off and on. The script's 124 → 137 rows cross both Auto edges
+//! (`AUTO_TREE_HI` up, `AUTO_TREE_LO` down). On every step the oracle and the twin's pose bytes
+//! hold; the kind Auto chose is the hysteresis of the row count and the previous side (Tree iff
+//! rows ≥ HI, or rows > LO with the band on); a Tree step runs the default `LeafList` kernel
+//! (ruling 4: the kd order is never auto-selected) and takes the tree path; an AllPairs step
+//! holds no sleeper and moves no tree counter (T6). Void unless both kinds ran, the band switched
+//! once each way per cycle, and (sleeping on) a Tree → AllPairs switch had a live sleeper set.
+//! Shown red at C4: the `clear_sleepers` guard before the kind arms deleted (the sleeping-on arm
+//! fails at the first such switch); `select_broadphase` writing `Grid` for the Tree (the kind
+//! assertion fails while the pose stays equal — every kind emits the same pairs, which is why the
+//! kind is asserted).
 //!
 //! # G-F3-8: the kd leaf order (`levers/broadphase/06-DESIGN-F3.md`)
 //!
@@ -77,6 +95,7 @@ use boyko_ecs::ecs::identifiers::primitives::ArchetypeId;
 use boyko_macros::{Component, Resource};
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
+use boyko_physics::broadphase_policy::{AUTO_TREE_HI, AUTO_TREE_LO, PhysicsStats};
 use boyko_physics::broadphase_tree::{
     BroadphaseTree, QueryKernel, TREE_BRUTE_MAX_ROWS, TreeDiag, all_pairs_into,
 };
@@ -85,7 +104,9 @@ use boyko_physics::components::{
 };
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_colored_solve;
-use boyko_physics::resources::{BroadphaseKind, ContactPairs, PhysicsConfig, SolverScratch};
+use boyko_physics::resources::{
+    BroadphaseKind, BroadphaseSelectMode, ContactPairs, PhysicsConfig, SolverScratch,
+};
 
 // ── Scene constants (Jolt `PyramidScene.h`, as the parity runner transcribes them) ──
 
@@ -667,15 +688,41 @@ fn g_f3_8_churn_arms_kd_match_all_pairs() {
 
 // ── G-TH1: the brute threshold's band (module docs) ──────────────────────────
 
-/// Rest piles of the band scene.
-const BAND_PILES: usize = 10;
+/// Rows of the band scene before the script adds a box (the floor is one): four below the
+/// default brute threshold, so step 0 is a brute step over rest piles.
+const BAND_BASE_ROWS: usize = TREE_BRUTE_MAX_ROWS as usize - 4;
+/// Rows at the top of a climb: one above Auto's Tree edge, so the same script also crosses the
+/// Auto band both ways (G-AUTO1).
+const BAND_TOP_ROWS: usize = AUTO_TREE_HI as usize + 1;
 /// Layers of a band pile (9 + 4 + 1 boxes). Its boxes touch their neighbours, so a box has
 /// several dynamic partners and the stream's order reaches the colouring.
 const BAND_PILE_LAYERS: i32 = 3;
 /// Boxes per band pile.
 const BAND_PILE_BOXES: usize = 14;
-/// Boxes the script spawns and despawns: 141 rows → 150 and back, across 144 ↔ 145.
-const BAND_EXTRAS: usize = 9;
+/// Dynamic boxes of the base scene.
+const BAND_BASE_BOXES: usize = BAND_BASE_ROWS - 1;
+/// Rest piles of the band scene: as many whole piles as the base holds.
+const BAND_PILES: usize = BAND_BASE_BOXES / BAND_PILE_BOXES;
+/// Loose base boxes resting on the floor clear of the piles and of each other: the remainder.
+const BAND_LOOSE: usize = BAND_BASE_BOXES % BAND_PILE_BOXES;
+/// Boxes the script spawns and despawns: `BAND_BASE_ROWS` → `BAND_TOP_ROWS` and back (124 → 137
+/// at the provisional 128 / 136), across `TREE_BRUTE_MAX_ROWS` ↔ `+ 1`.
+const BAND_EXTRAS: usize = BAND_TOP_ROWS - BAND_BASE_ROWS;
+/// Loose boxes and extras per row of their floor strip, 5 apart.
+const BAND_STRIP: usize = 17;
+
+// The scene follows the constants, so a window-9 value needs no re-scene; these say it still
+// crosses the threshold and fits its layout.
+const _: () = assert!(
+    BAND_BASE_ROWS < TREE_BRUTE_MAX_ROWS as usize && (TREE_BRUTE_MAX_ROWS as usize) < BAND_TOP_ROWS,
+    "G-TH1: the band scene must cross the default brute threshold"
+);
+const _: () = assert!(BAND_PILES >= 1, "G-TH1: the base holds a rest pile, so the stream's order reaches a pose");
+const _: () = assert!(BAND_PILES <= 10, "G-TH1: at most ten piles fit the pile grid");
+const _: () = assert!(
+    BAND_EXTRAS <= 4 * BAND_STRIP && BAND_LOOSE <= BAND_STRIP,
+    "G-TH1: the extras fit four floor strips, the loose boxes one"
+);
 /// Steps between two row changes of the script.
 const BAND_PERIOD: usize = 10;
 /// Steps before the first climb; the sleeping-on arm's piles fall asleep in them.
@@ -685,11 +732,18 @@ const BAND_HOLD: usize = 30;
 /// Climbs and descents.
 const BAND_CYCLES: usize = 2;
 
-/// The band scene on `kind`, sleeping `sleeping`, at the default brute threshold.
+/// The floor position of box `k` of a strip of loose boxes whose first row lies at `z0`, rows
+/// stepping by `dz`: 5 apart, so no two touch.
+fn strip_position(k: usize, z0: f32, dz: f32) -> Vec3 {
+    Vec3::new(-40.0 + 5.0 * (k % BAND_STRIP) as f32, 1.0, z0 + dz * (k / BAND_STRIP) as f32)
+}
+
+/// The band scene on `kind`, sleeping `sleeping`, at the default brute threshold: `BAND_PILES`
+/// rest piles and `BAND_LOOSE` loose boxes, `BAND_BASE_ROWS` rows with the floor.
 fn band_rig(kind: BroadphaseKind, sleeping: bool) -> Rig {
     let mut world = EcsMaster::new();
     spawn_box(&mut world, Vec3::new(0.0, -1.0, 0.0), REST_FRICTION, false);
-    let mut boxes = Vec::with_capacity(BAND_PILES * BAND_PILE_BOXES + BAND_EXTRAS);
+    let mut boxes = Vec::with_capacity(BAND_BASE_BOXES + BAND_EXTRAS);
     for p in 0..BAND_PILES {
         let (ox, oz) = (-20.0 + 10.0 * (p % 5) as f32, -10.0 + 20.0 * (p / 5) as f32);
         for i in 0..BAND_PILE_LAYERS {
@@ -708,7 +762,10 @@ fn band_rig(kind: BroadphaseKind, sleeping: bool) -> Rig {
             }
         }
     }
-    assert_eq!(boxes.len(), BAND_PILES * BAND_PILE_BOXES, "construction: ten piles of 14 boxes");
+    for k in 0..BAND_LOOSE {
+        boxes.push(spawn_box(&mut world, strip_position(k, -30.0, -5.0), REST_FRICTION, true));
+    }
+    assert_eq!(boxes.len(), BAND_BASE_BOXES, "construction: the piles and the loose boxes");
     let physics = wire_sleeping(&mut world, kind, sleeping);
     // G-TH1 is about the default threshold, which `wire_sleeping` sets to 0.
     world.resource_mut::<BroadphaseTree>().set_brute_max_rows(TREE_BRUTE_MAX_ROWS);
@@ -736,9 +793,8 @@ fn band_script() -> Vec<i8> {
 fn band_edit(rig: &mut Rig, edit: i8) {
     match edit {
         1 => {
-            let k = rig.boxes.len() - BAND_PILES * BAND_PILE_BOXES;
-            let position = Vec3::new(-20.0 + 5.0 * k as f32, 1.0, 30.0);
-            let e = spawn_box(&mut rig.world, position, REST_FRICTION, true);
+            let k = rig.boxes.len() - BAND_BASE_BOXES;
+            let e = spawn_box(&mut rig.world, strip_position(k, 30.0, 5.0), REST_FRICTION, true);
             rig.boxes.push(e);
         }
         -1 => {
@@ -844,6 +900,105 @@ fn tree_threshold_band_is_value_neutral() {
 #[test]
 fn tree_threshold_band_is_value_neutral_sleeping_on() {
     assert_threshold_band(true);
+}
+
+// ── G-AUTO1: Auto's Tree band on the band scene (module docs) ────────────────
+
+/// G-AUTO1 on the band scene, sleeping `sleeping`: an Auto world (started on the Tree) against a
+/// Manual AllPairs twin (module docs).
+fn assert_auto_band(sleeping: bool) {
+    let label = if sleeping { "auto band, sleeping on" } else { "auto band, sleeping off" };
+    let mut auto = band_rig(BroadphaseKind::Tree, sleeping);
+    auto.world.resource_mut::<PhysicsConfig>().broadphase_select = BroadphaseSelectMode::Auto;
+    let mut all = band_rig(BroadphaseKind::AllPairs, sleeping);
+    let (lo, hi) = (AUTO_TREE_LO as usize, AUTO_TREE_HI as usize);
+    let script = band_script();
+    let (mut wt, mut wa) = (Witness::START, Witness::START);
+    let mut prev = auto.diag();
+    let mut prev_tree = auto.world.resource::<PhysicsStats>().broadphase_band;
+    let mut prev_sleepers = 0u64;
+    let (mut tree_steps, mut all_steps) = (0usize, 0usize);
+    let (mut to_tree, mut to_all, mut to_all_held) = (0usize, 0usize, 0usize);
+    for (step, &edit) in script.iter().enumerate() {
+        band_edit(&mut auto, edit);
+        band_edit(&mut all, edit);
+        auto.step();
+        all.step();
+        let (p_steps, mism, first) = auto.probe();
+        assert_eq!(p_steps, step as u64 + 1, "{label}: the probe runs once per step");
+        assert_eq!(mism, 0, "{label} step {step}: Auto's pairs differ from all-pairs' (first at {first:?})");
+        assert!(
+            auto.pose_bits() == all.pose_bits(),
+            "{label} step {step}: the Auto world's pose bytes differ from the AllPairs twin's"
+        );
+        wt.fold(&auto);
+        wa.fold(&all);
+
+        // The kind Auto chose this step is the hysteresis of the row count and the side it was on.
+        let rows = auto.world.resource::<SolverScratch>().bodies_len();
+        let want_tree = rows >= hi || (rows > lo && prev_tree);
+        let want = if want_tree { BroadphaseKind::Tree } else { BroadphaseKind::AllPairs };
+        let kind = auto.world.resource::<PhysicsConfig>().broadphase;
+        assert_eq!(
+            kind, want,
+            "{label} step {step}: rows {rows} with the band {} (LO {lo}, HI {hi}): Auto selected {kind:?}",
+            if prev_tree { "on" } else { "off" }
+        );
+        assert_eq!(auto.world.resource::<PhysicsStats>().broadphase_band, want_tree, "{label} step {step}: the band");
+        let d = auto.diag();
+        let tree = auto.world.resource::<BroadphaseTree>();
+        let sleepers = tree.sleeper_members();
+        if want_tree {
+            tree_steps += 1;
+            // Ruling 4 (2026-09-29): Auto selects the kind, never the query kernel.
+            assert_eq!(tree.query_kernel(), QueryKernel::LeafList, "{label} step {step}: the query kernel");
+            // Auto's Tree side starts above LO >= brute_max_rows, so every Tree step is a tree-path step.
+            let answered = d.leaf_list_leaves - prev.leaf_list_leaves;
+            assert!(
+                answered > 0 || sleepers > 0,
+                "{label} step {step}: a Tree step at {rows} rows answered no leaf-list leaf and holds no sleeper"
+            );
+        } else {
+            all_steps += 1;
+            // T6: a step on another kind leaves no sleeper, and never runs the tree.
+            assert_eq!(sleepers, 0, "{label} step {step}: an AllPairs step left {sleepers} sleepers (T6)");
+            assert_eq!(
+                TreeDiag { members: 0, ..d },
+                TreeDiag { members: 0, ..prev },
+                "{label} step {step}: an AllPairs step moves no tree counter"
+            );
+        }
+        to_tree += usize::from(want_tree && !prev_tree);
+        if prev_tree && !want_tree {
+            to_all += 1;
+            to_all_held += usize::from(prev_sleepers > 0);
+        }
+        (prev, prev_tree, prev_sleepers) = (d, want_tree, sleepers);
+    }
+    assert!(tree_steps > 0 && all_steps > 0, "{label}: void: Auto ran {tree_steps} Tree and {all_steps} AllPairs steps");
+    assert_eq!((to_tree, to_all), (BAND_CYCLES, BAND_CYCLES), "{label}: one switch each way per cycle");
+    if sleeping {
+        assert!(to_all_held > 0, "{label}: void: no Tree → AllPairs switch had a live sleeper set (T6 on a kind switch)");
+    }
+    println!(
+        "{label}: {} steps, {tree_steps} Tree, {all_steps} AllPairs; switches to the Tree {to_tree}, to AllPairs \
+         {to_all} ({to_all_held} with a live sleeper set); tree {:?}",
+        script.len(),
+        auto.diag()
+    );
+    report_witness(label, script.len(), wt, wa);
+}
+
+/// G-AUTO1, sleeping off (module docs).
+#[test]
+fn auto_tree_band_is_value_neutral() {
+    assert_auto_band(false);
+}
+
+/// G-AUTO1, sleeping on: a Tree → AllPairs switch dissolves the sleeper set (T6).
+#[test]
+fn auto_tree_band_is_value_neutral_sleeping_on() {
+    assert_auto_band(true);
 }
 
 // ── The churn scene (`benches/row_identity_churn.rs`, transcribed) ───────────

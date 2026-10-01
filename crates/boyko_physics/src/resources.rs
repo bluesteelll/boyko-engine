@@ -50,34 +50,34 @@ const BITS_PER_CHUNK: usize = 256;
 
 /// Broadphase algorithm selector (plan O2, Decision 1; the 0%-gate flag).
 ///
-/// [`AllPairs`](BroadphaseKind::AllPairs) is the DEFAULT and runs the shipped
-/// O(n²) double loop byte-for-byte unchanged — so a world that never opts in is
-/// bit-identical to today (the campaign 0%-gate). [`Grid`](BroadphaseKind::Grid)
+/// [`Tree`](BroadphaseKind::Tree) is the DEFAULT since the tree broadphase's C4: the
+/// packed-BVH broadphase with a persistent static set
+/// ([`BroadphaseTree`](crate::broadphase_tree::BroadphaseTree)), whose pair set is
+/// AllPairs' exact set by construction (the same predicate on the same bits, one
+/// owner per pair, an integer-count assembly) — so the flip moved no result bit.
+/// [`AllPairs`](BroadphaseKind::AllPairs) runs the shipped O(n²) double loop
+/// byte-for-byte unchanged (cfg-A and every AllPairs pin run it). [`Grid`](BroadphaseKind::Grid)
 /// opts into the uniform-grid CSR counting-sort, which emits candidate pairs then
 /// applies the SAME sphere-bound feasibility predicate as all-pairs and SORTS the
 /// survivors by `(min, max)` — so its [`ContactPairs`] output is bit-identical to
-/// all-pairs (the O2 correctness gate). [`Tree`](BroadphaseKind::Tree) opts into
-/// the packed-BVH broadphase with a persistent static set
-/// ([`BroadphaseTree`](crate::broadphase_tree::BroadphaseTree)), whose pair set is
-/// AllPairs' exact set by construction (the same predicate on the same bits, one
-/// owner per pair, an integer-count assembly) — bit-identical too, and serial.
-/// The choice is a single runtime branch in
-/// [`physics_broadphase`](crate::systems::physics_broadphase) (the one-branch
+/// all-pairs (the O2 correctness gate). The Tree is serial, and at or below
+/// `TREE_BRUTE_MAX_ROWS` rows it runs the all-pairs loop itself. The choice is a single
+/// runtime branch in [`physics_broadphase`](crate::systems::physics_broadphase) (the one-branch
 /// floor).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BroadphaseKind {
-    /// The shipped O(n²) all-pairs loop (DEFAULT) — byte-identical to today.
-    #[default]
+    /// The shipped O(n²) all-pairs loop — byte-identical to before O2 (opt-in since the
+    /// tree broadphase's C4).
     AllPairs,
     /// The uniform-grid CSR counting-sort broadphase (opt-in, O2). Produces a
     /// `(min, max)`-sorted pair set bit-identical to [`AllPairs`](Self::AllPairs).
     Grid,
-    /// The packed-BVH broadphase with a persistent static set (opt-in, the tree
-    /// broadphase design; it becomes the default at its commit C4). Produces a
-    /// `(min, max)`-sorted pair set bit-identical to [`AllPairs`](Self::AllPairs);
-    /// runs the all-pairs loop itself at or below
+    /// The packed-BVH broadphase with a persistent static set (the DEFAULT since the
+    /// tree broadphase design's commit C4). Produces a `(min, max)`-sorted pair set
+    /// bit-identical to [`AllPairs`](Self::AllPairs); runs the all-pairs loop itself at or below
     /// [`BroadphaseTree::brute_max_rows`](crate::broadphase_tree::BroadphaseTree::brute_max_rows)
     /// rows.
+    #[default]
     Tree,
 }
 
@@ -220,11 +220,11 @@ pub struct PhysicsConfig {
     /// direct-drive caller that never gathers rows (`solve_colored`, `solve_colored_sleeping`,
     /// `RigidSolver::solve`) resumes from the impulses its last warm solve stored.
     pub warm_start: bool,
-    /// Broadphase algorithm (default [`BroadphaseKind::AllPairs`] = the shipped
-    /// O(n²) loop, byte-identical to today). Set to [`BroadphaseKind::Grid`] to
-    /// opt into the O2 uniform-grid broadphase, or to [`BroadphaseKind::Tree`] for
-    /// the packed-BVH broadphase with a persistent static set; both pair sets are
-    /// bit-identical to all-pairs (the 0%-gate flag — a single runtime branch in
+    /// Broadphase algorithm (default [`BroadphaseKind::Tree`] since the tree broadphase's
+    /// C4 = the packed-BVH broadphase with a persistent static set). Set to
+    /// [`BroadphaseKind::AllPairs`] for the shipped O(n²) loop, or to [`BroadphaseKind::Grid`]
+    /// for the O2 uniform-grid broadphase; every kind's pair set is bit-identical to
+    /// all-pairs (the 0%-gate flag — a single runtime branch in
     /// [`physics_broadphase`](crate::systems::physics_broadphase)).
     pub broadphase: BroadphaseKind,
     /// Who drives [`broadphase`](Self::broadphase) — the user
@@ -607,9 +607,9 @@ impl Default for PhysicsConfig {
             // L10 D5b: warm start on, as the solvers' own default; the effective value is this AND
             // the solver's setup flag, so the default keeps every setup choice's effect.
             warm_start: true,
-            // Default to the shipped O(n²) loop so an un-opted world is
-            // byte-identical to today (the campaign 0%-gate).
-            broadphase: BroadphaseKind::AllPairs,
+            // The tree broadphase's C4: the Tree by default. Its pair set is all-pairs'
+            // exact set (G1), so the flip moves no pose.
+            broadphase: BroadphaseKind::Tree,
             // Default Manual so the user owns `broadphase` (the P3 0%-gate): the
             // density policy only counts bodies, it never overrides the kind.
             broadphase_select: BroadphaseSelectMode::Manual,
