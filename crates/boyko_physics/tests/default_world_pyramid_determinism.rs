@@ -33,12 +33,18 @@
 //! `contact_reuse = false`, must end in [`PINNED_FINAL_HASH_REUSE_OFF`]: the pre-C4 trajectory,
 //! which every later lane's reuse-off mode has to reproduce bit for bit.
 //!
+//! **The overlap-only arms (V2).** Two more runs set `speculative_distance = 0` and
+//! `speculative_velocity_cap = 0`, with contact reuse on and off, and must end in
+//! [`PINNED_FINAL_HASH_D0`] and [`PINNED_FINAL_HASH_REUSE_OFF_D0`]: the trajectories from before
+//! V2's speculative contacts, which the two values at `0` together (never the distance alone)
+//! have to reproduce bit for bit whatever the defaults are.
+//!
 //! **The AllPairs arm (the tree broadphase's C4).** The default broadphase is the Tree since C4,
 //! so the reference and every arm above run it. One more run, the reference configuration with
 //! `broadphase = AllPairs`, must equal the reference on EVERY frame and end in the same
 //! [`PINNED_FINAL_HASH`]: the in-cargo proof that the flip moved no value (every kind emits
 //! AllPairs' pair set in `(min, max)` order), and the pin that keeps the shipped all-pairs arm,
-//! which the default no longer runs, under a pinned hash. It is asserted after the two pins, so
+//! which the default no longer runs, under a pinned hash. It is asserted after the pins, so
 //! a Tree defect that moves the default world reads as the reference pin.
 //!
 //! # Scene size per profile
@@ -101,11 +107,15 @@ const FRAMES: usize = if cfg!(debug_assertions) { 60 } else { 120 };
 const DT: f32 = 1.0 / 60.0;
 
 /// The reference run's final hash, per profile: release (height 15, 120 frames)
-/// `0xb583_189f_a681_f3a6`, debug (height 10, 60 frames) `0x839d_9426_8d67_b09f`. Both were
-/// read on msvc at L9 C4 (contact reuse on by default, 2026-09-24), which re-pinned them from
-/// release `0xa386_20b3_8cbc_a8d3` and debug `0xc7eb_531b_1e1a_c19b`, read at L9 C3
-/// (`aef7dda4`) when the default had reuse off; those are now
-/// [`PINNED_FINAL_HASH_REUSE_OFF`].
+/// `0xe5d8_a7d5_f469_4f08`, debug (height 10, 60 frames) `0x2112_97c3_d16c_603c`. Both were read
+/// on msvc at V2's flip (speculative contacts and the approach-velocity margin on by default,
+/// owner V2a/V2b and rulings 2026-09-30 items 9-10, 2026-10-01) from this test's `reference final
+/// hash` line (`cargo test [--release] -p boyko-physics --test default_world_pyramid_determinism
+/// -- --nocapture`), re-pinned from release `0xb583_189f_a681_f3a6` and debug
+/// `0x839d_9426_8d67_b09f`, read at L9 C4 (contact reuse on by default, 2026-09-24); those are now
+/// [`PINNED_FINAL_HASH_D0`], which the overlap-only rule still reads exactly. L9 C4 had re-pinned
+/// them from release `0xa386_20b3_8cbc_a8d3` and debug `0xc7eb_531b_1e1a_c19b`, read at L9 C3
+/// (`aef7dda4`) when the default had reuse off.
 ///
 /// **Re-pin rule.** The value moves only with a commit that changes values by design (a
 /// value-changing lever). That commit re-reads BOTH profiles from this test's own
@@ -113,19 +123,44 @@ const DT: f32 = 1.0 / 60.0;
 /// and the old values in this doc. In a commit that claims bit identity, a change is a
 /// defect, never a re-pin.
 const PINNED_FINAL_HASH: u64 = if cfg!(debug_assertions) {
+    0x2112_97c3_d16c_603c
+} else {
+    0xe5d8_a7d5_f469_4f08
+};
+
+/// The reference configuration's final hash with contact reuse OFF (the exact narrowphase),
+/// per profile: release `0x7812_1c47_f5c6_e8b2`, debug `0x0fc5_7194_33da_d377`. Read on msvc at V2's
+/// flip (2026-10-01) from this test's `reuse off` line, re-pinned from release
+/// `0xa386_20b3_8cbc_a8d3` and debug `0xc7eb_531b_1e1a_c19b` (read at L9 C3, `aef7dda4`, as the
+/// default's, and again at L9 C4), which are now [`PINNED_FINAL_HASH_REUSE_OFF_D0`]. V2 is not a
+/// contact-reuse change: its rule reaches the reuse-off narrowphase too.
+///
+/// **Re-pin rule.** [`PINNED_FINAL_HASH`]'s, read from the `reuse off` line, except that no
+/// contact-reuse change may move it: with reuse off no reuse code runs.
+const PINNED_FINAL_HASH_REUSE_OFF: u64 = if cfg!(debug_assertions) {
+    0x0fc5_7194_33da_d377
+} else {
+    0x7812_1c47_f5c6_e8b2
+};
+
+/// The reference configuration's final hash with `speculative_distance = 0` and
+/// `speculative_velocity_cap = 0` (V2's overlap-only rule) and contact reuse on, per profile:
+/// release `0xb583_189f_a681_f3a6`, debug `0x839d_9426_8d67_b09f` — [`PINNED_FINAL_HASH`]'s values on
+/// the tree before V2 (`16191fda`), read again unchanged at V2's flip.
+///
+/// **Never re-pinned by a value change of V2's.** The overlap-only rule (both values `0`, not the
+/// distance alone) is the pre-V2 contact rule bit for bit; a lever outside V2 that changes values
+/// re-pins it under [`PINNED_FINAL_HASH`]'s rule, from the `d = 0` line.
+const PINNED_FINAL_HASH_D0: u64 = if cfg!(debug_assertions) {
     0x839d_9426_8d67_b09f
 } else {
     0xb583_189f_a681_f3a6
 };
 
-/// The reference configuration's final hash with contact reuse OFF (the exact narrowphase),
-/// per profile: release `0xa386_20b3_8cbc_a8d3`, debug `0xc7eb_531b_1e1a_c19b`. Read on msvc
-/// at L9 C3 (`aef7dda4`) as the default's, and again at L9 C4 from this test's `reuse off`
-/// line.
-///
-/// **Re-pin rule.** [`PINNED_FINAL_HASH`]'s, read from the `reuse off` line, except that no
-/// contact-reuse change may move it: with reuse off no reuse code runs.
-const PINNED_FINAL_HASH_REUSE_OFF: u64 = if cfg!(debug_assertions) {
+/// [`PINNED_FINAL_HASH_D0`] with contact reuse off: release `0xa386_20b3_8cbc_a8d3`, debug
+/// `0xc7eb_531b_1e1a_c19b` — [`PINNED_FINAL_HASH_REUSE_OFF`]'s values before V2. Its rule is
+/// [`PINNED_FINAL_HASH_D0`]'s.
+const PINNED_FINAL_HASH_REUSE_OFF_D0: u64 = if cfg!(debug_assertions) {
     0xc7eb_531b_1e1a_c19b
 } else {
     0xa386_20b3_8cbc_a8d3
@@ -288,17 +323,20 @@ fn run_with_reuse(
     simd_solve: bool,
     reuse: Option<bool>,
 ) -> Run {
-    run_with(workers, parallel_solve, simd_solve, reuse, None)
+    run_with(workers, parallel_solve, simd_solve, reuse, None, None)
 }
 
 /// [`run_with_reuse`], with the broadphase set to `kind` under the `Manual` select mode when it
-/// is `Some` (the default's otherwise).
+/// is `Some` (the default's otherwise), and `speculative_distance` set to `speculative` with the
+/// approach-velocity margin off (`speculative_velocity_cap = 0`) when it is `Some`: `Some(0.0)` is
+/// V2's overlap-only rule.
 fn run_with(
     workers: usize,
     parallel_solve: bool,
     simd_solve: bool,
     reuse: Option<bool>,
     kind: Option<BroadphaseKind>,
+    speculative: Option<f32>,
 ) -> Run {
     let mut world = EcsMaster::new();
     let n = spawn_pyramid(&mut world);
@@ -320,6 +358,10 @@ fn run_with(
         if let Some(kind) = kind {
             cfg.broadphase_select = BroadphaseSelectMode::Manual;
             cfg.broadphase = kind;
+        }
+        if let Some(d) = speculative {
+            cfg.speculative_distance = d;
+            cfg.speculative_velocity_cap = 0.0;
         }
     }
 
@@ -401,8 +443,16 @@ fn default_world_pyramid_is_run_to_run_worker_count_and_scalar_identical() {
     let reuse_off = run_with_reuse(1, false, true, Some(false));
     let reuse_off_final = reuse_off.hashes.last().copied().unwrap_or(0);
     println!("  reuse off (1w parallel_solve=false): final hash {reuse_off_final:#018x}");
+    // The overlap-only rule (V2's d = 0 and velocity cap 0, both set by `run_with`), reuse on and
+    // off: pinned on their own.
+    let d0_final =
+        run_with(1, false, true, None, None, Some(0.0)).hashes.last().copied().unwrap_or(0);
+    let d0_reuse_off_final =
+        run_with(1, false, true, Some(false), None, Some(0.0)).hashes.last().copied().unwrap_or(0);
+    println!("  d = 0 (1w parallel_solve=false): final hash {d0_final:#018x}");
+    println!("  d = 0, reuse off (1w parallel_solve=false): final hash {d0_reuse_off_final:#018x}");
     // The tree broadphase's C4: the AllPairs arm the default no longer runs (module docs).
-    let all_pairs = run_with(1, false, true, None, Some(BroadphaseKind::AllPairs));
+    let all_pairs = run_with(1, false, true, None, Some(BroadphaseKind::AllPairs), None);
     let all_pairs_final = all_pairs.hashes.last().copied().unwrap_or(0);
     println!("  AllPairs (1w parallel_solve=false): final hash {all_pairs_final:#018x}");
     // Before the value gates, so a moved pin is read beside the census that names or clears the
@@ -445,6 +495,18 @@ fn default_world_pyramid_is_run_to_run_worker_count_and_scalar_identical() {
          contact-reuse change may move; only a value-changing lever outside contact reuse re-pins, \
          under `PINNED_FINAL_HASH_REUSE_OFF`'s rule"
     );
+    for (label, got, pinned) in [
+        ("d = 0", d0_final, PINNED_FINAL_HASH_D0),
+        ("d = 0, reuse off", d0_reuse_off_final, PINNED_FINAL_HASH_REUSE_OFF_D0),
+    ] {
+        assert_eq!(
+            got, pinned,
+            "the default world's pyramid under the overlap-only rule ({label}) moved: final hash \
+             {got:#018x}, pinned {pinned:#018x} (height {PYRAMID_HEIGHT}, {FRAMES} frames). \
+             speculative_distance = 0 with speculative_velocity_cap = 0 is the contact rule from \
+             before V2, bit for bit: a V2 leak, never a re-pin"
+        );
+    }
     let all_pairs_first = all_pairs
         .hashes
         .iter()

@@ -46,9 +46,10 @@
 //!
 //! # Configurations (`--cfg`, `--solver`)
 //!
-//! The runner sets every knob it depends on explicitly but one, so a change of a shipped default
+//! The runner sets every knob it depends on explicitly but three, so a change of a shipped default
 //! (the colored solver and `simd_solve` became the defaults in `56c1e9e7`, 2026-09-18) cannot
-//! change what a row measures; the one is `contact_reuse` (below the list):
+//! change what a row measures; the three are `contact_reuse`, `speculative_distance` and
+//! `speculative_velocity_cap` (below the list):
 //!
 //! * `--cfg a` (cfg-A, H7): the colored solve; `parallel_solve = W > 1` (`--parallel-solve` could
 //!   force it on at W = 1 until L4 retired J-P1); `parallel_narrowphase` follows `parallel_solve`
@@ -96,7 +97,11 @@
 //! defaults and are printed in the summary. So does `contact_reuse` under every `--cfg` unless
 //! `--contact-reuse` sets it, and that default is a value knob: it is on since L9 C4, so a row
 //! without the flag runs contact reuse, and `--contact-reuse off` is the exact narrowphase — the
-//! spelling every cross-window bridge and every pre-C4 pose fixture needs from C4 on.
+//! spelling every cross-window bridge and every pre-C4 pose fixture needs from C4 on. So does
+//! `speculative_distance` unless `--speculative-distance` sets it, and `speculative_velocity_cap`
+//! unless `--speculative-velocity-cap` sets it: V2's contact rule, value knobs as well, and
+//! `--speculative-distance 0 --speculative-velocity-cap 0` is the overlap-only rule — the spelling
+//! every cross-window bridge and every pre-V2 pose fixture needs once V2 is the default.
 //!
 //! # The profile (`--arm-profiler`)
 //!
@@ -256,6 +261,11 @@
 //!                              summary's `pair_classes`, as does any row whose config has
 //!                              contact_reuse on without the flag
 //! --reuse-distance D           contact_reuse_distance τ in metres (with --contact-reuse on)
+//! --speculative-distance D     V2's speculative_distance d in metres (finite, >= 0), under any
+//!                              --cfg; 0 (with --speculative-velocity-cap 0) is the overlap-only
+//!                              rule of every pre-V2 fixture
+//! --speculative-velocity-cap C V2's speculative_velocity_cap in metres (finite, >= 0), under any
+//!                              --cfg; 0 switches the approach-velocity margin off
 //! --broadphase allpairs|tree|grid
 //!                              set broadphase (tree broadphase C3) under Manual selection, under
 //!                              any --cfg
@@ -309,8 +319,9 @@
 //!   `hint_capped` or (contact reuse on) `refresh_stale` is above zero, so a moved `--expect-pose`
 //!   row with all three at zero was not moved by it.
 //! * exit code: 0 ok; 2 bad flags; 3 void (anti-vacuity, frozen-by, disarmed ring traffic,
-//!   dropped samples, a reuse-on row with no reuse over steps [100, 500)); 4 `--expect-pose`
-//!   mismatch; 101 panic.
+//!   dropped samples, a reuse-on row that collided box pairs over steps [100, 500) and reused no
+//!   record there, or whose window collided none and whose whole run reused no record);
+//!   4 `--expect-pose` mismatch; 101 panic.
 //!
 //! # Self-check (no `--scene`)
 //!
@@ -501,8 +512,10 @@ const COLOR_CHUNKS_PER_WORKER: usize = 6;
 const COLOR_MIN_SLOTS_PER_CHUNK: usize = 64;
 /// The SIMD cohort width the cut snaps to: `solver/colored.rs`'s `COHORT`.
 const COLOR_COHORT: usize = 8;
-/// The steps a contact-reuse row must reuse a record in, or be void (L9 design, "Integration":
-/// J's pile settles before step ~188, so a reuse-on row that reused nothing here measured nothing).
+/// The steps a contact-reuse row that collides a box pair in them must reuse a record in, or be
+/// void (L9 design, "Integration": J's pile settles before step ~188, so a reuse-on row that
+/// reused nothing here measured nothing). A row whose window collided no box pair (every island
+/// held) must reuse a record somewhere in its run instead.
 const REUSE_PROBE: (usize, usize) = (100, 500);
 
 // ── Command line ──────────────────────────────────────────────────────────────
@@ -613,6 +626,10 @@ struct Args {
     parallel_np: Option<bool>,
     contact_reuse: Option<bool>,
     reuse_distance: Option<f32>,
+    /// `--speculative-distance D` (V2); `None` leaves the tree's default.
+    speculative_distance: Option<f32>,
+    /// `--speculative-velocity-cap C` (V2); `None` leaves the tree's default.
+    speculative_velocity_cap: Option<f32>,
     broadphase: Option<BroadphaseKind>,
     /// `--sleeping [on|off]`; `None` leaves the --cfg's own value.
     sleeping: Option<bool>,
@@ -652,6 +669,7 @@ fn usage_error(msg: &str) -> ExitCode {
         "usage: jolt_parity_pyramid --scene jolt|rest|s16 [--workers W] [--steps N] [--window A..B] \
          [--gap G] [--solver colored|reference] [--cfg a|as|b|default] [--parallel-solve] \
          [--parallel-np on|off] [--contact-reuse on|off] [--reuse-distance D] \
+         [--speculative-distance D] [--speculative-velocity-cap C] \
          [--broadphase allpairs|tree|grid] [--sleeping [on|off]] [--sleep-skip off|sets] \
          [--threshold T] \
          [--frozen-by K] [--arm-profiler] [--canary-frac F --canary-ref-ns T] \
@@ -691,6 +709,8 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     let mut parallel_np = None;
     let mut contact_reuse = None;
     let mut reuse_distance = None;
+    let mut speculative_distance = None;
+    let mut speculative_velocity_cap = None;
     let mut broadphase = None;
     let mut sleeping = None;
     let mut sleep_skip = None;
@@ -752,6 +772,13 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
             }
             "--reuse-distance" => {
                 reuse_distance = Some(parse_num::<f32>("--reuse-distance", it.next())?);
+            }
+            "--speculative-distance" => {
+                speculative_distance = Some(parse_num::<f32>("--speculative-distance", it.next())?);
+            }
+            "--speculative-velocity-cap" => {
+                speculative_velocity_cap =
+                    Some(parse_num::<f32>("--speculative-velocity-cap", it.next())?);
             }
             "--broadphase" => {
                 broadphase = match it.next().as_deref() {
@@ -818,6 +845,8 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
         parallel_np,
         contact_reuse,
         reuse_distance,
+        speculative_distance,
+        speculative_velocity_cap,
         broadphase,
         sleeping,
         sleep_skip,
@@ -908,6 +937,16 @@ fn validate(a: &Args) -> Result<(), String> {
         if !d.is_finite() || d < 0.0 {
             return Err(format!("--reuse-distance {d} must be finite and >= 0"));
         }
+    }
+    if let Some(d) = a.speculative_distance
+        && !(d.is_finite() && d >= 0.0)
+    {
+        return Err(format!("--speculative-distance {d} must be finite and >= 0"));
+    }
+    if let Some(c) = a.speculative_velocity_cap
+        && !(c.is_finite() && c >= 0.0)
+    {
+        return Err(format!("--speculative-velocity-cap {c} must be finite and >= 0"));
     }
     if let Some(k) = a.frozen_by {
         if a.sleeping != Some(true) {
@@ -1138,6 +1177,12 @@ fn configure(cfg: &mut PhysicsConfig, args: &Args) {
     }
     if let Some(d) = args.reuse_distance {
         cfg.contact_reuse_distance = d;
+    }
+    if let Some(d) = args.speculative_distance {
+        cfg.speculative_distance = d;
+    }
+    if let Some(c) = args.speculative_velocity_cap {
+        cfg.speculative_velocity_cap = c;
     }
     if let Some(kind) = args.broadphase {
         cfg.broadphase_select = BroadphaseSelectMode::Manual;
@@ -2024,6 +2069,8 @@ fn self_check() -> ExitCode {
         parallel_np: None,
         contact_reuse: None,
         reuse_distance: None,
+        speculative_distance: None,
+        speculative_velocity_cap: None,
         broadphase: None,
         sleeping: None,
         sleep_skip: None,
@@ -2087,6 +2134,7 @@ fn run(args: &Args) -> ExitCode {
              \"tree_brute_max_rows\":{tree_brute_max_rows},\
              \"simd\":{},\"simd_solve\":{},\"parallel_solve\":{},\"parallel_broadphase\":{},\
              \"parallel_narrowphase\":{},\"contact_reuse\":{},\"contact_reuse_distance\":{},\
+             \"speculative_distance\":{},\"speculative_velocity_cap\":{},\
              \"sleeping\":{},\"sleep_skip\":{},\"sleep_threshold\":{},\"sleep_frames\":{},\
              \"colored\":{},\"contact_hertz\":{},\"contact_damping\":{}}}",
             cfg.substeps,
@@ -2100,6 +2148,8 @@ fn run(args: &Args) -> ExitCode {
             cfg.parallel_narrowphase,
             cfg.contact_reuse,
             json_f64(f64::from(cfg.contact_reuse_distance)),
+            json_f64(f64::from(cfg.speculative_distance)),
+            json_f64(f64::from(cfg.speculative_velocity_cap)),
             cfg.sleeping,
             json_str(&format!("{:?}", cfg.sleep_skip)),
             json_f64(f64::from(cfg.sleep_threshold)),
@@ -2401,18 +2451,33 @@ fn run(args: &Args) -> ExitCode {
         void_steps += 1;
         first_void.get_or_insert_with(|| format!("the disarmed run pushed {traffic} samples"));
     }
-    // L9 (design, "Integration"): a reuse-on row that reused nothing over steps [100, 500) is void.
-    // It tests the effective config, which is also what `read_classes` tests, so `classes` holds
-    // one entry per step on every row it indexes, the flag named or not.
+    // L9 (design, "Integration"): a reuse-on row that collided a box pair over steps [100, 500)
+    // and reused no record there is void. A window in which the narrowphase collided no box pair
+    // at all (every island held: V2's rest pile freezes at step 86 in the `Sets` mode) had nothing
+    // to reuse, so its silence is no evidence; such a row is read over the whole run instead, and
+    // is void iff it reused no record anywhere. A reuse flag that never reaches the narrowphase
+    // still voids: its run collides box pairs on its first steps and reuses none. It tests the
+    // effective config, which is also what `read_classes` tests, so `classes` holds one entry per
+    // step on every row it indexes, the flag named or not.
     let reuse_probe = REUSE_PROBE.0..REUSE_PROBE.1.min(args.steps);
-    if contact_reuse
-        && !reuse_probe.is_empty()
-        && classes[reuse_probe.clone()].iter().all(|c| c.reused == 0)
-    {
-        void_steps += 1;
-        first_void.get_or_insert_with(|| {
-            format!("contact reuse is on and no pair reused its record over steps {reuse_probe:?}")
-        });
+    if contact_reuse && !reuse_probe.is_empty() {
+        let probe = &classes[reuse_probe.clone()];
+        let collided = probe.iter().any(|c| c.sep_hits + c.reused + c.full != 0);
+        if collided && probe.iter().all(|c| c.reused == 0) {
+            void_steps += 1;
+            first_void.get_or_insert_with(|| {
+                format!("contact reuse is on and no pair reused its record over steps {reuse_probe:?}")
+            });
+        } else if !collided && classes.iter().all(|c| c.reused == 0) {
+            void_steps += 1;
+            first_void.get_or_insert_with(|| {
+                format!(
+                    "contact reuse is on, steps {reuse_probe:?} collided no box pair, and no pair \
+                     reused its record over the whole run (steps 0..{})",
+                    classes.len()
+                )
+            });
+        }
     }
     let classes_json = if classes.is_empty() {
         "null".to_owned()

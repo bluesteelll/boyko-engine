@@ -1,0 +1,9 @@
+row            steps  manifolds    points  colours  passes  vel rows  rows x passes x
+JT_parent        400    4467.66  16553.76   10.875  130.50  198645.1   1.000    1.000
+JT_d0            400    4467.66  16553.76   10.875  130.50  198645.1   1.000    1.000
+JT_v2            400    8500.83  30919.90   16.000  192.00  371038.8   1.868    1.471
+JToff_parent     400    4519.26  17020.50   10.688  128.25  204246.0   1.000    1.000
+JToff_d0         400    4519.26  17020.50   10.688  128.25  204246.0   1.000    1.000
+JToff_v2         400    8492.75  30966.68   16.000  192.00  371600.2   1.819    1.497
+JT: the overlap-only rule's receipts equal the parent's: True
+JToff: the overlap-only rule's receipts equal the parent's: True

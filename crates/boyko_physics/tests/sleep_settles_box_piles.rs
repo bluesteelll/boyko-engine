@@ -31,10 +31,12 @@
 //!    probability p for that height, and the negative-binomial tail P(>= budget+1 events | p, N
 //!    draws) — and does not block.
 //! 4. A budget is re-sized ONLY from a fresh run of the `flicker_redraw_distribution` generator.
-//!    The last run was on the A7b tree (msvc release, 2026-09-18): the pooled wake probability
-//!    fell from 160/216 to 20/76 at height 5 and from 48/78 to 2/32 at height 4, and the
-//!    budgets came down with it (G2 18 -> 3, G7 56 -> 6). Never raise a budget to turn a red
-//!    green.
+//!    The last run was on V2's flip (speculative contacts and the approach-velocity margin on
+//!    by default; msvc release, 2026-10-01): 0 events in all 86 draws, every one frozen at step
+//!    61, so the pooled wake probability fell to 0/56 at height 5 and 0/30 at height 4 and the
+//!    budgets to 0 (G2 4 -> 0, G7 6 -> 0). The run before it, on the A7b tree (2026-09-18), had
+//!    taken them from 160/216 and 48/78 to 20/76 and 2/32 (G2 18 -> 4, G7 56 -> 6). Never raise a
+//!    budget to turn a red green.
 //! * **Row moves** (design Decision 1 case 5). A row move can change the axis hint a box pair
 //!   reads from the box-axis cache while the poses stay put. Before A7b that could change
 //!   whether a knife-edge pair had a manifold at all (A4's Known behaviour 2). Since A7b it
@@ -49,6 +51,14 @@
 //!   manifold appeared or vanished, each classed knife-edge or load-bearing), "count
 //!   unchanged" or "latch lost". Every kind is a defect that blocks the commit — a
 //!   "count changed" wake on knife-edge pairs only included.
+//!
+//!   **Under V2** (speculative contacts, `PhysicsConfig::speculative_distance`, 20 mm by default)
+//!   a box-box manifold exists when the poses are within `d`, so an exactly touching pile has no
+//!   knife-edge pair left: every touching pair carries a speculative manifold. G5 and G6
+//!   therefore run the overlap-only rule (`speculative_distance = 0`, the velocity term off),
+//!   the rule their premise P2 is about, and each has a V2 twin (G5-V2, G6-V2) whose pile stands
+//!   its layer neighbours half a [`TOUCH_GAP`] past `d`, so the knife-edge pairs are the ones at
+//!   V2's own boundary (rulings 2026-09-30, item 10b).
 //!
 //! **Defect A7.** A resting box pyramid crept sideways with a fixed (-x, -z) bias and its
 //! contact set kept changing at rest, so piles of height 7 or more never reached a 60-step
@@ -71,8 +81,9 @@
 //! were on the edge path (A7a alone: 33.3 %), so the mechanism A7b removed is not acting on
 //! the supports. It is an open question in `docs/OPEN-QUESTIONS.md`. Every figure in this
 //! paragraph was read with contact reuse off, the default until L9 C4; with reuse on (the
-//! default since) A7-R1 reads 0.6670 mm over steps 600-3000, and the 5400-step extension has
-//! not been re-run.
+//! default since) A7-R1 reads 0.6670 mm over steps 600-3000, and with V2's speculative contacts
+//! (the default since 2026-10-01) 0.7245 mm with reuse on and 0.5266 mm with reuse off. The
+//! 5400-step extension has not been re-run.
 //!
 //! ## S5's rung, pre-registered before any pile run of it (2026-09-18)
 //!
@@ -133,14 +144,14 @@
 //!
 //! # Legs
 //!
-//! * G1, G3, G4, G5 (height-4 piles, 30 boxes) and G8 (height 6, 91 boxes) run in both
-//!   profiles, in the ordinary `cargo test -p boyko-physics --test sleep_settles_box_piles`
+//! * G1, G3, G4, G5 and G5-V2 (height-4 piles, 30 boxes) and G8 (height 6, 91 boxes) run in
+//!   both profiles, in the ordinary `cargo test -p boyko-physics --test sleep_settles_box_piles`
 //!   run. G8 takes 2.4 s in debug.
-//! * G2, G6 (height 5, 55 boxes), G7 (sixteen height-4 draws), A7-R1 and A7-R2 (height 15,
+//! * G2, G6 and G6-V2 (height 5, 55 boxes), G7 (sixteen height-4 draws), A7-R1 and A7-R2 (height 15,
 //!   1240 boxes) run ONLY in release, as part of the physics release run that `CLAUDE.md`
 //!   names as their leg: `cargo test --release -p boyko-physics --no-fail-fast` (this file
 //!   alone: `cargo test --release -p boyko-physics --test sleep_settles_box_piles`). There
-//!   this binary prints `running 13 tests` and `12 passed; 0 failed; 1 ignored` (the
+//!   this binary prints `running 15 tests` and `14 passed; 0 failed; 1 ignored` (the
 //!   generator). In a debug build they are ignored, and `-- --ignored` in a debug build is NOT
 //!   their leg. A7-R1 is the long one: ~73 s in release, ~80 s for the whole binary before
 //!   the SIMD on/off differential below was added (it runs A7-R1's scene twice more; its
@@ -224,7 +235,8 @@ use boyko_physics::narrowphase::box_box::fallback_census;
 use boyko_physics::narrowphase::{feature_face_clip, feature_face_face};
 use boyko_physics::plugin::add_physics_colored_solve;
 use boyko_physics::resources::{
-    ConstraintGraph, ContactPairs, IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
+    ConstraintGraph, ContactPairs, DEFAULT_SPECULATIVE_DISTANCE, DEFAULT_SPECULATIVE_VELOCITY_CAP,
+    IslandSleep, Manifolds, PhysicsConfig, SolverScratch,
 };
 
 // ── Scene constants ──────────────────────────────────────────────────────────
@@ -251,49 +263,58 @@ const JOLT: usize = 15;
 const SMALL_SETTLE_LIMIT: usize = 1500;
 /// Settle budget (steps) for G8 and A7-R2.
 const LONG_SETTLE_LIMIT: usize = 6000;
-/// Settle budget (steps) for G2 and G6: twice the latest freeze of the 56 height-5 draws
-/// `flicker_redraw_distribution` measured on the A7b tree (step 243, msvc release,
-/// 2026-09-18), so that G2's event budget, not the step limit, is what a flicker overrun
-/// reaches first: the most-woken draw took its four events by step 183. G2's own draw froze
-/// at step 67 (step 65 at L9 C4, contact reuse on by default, 2026-09-24). Before A7b the
-/// latest freeze was step 9987 and this limit 20 000.
-const MEDIUM_SETTLE_LIMIT: usize = 2 * 243;
+/// Settle budget (steps) for G2 and G6-V2: twice the latest freeze of the 56 height-5 draws
+/// `flicker_redraw_distribution` measured on V2's flip (step 61, msvc release, 2026-10-01), so
+/// that G2's event budget, not the step limit, is what a flicker overrun reaches first. G2's own
+/// draw froze at step 61 there (step 67 on the A7b tree, 65 at L9 C4). Re-derived at V2's flip
+/// from 2 x 243 (the A7b tree's latest freeze); before A7b the latest freeze was step 9987 and
+/// this limit 20 000.
+const MEDIUM_SETTLE_LIMIT: usize = 2 * 61;
+/// Settle budget (steps) for G6, which runs the overlap-only rule: [`MEDIUM_SETTLE_LIMIT`]'s
+/// value before V2, twice the latest freeze of the 56 height-5 draws the generator measured on
+/// the A7b tree (step 243, 2026-09-18) — the last distribution read under the overlap-only rule.
+/// G6 froze at step 65 at V2's flip.
+const OVERLAP_ONLY_MEDIUM_SETTLE_LIMIT: usize = 2 * 243;
 /// Settle budget (steps) for each of G7's draws: eight times the latest freeze of the 30
-/// height-4 draws measured on the A7b tree (step 127, the same run). Eight, not two, because
-/// one draw may spend all of [`G7_MAX_EVENTS`]: seven latch attempts, the last near step
-/// 63 + 6 × 60 = 423, and the budget must fire before the step limit. Before A7b this was
-/// eight times step 750, [`LONG_SETTLE_LIMIT`].
-const G7_SETTLE_LIMIT: usize = 8 * 127;
+/// height-4 draws measured on V2's flip (step 61, the same run). Eight, not two, was sized on
+/// the A7b tree so one draw could spend a whole budget of 6 (seven latch attempts) before the
+/// step limit; the factor is kept, so the rule stays one rule. Re-derived at V2's flip from
+/// 8 x 127 (the A7b tree's latest height-4 freeze); before A7b it was eight times step 750,
+/// [`LONG_SETTLE_LIMIT`].
+const G7_SETTLE_LIMIT: usize = 8 * 61;
 /// G2's cap on contact-change wake events (steps on which `contact_wakes` rose), re-derived
-/// from the generator's run on the A7b tree (msvc release, 2026-09-18). This file's rule is
-/// the smallest budget whose tail `P(>= budget + 1 events)` ([`tail_probability`]) is below
-/// 1 % at the measured wake probability plus one standard error, and it alone gives 3: with
-/// one draw the tail is `p^4`, 0.48 % at the measured [`MEASURED_P_HEIGHT_5`] = 20/76 and
-/// 0.97 % at p = 0.314 (one standard error above it).
+/// from the generator's run on V2's flip (msvc release, 2026-10-01; rulings 2026-09-30, item
+/// 10e). This file's rule is the smallest budget whose tail `P(>= budget + 1 events)`
+/// ([`tail_probability`]) is below 1 % at the measured wake probability plus one standard error,
+/// never below the largest count its own generator sample produced. Under V2 no height-5 draw
+/// woke (0 events in 56 attempts, every draw frozen at step 61), so [`MEASURED_P_HEIGHT_5`] = 0,
+/// its standard error is 0, the tail of one event is 0, and the rule gives 0. The rule is
+/// applied as written. It is degenerate at a measured 0 — the standard error of a proportion
+/// vanishes there — and the rule-of-three bound p = 3/56 would give 1 (`P(>= 2)` = 0.29 %):
+/// recorded so that a red at this budget is triaged knowing it.
 ///
-/// The budget is 4 because the SAMPLE refutes 3. One of the 56 measured draws took 4 events,
-/// so a budget of 3 reds about 1 re-drawn trajectory in 56, where the pooled geometric
-/// model says 0.48 %: wake events cluster within a draw (that draw woke at steps 62, 63, 123
-/// and 183), and a model that treats them as independent understates the tail. A budget is
-/// therefore never set below the largest count its own generator sample produced. At 4 the
-/// model's tail is `p^5`: 0.13 % at p and 0.30 % at one standard error above it. G2's own draw
-/// takes 0, at L9 C4 too. Before A7b this was 18, sized for p = 160/216; a budget sized for the
-/// pre-fix flicker is one the pre-fix flicker passes.
-const G2_MAX_EVENTS: usize = 4;
+/// History: 4 on the A7b tree (p = 20/76; the rule alone gave 3, but one of the 56 draws took 4
+/// events — they cluster within a draw — so the sample refuted 3), 18 before A7b (p = 160/216):
+/// a budget sized for a flicker is one that flicker passes. G2's own draw takes 0, as on the A7b
+/// tree and at L9 C4.
+const G2_MAX_EVENTS: usize = 0;
 /// G7's cap on the contact-change wake events summed over its sixteen draws, re-derived by
-/// the same rule from the same run: `P(>= 7 events)` over sixteen draws is 0.03 % at the
-/// measured [`MEASURED_P_HEIGHT_4`] = 2/32 and 0.59 % at p = 0.105 (one standard error above
-/// it); a budget of 5 would be 1.8 % there. G7's own draws take 2 (movers 2 and 9, one
-/// each); at L9 C4 (contact reuse on by default, 2026-09-24) they take 1 (mover 12). Before A7b
-/// this was 56, sized for p = 48/78.
-const G7_MAX_EVENTS: usize = 6;
+/// the same rule from the same run: no height-4 draw woke (0 events in 30 attempts), so
+/// [`MEASURED_P_HEIGHT_4`] = 0 and the rule gives 0, degenerate as [`G2_MAX_EVENTS`]'s is (the
+/// rule-of-three bound p = 3/30 would give 6, `P(>= 7)` over sixteen draws = 0.44 %). G7's own
+/// draws take 0 at V2's flip (all sixteen frozen at step 61).
+///
+/// History: 6 on the A7b tree (p = 2/32: `P(>= 7)` 0.03 % at p, 0.59 % at one standard error
+/// above it); its draws took 2 there (movers 2 and 9) and 1 at L9 C4 (mover 12). Before A7b this
+/// was 56, sized for p = 48/78.
+const G7_MAX_EVENTS: usize = 0;
 /// The per-latch-attempt wake probability at height 4, pooled over the 30 height-4 draws
-/// of `flicker_redraw_distribution` on the A7b tree (2 events in 32 attempts, msvc release,
-/// 2026-09-18; before A7b, 48 in 78).
-const MEASURED_P_HEIGHT_4: f64 = 2.0 / 32.0;
-/// The same at height 5, pooled over its 56 draws (20 events in 76 attempts; before A7b,
-/// 160 in 216).
-const MEASURED_P_HEIGHT_5: f64 = 20.0 / 76.0;
+/// of `flicker_redraw_distribution` on V2's flip (0 events in 30 attempts, msvc release,
+/// 2026-10-01; on the A7b tree 2 in 32, before A7b 48 in 78).
+const MEASURED_P_HEIGHT_4: f64 = 0.0 / 30.0;
+/// The same at height 5, pooled over its 56 draws (0 events in 56 attempts on V2's flip; on the
+/// A7b tree 20 in 76, before A7b 160 in 216).
+const MEASURED_P_HEIGHT_5: f64 = 0.0 / 56.0;
 /// G4's mover: layer 0's `j = 3, k = 0` corner, spawned at (2, 1, -4). A pinned
 /// trajectory, not a structural property — every change to contact ids, impulses or
 /// ordering re-draws it, so the premise is re-measured over all 16 layer-0 movers each time
@@ -329,12 +350,14 @@ const CREEP_FROM: usize = 600;
 const CREEP_TO: usize = 3000;
 /// A7-R1's bound on horizontal displacement over the window: 2 × Box2D's `B2_LINEAR_SLOP`.
 const CREEP_BOUND_M: f32 = 0.01;
-/// A7-R1's exact reading on the default config, pinned by its bits: D_max = 0.0006670445 m
-/// (`0x3a2e_dc99`; box 1240, layer 14), with contact reuse on. Re-pinned at L9 C4 (contact reuse
-/// on by default; msvc release, 2026-09-24) from the old value 0.0007180063 m (`0x3a3c_3896`;
-/// box 1227, layer 12), read at L9 C3 (`aef7dda4`) when the default had reuse off, which is now
-/// [`A7_R1_D_MAX_BITS_REUSE_OFF`]. The reading is in the L9 design's pre-registered "confirms"
-/// band (under 2 mm). The comparison is on bits. The test prints D_max with `{}`, which is
+/// A7-R1's exact reading on the default config, pinned by its bits: D_max = 0.0007244835 m
+/// (`0x3a3d_eb44`; box 997, layer 6), with contact reuse on. Re-pinned at V2's flip (speculative
+/// contacts and the approach-velocity margin on by default, owner V2a/V2b, rulings 2026-09-30;
+/// msvc release, 2026-10-01, from A7-R1's own `D_max` line) from 0.0006670445 m (`0x3a2e_dc99`;
+/// box 1240, layer 14), which the overlap-only rule still reads exactly
+/// ([`A7_R1_D_MAX_BITS_D0`]). L9 C4 (contact reuse on by default, 2026-09-24) had re-pinned it from
+/// 0.0007180063 m (`0x3a3c_3896`; box 1227, layer 12), read at L9 C3 (`aef7dda4`) when the default
+/// had reuse off. Every reading is in the L9 design's pre-registered "confirms" band (under 2 mm). The comparison is on bits. The test prints D_max with `{}`, which is
 /// `f32`'s shortest round-trip form, so the printed decimal parses back to exactly these bits.
 ///
 /// This is a regression pin, separate from [`CREEP_BOUND_M`], which is an acceptance
@@ -346,15 +369,25 @@ const CREEP_BOUND_M: f32 = 0.01;
 /// value-changing lever). That commit re-reads it from A7-R1's own `D_max` line (msvc
 /// release), re-pins it here in the same commit, and names the lever and the old value in
 /// this doc. In a commit that claims bit identity, a change is a defect, never a re-pin.
-const A7_R1_D_MAX_BITS: u32 = 0x3a2e_dc99;
-/// A7-R1's exact reading with contact reuse OFF, the exact narrowphase: D_max = 0.0007180063 m
-/// (`0x3a3c_3896`; box 1227, layer 12). Read in msvc release at L9 C3 (`aef7dda4`), when it was
-/// the default's, and again on the L9 C4 tree by the reuse-off arm: the L9 design requires that
-/// arm to read it exactly. The S5 rung recorded it as 0.0007180 m (module header).
+const A7_R1_D_MAX_BITS: u32 = 0x3a3d_eb44;
+/// A7-R1's exact reading with contact reuse OFF, the exact narrowphase: D_max = 0.0005266388 m
+/// (`0x3a0a_0e22`; box 1227, layer 12). Re-pinned at V2's flip (msvc release, 2026-10-01, from the
+/// reuse-off arm's `D_max` line) from 0.0007180063 m (`0x3a3c_3896`; box 1227, layer 12), read at
+/// L9 C3 (`aef7dda4`) when it was the default's and again on the L9 C4 tree by this arm. V2 is not
+/// a contact-reuse change: its rule reaches the reuse-off narrowphase too. The S5 rung recorded
+/// the pre-V2 value as 0.0007180 m (module header).
 ///
 /// **Re-pin rule.** [`A7_R1_D_MAX_BITS`]'s, except that no contact-reuse change may move it:
 /// with reuse off no reuse code runs.
-const A7_R1_D_MAX_BITS_REUSE_OFF: u32 = 0x3a3c_3896;
+const A7_R1_D_MAX_BITS_REUSE_OFF: u32 = 0x3a0a_0e22;
+/// A7-R1's exact reading with `speculative_distance = 0` and `speculative_velocity_cap = 0` (V2's
+/// overlap-only rule) and contact reuse on: D_max = 0.0006670445 m (`0x3a2e_dc99`),
+/// [`A7_R1_D_MAX_BITS`]'s value on the tree before V2 (`16191fda`), read again exactly at V2's
+/// flip.
+///
+/// **Re-pin rule.** [`A7_R1_D_MAX_BITS`]'s, except that no V2 change may move it: the overlap-only
+/// rule (both values `0`, not the distance alone) is the contact rule from before V2, bit for bit.
+const A7_R1_D_MAX_BITS_D0: u32 = 0x3a2e_dc99;
 /// A7-R1's standing guard: the largest vertical drop any pile box may have taken by
 /// [`CREEP_FROM`]. Half a box edge — losing one layer costs a full [`BOX_SIZE`], while the
 /// vertical settle's penetration slop is millimetres per layer. Without it a pile that had
@@ -486,7 +519,7 @@ fn flicker_triage(events: usize, attempts: usize, budget: &Budget) -> String {
          docs/OPEN-QUESTIONS.md together with the numbers above (observed events, the measured p \
          for this height, and the negative-binomial tail) and does not block.\n\
          4. A budget is re-sized ONLY from a fresh run of the `flicker_redraw_distribution` \
-         generator (the last: the A7b tree, 2026-09-18). Never raise a budget to turn a red \
+         generator (the last: V2's flip, 2026-10-01). Never raise a budget to turn a red \
          green.\n\
          Escalate to the orchestrator with these numbers: Decision 3 is to be decided again now \
          that A7 has landed (A4 round-2 ruling §3.4), and has not been yet",
@@ -512,18 +545,26 @@ fn serial_pool() -> Arc<ThreadPool> {
 
 /// The Jolt pyramid loop with a height parameter: box centres in spawn order.
 fn pyramid_positions(height: usize) -> Vec<Vec3> {
+    pyramid_positions_with_gap(height, 0.0)
+}
+
+/// [`pyramid_positions`] with every layer's neighbours `lateral_gap` apart (pitch
+/// `BOX_SIZE + lateral_gap`, each odd layer centred over the junction below). At `0.0` it is
+/// [`pyramid_positions`] bit for bit: the pitch is `2.0 + 0.0` and the odd offset `0.5 · 2.0`.
+fn pyramid_positions_with_gap(height: usize, lateral_gap: f32) -> Vec<Vec3> {
     let h = height as i32;
+    let pitch = BOX_SIZE + lateral_gap;
     let mut out = Vec::new();
     for i in 0..h {
         let lo = i / 2;
         let hi = h - (i + 1) / 2;
         for j in lo..hi {
             for k in lo..hi {
-                let odd = if i & 1 != 0 { HALF_BOX } else { 0.0 };
+                let odd = if i & 1 != 0 { 0.5 * pitch } else { 0.0 };
                 out.push(Vec3::new(
-                    -(h as f32) + BOX_SIZE * j as f32 + odd,
+                    -(h as f32) + pitch * j as f32 + odd,
                     1.0 + (BOX_SIZE + BOX_SEPARATION) * i as f32,
-                    -(h as f32) + BOX_SIZE * k as f32 + odd,
+                    -(h as f32) + pitch * k as f32 + odd,
                 ));
             }
         }
@@ -649,6 +690,17 @@ impl Harness {
             plain,
             entities: Vec::new(),
             pairs: PairTracker::default(),
+        }
+    }
+
+    /// Sets the contact rule: `None` keeps the configuration's default, `Some(0.0)` is the
+    /// overlap-only rule (the approach-velocity margin off too), and any other `Some(d)` is V2's
+    /// rule at distance `d` with the owner-ruled velocity cap.
+    fn set_speculative(&mut self, distance: Option<f32>) {
+        if let Some(d) = distance {
+            let cfg = self.world.resource_mut::<PhysicsConfig>();
+            cfg.speculative_distance = d;
+            cfg.speculative_velocity_cap = if d == 0.0 { 0.0 } else { DEFAULT_SPECULATIVE_VELOCITY_CAP };
         }
     }
 
@@ -1214,11 +1266,23 @@ fn face_face_reference_face(feature_id: u32) -> Option<u32> {
 /// `last` names a pile index (Jolt loop order) that is spawned after the rest of the pile.
 /// Returns the pile ids, in spawn order.
 fn spawn_scene(h: &mut Harness, height: usize, lone: bool, last: Option<usize>) -> Vec<u32> {
+    spawn_scene_with_gap(h, height, lone, last, 0.0)
+}
+
+/// [`spawn_scene`] with the pile's layer neighbours `lateral_gap` apart
+/// ([`pyramid_positions_with_gap`]).
+fn spawn_scene_with_gap(
+    h: &mut Harness,
+    height: usize,
+    lone: bool,
+    last: Option<usize>,
+    lateral_gap: f32,
+) -> Vec<u32> {
     h.spawn_floor();
     if lone {
         h.spawn_box(LONE_ID, Vec3::new(40.0, 1.0, 0.0));
     }
-    let positions = pyramid_positions(height);
+    let positions = pyramid_positions_with_gap(height, lateral_gap);
     let mut order: Vec<usize> = (0..positions.len()).collect();
     if let Some(index) = last {
         order.retain(|&i| i != index);
@@ -1610,10 +1674,11 @@ fn sixteen_height_4_draws_freeze_within_the_onset_flicker_budget() {
         // checked against this same cap, so this assertion cannot fire: it restates the bound
         // where the loop ends, and carries the triage paragraph for a reader who arrives here.
         assert!(
-            spent <= G7_MAX_EVENTS,
-            "G7, {} {spent} contact-change wake events (budget {G7_MAX_EVENTS}); (mover, freeze \
+            spent <= budget.max,
+            "G7, {} {spent} contact-change wake events (budget {}); (mover, freeze \
              step, events, K) {rows:?}. {}",
             budget.label,
+            budget.max,
             flicker_triage(spent, spent + rows.len(), &budget)
         );
     });
@@ -1638,6 +1703,8 @@ fn sixteen_height_4_draws_freeze_within_the_onset_flicker_budget() {
 ///   same line in release.
 /// * L9 C4 (contact reuse on by default, 2026-09-24): it froze at step 66 with `contact_wakes`
 ///   0 and no rise event, the same line in release and debug.
+/// * V2 (speculative contacts on by default, 2026-10-01): it froze at step 61 with
+///   `contact_wakes` 0 and no rise event.
 ///
 /// Every contact change re-draws that freeze step, so it is a reading, not a pin. The
 /// test's bound is [`LONG_SETTLE_LIMIT`]. At 2.4 s in debug a `slow:` ignore would be a false
@@ -1769,6 +1836,10 @@ fn a_resting_jolt_pyramid_does_not_creep_with_sleeping_off() {
     let reuse_off_arm = under_watchdog("A7-R1, contact reuse off", JOLT_TIMEOUT, || {
         a7_r1_arm("contact reuse off", Some(false))
     });
+    // V2: the overlap-only rule, with the default's contact reuse.
+    let d0_arm = under_watchdog("A7-R1, speculative_distance 0", JOLT_TIMEOUT, || {
+        a7_r1_arm_with("speculative_distance 0", None, Some(0.0))
+    });
     for (arm, reading, pinned, pin) in [
         ("contact reuse on (the default)", default_arm, A7_R1_D_MAX_BITS, "A7_R1_D_MAX_BITS"),
         (
@@ -1777,6 +1848,7 @@ fn a_resting_jolt_pyramid_does_not_creep_with_sleeping_off() {
             A7_R1_D_MAX_BITS_REUSE_OFF,
             "A7_R1_D_MAX_BITS_REUSE_OFF",
         ),
+        ("speculative_distance 0", d0_arm, A7_R1_D_MAX_BITS_D0, "A7_R1_D_MAX_BITS_D0"),
     ] {
         assert_eq!(
             reading.d_max.to_bits(),
@@ -1808,12 +1880,27 @@ struct CreepReading {
 /// and [`CREEP_BOUND_M`], prints D_max and the step-[`CREEP_FROM`] contact counts, and returns
 /// the reading its caller compares with the arm's pin.
 fn a7_r1_arm(arm: &'static str, contact_reuse: Option<bool>) -> CreepReading {
+    a7_r1_arm_with(arm, contact_reuse, None)
+}
+
+/// [`a7_r1_arm`], with `speculative_distance` set to `speculative` and the approach-velocity
+/// margin off (`speculative_velocity_cap = 0`) when it is `Some` (V2): `Some(0.0)` is the
+/// overlap-only rule.
+fn a7_r1_arm_with(
+    arm: &'static str,
+    contact_reuse: Option<bool>,
+    speculative: Option<f32>,
+) -> CreepReading {
     let mut h = Harness::new();
     {
         let cfg = h.world.resource_mut::<PhysicsConfig>();
         cfg.sleeping = false;
         if let Some(reuse) = contact_reuse {
             cfg.contact_reuse = reuse;
+        }
+        if let Some(d) = speculative {
+            cfg.speculative_distance = d;
+            cfg.speculative_velocity_cap = 0.0;
         }
     }
     let reuse = h.world.resource::<PhysicsConfig>().contact_reuse;
@@ -1962,6 +2049,8 @@ fn a7_r1_fallback_census(
 ///   froze at step 248 with `contact_wakes` 3720 and three rise events, at [68, 128, 188].
 /// * L9 C4 (contact reuse on by default, 2026-09-24): it froze at step 250 with
 ///   `contact_wakes` 3720 and three rise events, at [70, 130, 190].
+/// * V2 (speculative contacts on by default, 2026-10-01): it froze at step 86 with
+///   `contact_wakes` 0 and no rise event.
 ///
 /// The freeze step is a reading, not a pin: every contact change re-draws it — the two kernels
 /// differ only in that yield, so it fired in this scene and moved the freeze by one latch
@@ -2303,7 +2392,7 @@ fn swap_remove_scene(
     let before = h.lateral_reference_boxes(mover, &pile);
     if mover_index.is_some() && before.lateral == 0 {
         let manifolds = h.manifolds_of(mover);
-        let touching: Vec<(u32, u32, [f32; 3])> = touching_no_contact_pairs(&mut h, &pile)
+        let touching: Vec<(u32, u32, [f32; 3])> = knife_edge_no_contact_pairs(&mut h, &pile, ShiftRule::OverlapOnly)
             .into_iter()
             .filter(|&(a, b, _)| a == mover || b == mover)
             .collect();
@@ -2444,9 +2533,37 @@ fn a_frozen_box_pile_whose_bottom_corner_reverses_its_pair_order_takes_no_contac
 
 // ── G5, G6: a spawn shifts every pile row by one ─────────────────────────────
 
-/// Candidate box pairs of the pile that produced no manifold on the last step although their
-/// settled centres touch (every axis-aligned gap at most [`TOUCH_GAP`]): `(id, id, gaps)`.
-fn touching_no_contact_pairs(h: &mut Harness, pile: &[u32]) -> Vec<(u32, u32, [f32; 3])> {
+/// The contact rule a shift scene runs, which fixes where its knife-edge pairs sit (V2,
+/// rulings 2026-09-30, item 10b).
+#[derive(Clone, Copy, Debug)]
+enum ShiftRule {
+    /// The overlap-only rule (`speculative_distance = 0`, the velocity term off) on the exactly
+    /// touching pile: the knife-edge pairs are the touching pairs with no manifold — premise P2
+    /// as written before V2. Under V2 a touching pair is within `d`, so it always has a
+    /// manifold and this premise has no material; it is a property of the overlap-only rule.
+    OverlapOnly,
+    /// V2's rule at the owner's values on a pile whose layer neighbours stand
+    /// [`V2_LATERAL_GAP`] apart, half a [`TOUCH_GAP`] past the speculative boundary: the
+    /// knife-edge pairs are the face-separated pairs with no manifold whose gap is within
+    /// [`TOUCH_GAP`] of `d` — the pairs whose existence a non-pose input could flip under V2's
+    /// own rule.
+    Speculative,
+}
+
+/// The V2 shift twins' lateral gap: half a [`TOUCH_GAP`] past the speculative boundary, so every
+/// layer neighbour pair of the settled pile sits just outside `d` with no manifold.
+const V2_LATERAL_GAP: f32 = DEFAULT_SPECULATIVE_DISTANCE + 0.5 * TOUCH_GAP;
+
+/// Candidate box pairs of the pile that produced no manifold on the last step although they sit
+/// at `rule`'s contact boundary, `(id, id, gaps)` with `gaps` the settled centres' axis-aligned
+/// gaps: under [`ShiftRule::OverlapOnly`] every gap is at most [`TOUCH_GAP`] (the centres
+/// touch); under [`ShiftRule::Speculative`] exactly one gap is positive (a face-separated pair)
+/// and it is within [`TOUCH_GAP`] of [`DEFAULT_SPECULATIVE_DISTANCE`].
+fn knife_edge_no_contact_pairs(
+    h: &mut Harness,
+    pile: &[u32],
+    rule: ShiftRule,
+) -> Vec<(u32, u32, [f32; 3])> {
     let walk = h.walk_ids();
     let centres: Vec<Vec3> = h
         .world
@@ -2478,7 +2595,15 @@ fn touching_no_contact_pairs(h: &mut Harness, pile: &[u32]) -> Vec<(u32, u32, [f
             d.y.abs() - BOX_SIZE,
             d.z.abs() - BOX_SIZE,
         ];
-        if gaps.iter().all(|&g| g <= TOUCH_GAP) {
+        let at_boundary = match rule {
+            ShiftRule::OverlapOnly => gaps.iter().all(|&g| g <= TOUCH_GAP),
+            ShiftRule::Speculative => {
+                let widest = gaps.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                gaps.iter().filter(|&&g| g > 0.0).count() == 1
+                    && (widest - DEFAULT_SPECULATIVE_DISTANCE).abs() <= TOUCH_GAP
+            }
+        };
+        if at_boundary {
             out.push((ia, ib, gaps));
         }
     }
@@ -2495,11 +2620,28 @@ enum ClearBound {
     Pairs,
 }
 
-/// The shared body of G5 and G6: floor and pile in `plain`; settle; hold 5; spawn a far
-/// sphere into `marked`, which shifts every `plain` row by one with the order kept; hold 60.
-fn shift_scene(what: &'static str, height: usize, settle_limit: usize, bound: ClearBound) {
+/// The shared body of G5 and G6 and their V2 twins: floor and pile in `plain`; settle; hold 5;
+/// spawn a far sphere into `marked`, which shifts every `plain` row by one with the order kept;
+/// hold 60. `rule` sets the contact rule and the pile's lateral gap ([`ShiftRule`]).
+fn shift_scene(
+    what: &'static str,
+    height: usize,
+    settle_limit: usize,
+    bound: ClearBound,
+    rule: ShiftRule,
+) {
     let mut h = Harness::new();
-    let pile = spawn_scene(&mut h, height, false, None);
+    let lateral_gap = match rule {
+        ShiftRule::OverlapOnly => {
+            h.set_speculative(Some(0.0));
+            0.0
+        }
+        ShiftRule::Speculative => {
+            h.set_speculative(Some(DEFAULT_SPECULATIVE_DISTANCE));
+            V2_LATERAL_GAP
+        }
+    };
+    let pile = spawn_scene_with_gap(&mut h, height, false, None, lateral_gap);
     // The rows stay fixed until the far sphere spawns.
     h.track_pairs();
     if let ClearBound::Rows = bound {
@@ -2542,20 +2684,21 @@ fn shift_scene(what: &'static str, height: usize, settle_limit: usize, bound: Cl
          {off_island:?}",
         h.n_islands()
     );
-    // P2: at least one touching box pair with no manifold. These knife-edge pairs are the
-    // ones a narrowphase input other than the poses could flip. Before A7b the axis hint was
-    // such an input (A4's Known behaviour 2); since A7b a box-box manifold exists exactly
-    // when the poses overlap, except on a zero-extent reference face (A7-N11 pins it), so a
-    // row shift must leave every one of them without a manifold — the property this scene
-    // holds the pile to.
-    let n_set = touching_no_contact_pairs(&mut h, &pile);
+    // P2: at least one box pair at the rule's contact boundary with no manifold. These
+    // knife-edge pairs are the ones a narrowphase input other than the poses could flip. Before
+    // A7b the axis hint was such an input (A4's Known behaviour 2); since A7b a box-box manifold
+    // exists exactly when the poses overlap (under V2, when they are within `d`), except on a
+    // zero-extent reference face (A7-N11 pins it), so a row shift must leave every one of them
+    // without a manifold — the property this scene holds the pile to.
+    let n_set = knife_edge_no_contact_pairs(&mut h, &pile, rule);
     assert!(
         !n_set.is_empty(),
-        "scene-fitness: the settled pile has no touching no-contact box pair, so {what} holds no \
-         pair whose existence a non-pose input could flip — escalate"
+        "scene-fitness ({rule:?}): the settled pile has no box pair at the contact boundary \
+         without a manifold, so {what} holds no pair whose existence a non-pose input could flip \
+         — escalate"
     );
     println!(
-        "{what}: {} touching no-contact pairs (first ids and gaps: {:?})",
+        "{what}: {} knife-edge no-contact pairs at the {rule:?} boundary (first ids and gaps: {:?})",
         n_set.len(),
         &n_set[..n_set.len().min(8)]
     );
@@ -2637,7 +2780,8 @@ fn shift_scene(what: &'static str, height: usize, settle_limit: usize, bound: Cl
     );
 }
 
-/// G5: a height-4 pile, every row shifted by one.
+/// G5: a height-4 pile, every row shifted by one, under the overlap-only rule (its premise P2
+/// is that rule's: [`ShiftRule::OverlapOnly`]).
 #[test]
 #[cfg_attr(
     miri,
@@ -2646,7 +2790,21 @@ fn shift_scene(what: &'static str, height: usize, settle_limit: usize, bound: Cl
 )]
 fn a_frozen_box_pile_ignores_a_spawn_that_shifts_every_row_it_holds() {
     under_watchdog("G5", SMALL_TIMEOUT, || {
-        shift_scene("G5", SMALL, SMALL_SETTLE_LIMIT, ClearBound::Rows);
+        shift_scene("G5", SMALL, SMALL_SETTLE_LIMIT, ClearBound::Rows, ShiftRule::OverlapOnly);
+    });
+}
+
+/// G5's V2 twin: the height-4 pile with its layer neighbours just past the speculative boundary
+/// ([`ShiftRule::Speculative`]), every row shifted by one under V2's rule.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: runs the real physics schedule on a boyko_threadpool until a 30-box pile \
+              freezes; intractable under Miri"
+)]
+fn a_frozen_box_pile_ignores_a_spawn_that_shifts_every_row_it_holds_under_speculative_contacts() {
+    under_watchdog("G5-V2", SMALL_TIMEOUT, || {
+        shift_scene("G5-V2", SMALL, SMALL_SETTLE_LIMIT, ClearBound::Rows, ShiftRule::Speculative);
     });
 }
 
@@ -2662,6 +2820,26 @@ fn a_frozen_box_pile_ignores_a_spawn_that_shifts_every_row_it_holds() {
 )]
 fn a_height_5_box_pyramid_ignores_a_spawn_that_shifts_every_row_it_holds() {
     under_watchdog("G6", MEDIUM_TIMEOUT, || {
-        shift_scene("G6", MEDIUM, MEDIUM_SETTLE_LIMIT, ClearBound::Pairs);
+        shift_scene(
+            "G6",
+            MEDIUM,
+            OVERLAP_ONLY_MEDIUM_SETTLE_LIMIT,
+            ClearBound::Pairs,
+            ShiftRule::OverlapOnly,
+        );
+    });
+}
+
+/// G6's V2 twin: the height-5 pile with its layer neighbours just past the speculative boundary
+/// ([`ShiftRule::Speculative`]), every row shifted by one under V2's rule.
+#[test]
+#[cfg_attr(
+    any(miri, debug_assertions),
+    ignore = "slow: a 55-box pile through the real schedule until frozen; release only, \
+              intractable under Miri"
+)]
+fn a_height_5_box_pyramid_ignores_a_spawn_that_shifts_every_row_it_holds_under_speculative_contacts() {
+    under_watchdog("G6-V2", MEDIUM_TIMEOUT, || {
+        shift_scene("G6-V2", MEDIUM, MEDIUM_SETTLE_LIMIT, ClearBound::Pairs, ShiftRule::Speculative);
     });
 }

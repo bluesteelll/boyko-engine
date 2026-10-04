@@ -209,21 +209,21 @@ The repair belongs in those two crates, not in the gate.
 
 The four commands above run **none** of the `#[ignore]`d tests.
 [tests/ignore_reasons_census.rs](tests/ignore_reasons_census.rs) prints what exists on every run
-(`cargo test -p boyko-engine --test ignore_reasons_census -- --nocapture`). Measured 2026-10-01 on
-the trunk at the `u/phys-tree-c4` merge (first parent `3d9433ae`; rung D-M0 adds one `solo` site to B3's
-`7d5a0015` reading, `u/fix-cq-sb`, L9 C4, PC-24, L10b and W8S each add one `.rs` file, L10 adds six, C1 adds five, none of those adds a site; DM1 adds nineteen `.rs` files and twelve `gpu-windowed` sites; tree C4 adds one `miri-slow` site), it read:
+(`cargo test -p boyko-engine --test ignore_reasons_census -- --nocapture`). Measured 2026-10-04 on
+the trunk at the `u/phys-v2-spec` merge (first parent `1d1bccc8`; rung D-M0 adds one `solo` site to B3's
+`7d5a0015` reading, `u/fix-cq-sb`, L9 C4, PC-24, L10b and W8S each add one `.rs` file, L10 adds six, C1 adds five, none of those adds a site; DM1 adds nineteen `.rs` files and twelve `gpu-windowed` sites; tree C4 adds one `miri-slow` site; V2 adds four `.rs` files, five `slow` sites (the fidelity gate's four, a device-free release leg, and G6's V2 twin) and one `miri-slow` site), it read:
 
 ```text
-[ignore census] 369 sites (204 plain, 165 cfg_attr) across 12 crates, 1858 .rs files walked, 0 waivers
+[ignore census] 375 sites (208 plain, 167 cfg_attr) across 12 crates, 1862 .rs files walked, 0 waivers
 [ignore classes] <none>=1, deferred=19, feature+gpu=1, feature+gpu-cap=3, feature+gpu-windowed+gpu-cap=4,
   feature+miri-slow=1, flaky=1, generator=7, gpu=29, gpu-cap=1, gpu-windowed=132, gpu-windowed+gpu-cap=1,
-  miri-slow=131, miri-unsupported=27, slow=9, solo=2; scopes: miri-only=157, native=211, release-only=1;
+  miri-slow=132, miri-unsupported=27, slow=14, solo=2; scopes: miri-only=158, native=216, release-only=1;
   rule inputs: 128 sites call a device entry, 2 exist only under Miri, 9 are feature-conditioned
 ```
 
 ⚠️ **Every count in this section is a snapshot, and the census's printed lines are the only
 figures to quote — read the run, not this paragraph.** `MIN_SITES` is a floor, so a prose count
-can drift arbitrarily far and stay green. How the count moved (164 → 280 → … → 355 → 356 → 368 → 369) is in
+can drift arbitrarily far and stay green. How the count moved (164 → 280 → … → 355 → 356 → 368 → 369 → 375) is in
 `git log -p CLAUDE.md`, not here.
 
 Every site states its requirement **and its class**, and the census fails the build if a new one

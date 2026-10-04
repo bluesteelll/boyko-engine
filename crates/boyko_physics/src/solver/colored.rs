@@ -13,8 +13,12 @@
 //!
 //! The reference [`SoftStepSolver`](super::SoftStepSolver) — its AoS
 //! `PointConstraint` layout and the manifold-order `solve_velocities`
-//! Gauss-Seidel sweep — is **byte-untouched** and stays in the tree as the
-//! reference oracle. Since 2026-09-18 (owner decision) THIS solver is the default
+//! Gauss-Seidel sweep — is **byte-untouched** by this solver and stays in the
+//! tree as the reference oracle. It carries the one contact rule both solvers
+//! share: V2's speculative branch (a step whose speculative contacts are on,
+//! `PhysicsConfig::speculative_contacts`) is in both, through the same scalar helper, and a
+//! step with them off runs the pre-V2 sweep
+//! in both. Since 2026-09-18 (owner decision) THIS solver is the default
 //! world's ([`DefaultRigidSolver`](super::DefaultRigidSolver)), with the O7 AVX2
 //! cohort kernel on (`PhysicsConfig::simd_solve`). Every `add_physics_*::<S>`
 //! entry wires it when `S` is this type: the constraint graph plus a distinct
@@ -98,10 +102,14 @@ use super::contact::{
 use super::simd;
 // O2: the soft constants, the immovable-surface view, and the soft-coefficient
 // derivation are SHARED from the reference solver — a single source of truth so
-// the colored kernel cannot drift from `soft_step.rs` (the byte-untouched
-// 0%-gate reference). These are `pub(crate)` re-uses (visibility-widened only,
-// no value/layout change to `soft_step.rs`).
-use super::soft_step::{IMMOVABLE_AT_REST, MAX_BIAS_VELOCITY, RESTITUTION_THRESHOLD, SoftCoefficients};
+// the colored kernel cannot drift from `soft_step.rs` (the 0%-gate reference).
+// These are `pub(crate)` re-uses (visibility-widened only, no value/layout change
+// to `soft_step.rs`); V2's delta row, its current-separation helper and the K3
+// switch live there too, so both solvers read one definition.
+use super::soft_step::{
+    BodyDelta, CURRENT_SEPARATION_ALL_POINTS, IMMOVABLE_AT_REST, MAX_BIAS_VELOCITY,
+    RESTITUTION_THRESHOLD, SoftCoefficients, current_separation,
+};
 use super::warm_records::{
     self, PlanCounts, SearchCursors, WarmIndex, WarmLookup, WarmRecord, WarmRecords, WarmRun, ord,
     point_fid,
@@ -125,8 +133,8 @@ use crate::resources::{
 };
 use crate::row_identity::{RemapCursor, RowIdentity, RowRemap, WarmSeedStats};
 use crate::scratch_ids::{
-    body_eff_colored_id, colored_frozen_rows_id, contact_column_id, register_scratch_layouts,
-    scratch_reserve_rows, warm_table_id,
+    body_delta_colored_id, body_eff_colored_id, colored_frozen_rows_id, contact_column_id,
+    register_scratch_layouts, scratch_reserve_rows, warm_table_id,
 };
 use crate::sleep_sets::{HeldSolve, RowCls, SleepSets};
 
@@ -932,6 +940,51 @@ struct ColorSolvePtrs<'a> {
 //   loop) hold.
 unsafe impl Send for ColorSolvePtrs<'_> {}
 unsafe impl Sync for ColorSolvePtrs<'_> {}
+
+/// The step's solve parameters (V2, `levers/V2-speculative/01-DESIGN.md` §2.4): the soft
+/// coefficients, `1 / h`, whether the speculative branch runs
+/// (`PhysicsConfig::speculative_contacts`), and the bodies' accumulated step movement that branch
+/// reads.
+///
+/// The dispatch hands ONE reference to every kernel call in place of the three coefficients it
+/// forwarded before, so the parallel colour task's capture keeps its size (a reference is two
+/// fewer words than the coefficients it replaces): its scope keeps its cell budget, one chunk per
+/// colour scope, which the frame census pins. `Copy` + `Sync` (the delta view is `Sync`), so a
+/// shared reference crosses into every worker task; the kernels copy the fields out once per call.
+#[derive(Clone, Copy)]
+struct SolveStep<'a> {
+    /// `SoftCoefficients::bias_rate`.
+    bias_rate: f32,
+    /// `SoftCoefficients::mass_coeff`.
+    mass_coeff: f32,
+    /// `SoftCoefficients::impulse_coeff`.
+    impulse_coeff: f32,
+    /// `1 / h` for the substep `h`, computed once per step in `f32`, so every kernel multiplies a
+    /// speculative separation by the same bits.
+    inv_h: f32,
+    /// Whether the speculative branch runs: `PhysicsConfig::speculative_contacts`. Off, every
+    /// kernel runs its `SPEC = false` instance, the pre-V2 instruction stream.
+    spec: bool,
+    /// Each body row's accumulated movement over the step, written by the tracked integrate;
+    /// read only when `spec` (empty otherwise). Never written during a sweep.
+    deltas: ScratchSolveView<'a, BodyDelta>,
+}
+
+/// Copy of body row `i`'s accumulated step movement through the delta view (V2).
+///
+/// # Safety contract (caller)
+/// `i < deltas.len()` — a gathered body row on a `spec` step, whose delta column the build
+/// resized to the gathered row count — and no writer of the column during the sweep (the tracked
+/// integrate runs between sweeps, on one thread).
+#[inline]
+fn delta_copy(deltas: ScratchSolveView<'_, BodyDelta>, i: usize) -> BodyDelta {
+    debug_assert!(i < deltas.len(), "invariant: a speculative lane's body row has a delta");
+    // SAFETY: `i < deltas.len()` (the contract, debug-asserted): `row_ptr(i)` is the live `i`-th
+    //   element on the column's address-stable base. The column is written only by the tracked
+    //   integrate, single-threaded and between sweeps, so this read aliases no write, whichever
+    //   worker makes it. `BodyDelta: Copy`, so the read is a byte copy with no drop glue.
+    unsafe { *deltas.row_ptr(i) }
+}
 
 // ── BodyEffective row access through the ScratchSolveView (mirror 1) ─────────────
 //
@@ -1808,6 +1861,12 @@ pub struct ColoredSoftStepSolver {
     /// realloc-moves across a refill-grow — the property `std::Vec` lacked that
     /// caused the SP4 colored-solve data race.
     bodies: ScratchColumn<BodyEffective>,
+    /// V2: each body row's accumulated movement over the step (`dp`, `dq`), parallel to
+    /// `bodies`, for the speculative current separation. Reset to `(0, IDENTITY)` for every row
+    /// at the build of a step whose speculative contacts are on and advanced by the tracked
+    /// integrate; untouched (and unread) otherwise. Its own column, not a field of
+    /// [`BodyEffective`], whose 64 B line every kernel gather reads.
+    deltas: ScratchColumn<BodyDelta>,
     /// The cohort tables, in color order (rebuilt each solve, reused).
     columns: CohortColumns,
     /// The two sides of the warm store (L11 D1): `warm[warm_cur]` holds the previous
@@ -1880,6 +1939,10 @@ impl ColoredSoftStepSolver {
         let reserve = bodies.max(scratch_reserve_rows(size_of::<BodyEffective>()));
         Self {
             bodies: ScratchColumn::new(body_eff_colored_id(), reserve),
+            deltas: ScratchColumn::new(
+                body_delta_colored_id(),
+                bodies.max(scratch_reserve_rows(size_of::<BodyDelta>())),
+            ),
             columns: CohortColumns::with_capacity(contacts),
             // One record per manifold; a manifold has at least one point in every
             // stream the narrowphase emits, so `contacts` bounds the manifold count
@@ -2197,7 +2260,10 @@ impl ColoredSoftStepSolver {
     /// W1), read from the same function over the same flag as the graph's colouring predicate,
     /// so the write guards, gravity, the integrate, the refresh and the write-back leave a held
     /// row as the colouring does.
-    fn build_bodies(&mut self, bodies: &[BodyState], cls: &[RowCls]) {
+    ///
+    /// On a speculative step (`spec`, V2) it also resets every row's accumulated movement to
+    /// `(0, IDENTITY)`; the column is not touched otherwise.
+    fn build_bodies(&mut self, bodies: &[BodyState], cls: &[RowCls], spec: bool) {
         debug_assert!(
             cls.is_empty() || cls.len() >= bodies.len(),
             "invariant: a classification covers every row"
@@ -2225,6 +2291,11 @@ impl ColoredSoftStepSolver {
                 linear_velocity: b.linear_velocity,
                 angular_velocity: b.angular_velocity,
             });
+        }
+        if spec {
+            let mut deltas = self.deltas.build_view();
+            deltas.clear();
+            deltas.resize(bodies.len(), BodyDelta::ZERO);
         }
     }
 
@@ -3344,9 +3415,7 @@ impl ColoredSoftStepSolver {
         ctx: ColorCtx,
         g_lo: usize,
         g_hi: usize,
-        bias_rate: f32,
-        mass_coeff: f32,
-        impulse_coeff: f32,
+        step: &SolveStep<'_>,
         bias_active: bool,
         simd: bool,
     ) {
@@ -3361,16 +3430,7 @@ impl ColoredSoftStepSolver {
                 //   whose lanes are body-disjoint; the kernel documents its per-load
                 //   bounds + disjoint-write invariants.
                 unsafe {
-                    Self::solve_color_avx2(
-                        view,
-                        bodies_eff,
-                        k_lo,
-                        k_hi,
-                        bias_rate,
-                        mass_coeff,
-                        impulse_coeff,
-                        bias_active,
-                    );
+                    Self::solve_color_avx2(view, bodies_eff, k_lo, k_hi, step, bias_active);
                 }
                 return;
             }
@@ -3379,17 +3439,7 @@ impl ColoredSoftStepSolver {
         // `simd_solve == false` path AND the SIMD non-AVX2 fallback).
         #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         let _ = simd;
-        Self::solve_color(
-            view,
-            bodies_eff,
-            ctx,
-            g_lo,
-            g_hi,
-            bias_rate,
-            mass_coeff,
-            impulse_coeff,
-            bias_active,
-        );
+        Self::solve_color(view, bodies_eff, ctx, g_lo, g_hi, step, bias_active);
     }
 
     /// The scalar per-color kernel over the cohort layout: group-major (lane outer,
@@ -3400,18 +3450,54 @@ impl ColoredSoftStepSolver {
     /// chunk may share a cohort with another worker's chunk, never a lane).
     ///
     /// [O7]: https://github.com/bluesteelll/boyko-engine
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// V2: one branch per call picks the instance — `SPEC = false` (the step's speculative
+    /// contacts are off), whose body is the pre-V2 kernel, or the speculative one with
+    /// the step's `K3` ([`CURRENT_SEPARATION_ALL_POINTS`]).
     fn solve_color(
         view: CohortSolveView<'_>,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
         ctx: ColorCtx,
         g_lo: usize,
         g_hi: usize,
-        bias_rate: f32,
-        mass_coeff: f32,
-        impulse_coeff: f32,
+        step: &SolveStep<'_>,
         bias_active: bool,
     ) {
+        if step.spec {
+            Self::solve_color_k::<true, CURRENT_SEPARATION_ALL_POINTS>(
+                view,
+                bodies_eff,
+                ctx,
+                g_lo,
+                g_hi,
+                step,
+                bias_active,
+            );
+        } else {
+            Self::solve_color_k::<false, false>(view, bodies_eff, ctx, g_lo, g_hi, step, bias_active);
+        }
+    }
+
+    /// The body of [`solve_color`](Self::solve_color).
+    ///
+    /// `SPEC = false` is the pre-V2 kernel: every point takes the soft rule on its gather-time
+    /// separation (`K3` is unread). `SPEC = true` is V2's rule per point (design §2.4): the
+    /// separation `s` it solves on is the current one — `s0` plus the relative normal movement of
+    /// the two anchors over the step so far — for a point speculative at gather (`s0 > 0`), and for
+    /// every point when `K3`; otherwise `s0`. A point with `s > 0` is speculative: `dλ = -m·(vn +
+    /// s/h)`, mass scale 1, impulse scale 0, in the biased and the relaxation pass alike (Box2D
+    /// v3); any other point takes the soft rule on `s`, so with `K3 = false` a point penetrating
+    /// at gather runs the pre-V2 ops on the pre-V2 value. The AVX2 kernel is the same op for op.
+    fn solve_color_k<const SPEC: bool, const K3: bool>(
+        view: CohortSolveView<'_>,
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
+        ctx: ColorCtx,
+        g_lo: usize,
+        g_hi: usize,
+        step: &SolveStep<'_>,
+        bias_active: bool,
+    ) {
+        let SolveStep { bias_rate, mass_coeff, impulse_coeff, inv_h, deltas, .. } = *step;
         for g in g_lo..g_hi {
             let (k, l) = ctx.lane_of(g);
             // SAFETY: `g` is a built group of the color, so `(k, l)` is a live lane of a
@@ -3459,6 +3545,15 @@ impl ColoredSoftStepSolver {
             let ia_movable = is_dynamic_row(body_ref(bodies_eff, ia).inv_mass);
             let ib_movable = !b_is_sentinel && is_dynamic_row(body_ref(bodies_eff, ib).inv_mass);
 
+            // V2 (`SPEC` only): the lane's two bodies' movement over the step so far. A sentinel B
+            // is the immovable surface, which never moves: its row index is A's, never B's.
+            let (da, db) = if SPEC {
+                let db = if b_is_sentinel { BodyDelta::ZERO } else { delta_copy(deltas, ib) };
+                (delta_copy(deltas, ia), db)
+            } else {
+                (BodyDelta::ZERO, BodyDelta::ZERO)
+            };
+
             let rank_base = head.rank_base as usize;
             for r in 0..head.width[l] as usize {
                 // SAFETY: `rank_base + r < rank_base + depth <= n_blocks` (a built rank
@@ -3474,6 +3569,13 @@ impl ColoredSoftStepSolver {
                         lane_vec3(&raw const (*blk).rb, l),
                         ptr::read(&raw const (*blk).sep[l]),
                     )
+                };
+
+                // V2: the separation this pass solves on (the design's `s_eff`).
+                let separation = if SPEC && (K3 || separation > 0.0) {
+                    current_separation(separation, normal, ra, rb, &da, &db)
+                } else {
+                    separation
                 };
 
                 // ── Normal solve ───────────────────────────────────────────────
@@ -3495,7 +3597,10 @@ impl ColoredSoftStepSolver {
                 // SAFETY: a single-lane raw read of the live impulse element this
                 //   worker owns.
                 let lambda_n = unsafe { ptr::read(&raw const (*blk).ni[l]) };
-                let d_lambda = if bias_active {
+                let d_lambda = if SPEC && separation > 0.0 {
+                    // A speculative point: close the gap within the substep, never push.
+                    -m_eff * (vn + separation * inv_h)
+                } else if bias_active {
                     -mass_coeff * m_eff * (vn + bias) - impulse_coeff * lambda_n
                 } else {
                     -m_eff * vn
@@ -3628,17 +3733,49 @@ impl ColoredSoftStepSolver {
     /// writing. The per-cohort scatter writes ≤ 16 distinct dynamic body rows;
     /// statics/sentinels are never written (the movable-blend guard), so a SHARED
     /// static row across cohorts is read-only.
+    ///
+    /// V2: one branch per call picks the instance, as [`solve_color`](Self::solve_color) does;
+    /// the speculative instance is [`solve_color_k`](Self::solve_color_k)'s rule lane for lane —
+    /// the current separation and both `dλ` formulas computed on every lane, a per-lane blend on
+    /// `s > 0` selecting between them, no per-lane branch.
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[target_feature(enable = "avx2")]
-    #[allow(clippy::too_many_arguments)]
     fn solve_color_avx2(
         view: CohortSolveView<'_>,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
         k_lo: usize,
         k_hi: usize,
-        bias_rate: f32,
-        mass_coeff: f32,
-        impulse_coeff: f32,
+        step: &SolveStep<'_>,
+        bias_active: bool,
+    ) {
+        if step.spec {
+            Self::solve_color_avx2_k::<true, CURRENT_SEPARATION_ALL_POINTS>(
+                view,
+                bodies_eff,
+                k_lo,
+                k_hi,
+                step,
+                bias_active,
+            );
+        } else {
+            Self::solve_color_avx2_k::<false, false>(view, bodies_eff, k_lo, k_hi, step, bias_active);
+        }
+    }
+
+    /// The body of [`solve_color_avx2`](Self::solve_color_avx2), `SPEC` and `K3` as in
+    /// [`solve_color_k`](Self::solve_color_k).
+    ///
+    /// # Safety
+    ///
+    /// [`solve_color_avx2`](Self::solve_color_avx2)'s.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[target_feature(enable = "avx2")]
+    fn solve_color_avx2_k<const SPEC: bool, const K3: bool>(
+        view: CohortSolveView<'_>,
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
+        k_lo: usize,
+        k_hi: usize,
+        step: &SolveStep<'_>,
         bias_active: bool,
     ) {
         use core::arch::x86_64::{
@@ -3648,9 +3785,10 @@ impl ColoredSoftStepSolver {
             _mm256_set1_epi32, _mm256_set1_ps, _mm256_sqrt_ps, _mm256_sub_ps,
         };
         use crate::solver::simd::{
-            apply_impulse_blend_x8, cross8, dot8, effective_mass_x8, pointvel_x8,
+            apply_impulse_blend_x8, cross8, dot8, effective_mass_x8, pointvel_x8, rotate_x8,
         };
 
+        let SolveStep { bias_rate, mass_coeff, impulse_coeff, inv_h, deltas, .. } = *step;
         const W: usize = COHORT;
         debug_assert!(k_hi <= view.n_heads, "invariant: the cohort range is built");
 
@@ -3679,6 +3817,12 @@ impl ColoredSoftStepSolver {
         let mut out_a_ang = [[0.0f32; W]; 3];
         let mut out_b_lin = [[0.0f32; W]; 3];
         let mut out_b_ang = [[0.0f32; W]; 3];
+        // V2 (`SPEC` only): each lane's two bodies' movement over the step, SoA; a sentinel B and
+        // a padding lane stage `(0, IDENTITY)`.
+        let mut dpa_s = [[0.0f32; W]; 3];
+        let mut dqa_s = [[0.0f32; W]; 4];
+        let mut dpb_s = [[0.0f32; W]; 3];
+        let mut dqb_s = [[0.0f32; W]; 4];
 
         // Whole-call constants (bias_active hoisted OUTSIDE the loops for I-cache
         // compactness — it is loop-invariant, exactly as the scalar `if`).
@@ -3691,6 +3835,7 @@ impl ColoredSoftStepSolver {
         let neg_max_bias = _mm256_set1_ps(-MAX_BIAS_VELOCITY);
         let mass_coeff_v = _mm256_set1_ps(mass_coeff);
         let impulse_coeff_v = _mm256_set1_ps(impulse_coeff);
+        let inv_h_v = _mm256_set1_ps(inv_h);
 
         for k in k_lo..k_hi {
             // SAFETY: `k < k_hi <= n_heads` (the caller's contract): a built cohort of
@@ -3734,6 +3879,12 @@ impl ColoredSoftStepSolver {
                     let bb = if b_sent { &IMMOVABLE_AT_REST } else { body_ref(bodies_eff, lane_ib) };
                     b_invm_s[lane] = bb.inv_mass;
                     Self::stage_body_state(bb, lane, &mut b_ii_s, &mut b_lin_s, &mut b_ang_s);
+                    if SPEC {
+                        // A sentinel B never moves: its row index is A's, never B's.
+                        let db = if b_sent { BodyDelta::ZERO } else { delta_copy(deltas, lane_ib) };
+                        Self::stage_delta(&delta_copy(deltas, lane_ia), lane, &mut dpa_s, &mut dqa_s);
+                        Self::stage_delta(&db, lane, &mut dpb_s, &mut dqb_s);
+                    }
                 } else {
                     ia[lane] = 0;
                     ib[lane] = 0;
@@ -3749,6 +3900,10 @@ impl ColoredSoftStepSolver {
                         a_ang_s[c][lane] = 0.0;
                         b_lin_s[c][lane] = 0.0;
                         b_ang_s[c][lane] = 0.0;
+                    }
+                    if SPEC {
+                        Self::stage_delta(&BodyDelta::ZERO, lane, &mut dpa_s, &mut dqa_s);
+                        Self::stage_delta(&BodyDelta::ZERO, lane, &mut dpb_s, &mut dqb_s);
                     }
                 }
             }
@@ -3792,6 +3947,23 @@ impl ColoredSoftStepSolver {
             let b_neq0 = _mm256_cmp_ps::<_CMP_NEQ_OQ>(b_invm, zero);
             let b_movable = _mm256_and_ps(not_sent, b_neq0);
 
+            // V2 (`SPEC` only): `dpB − dpA` once per cohort (the scalar recomputes the same bits
+            // per point) and both rotations.
+            let (dp_rel, dqa, dqb) = if SPEC {
+                let (dpa, dpb) = (load3(&dpa_s), load3(&dpb_s));
+                (
+                    [
+                        _mm256_sub_ps(dpb[0], dpa[0]),
+                        _mm256_sub_ps(dpb[1], dpa[1]),
+                        _mm256_sub_ps(dpb[2], dpa[2]),
+                    ],
+                    [load1(&dqa_s[0]), load1(&dqa_s[1]), load1(&dqa_s[2]), load1(&dqa_s[3])],
+                    [load1(&dqb_s[0]), load1(&dqb_s[1]), load1(&dqb_s[2]), load1(&dqb_s[3])],
+                )
+            } else {
+                ([zero; 3], [zero; 4], [zero; 4])
+            };
+
             // ── Rank loop (register-carry velocity) ─────────────────────────────
             for r in 0..depth {
                 // SAFETY: `rank_base + r < rank_base + depth <= n_blocks` (asserted
@@ -3834,6 +4006,35 @@ impl ColoredSoftStepSolver {
                 ];
                 let vn = dot8(dvn[0], dvn[1], dvn[2], n[0], n[1], n[2]);
                 let lambda_n = old_ni;
+                // V2: the separation this pass solves on, the scalar's `s_eff` op for op:
+                // s0 + ((dpB − dpA) + (dqB·rb − rb) − (dqA·ra − ra))·n, blended back to s0 on a
+                // lane penetrating at gather unless `K3`.
+                let sep = if SPEC {
+                    let rot_b = rotate_x8(dqb, rb);
+                    let rot_a = rotate_x8(dqa, ra);
+                    let ds = [
+                        _mm256_sub_ps(
+                            _mm256_add_ps(dp_rel[0], _mm256_sub_ps(rot_b[0], rb[0])),
+                            _mm256_sub_ps(rot_a[0], ra[0]),
+                        ),
+                        _mm256_sub_ps(
+                            _mm256_add_ps(dp_rel[1], _mm256_sub_ps(rot_b[1], rb[1])),
+                            _mm256_sub_ps(rot_a[1], ra[1]),
+                        ),
+                        _mm256_sub_ps(
+                            _mm256_add_ps(dp_rel[2], _mm256_sub_ps(rot_b[2], rb[2])),
+                            _mm256_sub_ps(rot_a[2], ra[2]),
+                        ),
+                    ];
+                    let s_cur = _mm256_add_ps(sep, dot8(ds[0], ds[1], ds[2], n[0], n[1], n[2]));
+                    if K3 {
+                        s_cur
+                    } else {
+                        _mm256_blendv_ps(sep, s_cur, _mm256_cmp_ps::<_CMP_GT_OQ>(sep, zero))
+                    }
+                } else {
+                    sep
+                };
                 // bias_active hoisted: the whole d_lambda branch is a Rust `if`, not
                 // a per-lane blend (matches the scalar loop-invariant `if`).
                 let d_lambda = if bias_active {
@@ -3849,6 +4050,17 @@ impl ColoredSoftStepSolver {
                 } else {
                     // -mEff * vn.
                     _mm256_mul_ps(_mm256_mul_ps(neg_one, m_eff), vn)
+                };
+                // V2: a speculative lane (s > 0) takes -mEff * (vn + s/h), the scalar's
+                // `-m_eff * (vn + separation * inv_h)`, selected per lane.
+                let d_lambda = if SPEC {
+                    let spec_dl = _mm256_mul_ps(
+                        _mm256_mul_ps(neg_one, m_eff),
+                        _mm256_add_ps(vn, _mm256_mul_ps(sep, inv_h_v)),
+                    );
+                    _mm256_blendv_ps(d_lambda, spec_dl, _mm256_cmp_ps::<_CMP_GT_OQ>(sep, zero))
+                } else {
+                    d_lambda
                 };
                 // new_lambda = max(lambda_n + d_lambda, 0); applied = new - old.
                 let new_lambda = _mm256_max_ps(_mm256_add_ps(lambda_n, d_lambda), zero);
@@ -3989,6 +4201,20 @@ impl ColoredSoftStepSolver {
     /// `angular_velocity` (3) into the cohort gather buffers at `lane` (the
     /// scalar-side gather half of [`solve_color_avx2`]). Pure scalar marshaling, no
     /// intrinsics.
+    /// Stages one body's accumulated step movement (V2) into the cohort's SoA buffers at `lane`:
+    /// `dp` (3 columns) and `dq` (4, `x y z w`). Pure scalar marshaling, no intrinsics.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[inline]
+    fn stage_delta(d: &BodyDelta, lane: usize, dp: &mut [[f32; 8]; 3], dq: &mut [[f32; 8]; 4]) {
+        dp[0][lane] = d.dp.x;
+        dp[1][lane] = d.dp.y;
+        dp[2][lane] = d.dp.z;
+        dq[0][lane] = d.dq.x;
+        dq[1][lane] = d.dq.y;
+        dq[2][lane] = d.dq.z;
+        dq[3][lane] = d.dq.w;
+    }
+
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[inline]
     fn stage_body_state(
@@ -4043,9 +4269,7 @@ impl ColoredSoftStepSolver {
     fn solve_all_colors(
         cols: &CohortColumns,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
-        bias_rate: f32,
-        mass_coeff: f32,
-        impulse_coeff: f32,
+        step: &SolveStep<'_>,
         bias_active: bool,
         parallel: bool,
         simd: bool,
@@ -4091,9 +4315,7 @@ impl ColoredSoftStepSolver {
                         c,
                         ctx,
                         g_hi,
-                        bias_rate,
-                        mass_coeff,
-                        impulse_coeff,
+                        step,
                         bias_active,
                         simd,
                         tally,
@@ -4101,18 +4323,7 @@ impl ColoredSoftStepSolver {
                     continue;
                 }
                 Self::solve_color_parallel::<false>(
-                    cols,
-                    view,
-                    bodies_eff,
-                    c,
-                    ctx,
-                    g_hi,
-                    bias_rate,
-                    mass_coeff,
-                    impulse_coeff,
-                    bias_active,
-                    simd,
-                    None,
+                    cols, view, bodies_eff, c, ctx, g_hi, step, bias_active, simd, None,
                 );
             } else {
                 // O7 dispatch fork (the 0%-gate): `simd == false` runs the byte-
@@ -4126,9 +4337,7 @@ impl ColoredSoftStepSolver {
                     ctx,
                     ctx.g_base,
                     g_hi,
-                    bias_rate,
-                    mass_coeff,
-                    impulse_coeff,
+                    step,
                     bias_active,
                     simd,
                 );
@@ -4226,9 +4435,7 @@ impl ColoredSoftStepSolver {
         color: usize,
         ctx: ColorCtx,
         g_hi: usize,
-        bias_rate: f32,
-        mass_coeff: f32,
-        impulse_coeff: f32,
+        step: &SolveStep<'_>,
         bias_active: bool,
         simd: bool,
         stamps: Option<&WaveStamps>,
@@ -4259,18 +4466,7 @@ impl ColoredSoftStepSolver {
             // Inline on the calling thread, routed through the O7 dispatch fork:
             // `simd` runs `solve_color_avx2` over the whole color's cohorts, else the
             // scalar oracle over its groups — both bit-identical to the parallel split.
-            Self::solve_color_dispatch(
-                view,
-                bodies_eff,
-                ctx,
-                g_lo,
-                g_hi,
-                bias_rate,
-                mass_coeff,
-                impulse_coeff,
-                bias_active,
-                simd,
-            );
+            Self::solve_color_dispatch(view, bodies_eff, ctx, g_lo, g_hi, step, bias_active, simd);
             return;
         }
 
@@ -4414,8 +4610,9 @@ impl ColoredSoftStepSolver {
             pool.scope(|scope| {
                 // The chunk task: a `Fn` over a cut that hands back that chunk's
                 // body, one spawn per cut. Every capture is `Copy` (the solve
-                // views, the color context and the step scalars), so each body owns
-                // its copies and borrows nothing.
+                // views, the color context, the step's parameters by reference and the two
+                // flags), so each body owns its copies and borrows only the step, which
+                // outlives the scope.
                 let task = move |cut: ColorChunkCut| {
                     let (task_g_lo, task_g_hi) = cut;
                     move || {
@@ -4468,9 +4665,7 @@ impl ColoredSoftStepSolver {
                             ctx,
                             task_g_lo,
                             task_g_hi,
-                            bias_rate,
-                            mass_coeff,
-                            impulse_coeff,
+                            step,
                             bias_active,
                             simd,
                         );
@@ -4506,18 +4701,7 @@ impl ColoredSoftStepSolver {
         // color did not split into two or more chunks, so dispatching it would have
         // been one task and a wait. Both take the inline path.
         if dispatched != Some(true) {
-            Self::solve_color_dispatch(
-                view,
-                bodies_eff,
-                ctx,
-                g_lo,
-                g_hi,
-                bias_rate,
-                mass_coeff,
-                impulse_coeff,
-                bias_active,
-                simd,
-            );
+            Self::solve_color_dispatch(view, bodies_eff, ctx, g_lo, g_hi, step, bias_active, simd);
         }
     }
 
@@ -4538,9 +4722,7 @@ impl ColoredSoftStepSolver {
         color: usize,
         ctx: ColorCtx,
         g_hi: usize,
-        bias_rate: f32,
-        mass_coeff: f32,
-        impulse_coeff: f32,
+        step: &SolveStep<'_>,
         bias_active: bool,
         simd: bool,
         tally: &mut WaveTally,
@@ -4553,9 +4735,7 @@ impl ColoredSoftStepSolver {
             color,
             ctx,
             g_hi,
-            bias_rate,
-            mass_coeff,
-            impulse_coeff,
+            step,
             bias_active,
             simd,
             Some(&stamps),
@@ -4574,10 +4754,17 @@ impl ColoredSoftStepSolver {
     /// Walks the cohorts group-major in color order — the slot order (the bodies
     /// within a color are disjoint; cross-color the result is order-fixed). A
     /// zero-restitution contact is skipped, and only there is `vn0` unread (D9).
+    ///
+    /// V2 (`spec`, a step whose speculative contacts are on): a point speculative at gather
+    /// (`s0 > 0`) whose normal impulse ended the substeps at `0` never touched this step, and gets
+    /// no bounce — Box2D v3's rule ("the total normal impulse is 0 for speculative points").
+    /// Without it such a point, approaching faster than the threshold, would be pushed apart
+    /// before any contact.
     fn apply_restitution(
         cols: &mut CohortColumns,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
         counters: &mut SetupCounters,
+        spec: bool,
     ) {
         // Single-threaded (run after the parallel solve has joined), so direct
         // `&mut` access to the blocks is sound — `cold` / `rank_cold` are ST-only
@@ -4607,8 +4794,11 @@ impl ColoredSoftStepSolver {
                     if vn0 > -RESTITUTION_THRESHOLD {
                         continue;
                     }
-                    counters.restitution();
                     let blk = &mut blocks[rank_base + r];
+                    if spec && blk.sep[l] > 0.0 && blk.ni[l] == 0.0 {
+                        continue;
+                    }
+                    counters.restitution();
                     let ra = blk.ra(l);
                     let rb = blk.rb(l);
                     let m_eff = {
@@ -4908,6 +5098,11 @@ impl ColoredSoftStepSolver {
     ) {
         let substeps = config.substeps.max(1);
         let h = config.dt / substeps as f32;
+        // V2: the speculative branch runs iff speculative contacts are on (a positive distance or
+        // a positive velocity cap; off — and a NaN — is the pre-V2 kernel); `1 / h` once, so every
+        // kernel multiplies by the same bits.
+        let spec = config.speculative_contacts();
+        let inv_h = 1.0 / h;
 
         // Defect A (interim): re-key the sleep latch to this gather's rows BEFORE the early
         // return below, so a transient step with no simulated dynamic body does not leave
@@ -4971,7 +5166,7 @@ impl ColoredSoftStepSolver {
             let warm_remap = {
                 let bodies_zone = zone!(PHYS_SB_BODIES);
                 self.canary.at(&PHYS_SB_BODIES, bodies_zone.is_some());
-                self.build_bodies(scratch.bodies(), cls);
+                self.build_bodies(scratch.bodies(), cls, spec);
                 // Ruling W1: the write guards read the effective inverse mass of the flag the
                 // colouring read, so a held row is immovable to both.
                 debug_assert!(
@@ -5147,12 +5342,18 @@ impl ColoredSoftStepSolver {
             // (3)+(4) Soft normal + friction sweep ACROSS colors (Gauss-Seidel).
             {
                 let _z = zone!(PHYS_PASS_BIASED);
+                let step = SolveStep {
+                    bias_rate: soft.bias_rate,
+                    mass_coeff: soft.mass_coeff,
+                    impulse_coeff: soft.impulse_coeff,
+                    inv_h,
+                    spec,
+                    deltas: self.deltas.solve_view(),
+                };
                 Self::solve_all_colors(
                     &self.columns,
                     self.bodies.solve_view(),
-                    soft.bias_rate,
-                    soft.mass_coeff,
-                    soft.impulse_coeff,
+                    &step,
                     true,
                     parallel,
                     use_simd_solve,
@@ -5168,12 +5369,24 @@ impl ColoredSoftStepSolver {
                 let _z = zone!(PHYS_INTEGRATE);
                 {
                     let mut snap_view = scratch.bodies.build_view();
-                    simd::position_integrate(
-                        self.bodies.as_read_slice(),
-                        snap_view.as_mut_slice(),
-                        h,
-                        false,
-                    );
+                    if spec {
+                        // V2: the same integrate, which also advances each moved row's step
+                        // movement for the speculative current separation — no new stage.
+                        let mut delta_view = self.deltas.build_view();
+                        simd::position_integrate_tracked(
+                            self.bodies.as_read_slice(),
+                            snap_view.as_mut_slice(),
+                            delta_view.as_mut_slice(),
+                            h,
+                        );
+                    } else {
+                        simd::position_integrate(
+                            self.bodies.as_read_slice(),
+                            snap_view.as_mut_slice(),
+                            h,
+                            false,
+                        );
+                    }
                 }
                 {
                     let mut view = self.bodies.build_view();
@@ -5182,14 +5395,20 @@ impl ColoredSoftStepSolver {
             }
 
             // (6) Relax: re-solve bias-free to remove soft-bias energy.
+            let step = SolveStep {
+                bias_rate: soft.bias_rate,
+                mass_coeff: soft.mass_coeff,
+                impulse_coeff: soft.impulse_coeff,
+                inv_h,
+                spec,
+                deltas: self.deltas.solve_view(),
+            };
             for _ in 0..config.relax_iterations {
                 let _z = zone!(PHYS_PASS_RELAX);
                 Self::solve_all_colors(
                     &self.columns,
                     self.bodies.solve_view(),
-                    soft.bias_rate,
-                    soft.mass_coeff,
-                    soft.impulse_coeff,
+                    &step,
                     false,
                     parallel,
                     use_simd_solve,
@@ -5210,6 +5429,7 @@ impl ColoredSoftStepSolver {
                 &mut self.columns,
                 self.bodies.solve_view(),
                 &mut self.counters,
+                spec,
             );
         }
 
