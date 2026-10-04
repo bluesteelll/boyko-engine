@@ -422,9 +422,13 @@ pub(crate) trait RegionWords: Sync {
     fn done_lines(&self) -> usize;
     /// Word `word` of claim line `line`.
     fn claim(&self, line: usize, word: usize) -> &AtomicU64;
-    /// How many claim lines the frame holds.
+    /// How many claim lines the frame holds. Debug builds only: the open check is its one reader,
+    /// and release (`-D warnings`, as CI builds it) rejects a trait method nothing calls.
+    #[cfg(debug_assertions)]
     fn claim_lines(&self) -> usize;
-    /// How many words of each claim line the frame stores (8 natively).
+    /// How many words of each claim line the frame stores (8 natively). Debug builds only, for the
+    /// same reason as `claim_lines`.
+    #[cfg(debug_assertions)]
     fn claim_words(&self) -> usize;
     /// Word `k` of participant `p`'s receipt line.
     fn receipt_word(&self, p: usize, k: usize) -> &AtomicU64;
@@ -501,10 +505,12 @@ impl RegionWords for FrameWords<'_> {
     fn claim(&self, line: usize, word: usize) -> &AtomicU64 {
         &self.claims[line].0[word]
     }
+    #[cfg(debug_assertions)]
     #[inline]
     fn claim_lines(&self) -> usize {
         self.claims.len()
     }
+    #[cfg(debug_assertions)]
     #[inline]
     fn claim_words(&self) -> usize {
         8
@@ -1472,9 +1478,11 @@ impl RegionWords for LoomRegionWords {
         assert!(word < self.words_per_line, "loom region frame: claim word {word} is not stored");
         &self.claims[line * self.words_per_line + word]
     }
+    #[cfg(debug_assertions)]
     fn claim_lines(&self) -> usize {
         self.claims.len() / self.words_per_line
     }
+    #[cfg(debug_assertions)]
     fn claim_words(&self) -> usize {
         self.words_per_line
     }
