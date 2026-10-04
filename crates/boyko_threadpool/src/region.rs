@@ -1136,8 +1136,15 @@ pub(crate) fn run_orchestrator<W: RegionWords, S: RegionStages, P: RegionPolicy,
         }
     }
     part.exit(RegionExit::End);
-    // Release: every item's writes happen-before a helper's Acquire load of END.
-    publish.store(END_BIT | base, Ordering::Release);
+    // Relaxed: no reader depends on an edge from this store (tester r3 N4). A helper that loads
+    // END runs no block and reads nothing participant 0 wrote: it checks the tag, loads `poison`
+    // and stores its own receipt. In a region that ends normally, `poison`'s last store precedes
+    // this region's spawns, which order it before every helper's load; a poisoning that races
+    // this END is re-raised by the scope's join whatever the helper's receipt says. What the
+    // caller reads afterwards (the blocks' data, the receipts) is ordered by the done counts'
+    // release sequences and by that join, not by END. The POISONED ENDs (`poisoned_exit`,
+    // `Participant::on_unwind`) stay Release: a helper's POISONED receipt depends on them.
+    publish.store(END_BIT | base, Ordering::Relaxed);
     stats
 }
 
@@ -1177,7 +1184,8 @@ fn wait_publish<W: RegionWords, P: RegionPolicy, const ARMED: bool>(
     census: bool,
 ) -> u64 {
     let publish = w.publish();
-    // Acquire: pairs with the orchestrator's Release publish (an epoch or END).
+    // Acquire: pairs with the orchestrator's Release publish of an epoch or of a poisoned END
+    // (the normal END is Relaxed: nothing after it reads data, see `run_orchestrator`).
     let v = publish.load(Ordering::Acquire);
     if v != last {
         return v;
@@ -1216,8 +1224,10 @@ pub(crate) fn run_helper<W: RegionWords, S: RegionStages, P: RegionPolicy, const
                 base,
                 "region: a helper read another region's END (the open reset did not store OPEN)"
             );
-            // Relaxed: the END just acquired was published after the poison store that caused it
-            // (by the same guard, or after the orchestrator's Acquire load of it).
+            // Relaxed: a poisoned END was published (Release) after the poison store that caused
+            // it (by the same guard, or after the orchestrator's Acquire load of it). A normal END
+            // has no poison store to show: barring a racing poisoning (which the scope's join
+            // re-raises), `poison`'s last store precedes this helper's spawn.
             let exit = if w.poison().load(Ordering::Relaxed) != 0 {
                 RegionExit::Poisoned
             } else {

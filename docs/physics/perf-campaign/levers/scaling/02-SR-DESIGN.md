@@ -56,7 +56,10 @@ The frame is plain data the caller owns — the physics solver keeps it in its R
   reset is gone).
 - **Tagged END and the open reset.** At open, participant 0 stores `publish = base` (OPEN) before any spawn; END
   is `END_BIT | base`; a helper that reads END debug-asserts the tag. `base ≥ 1` always (critique r1 O1), so a
-  zero-initialised publish word or receipt can never read as a region's OPEN or tag.
+  zero-initialised publish word or receipt can never read as a region's OPEN or tag. The normal END is a Relaxed
+  store: a helper reads no data after END, and what the caller reads is ordered by the done counts and the scope's
+  join (tester r3 N4: weakening it to Relaxed was invisible to every loom model and to Miri, because nothing
+  consumes the edge). The poisoned ENDs stay Release: a helper's POISONED receipt depends on seeing `poison = 1`.
 - **Exact completion.** `done.fetch_add(1, Release)` per block (R-a: one batched add per participant); the
   orchestrator waits for exactly `n_blocks` (Acquire) and resets the line to 0 before its next publish.
 - **Poison on unwind.** Each participant's tallies live in a guard. Dropped while armed it stores its receipt
