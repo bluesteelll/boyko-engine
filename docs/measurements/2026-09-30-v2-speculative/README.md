@@ -52,28 +52,44 @@ checkout, and strip carriage returns first on a `core.autocrlf=true` checkout.
 | `l10/pose_gates_sync.sh`, `l10/runner_checks_c3c.sh`, `l10/runner_checks_off.sh` | the trunk's L10 pose gates on the pre-V2 fixtures, unchanged | (through `pose_gates_d0.sh`) |
 | `pose_gates_d0.sh <exe> <out>` | the three above, every row through `runner_d0.sh` (both overlap-only flags appended) | 264/264, both negatives exit 4, 26/26, 17/17 |
 | `make_v2_scripts.py` | writes `*_v2.sh` from `l10/`: the five fixture directories re-pointed here and the six pinned hashes replaced by this directory's recordings of the same rows | — |
-| `pose_gates_v2.sh <exe> <out>` | the three `*_v2.sh` | 264/264, 4/4, 26/26, 17/17 except the VOID rows below |
+| `pose_gates_v2.sh <exe> <out>` | the three `*_v2.sh` | 264/264, both negatives exit 4, 26/26, 17/17 (the rest pile's `Sets` rows exited VOID before the probe fix below) |
 | `runner_pins.sh <exe> <out>` | the trunk's runner pins J500, J500 reuse-off, R1100 at W 1 and 8: flagless they read V2's recordings, with both flags the pre-V2 pins | 12/12 |
 | `record_v2_fixtures.sh <exe> <dir>` | the recorder that wrote this directory | 35 rows |
 
-## The rows that exit VOID
+## The rows that exited VOID, and the probe that voided them
 
-Four rows record their pose but the runner exits 3 (VOID): `l9-reuse-on/R-S`, `l10-reuse-on/R-S`,
+Under the flip's runner (its sha256 in `fixtures.json`, which keeps every exit code as recorded)
+four rows recorded their pose but exited 3 (VOID): `l9-reuse-on/R-S`, `l10-reuse-on/R-S`,
 `l10-reuse-on/R-on` and `w6/RSOffp800` — the rest pile with sleeping on, contact reuse on, in the
-`Sets` sleep-skip mode. The runner's L9 rule voids a reuse-on row in which no pair reused its record
-over steps [100, 500). Under V2 the rest pile freezes at step 86 (before V2: step 250), so from step
-87 every row is held and the narrowphase sees no box pair at all in that window. The runner's own
-pair classes (`--window`, W1, 600 steps) read it directly:
+`Sets` sleep-skip mode. The runner's L9 probe voided every reuse-on row in which no pair reused its
+record over steps [100, 500). Under V2 the rest pile freezes at step 86 (before V2: step 250), so
+from step 87 every row is held and the narrowphase collides no box pair at all in that window. The
+runner's own pair classes (W1, 600 steps, `--window`; "collided" is `sep_hits + reused + full`, the
+box pairs the narrowphase ran, and the candidate pairs also count the ones sleep-skip held):
 
-| rule, sleep-skip mode | window | box pairs narrowphased | records reused |
-|---|---|---|---|
-| V2, `Sets` | [100, 500) | 0 | 0 |
-| V2, `Sets` | [0, 100) | 842,160 | 709,565 |
-| V2, `Off` | [100, 500) | 3,828,000 | 3,422,000 |
-| overlap-only (both flags), `Sets` | [100, 500) | 1,454,640 | 1,161,882 |
+| rule, sleep-skip mode | window | candidate pairs | box pairs collided | records reused | first frozen step |
+|---|---|---|---|---|---|
+| V2, `Sets` | [100, 500) | 0 | 0 | 0 | 86 |
+| V2, `Sets` | [0, 100) | 842,160 | 823,020 | 709,565 | 86 |
+| V2, `Off` | [100, 500) | 3,828,000 | 3,828,000 | 3,422,000 | 86 |
+| overlap-only (both flags), `Sets` | [0, 100) | 957,000 | 957,000 | 748,333 | 250 |
+| overlap-only (both flags), `Sets` | [100, 500) | 1,454,640 | 1,435,500 | 1,161,882 | 250 |
 
-The pose is recorded and every gate row that reads these fixtures matches its pose
-(`expect_pose: match`, or the pinned hash) — but the gate counts a nonzero exit as a FAIL, so
-`pose_gates_v2.sh` reads 228/264, both negatives exit 4, 19/26 and 17/17, every one of the 43
-failures this VOID. Whether the L9 probe should exempt a window in which no box pair was
-narrowphased is a ruling for the orchestrator (V2 lane `impl.md`, rounds 4-5), not a re-pin.
+The gates count a nonzero exit as a FAIL, so `pose_gates_v2.sh` read 228/264, both negatives exit
+4, 19/26 and 17/17, every one of the 43 failures this VOID with its pose matching (`expect_pose:
+match`, or the pinned hash).
+
+**The probe since the V2 lane's triage round 1** (option (a) of the lane's ruling question: exempt
+a window that collided no box pair). A reuse-on row is void iff its window collided a box pair and
+reused no record there — the rule before, unchanged on every such row — or iff its window collided
+no box pair and its whole run reused no record. A window with nothing to collide says nothing about
+reuse; the whole-run clause keeps the void for a reuse flag that never reaches the narrowphase,
+which collides pairs on its first steps and reuses none. The runner's VOID message names the clause
+that fired. Shown able to fail by a scratch mutation that hands the narrowphase reuse OFF whatever
+the configuration says (the step's `ReuseStep::new` in `narrowphase_step`,
+`crates/boyko_physics/src/systems.rs`; restored by content and md5-checked): the rest pile in `Sets` exits 3 through the whole-run clause (its window collided
+no pair; its pose is the reuse-off hash `0xe99ed04348f5d898`), and in `Off` through the window
+clause. The probe reads counters after the run, so it moves no pose. On the fixed runner
+`pose_gates_v2.sh` reads 264/264, both negatives exit 4, 26/26 and 17/17, `pose_gates_d0.sh`
+264/264, both negatives exit 4, 26/26 and 17/17, and `runner_pins.sh` 12/12, with no row of the
+three reporting a VOID.

@@ -322,8 +322,9 @@
 //!   `hint_capped` or (contact reuse on) `refresh_stale` is above zero, so a moved `--expect-pose`
 //!   row with all three at zero was not moved by it.
 //! * exit code: 0 ok; 2 bad flags; 3 void (anti-vacuity, frozen-by, disarmed ring traffic,
-//!   dropped samples, a reuse-on row with no reuse over steps [100, 500)); 4 `--expect-pose`
-//!   mismatch; 101 panic.
+//!   dropped samples, a reuse-on row that collided box pairs over steps [100, 500) and reused no
+//!   record there, or whose window collided none and whose whole run reused no record);
+//!   4 `--expect-pose` mismatch; 101 panic.
 //!
 //! # Self-check (no `--scene`)
 //!
@@ -514,8 +515,10 @@ const COLOR_CHUNKS_PER_WORKER: usize = 6;
 const COLOR_MIN_SLOTS_PER_CHUNK: usize = 64;
 /// The SIMD cohort width the cut snaps to: `solver/colored.rs`'s `COHORT`.
 const COLOR_COHORT: usize = 8;
-/// The steps a contact-reuse row must reuse a record in, or be void (L9 design, "Integration":
-/// J's pile settles before step ~188, so a reuse-on row that reused nothing here measured nothing).
+/// The steps a contact-reuse row that collides a box pair in them must reuse a record in, or be
+/// void (L9 design, "Integration": J's pile settles before step ~188, so a reuse-on row that
+/// reused nothing here measured nothing). A row whose window collided no box pair (every island
+/// held) must reuse a record somewhere in its run instead.
 const REUSE_PROBE: (usize, usize) = (100, 500);
 
 // ── Command line ──────────────────────────────────────────────────────────────
@@ -2455,18 +2458,33 @@ fn run(args: &Args) -> ExitCode {
         void_steps += 1;
         first_void.get_or_insert_with(|| format!("the disarmed run pushed {traffic} samples"));
     }
-    // L9 (design, "Integration"): a reuse-on row that reused nothing over steps [100, 500) is void.
-    // It tests the effective config, which is also what `read_classes` tests, so `classes` holds
-    // one entry per step on every row it indexes, the flag named or not.
+    // L9 (design, "Integration"): a reuse-on row that collided a box pair over steps [100, 500)
+    // and reused no record there is void. A window in which the narrowphase collided no box pair
+    // at all (every island held: V2's rest pile freezes at step 86 in the `Sets` mode) had nothing
+    // to reuse, so its silence is no evidence; such a row is read over the whole run instead, and
+    // is void iff it reused no record anywhere. A reuse flag that never reaches the narrowphase
+    // still voids: its run collides box pairs on its first steps and reuses none. It tests the
+    // effective config, which is also what `read_classes` tests, so `classes` holds one entry per
+    // step on every row it indexes, the flag named or not.
     let reuse_probe = REUSE_PROBE.0..REUSE_PROBE.1.min(args.steps);
-    if contact_reuse
-        && !reuse_probe.is_empty()
-        && classes[reuse_probe.clone()].iter().all(|c| c.reused == 0)
-    {
-        void_steps += 1;
-        first_void.get_or_insert_with(|| {
-            format!("contact reuse is on and no pair reused its record over steps {reuse_probe:?}")
-        });
+    if contact_reuse && !reuse_probe.is_empty() {
+        let probe = &classes[reuse_probe.clone()];
+        let collided = probe.iter().any(|c| c.sep_hits + c.reused + c.full != 0);
+        if collided && probe.iter().all(|c| c.reused == 0) {
+            void_steps += 1;
+            first_void.get_or_insert_with(|| {
+                format!("contact reuse is on and no pair reused its record over steps {reuse_probe:?}")
+            });
+        } else if !collided && classes.iter().all(|c| c.reused == 0) {
+            void_steps += 1;
+            first_void.get_or_insert_with(|| {
+                format!(
+                    "contact reuse is on, steps {reuse_probe:?} collided no box pair, and no pair \
+                     reused its record over the whole run (steps 0..{})",
+                    classes.len()
+                )
+            });
+        }
     }
     let classes_json = if classes.is_empty() {
         "null".to_owned()

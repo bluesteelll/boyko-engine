@@ -352,9 +352,10 @@ four-cube tower with contact reuse OFF first holds at step 223 (137 before).
 **The fixtures** (`docs/measurements/2026-09-30-v2-speculative/`, 35 rows at W1, every W8 file a copy
 of its W1 recording; the pose gates that read them are committed beside them in `gate/`). The V2
 pose gates (the trunk's three scripts with the V2 fixture directories and hashes substituted,
-`gate/*_v2.sh`), on the synced tip's runner: 228/264, both negatives exit 4, 19/26 and 17/17. Every one of the 43 failures is the same row type — the rest pile
-with sleeping on and contact reuse on in the `Sets` mode — exiting VOID with its pose matching the V2
-fixture (§7.2, the first open item).
+`gate/*_v2.sh`), on the synced tip's runner: 228/264, both negatives exit 4, 19/26 and 17/17.
+Every one of the 43 failures is the same row type — the rest pile with sleeping on and contact
+reuse on in the `Sets` mode — exiting VOID with its pose matching the V2 fixture. Since the runner's
+probe fix (§7.3) the same gates read 264/264, both negatives exit 4, 26/26 and 17/17.
 
 **Work receipts** (armed W1 rows, steps [100, 500), untimed; the fixture directory's `receipts/`):
 
@@ -382,14 +383,7 @@ draws (all frozen at step 61, 0 events), the d = 0 arms, and the work receipts.
 
 ### 7.2 Open after the flip
 
-- **The runner's L9 reuse probe under V2** (a ruling, not a re-pin). The parity runner voids a
-  reuse-on row in which no pair reused its record over steps [100, 500). Under V2 the rest pile with
-  sleeping on freezes at step 86, so in the `Sets` mode every box pair is held from step 87 and the
-  window holds no narrowphased box pair (0 there, 842,160 in steps [0, 100); the fixture
-  directory's README tabulates the runner's pair classes): four of the 35 V2 recordings and every
-  gate row that runs them exit VOID (code 3) with their pose matching. A probe that exempts a window with no
-  narrowphased box pair (or reads the whole run when the window has none) would keep the void for a
-  reuse flag that does not reach the narrowphase; which form, if any, is the orchestrator's call.
+- ~~**The runner's L9 reuse probe under V2**~~ — closed in the triage round, §7.3.
 - **PC-V2-HYST** (ruling 10a): why the sign-correct hysteresis creeps with reuse off.
 - **The flicker budgets at a measured 0.** G2 and G7 are 0 by the file's rule because no draw woke;
   the rule's standard error vanishes at 0, and the rule of three would give 1 and 6. A red at 0 is
@@ -399,3 +393,26 @@ draws (all frozen at step 61, 0 events), the d = 0 arms, and the work receipts.
 - PC-V2-1 .. PC-V2-10 of the cut stand (CLAUDE.md's ignored-suite figures: the fidelity gate's four
   `slow:` tests are a device-free release leg; the census reads 374 sites at the flip and 375 on
   the synced tree, which brought one; slow 14).
+
+### 7.3 Triage round 1 (2026-10-04)
+
+- **The runner's L9 reuse probe (T-L9), option (a).** The parity runner voided a reuse-on row in
+  which no pair reused its record over steps [100, 500). Under V2 the rest pile with sleeping on
+  freezes at step 86, so in the `Sets` mode every box pair is held from step 87 and the window
+  collides no box pair (0 there; 823,020 collided and 709,565 reused in steps [0, 100)): four of
+  the 35 V2 recordings and every gate row that ran them exited VOID with their pose matching. The
+  probe now voids a reuse-on row iff its window collided a box pair (`sep_hits + reused + full`)
+  and reused no record there — the old rule, unchanged on every such row — or iff its window
+  collided none and its whole run reused no record. A window with nothing to collide says nothing
+  about reuse; the whole-run clause keeps the void for a reuse flag that never reaches the
+  narrowphase. Red first: the old runner exits 3 on the rest pile's `Sets` row (pose matching);
+  the fixed one exits 0 on the same pose; a scratch mutation that hands the narrowphase reuse off
+  whatever the configuration says still exits 3 on that row through the whole-run clause, and on
+  the `Off` row through the window clause. The probe reads counters after the run, so no pose
+  moves: on the fixed runner `pose_gates_v2.sh` reads 264/264, both negatives exit 4, 26/26,
+  17/17; `pose_gates_d0.sh` the same; `runner_pins.sh` 12/12; no row of the three is VOID. The
+  fixture directory's README carries the pair-class table and the mutation.
+- **W1, docs only.** "`speculative_distance = 0` is the pre-V2 rule" was stated with one flag in
+  §2, Q7, critique W2/W5, §6, §7.1, `PhysicsConfig::contact_reuse`'s rustdoc and four test files.
+  Since §2.6 the overlap-only rule needs the velocity cap at `0` too (`speculative_contacts()` is
+  `d > 0 || cap > 0`); every code arm, script and receipt already set both, so no value moved.
