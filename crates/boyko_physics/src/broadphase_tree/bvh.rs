@@ -5,8 +5,8 @@
 //! One [`ScratchColumn`] of [`Node8`], level 0 (the leaves) first and the root last. Node `i` of
 //! level `L ≥ 1` has children `8·i .. 8·i + 8` of level `L − 1`, so there is no child pointer:
 //! `level_start[L] + i` addresses the node and `level_start[L − 1] + 8·i + k` its lane `k`. A
-//! leaf node holds up to eight rows in the build's leaf order (below); the leaf **slot** of a row
-//! is `8 · leaf_node + lane`, and a slot is what a member record remembers.
+//! leaf node holds up to eight rows in Morton order; the leaf **slot** of a row is
+//! `8 · leaf_node + lane`, and a slot is what a member record remembers.
 //!
 //! * An internal lane holds its child's AABB (`min_x, min_y, min_z, max_x, max_y, max_z`), the
 //!   union of the padded leaf boxes below it. An empty lane holds `+inf` mins and `-inf` maxes,
@@ -27,19 +27,12 @@
 //!
 //! # Build
 //!
-//! The rows are put in a leaf order ([`LeafOrder`]), then packed eight to a leaf. Each level
-//! above is the union of the level below. Every step of the build reads only the rows it is
-//! given, so a build is a pure function of the row list and the tree is the same on every
-//! machine — not that the pair set depends on it: the assembly canonicalises the order.
-//!
-//! * **Morton** (every tree by default): the Morton code of the position quantised to a 10-bit
-//!   grid over the rows' bounding box, by an LSD radix sort over the 30 code bits in three
-//!   10-bit passes, stable, so equal codes keep row order.
-//! * **kd** (F3, `levers/broadphase/06-DESIGN-F3.md`; the active tree under
-//!   `QueryKernel::LeafListKd` only): the model's top-down median split ([`kd_sort`]) — each
-//!   piece of more than eight rows split on its widest centroid axis at a whole number of
-//!   leaves, so every leaf node is one kd leaf. It permutes the items in place, keeping each
-//!   row's key in its item, and needs no column of its own.
+//! The rows are sorted by the Morton code of their position quantised to a 10-bit grid over
+//! the rows' bounding box (an LSD radix sort over the 30 code bits in three 10-bit passes,
+//! stable, so equal codes keep row order), then packed eight to a leaf. Each level above is
+//! the union of the level below. Every step of the build reads only the rows it is given, so a
+//! build is a pure function of the row list and the tree is the same on every machine — not
+//! that the pair set depends on it: the assembly canonicalises the order.
 
 use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
@@ -95,24 +88,6 @@ const MORTON_BITS: u32 = 10;
 /// Radix digit width of the Morton sort, and so its histogram size.
 const RADIX_BITS: u32 = 10;
 
-/// Rows of a kd leaf piece: one leaf node.
-const KD_LEAF: usize = LANES;
-
-/// The kd order's stack of pending pieces (512 B). A split pushes two pieces and pops one, so at
-/// most one sibling per depth waits; the depth is at most `ceil(log2(2^21 leaf nodes)) + 1 = 22`
-/// below `2^24` rows.
-const KD_STACK: usize = 64;
-
-/// The order a build packs its items in (module docs, "Build").
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LeafOrder {
-    /// The Morton order of the positions: every tree, unless the kernel selects the kd order.
-    Morton,
-    /// The kd median-split order ([`kd_sort`]): the active tree under
-    /// `QueryKernel::LeafListKd` (F3).
-    Kd,
-}
-
 /// One node of the tree: six rows of eight lanes, 192 B, three cache lines, 32-aligned so the
 /// AVX2 kernel loads each row aligned.
 #[repr(C, align(32))]
@@ -150,7 +125,7 @@ impl Node8 {
     };
 }
 
-/// A row the build reads: its bits, its row and the kd order's key. 32 B.
+/// A row the build reads: its bits and its row. 32 B.
 #[repr(C, align(32))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Item {
@@ -159,11 +134,7 @@ pub(crate) struct Item {
     pub(crate) z: f32,
     pub(crate) r: f32,
     pub(crate) row: u32,
-    /// The row's key on its kd piece's split axis ([`axis_key`]): written by [`kd_sort`], `0`
-    /// from [`new`](Self::new) and read by no other build. Beside `row`, so the kd sort key
-    /// `(key, row)` is one 8-B word of the item.
-    pub(crate) key: u32,
-    pub(crate) _pad: [u32; 2],
+    pub(crate) _pad: [u32; 3],
 }
 
 const _: () = assert!(size_of::<Item>() == 32 && align_of::<Item>() == 32);
@@ -172,7 +143,7 @@ impl Item {
     /// An item for `row` at `(x, y, z)` with bounding radius `r`.
     #[inline]
     pub(crate) const fn new(x: f32, y: f32, z: f32, r: f32, row: u32) -> Self {
-        Self { x, y, z, r, row, key: 0, _pad: [0; 2] }
+        Self { x, y, z, r, row, _pad: [0; 3] }
     }
 }
 
@@ -196,7 +167,7 @@ pub(crate) struct PackedBvh8 {
     /// Levels in the tree; `0` for an empty tree.
     levels: u8,
     /// Leaf slots in use: live plus killed lanes. Slots `0 .. leaves` are the items given to
-    /// the last build, in its leaf order.
+    /// the last build, in Morton order.
     leaves: u32,
     /// Killed lanes among them.
     dead: u32,
@@ -338,16 +309,12 @@ impl PackedBvh8 {
         debug_assert!(self.dead <= self.leaves, "invariant: dead ≤ leaves");
     }
 
-    /// Rebuilds the tree over `items` (every one a Normal row) in `order`, with `keys_a` /
-    /// `keys_b` as the Morton radix sort's ping-pong buffers. After the build, leaf slot `s`
-    /// holds the `s`-th item in that order, no lane is dead, and every leaf node's
-    /// [`LEAF_MAXROW`] is its largest row. [`LeafOrder::Kd`] permutes `items` into the kd order
-    /// in place (their rows must ascend: [`kd_sort`]); [`LeafOrder::Morton`] leaves them as
-    /// they are.
+    /// Rebuilds the tree over `items` (every one a Normal row), with `keys_a` / `keys_b` as the
+    /// radix sort's ping-pong buffers. After the build, leaf slot `s` holds the `s`-th item in
+    /// Morton order, no lane is dead, and every leaf node's [`LEAF_MAXROW`] is its largest row.
     pub(crate) fn build(
         &mut self,
-        items: &mut [Item],
-        order: LeafOrder,
+        items: &[Item],
         keys_a: &mut ScratchColumn<u64>,
         keys_b: &mut ScratchColumn<u64>,
     ) {
@@ -380,15 +347,8 @@ impl PackedBvh8 {
         self.levels = levels as u8;
         let total = start as usize;
 
-        // The leaf order: the Morton keys `(code << 32) | item index`, or the kd order applied
-        // to `items` in place.
-        let morton_keys: &[u64] = match order {
-            LeafOrder::Morton => morton_sort(items, keys_a, keys_b),
-            LeafOrder::Kd => {
-                kd_sort(items);
-                &[]
-            }
-        };
+        // Morton order of the items.
+        let order = morton_sort(items, keys_a, keys_b);
 
         let mut nodes = self.nodes.build_view();
         nodes.clear();
@@ -397,17 +357,15 @@ impl PackedBvh8 {
         for node in nodes.iter_mut().take(count[0] as usize) {
             *node = Node8::EMPTY_LEAF;
         }
-        match order {
-            LeafOrder::Morton => {
-                for (slot, &key) in morton_keys.iter().enumerate() {
-                    pack_lane(nodes, slot, &items[(key & 0xffff_ffff) as usize]);
-                }
-            }
-            LeafOrder::Kd => {
-                for (slot, item) in items.iter().enumerate() {
-                    pack_lane(nodes, slot, item);
-                }
-            }
+        for (slot, &key) in order.iter().enumerate() {
+            let item = &items[(key & 0xffff_ffff) as usize];
+            let node = &mut nodes[slot / LANES];
+            let k = slot % LANES;
+            node.p[LEAF_X][k] = item.x;
+            node.p[LEAF_Y][k] = item.y;
+            node.p[LEAF_Z][k] = item.z;
+            node.p[LEAF_R][k] = item.r;
+            node.p[LEAF_ROW][k] = f32::from_bits(item.row);
         }
         for node in nodes.iter_mut().take(count[0] as usize) {
             let mut maxrow = 0u32;
@@ -604,18 +562,6 @@ const fn unpack(entry: u32) -> (usize, usize) {
     ((entry >> 28) as usize, (entry & 0x0fff_ffff) as usize)
 }
 
-/// Writes `item` into leaf slot `slot` of the leaf level `nodes`.
-#[inline]
-fn pack_lane(nodes: &mut [Node8], slot: usize, item: &Item) {
-    let node = &mut nodes[slot / LANES];
-    let k = slot % LANES;
-    node.p[LEAF_X][k] = item.x;
-    node.p[LEAF_Y][k] = item.y;
-    node.p[LEAF_Z][k] = item.z;
-    node.p[LEAF_R][k] = item.r;
-    node.p[LEAF_ROW][k] = f32::from_bits(item.row);
-}
-
 /// The union of a leaf node's live lanes' padded boxes.
 #[inline]
 fn leaf_bounds(node: &Node8) -> ([f32; 3], [f32; 3]) {
@@ -743,118 +689,4 @@ fn morton_sort<'a>(
     let sorted = keys_b.as_read_slice();
     debug_assert!(sorted.windows(2).all(|w| (w[0] >> 32) <= (w[1] >> 32)), "Morton sort is sorted");
     sorted
-}
-
-/// Sorts `items` into the kd median-split order in place (F3, `levers/broadphase/06-DESIGN-F3.md`
-/// §2): the model's `kd_order` (`c3b/sim.py`), entry by entry. Top-down, a piece of more than
-/// eight rows gets the key of each row on its widest centroid axis ([`widest_axis`],
-/// [`axis_key`]) and is split at `ceil(leaves / 2) · 8` rows by the sort key `(key, row)`; a
-/// piece of at most eight rows — one leaf node — is sorted by its parent's key. The rows must
-/// ascend, as `build_active` pushes them: the model breaks ties by row index, and these are the
-/// same ties.
-///
-/// The result does not depend on `select`'s algorithm: the sort keys are unique (the rows are),
-/// so each split's two sets are fixed; each leaf's order is its full sort; the pieces on the
-/// stack are disjoint. Every piece starts at a multiple of eight and only the rightmost chain
-/// carries a remainder, so every leaf node but the last is one full kd leaf.
-///
-/// No heap, no `unsafe`: `select_nth_unstable_by_key` is `core`'s and the pending pieces sit in a
-/// fixed stack. `#[inline(never)]`: a symbol of its own, so the Morton build keeps its shape and
-/// the build-cost receipt has a function to read.
-#[inline(never)]
-pub(crate) fn kd_sort(items: &mut [Item]) {
-    let n = items.len();
-    debug_assert!(n < 1 << 24, "invariant: rows stay below 2^24");
-    debug_assert!(
-        items.windows(2).all(|w| w[0].row < w[1].row),
-        "invariant: the kd order's rows ascend (its ties by row are the model's ties by index)"
-    );
-    if n <= KD_LEAF {
-        // One leaf in row order: the model's `list(ids)` of the root.
-        return;
-    }
-    let mut stack = [(0u32, 0u32); KD_STACK];
-    stack[0] = (0, n as u32);
-    let mut depth = 1usize;
-    while depth > 0 {
-        depth -= 1;
-        let (s, m) = (stack[depth].0 as usize, stack[depth].1 as usize);
-        let piece = &mut items[s..s + m];
-        if m <= KD_LEAF {
-            debug_assert!(
-                s % KD_LEAF == 0 && (m == KD_LEAF || s + m == n),
-                "invariant: a kd leaf is one leaf node, full unless it is the last"
-            );
-            sort_kd_leaf(piece);
-            continue;
-        }
-        match widest_axis(piece) {
-            0 => piece.iter_mut().for_each(|it| it.key = axis_key(it.x)),
-            1 => piece.iter_mut().for_each(|it| it.key = axis_key(it.y)),
-            _ => piece.iter_mut().for_each(|it| it.key = axis_key(it.z)),
-        }
-        let left = m.div_ceil(KD_LEAF).div_ceil(2) * KD_LEAF;
-        debug_assert!(KD_LEAF <= left && left < m, "invariant: both parts of a split hold rows");
-        piece.select_nth_unstable_by_key(left, kd_key);
-        debug_assert!(depth + 2 <= KD_STACK, "invariant: at most one pending piece per depth");
-        stack[depth] = ((s + left) as u32, (m - left) as u32);
-        stack[depth + 1] = (s as u32, left as u32);
-        depth += 2;
-    }
-}
-
-/// The widest centroid axis of `piece` (0, 1 or 2): the `f32` extents compared in `f64`, the
-/// first maximum winning — numpy's `argmax` over `pts.max(0) − pts.min(0)` on `float64`. A zero's
-/// sign in a bound changes no extent's magnitude, so it cannot change the axis.
-#[inline]
-fn widest_axis(piece: &[Item]) -> usize {
-    let mut lo = [f32::INFINITY; 3];
-    let mut hi = [f32::NEG_INFINITY; 3];
-    for it in piece {
-        lo[0] = lo[0].min(it.x);
-        lo[1] = lo[1].min(it.y);
-        lo[2] = lo[2].min(it.z);
-        hi[0] = hi[0].max(it.x);
-        hi[1] = hi[1].max(it.y);
-        hi[2] = hi[2].max(it.z);
-    }
-    let ext = [0, 1, 2].map(|k| f64::from(hi[k]) - f64::from(lo[k]));
-    let mut axis = 0;
-    if ext[1] > ext[axis] {
-        axis = 1;
-    }
-    if ext[2] > ext[axis] {
-        axis = 2;
-    }
-    axis
-}
-
-/// The order-preserving key of a finite coordinate: its bits with the sign bit flipped, a
-/// negative's inverted. `v + 0.0` maps `−0.0` to `+0.0` first, so the two zeros tie and fall to
-/// the row, as numpy's `==` has them — `f32::total_cmp` would order them.
-#[inline]
-pub(crate) fn axis_key(v: f32) -> u32 {
-    let b = (v + 0.0).to_bits();
-    if b >> 31 == 1 { !b } else { b | 0x8000_0000 }
-}
-
-/// The kd sort key of an item: its axis key, then its row (unique).
-#[inline]
-fn kd_key(item: &Item) -> u64 {
-    (u64::from(item.key) << 32) | u64::from(item.row)
-}
-
-/// Sorts a kd leaf (at most eight items) by [`kd_key`]: an insertion sort.
-#[inline]
-fn sort_kd_leaf(piece: &mut [Item]) {
-    for i in 1..piece.len() {
-        let cur = piece[i];
-        let key = kd_key(&cur);
-        let mut j = i;
-        while j > 0 && kd_key(&piece[j - 1]) > key {
-            piece[j] = piece[j - 1];
-            j -= 1;
-        }
-        piece[j] = cur;
-    }
 }
