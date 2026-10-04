@@ -279,4 +279,115 @@ run-vs-run gate stays unedited and green at the new default (W 1/2/4/8/16, the {
 
 ## 7. Results
 
-Appended at C7.
+### 7.1 The flip (round 4, 2026-10-01)
+
+The defaults became `d = 20 mm` and the velocity cap 0.5 m with K3 on and the pre-V2 hysteresis
+(rulings 2026-09-30 items 9-10). Three test-only commits came first, each value-neutral at the old
+default and green before and after the flip; then the flip with every cargo pin it moves; then the
+fixtures; then this record.
+
+**The fidelity gate holds** (release, `-- --ignored`): the gap sweep 13/13 with contact reuse on
+(gap 0.5: 66.8 mm max drift, 0 boxes past 0.1 m; the worst 195.7 mm at gap 2.0) and 13/13 with it
+off (gap 0.5: 54.2 mm; worst 232.7 mm at gap 2.0), gap 0.5 with sleeping on 2/2 (66.8 / 54.1 mm),
+and the red control (gap 1.5, the velocity term capped at 1 mm) fails as it must (25 boxes past
+0.5 m, 19,990.5 mm). Jolt 5.6 on the same scene: 51 mm. Its four anchors equal the runner's V2
+recordings, so the test and the runner build the same J-T.
+
+**Premises only the overlap-only rule supplies** (item 10b). Under V2 a touching pair is within
+`d`, so it always carries a speculative manifold; three gates whose anti-vacuity needed a touching
+pair without one ran out of material:
+
+| gate | under V2 | resolution |
+|---|---|---|
+| G5 / G6 (P2: a touching no-contact pair) | none exists | the arms run the overlap-only rule; twins G5-V2 / G6-V2 stand the layer neighbours half a `TOUCH_GAP` past `d` (40 / 80 knife-edge pairs at V2's boundary) |
+| G-L9b-7 tipping (an unseen corner) | every bottom corner within `d` is held | the arm runs the overlap-only rule; a V2 twin asserts the bound, every penetrating corner held on every reused step (38 of 38) and a held point with `s > 0` (33 steps) |
+| S3 grow-clear (a REC-without-manifold pair) | 0 such pairs (15 before) | the arm runs the overlap-only rule (`Variant::overlap_only`); a default-rule run keeps every other guard. A V2-native placement (neighbours `d` apart) also read 0: the pile freezes on its spawn poses |
+| S3 cross pairs, move-in (held before the events) | the Tree reuse-off variant first holds at step 223 (137 before V2) | every event moves by the same offset to step 450 |
+
+Each new gate was shown able to fail by a scratch mutation (restored by content, md5-checked): the
+reuse refresh keeping only `s <= 0` (the tipping twin reds), the twins' pile placed inside `d`
+(scene-fitness reds), a `wake_all` on the shift step (all four shift scenes red).
+
+**Row D of the attribution census** (item 10d) is now derived per frame from the step's colours:
+`chunk == scope + passes x (blocks past each colour scope's first)`, the colour model observed
+against the scope and chunk counters on the same frame, and every scope frame and block released
+inside its step. Under V2 the widest colour reaches 42 cohort-snapped tasks at W = 8 (34 fit a first
+block): 3 of 24 frames take a second block, every one predicted. A 16 B larger task cell reds it.
+
+**The pins it moved**, each by its own rule (old -> new):
+
+| pin | old | new |
+|---|---|---|
+| pyramid `PINNED_FINAL_HASH` release / debug | `0xb583_189f_a681_f3a6` / `0x839d_9426_8d67_b09f` | `0xe5d8_a7d5_f469_4f08` / `0x2112_97c3_d16c_603c` |
+| pyramid `_REUSE_OFF` release / debug | `0xa386_20b3_8cbc_a8d3` / `0xc7eb_531b_1e1a_c19b` | `0x7812_1c47_f5c6_e8b2` / `0x0fc5_7194_33da_d377` |
+| A7-R1 reuse on / off | 0.6670 mm (`0x3a2e_dc99`) / 0.7180 mm (`0x3a3c_3896`) | 0.7245 mm (`0x3a3d_eb44`) / 0.5266 mm (`0x3a0a_0e22`) |
+| G2 / G7 budgets (the generator's rule) | 4 / 6 | 0 / 0 (0 events in 86 draws, all frozen at step 61) |
+| census S1c / S1e release | 123..=135 / 135..=135, dispatch 271 | 195..=195 both, dispatch 391 |
+| census S1c / S1e debug | 99..=111, dispatch 223 | 195..=195, dispatch 391 |
+| `bp_query_counts` J / kd J | `[1983, 5787, 155, 6368, 16120, 9549]` / `[1777, 3511, 155, 4048, 10671, 9549]` | `[1968, 5575, 155, 6160, 15950, 9570]` / `[1823, 3493, 155, 4024, 10663, 9570]` |
+| fidelity anchors (= the V2 fixtures) | JT500 `0x30c5_438b_c6ad_9ffa` ... | JT500 `0x441a_568e_91a4_f9c9`, JToff500 `0xbc09_a1fa_f7b4_13a8`, JSonT500 `0x130c_76cb_6b46_3ab8`, JSonToff500 `0xc671_8318_9439_4df6` |
+
+The `d = 0` arms read every old value exactly (the pyramid ×2, A7-R1, census S1f — S4's long-run
+histograms bin for bin in both profiles — `bp_query_counts`' overlap-only J and kd J, GOLDEN,
+`v2_speculative_d0_identity`), the L10 pose gates run with both overlap-only flags against the
+committed pre-V2 fixtures read 264/264, both negatives exit 4, 26/26 and 17/17, and the parity
+runner's trunk pins (J500, J500 with contact reuse off, R1100; W 1 and 8) read the pre-V2 hashes
+with both flags and V2's recordings without them, 12 of 12 (the synced tree's runner, round 5).
+
+**What V2 did to resting piles.** Every pile the generator draws freezes at step 61 — the first step
+the 60-step debounce allows — with no contact-change wake (before: up to step 243 at height 5, with
+20 wake events in 76 attempts); the rest pile freezes at step 86 (before: 250); A7-R2's 1240-box
+pyramid at 86 with no wake event (before: 250, three). The speculative manifolds keep a knife-edge
+pair's existence stable, which is exactly what the onset flicker was. The exception measured: a
+four-cube tower with contact reuse OFF first holds at step 223 (137 before).
+
+**The fixtures** (`docs/measurements/2026-09-30-v2-speculative/`, 35 rows at W1, every W8 file a copy
+of its W1 recording; the pose gates that read them are committed beside them in `gate/`). The V2
+pose gates (the trunk's three scripts with the V2 fixture directories and hashes substituted,
+`gate/*_v2.sh`), on the synced tip's runner: 228/264, both negatives exit 4, 19/26 and 17/17. Every one of the 43 failures is the same row type — the rest pile
+with sleeping on and contact reuse on in the `Sets` mode — exiting VOID with its pose matching the V2
+fixture (§7.2, the first open item).
+
+**Work receipts** (armed W1 rows, steps [100, 500), untimed; the fixture directory's `receipts/`):
+
+| J-T | manifolds | points | colours | colour passes | velocity rows | rows × | passes × |
+|---|---|---|---|---|---|---|---|
+| reuse on, parent `16191fda` | 4467.66 | 16553.76 | 10.875 | 130.50 | 198,645 | 1.000 | 1.000 |
+| reuse on, V2 tip, overlap-only flags | 4467.66 | 16553.76 | 10.875 | 130.50 | 198,645 | 1.000 | 1.000 |
+| reuse on, V2 tip | 8500.83 | 30919.90 | 16.000 | 192.00 | 371,039 | 1.868 | 1.471 |
+| reuse off, parent | 4519.26 | 17020.50 | 10.688 | 128.25 | 204,246 | 1.000 | 1.000 |
+| reuse off, V2 tip, overlap-only flags | 4519.26 | 17020.50 | 10.688 | 128.25 | 204,246 | 1.000 | 1.000 |
+| reuse off, V2 tip | 8492.75 | 30966.68 | 16.000 | 192.00 | 371,600 | 1.819 | 1.497 |
+
+The overlap-only rule does exactly the parent's work. V2's rows are 1.87× the parent's against F0d's
+1.676× for S20 alone (an 8-seed ensemble mean; these rows are one trajectory) — outside the cut's 5 %
+of S20, and reported as such: the production form adds K3
+(F0e: +7 % rows over S20) and the velocity term (F0g: +3.5-5.6 %), whose product with S20's ratio is
+about 1.87. Colour passes 1.47-1.50×, as S20's 1.477×.
+
+**The trunk sync** (tree C4: the Tree is the default broadphase). Every V2 pin above reads the same
+on the synced tree, the fidelity gate's 29 rows included, hash for hash, and the pyramid's AllPairs
+arm equals the Tree reference on every frame under V2's margin: C4 stays value-neutral with V2 on.
+Round 5 (2026-10-04) re-ran every gate above on the synced tree from a cold target and read the
+same values: the fidelity gate's 29 rows hash for hash, every pin in the table, the generator's 86
+draws (all frozen at step 61, 0 events), the d = 0 arms, and the work receipts.
+
+### 7.2 Open after the flip
+
+- **The runner's L9 reuse probe under V2** (a ruling, not a re-pin). The parity runner voids a
+  reuse-on row in which no pair reused its record over steps [100, 500). Under V2 the rest pile with
+  sleeping on freezes at step 86, so in the `Sets` mode every box pair is held from step 87 and the
+  window holds no narrowphased box pair (0 there, 842,160 in steps [0, 100); the fixture
+  directory's README tabulates the runner's pair classes): four of the 35 V2 recordings and every
+  gate row that runs them exit VOID (code 3) with their pose matching. A probe that exempts a window with no
+  narrowphased box pair (or reads the whole run when the window has none) would keep the void for a
+  reuse flag that does not reach the narrowphase; which form, if any, is the orchestrator's call.
+- **PC-V2-HYST** (ruling 10a): why the sign-correct hysteresis creeps with reuse off.
+- **The flicker budgets at a measured 0.** G2 and G7 are 0 by the file's rule because no draw woke;
+  the rule's standard error vanishes at 0, and the rule of three would give 1 and 6. A red at 0 is
+  triaged by the file's four steps.
+- **A four-cube tower with contact reuse off** first holds at step 223 under V2 (137 before), the one
+  resting scene measured that settles slower; every other measured pile settles faster.
+- PC-V2-1 .. PC-V2-10 of the cut stand (CLAUDE.md's ignored-suite figures: the fidelity gate's four
+  `slow:` tests are a device-free release leg; the census reads 374 sites at the flip and 375 on
+  the synced tree, which brought one; slow 14).
