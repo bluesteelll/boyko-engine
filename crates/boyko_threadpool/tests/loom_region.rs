@@ -634,8 +634,9 @@ fn m_r14_a_hint_that_names_no_earlier_item_is_no_hint() {
 /// (its done-wait's Acquire load) and `poisoned_exit`. Helper 2 never synchronises with helper 1:
 /// it reads that END with Acquire and then loads `poison` Relaxed, so `poisoned_exit`'s Release
 /// END is the one edge that carries helper 1's poison store to it, and it must record POISONED.
-/// The mutation "`poisoned_exit`'s END stored Relaxed" survives M-R1…M-R14, which have no third
-/// participant to read that END; it must be red here.
+/// The mutation "`poisoned_exit`'s END stored Relaxed" survives M-R1…M-R14, because no helper
+/// poisons a region in any of them, so `poisoned_exit` never runs (in M-R10 and M-R13 participant
+/// 0 itself unwinds, and its END is `on_unwind`'s). It must be red here.
 #[test]
 fn m_r15_the_poisoned_exit_end_carries_the_poison_to_a_third_participant() {
     model3(|| {

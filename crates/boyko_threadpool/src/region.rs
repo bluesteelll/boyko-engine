@@ -1531,3 +1531,65 @@ impl RegionWords for LoomRegionWords {
         self.participants
     }
 }
+
+// =========================================================================
+// Unit tests
+// =========================================================================
+
+#[cfg(test)]
+mod tests {
+    //! The hint by value (tester r4 G-HINT). T8 and M-R14 catch a hint that BREAKS exactly-once;
+    //! a clamp one step too tight, or a hint that is never used, is still correct and only costs a
+    //! CAS retry per first-claimed block, which no count-free gate can see. These live here because
+    //! `hint_of` is private to the protocol core.
+
+    use super::{SchedItem, hint_of, link_hints};
+
+    /// `hint_of` is the epoch of the earlier item `prev_off − 1` when `1 ≤ prev_off ≤ i`, and 0 (no
+    /// hint) otherwise; either way it is below the item's own epoch `base + 1 + i`.
+    #[test]
+    fn hint_of_names_only_an_earlier_item() {
+        for base in [1u64, 1_000, 1 << 62] {
+            for i in 0..24u64 {
+                for off in (0..=60u32).chain([u32::MAX - 1, u32::MAX]) {
+                    let item = SchedItem { entry: 0, _r: 0, prev_off: off };
+                    let want = if off >= 1 && u64::from(off) <= i { base + u64::from(off) } else { 0 };
+                    let got = hint_of(item, base, i);
+                    assert_eq!(got, want, "base {base}, item {i}, prev_off {off}");
+                    assert!(got < base + 1 + i, "base {base}, item {i}, prev_off {off}: hint {got} not below g");
+                }
+            }
+        }
+    }
+
+    /// A schedule linked by `link_hints` hints every repeat execution of an entry with the epoch of
+    /// that entry's previous execution (the value its claim words hold, so the first CAS hits), and
+    /// writes exactly what `SchedItem::new` builds from the previous item's index.
+    #[test]
+    fn a_linked_schedule_hints_each_repeat_with_its_previous_execution() {
+        let order: [u16; 12] = [0, 1, 0, 2, 1, 0, 0, 2, 1, 1, 0, 2];
+        let mut schedule: Vec<SchedItem> = order.iter().map(|&e| SchedItem::new(e, None)).collect();
+        // Not zero: `link_hints` zeroes its scratch first.
+        let mut last = [u32::MAX; 3];
+        link_hints(&mut schedule, &mut last);
+        let base = 77u64;
+        for (i, item) in schedule.iter().enumerate() {
+            let prev = order[..i].iter().rposition(|&e| e == order[i]);
+            let prev = prev.map(|j| u32::try_from(j).expect("test: a 12-item schedule"));
+            assert_eq!(*item, SchedItem::new(order[i], prev), "item {i}: link_hints and SchedItem::new disagree");
+            let want = prev.map_or(0, |j| base + 1 + u64::from(j));
+            assert_eq!(hint_of(*item, base, i as u64), want, "item {i} (entry {})", order[i]);
+        }
+    }
+
+    /// `SchedItem::new` stores the previous item's index + 1, and saturates at `u32::MAX` (a value
+    /// no schedule reaches, so it is no hint) instead of wrapping to 0 or overflowing.
+    #[test]
+    fn sched_item_new_stores_the_offset_and_saturates() {
+        assert_eq!(SchedItem::new(3, None).prev_off, 0);
+        assert_eq!(SchedItem::new(3, Some(0)).prev_off, 1);
+        assert_eq!(SchedItem::new(3, Some(41)).prev_off, 42);
+        assert_eq!(SchedItem::new(3, Some(u32::MAX - 1)).prev_off, u32::MAX);
+        assert_eq!(SchedItem::new(3, Some(u32::MAX)).prev_off, u32::MAX);
+    }
+}

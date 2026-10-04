@@ -115,6 +115,8 @@ census (`REGION_STALL_NS` = 20 µs, helpers' recruitment wait excluded) and `Reg
 - `tests/region_panic.rs`: rev 3's four cases at P = 2, 8, 16 with (a) payload, (b) receipts, (c) < 1 s; W8; W3.
 - `tests/loom_region.rs`: M-R1…M-R15 (M-R14: a hint that names no earlier item, both the own-epoch and the
   lagging-sweep form; M-R15: participant 0's poisoned END carries a helper's poison to a third participant).
+- `src/region.rs` unit tests: `hint_of`, `link_hints` and `SchedItem::new` by value (a clamp one step too tight,
+  or a hint never used, is correct and only slower, so no exactly-once gate can see it).
 - `tests/region_nested_scope.rs`: the debug guard (`Scope::new` asserts it is not inside a region block — a
   liveness rule: a join inside a block can steal its own region's helper task, which then spins until an END
   that cannot come).
