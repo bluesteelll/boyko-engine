@@ -20,21 +20,41 @@
 //! after a normal END") predicted red per profile: debug on the open's claim check, release on the
 //! `RegionWaitBound` payload (B's claims are all skipped and its done-wait reaches the bound).
 //!
-//! **W3** (critique r1): A is poisoned while entry 2's done line holds a partial count; B has only
-//! two entries; C has four again. The open reset after A must clear EVERY done line of the column,
-//! or C's entry 2 starts from A's stale count.
+//! **W3** (critique r1; re-expressed for ruling 17 B1): A is poisoned while entry 2's done line
+//! holds a partial count; B has only two entries, so A's count is still on line 2 when C opens; C
+//! has four entries and runs entry 2 first. The intent is unchanged — a stale done line must not
+//! complete an item early — and so is the scenario. What changed is the mechanism the gate holds
+//! the region to: each published item now resets its own line just before its publish, so the
+//! gate no longer asks for "every line 0" (lines hold their last count now) but for C to complete
+//! with every block exactly once while a helper holds block 1 of C's first entry-2 item, and for
+//! every line C published to end at exactly its entry's block count. Mutation **M-W3**, re-expressed
+//! the same way, is "the done line is reset after the item's done-wait (the old order), not before
+//! its publish".
+//!
+//! **F-FRAME failure B** (review r4 W1; ruling 17 B1): a region poisoned after a helper counted
+//! block 1 leaves `done[0] == 1`; the caller re-creates its sync line (`RegionLine::ZERO`, which
+//! hides the poison from the next open); region B then runs entry 0 and an inline entry 1 over the
+//! same columns under the shipped `V2Policy`. Before B1 the stale 1 completed entry 0 after
+//! participant 0's own block, and item 1 ran while a helper was still inside block 1 (5 of 5 runs
+//! in release; debug panicked at the open's done-line check). The test must read no overlap, and
+//! runs under a watchdog, so a hang is a red, never a hung suite.
 
 mod region_common;
 
 use std::any::Any;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
-use boyko_threadpool::{RegionExit, RegionReceipt, RegionReport};
+use boyko_threadpool::{
+    RegionExit, RegionLine, RegionReceipt, RegionReport, RegionStages, RegionWaitBound, ThreadPool,
+    V2Policy, try_with_active_pool,
+};
 
 use region_common::{
-    Frame, Inject, Injected, Ran, Route, Stages, TestPolicy, Who, panic_participant_counts, pool,
-    run_region,
+    Frame, Inject, Injected, Ran, Rendezvous, Route, Stages, TestPolicy, Who,
+    panic_participant_counts, pool, run_region, within,
 };
 
 /// Attempts allowed for an injection that depends on which participant claims a block.
@@ -228,8 +248,30 @@ fn w8_poisoned_region_then_same_frame_completes() {
     }
 }
 
-/// W3: A poisoned with entry 2's done line partial; B with two entries; C with four. Every done
-/// line must be 0 after B's open (the reset clears the column, not B's table) and after C.
+/// Every done line of an entry the frame's current schedule PUBLISHED (`n_blocks ≥ 2`) ends at
+/// exactly that entry's block count: its last execution counted from 0 (ruling 17 B1 resets a line
+/// just before each publish). A count that had started from a stale value ends above it.
+fn assert_published_lines_end_at_their_counts(frame: &Frame, what: &str) {
+    for (e, entry) in frame.entries.iter().enumerate() {
+        let published = entry.n_blocks >= 2 && frame.schedule.iter().any(|it| usize::from(it.entry) == e);
+        if published {
+            assert_eq!(
+                frame.done[e].word(0),
+                u64::from(entry.n_blocks),
+                "{what}: done line {e} after the region (its last execution's count, from 0)"
+            );
+        }
+    }
+}
+
+/// W3: A poisoned with entry 2's done line partial; B with two entries, so line 2 keeps A's count;
+/// C with four, running entry 2 first, over that line. C's first entry-2 item holds a helper in
+/// block 1 for 50 ms after participant 0's block 0, and the item after it (inline entry 0) reads
+/// every slot: a count that started from A's stale value either completes the item while block 1
+/// is held (that next item reads block 1's slots unwritten: a generation mismatch) or overshoots
+/// and never completes (the test bound). C must complete, every block exactly once — the intent,
+/// asserted first so that a stale count reds here — and then every line C published must end at
+/// exactly its entry's block count.
 #[test]
 fn w3_poisoned_then_smaller_then_larger_table_completes() {
     for &p in panic_participant_counts() {
@@ -253,31 +295,205 @@ fn w3_poisoned_then_smaller_then_larger_table_completes() {
         if let Err(e) = &ran.result {
             panic!(
                 "{what}: region B panicked: {:?} / {:?}",
-                e.downcast_ref::<boyko_threadpool::RegionWaitBound>(),
+                e.downcast_ref::<RegionWaitBound>(),
                 e.downcast_ref::<String>()
             );
         }
         ran.stages.assert_exactly_once(&ran.frame, &format!("{what} region B"));
         let mut frame = ran.frame;
-        for (e, line) in frame.done.iter().enumerate() {
-            assert_eq!(line.word(0), 0, "{what}: after B, done line {e} (A left {stale} on line 2)");
-        }
-        // C: four entries again; entry 2 executes three times.
+        // The case is real: nothing in B touched line 2, so C's first entry-2 item opens over A's
+        // stale count, and only its own pre-publish reset stands between that count and C.
+        assert_eq!(frame.done[2].word(0), stale, "{what}: B left A's stale count on line 2");
+        // C: four entries again; entry 2 executes three times, first.
         frame.set_table::<TestPolicy>(&[1, wide, wide + 1, 3], &[2, 0, 1, 2, 3, 2], p, 0);
-        let stages = Arc::new(Stages::new(&frame));
+        let hold = Rendezvous { entry: 2, hold: Duration::from_millis(50), sleep: true };
+        let stages = Arc::new(Stages::new(&frame).with_rendezvous(hold));
         let ran = run_region::<TestPolicy, false>(&pool, Route::Worker, frame, stages, p);
-        let ok = match &ran.result {
-            Ok(_) => true,
-            Err(e) => panic!(
-                "{what}: region C panicked: {:?} / {:?}",
-                e.downcast_ref::<boyko_threadpool::RegionWaitBound>(),
+        if let Err(e) = &ran.result {
+            panic!(
+                "{what}: region C panicked (a stale count that overshot never completes): {:?} / {:?}",
+                e.downcast_ref::<RegionWaitBound>(),
                 e.downcast_ref::<String>()
-            ),
-        };
-        assert!(ok);
+            );
+        }
         ran.stages.assert_exactly_once(&ran.frame, &format!("{what} region C"));
-        for (e, line) in ran.frame.done.iter().enumerate() {
-            assert_eq!(line.word(0), 0, "{what}: after C, done line {e}");
+        assert_published_lines_end_at_their_counts(&ran.frame, &format!("{what} region C"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F-FRAME failure B (review r4 W1; ruling 17 B1)
+// ---------------------------------------------------------------------------
+
+/// Region B's rendezvous: participant 0 waits at most this long, inside block 0, for a helper to
+/// start block 1. Spent only when no helper arrives (the round then reads vacuous, red).
+const FRAME_B_RENDEZVOUS: Duration = Duration::from_secs(5);
+/// How long the helper holds block 1 of item 0 unless item 1 runs meanwhile. Spent in full on every
+/// green round: item 1 cannot run before block 1 is counted.
+const FRAME_B_HOLD: Duration = Duration::from_millis(250);
+/// Rounds of the test; each is decided by the rendezvous, not by a race.
+const FRAME_B_ROUNDS: usize = 3;
+/// A round's watchdog (the region runs the shipped, unbounded `V2Policy`).
+const FRAME_B_WATCHDOG: Duration = Duration::from_secs(60);
+
+/// Spins (yielding) until `flag` is set, at most `limit`; whether it was set.
+fn wait_flag(flag: &AtomicBool, limit: Duration) -> bool {
+    let t = Instant::now();
+    // Acquire: pairs with the setter's Release store (the flags order no data; they are a rendezvous).
+    while !flag.load(Ordering::Acquire) {
+        if t.elapsed() > limit {
+            return false;
+        }
+        std::thread::yield_now();
+    }
+    true
+}
+
+/// Region A: participant 0 panics in block 0 of entry 0, but only once a helper has finished
+/// block 1, so the helper's count is the one A leaves on line 0 (`done[0] == 1`).
+#[derive(Default)]
+struct PoisonAfterAHelperCounted {
+    helper_finished_b1: AtomicBool,
+}
+
+impl RegionStages for PoisonAfterAHelperCounted {
+    fn run_block(&self, entry: u32, block: u32, participant: u32) {
+        if entry == 0 && block == 0 && participant == 0 {
+            let _ = wait_flag(&self.helper_finished_b1, FRAME_B_RENDEZVOUS);
+            std::panic::panic_any(Injected { participant });
+        }
+        if entry == 0 && block == 1 && participant != 0 {
+            self.helper_finished_b1.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Region B: participant 0's block 0 of item 0 returns once a helper has STARTED block 1; the
+/// helper holds block 1 for up to [`FRAME_B_HOLD`] unless item 1 (entry 1, inline) runs meanwhile.
+/// Item 1 running while block 1 is in flight is the overlap, seen from either side: the helper
+/// sees `item1_ran` during its hold, or item 1 sees `b1_in_flight`.
+#[derive(Default)]
+struct OverlapProbe {
+    b1_started: AtomicBool,
+    b1_in_flight: AtomicBool,
+    item1_ran: AtomicBool,
+    overlap: AtomicBool,
+}
+
+impl RegionStages for OverlapProbe {
+    fn run_block(&self, entry: u32, block: u32, participant: u32) {
+        // SeqCst on `b1_in_flight` and `item1_ran` (a Dekker pair): if item 1 runs inside the
+        // helper's block 1, at least one of the two sides reads the other's store.
+        match (entry, block) {
+            (0, 0) if participant == 0 => {
+                let _ = wait_flag(&self.b1_started, FRAME_B_RENDEZVOUS);
+            }
+            (0, 1) if participant != 0 => {
+                self.b1_in_flight.store(true, Ordering::SeqCst);
+                self.b1_started.store(true, Ordering::Release);
+                let t = Instant::now();
+                while t.elapsed() < FRAME_B_HOLD {
+                    if self.item1_ran.load(Ordering::SeqCst) {
+                        self.overlap.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    std::thread::yield_now();
+                }
+                self.b1_in_flight.store(false, Ordering::SeqCst);
+            }
+            (1, _) => {
+                self.item1_ran.store(true, Ordering::SeqCst);
+                if self.b1_in_flight.load(Ordering::SeqCst) {
+                    self.overlap.store(true, Ordering::Relaxed);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A panic payload, as text.
+fn payload_text(e: &(dyn Any + Send)) -> String {
+    if let Some(b) = e.downcast_ref::<RegionWaitBound>() {
+        format!("{b:?}")
+    } else if let Some(s) = e.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else if let Some(s) = e.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(i) = e.downcast_ref::<Injected>() {
+        format!("{i:?}")
+    } else {
+        "a non-text payload".to_owned()
+    }
+}
+
+/// One `V2Policy` region of `frame` at P = 2 through the public entry, its panic caught.
+fn frame_b_region<S: RegionStages>(
+    pool: &ThreadPool,
+    frame: &mut Frame,
+    stages: &S,
+) -> std::thread::Result<RegionReport> {
+    pool.install(|_| {
+        try_with_active_pool(|inner| {
+            catch_unwind(AssertUnwindSafe(|| inner.region::<S, V2Policy, false>(frame.region_frame(2), stages)))
+        })
+        .expect("test setup: install sets the active pool")
+    })
+}
+
+/// One round: A poisoned with `done[0] == 1`, the sync line re-created, then B.
+fn frame_b_round() -> Result<(), String> {
+    let p = 2;
+    let pool = pool(p);
+    let mut frame = Frame::new(2, p as usize, 2);
+    frame.set_table::<V2Policy>(&[2, 1], &[0], p, 0);
+    let mut left = 0;
+    for _ in 0..ATTEMPTS {
+        let a = PoisonAfterAHelperCounted::default();
+        let r = frame_b_region(&pool, &mut frame, &a);
+        left = frame.done[0].word(0);
+        if r.is_err() && left == 1 {
+            break;
+        }
+    }
+    if left != 1 {
+        return Err(format!("vacuous: region A never left done line 0 at 1 in {ATTEMPTS} attempts (last {left})"));
+    }
+    // The caller re-creates its sync line: the poison A left is gone, so B's open has no poison
+    // to react to, and only the done line still says what A did.
+    frame.sync = RegionLine::ZERO;
+    frame.set_table::<V2Policy>(&[2, 1], &[0, 1], p, 0);
+    let b = OverlapProbe::default();
+    if let Err(e) = frame_b_region(&pool, &mut frame, &b) {
+        return Err(format!("region B panicked: {}", payload_text(&*e)));
+    }
+    if !b.b1_started.load(Ordering::Acquire) {
+        return Err("vacuous: no helper reached block 1 of item 0 within the rendezvous".to_owned());
+    }
+    if b.overlap.load(Ordering::Relaxed) {
+        return Err(
+            "OVERLAP: item 1 ran while a helper was inside item 0's block 1 — A's stale count \
+             completed item 0 early"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// F-FRAME failure B: a stale done line (a poisoned region's count) under a re-created sync line
+/// never completes an item early. Red before ruling 17 B1 in release (overlap) and debug (the
+/// open's done-line check); `V2Policy` is unbounded, so each round runs under a watchdog.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri-unsupported: the overlap is detected by a 250 ms wall-clock hold and a 5 s rendezvous under a 60 s watchdog, proportions Miri's interpreter does not keep"
+)]
+fn frame_b_a_stale_done_line_never_completes_an_item_early() {
+    for round in 0..FRAME_B_ROUNDS {
+        match within(FRAME_B_WATCHDOG, frame_b_round) {
+            Some(Ok(())) => {}
+            Some(Err(e)) => panic!("F-FRAME B round {round}: {e}"),
+            None => panic!("F-FRAME B round {round}: no verdict within {FRAME_B_WATCHDOG:?} (a hang)"),
         }
     }
 }
@@ -325,19 +541,19 @@ fn threads_w8_and_w3_after_a_caught_poisoned_region() {
         let (ran, base_a) = poisoned(frame, p, Inject { entry: 2, block: 1, who: Who::Orchestrator });
         assert_poisoned(&ran, p, base_a, Who::Orchestrator, &what);
         let mut frame = ran.frame;
-        assert_ne!(frame.done[2].word(0), 0, "{what}: precondition");
+        let stale = frame.done[2].word(0);
+        assert_ne!(stale, 0, "{what}: precondition");
         frame.set_table::<TestPolicy>(&[wide, 1], &[0, 1, 0], p, 0);
         let stages = Arc::new(Stages::new(&frame));
         let ran = run_threads::<TestPolicy, false>(frame, stages, p);
         assert!(ran.result.is_ok(), "{what}: region B completes");
         let mut frame = ran.frame;
+        assert_eq!(frame.done[2].word(0), stale, "{what}: B left A's stale count on line 2");
         frame.set_table::<TestPolicy>(&[1, wide, wide + 1, 3], &[2, 0, 1, 2, 3, 2], p, 0);
         let stages = Arc::new(Stages::new(&frame));
         let ran = run_threads::<TestPolicy, false>(frame, stages, p);
         assert!(ran.result.is_ok(), "{what}: region C completes");
         ran.stages.assert_exactly_once(&ran.frame, &format!("{what} region C"));
-        for (e, line) in ran.frame.done.iter().enumerate() {
-            assert_eq!(line.word(0), 0, "{what}: after C, done line {e}");
-        }
+        assert_published_lines_end_at_their_counts(&ran.frame, &format!("{what} region C"));
     }
 }

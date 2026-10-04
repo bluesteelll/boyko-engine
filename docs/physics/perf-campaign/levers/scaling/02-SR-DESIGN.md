@@ -31,7 +31,7 @@ The frame is plain data the caller owns — the physics solver keeps it in its R
 | lines | words | owner of the column (Phase B) |
 |---|---|---|
 | sync (1) | `w[0]` publish (OPEN = base, an epoch `g`, `END_BIT \| base`), `w[1]` poison | `region_sync` |
-| done (≥ entries) | `w[0]` an entry's completion count; 0 between items | `region_done` |
+| done (≥ entries) | `w[0]` an entry's completion count; reset to 0 just before each publish of the entry, its last count between items | `region_done` |
 | receipts (≥ participants) | `w[0]` region tag (base), `w[1]` blocks, `w[2]` exit, `w[3]` stalls, `w[4]` max wait ns | `region_receipts` |
 | claims | `w[0]` the epoch of the block's last claim (R-b: a participant's ≤ 8 home blocks) | `region_claims` |
 
@@ -61,7 +61,8 @@ The frame is plain data the caller owns — the physics solver keeps it in its R
   join (tester r3 N4: weakening it to Relaxed was invisible to every loom model and to Miri, because nothing
   consumes the edge). The poisoned ENDs stay Release: a helper's POISONED receipt depends on seeing `poison = 1`.
 - **Exact completion.** `done.fetch_add(1, Release)` per block (R-a: one batched add per participant); the
-  orchestrator waits for exactly `n_blocks` (Acquire) and resets the line to 0 before its next publish.
+  orchestrator waits for exactly `n_blocks` (Acquire). It resets the line to 0 **just before the item's publish**
+  (ruling 17 B1, §1.3), not after the done-wait, so the count an item waits on starts at 0 whatever the line held.
 - **Poison on unwind.** Each participant's tallies live in a guard. Dropped while armed it stores its receipt
   (PANICKED, or BOUND if the wait bound fired), `poison = 1` (Release), and on participant 0 the tagged END. The
   orchestrator's guard is created inside the scope closure before the first spawn, so an unwind drops it — and
@@ -84,16 +85,51 @@ anything can write an epoch: `base = max(*epoch, 1); *epoch = base + len + 1`. E
 a bound panic, even an unwind out of `open`'s own debug checks) leaves the counter past every epoch the region
 can write. One site, no exit path to miss, a kernel property every consumer gets.
 
-**The companion reset.** A poisoned region can leave the in-flight entry's done line non-zero. The next `open`
-sees `poison == 1` and clears **every** done line of the column — not only the new table's entries (critique r1
-W3(a): a smaller table B followed by a larger table C would otherwise hand C's entry `e` A's stale count) — then
-stores `poison = 0`.
+**The done reset (ruling 17 B1, 2026-10-05; it replaces the companion reset).** A poisoned region can leave the
+in-flight entry's done line at a partial count. Rev 3 and the cut cleared done lines in two places: after each
+item's done-wait, and — when `open` saw `poison == 1` — the whole column (critique r1 W3(a): a smaller table B
+followed by a larger table C would otherwise hand C's entry `e` A's stale count). Review r4 W1 (F-FRAME failure B)
+showed that this left the safety of the barrier to the lines' history: a caller that re-creates its sync line after
+a caught panic hides the poison from the next `open`, the stale count survives, and it completes an item after
+fewer than `n_blocks` blocks — two items overlapped in 5 of 5 release runs through the safe API under `V2Policy`
+(fix r4, tester r5). **Now participant 0 stores `done = 0` immediately before each item's Release publish.**
+Every add of an earlier execution of the entry precedes that store in the line's modification order (in this
+region its done-wait read exactly `n_blocks` of them, and exactly-once claims leave none to come; in an earlier
+region the scope's join ordered them first), and the publish orders the store before every add of this item. So
+an item completes only on its own `n_blocks` adds, and **two items can never overlap, whatever the lines hold**.
+Same cost: one Relaxed store per published item, moved, not added. `open` now clears only `poison`, its
+O(column) cold loop is gone, and so is the "pass the WHOLE done column" precondition and the debug "every done
+line is 0 at open" check (a line now holds its entry's last count between items).
+
+| word / line | reset to | by whom, when |
+|---|---|---|
+| sync line's publish word | OPEN | every open (participant 0, before any spawn) |
+| sync line's poison word | 0 | the open that follows a poisoned region |
+| done lines | 0 | participant 0, just before each publish of the line's entry (B1); never at open |
+| receipts | never reset | tagged by `base` |
+| claim words | never reset | epochs |
+
+(The cut addendum's table, "Critique open question 1", read "done lines: 0 — participant 0 after each item's
+done-wait; the whole column by the open that follows a poisoned region". Ruling 17 B1 supersedes that row.)
 
 **Gates (Phase A):** `region_panic.rs::w8_poisoned_region_then_same_frame_completes` (P = 2, 8, 16 × participant 0
 in an inline item, participant 0 in a claimed block, a helper in a claimed block; B over the same frame must
 finish in < 1 s, every block exactly once, END and B's base in every receipt, `B.base == A.base + A.len + 1`);
-`w3_poisoned_then_smaller_then_larger_table_completes`; loom M-R13. Mutation **M-W8** ("advance only after a
-normal END") is red per profile: debug on the open's claim check, release on the `RegionWaitBound` payload.
+`w3_poisoned_then_smaller_then_larger_table_completes`; `frame_b_a_stale_done_line_never_completes_an_item_early`;
+loom M-R13. Mutation **M-W8** ("advance only after a normal END") is red per profile: debug on the open's claim
+check, release on the `RegionWaitBound` payload.
+
+**W3 and M-W3, re-expressed for B1.** The intent — a stale done line cannot complete an item early — is kept as a
+gate that can fail. A is poisoned with entry 2's line partial; B (two entries) leaves it untouched, which the test
+asserts, so C's first entry-2 item opens over A's stale count. C holds a helper in that item's block 1 for 50 ms
+after participant 0's block 0, and the next item reads every slot: a count that started stale either completes the
+item while block 1 is held (a generation mismatch) or overshoots and never completes (the test bound). C must
+complete exactly-once, and every line C published must end at exactly its entry's block count. The old assertion,
+"every done line is 0 after B and after C", tested the mechanism B1 deletes. **M-W3** is now "the done line is reset
+after the item's done-wait (the old order), not before its publish" — with the open's column loop gone, that is
+the old protocol minus its open reset, the state in which a stale line reaches a later item. It is also the
+mutation the F-FRAME failure-B regression test (`region_panic.rs`) must be red on. M-R13's last assertion moved
+from `done == 0` to `done == 2` (B's count from its own reset).
 
 ### 1.4 Every knob is a compile-time policy
 
@@ -112,7 +148,9 @@ census (`REGION_STALL_NS` = 20 µs, helpers' recruitment wait excluded) and `Reg
   (the retry path); T6 the bound in every ladder and role; T7 the census; T8 hints that name no earlier item (the
   item's own epoch, the next item's, past the region, `u32::MAX`) under `TestPolicy` and, on a watchdog thread,
   the shipped unbounded `V2Policy`.
-- `tests/region_panic.rs`: rev 3's four cases at P = 2, 8, 16 with (a) payload, (b) receipts, (c) < 1 s; W8; W3.
+- `tests/region_panic.rs`: rev 3's four cases at P = 2, 8, 16 with (a) payload, (b) receipts, (c) < 1 s; W8; W3
+  (re-expressed for B1); F-FRAME failure B (a poisoned region's count under a re-created sync line, `V2Policy`, a
+  rendezvous that holds block 1 while item 1 may run, under a watchdog: red before B1 in release and debug).
 - `tests/loom_region.rs`: M-R1…M-R15 (M-R14: a hint that names no earlier item, both the own-epoch and the
   lagging-sweep form; M-R15: participant 0's poisoned END carries a helper's poison to a third participant).
 - `src/region.rs` unit tests: `hint_of`, `link_hints` and `SchedItem::new` by value (a clamp one step too tight,
@@ -121,7 +159,7 @@ census (`REGION_STALL_NS` = 20 µs, helpers' recruitment wait excluded) and `Reg
   liveness rule: a join inside a block can steal its own region's helper task, which then spins until an END
   that cannot come).
 - Miri, Stacked and Tree Borrows, on the region test binaries only.
-- Mutations: M-G0, M-G1, M-W8, M-W3, M-OPEN, M-CAS, M-TTAS natively; one per loom model.
+- Mutations: M-G0, M-G1, M-W8, M-W3 (re-expressed for B1), M-OPEN, M-CAS, M-TTAS natively; one per loom model.
 
 ---
 

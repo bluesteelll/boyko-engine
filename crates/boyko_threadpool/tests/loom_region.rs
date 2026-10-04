@@ -56,6 +56,7 @@
 //! | M-R11 | no retry on `w < g` | branch budget (a block never claimed) |
 //! | M-R12 | no OPEN store | the END-tag debug assertion |
 //! | M-R13 | M-W8: epochs advanced only after a normal END | the open's claim check (debug) |
+//! | M-R13 | M-W3 (ruling 17 B1): the done reset after the done-wait, the old order | branch budget (A's count overshoots B's) |
 //! | M-R14 | the parent's `hint_of` (no clamp of `prev_off > i`) | causality violation (a block won twice) |
 //! | M-R15 | `poisoned_exit`'s END stored Relaxed | helper 2 records END, not POISONED |
 #![cfg(loom)]
@@ -574,6 +575,11 @@ fn m_r12_the_open_store_hides_the_previous_end() {
 /// item, possibly after the helper counted block 1 — and caught; region B over the SAME words and
 /// table must complete with every block exactly once, its base above every epoch A wrote. The
 /// mutation M-W8 ("reserve the epochs only on a normal END") must be red.
+///
+/// The last assertion changed with ruling 17 B1 (the done line is reset just before each publish,
+/// no longer after the done-wait and in the open after a poisoned region): entry 0's line must end
+/// at exactly 2, B's own count from its pre-publish reset, whatever A left on it (0 or 1). It was
+/// `== 0`, the old order's "0 between items", which B1 retires.
 #[test]
 fn m_r13_a_region_after_a_caught_poisoned_one_completes() {
     model(|| {
@@ -595,7 +601,7 @@ fn m_r13_a_region_after_a_caught_poisoned_one_completes() {
         s2.assert_exactly_once(&order, "M-R13 region B");
         assert_receipts(&w, 2, base_b, "M-R13 region B");
         assert_eq!(w.poison_value(), 0, "M-R13: B's open cleared the poison");
-        assert_eq!(w.done_value(0), 0, "M-R13: B's open (or A) left entry 0's done line at 0");
+        assert_eq!(w.done_value(0), 2, "M-R13: entry 0's line holds B's count from its own reset");
     });
 }
 

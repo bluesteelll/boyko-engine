@@ -26,15 +26,19 @@
 //!   read the previous region's END; a helper that reads END debug-asserts the tag.
 //! * **Exact completion.** Each counted block does `done.fetch_add(1, Release)` (or one batched
 //!   add per participant, [`RegionPolicy::DONE_BATCHED`]); the orchestrator waits for EXACTLY
-//!   `n_blocks` with `Acquire`, then resets the line to 0 before its next publish.
+//!   `n_blocks` with `Acquire`.
+//! * **The done line is reset just before the item's publish** (ruling 17 B1), not after its
+//!   done-wait. The count an item waits on therefore starts at 0 whatever the line held — a
+//!   poisoned region's partial count, a line the caller re-created or never cleared — so no stale
+//!   count can complete an item early, and two items can never overlap, whatever state the lines
+//!   are in. Between items a line holds its entry's last count.
 //! * **Poison on unwind.** Every participant holds a guard. A participant that unwinds stores its
 //!   receipt, then `poison = 1`; participant 0's guard also publishes the tagged END. The
 //!   orchestrator checks `poison` before every item and on every done-wait iteration, helpers
 //!   before every claim. The scope's join re-raises the payload.
-//! * **The open reset after a caught poisoned region.** A poisoned region can leave a done line
-//!   non-zero. The next open sees `poison == 1` and clears EVERY done line of the column (not only
-//!   the new table's entries: a later, larger table would otherwise inherit the stale count),
-//!   then stores `poison = 0`.
+//! * **The open after a caught poisoned region** sees `poison == 1` and stores `poison = 0`. The
+//!   partial count the poisoned item left on its done line needs no reset here: the next publish of
+//!   that entry resets its line first.
 //! * **Helpers spin** (the owner's value, 2026-09-29): a waiting helper PAUSEs and yields, it
 //!   never sleeps or parks inside a region. The orchestrator's wait is pure PAUSE by default.
 //!
@@ -108,7 +112,8 @@ const RECEIPT_WORDS: usize = 5;
 ///
 /// Word layout by role:
 /// * **sync line:** `w[0]` publish (OPEN = base, an epoch `g`, or `END_BIT | base`), `w[1]` poison;
-/// * **done line:** `w[0]` the completion count of one entry (0 between items);
+/// * **done line:** `w[0]` the completion count of one entry (reset to 0 just before each publish
+///   of the entry; between items it holds the entry's last count);
 /// * **receipt line:** `w[0]` the region tag (`base`), `w[1]` blocks run, `w[2]` the
 ///   [`RegionExit`], `w[3]` stalls, `w[4]` the longest wait in ns;
 /// * **claim line:** `w[0]` the epoch of the block's last claim; under
@@ -424,8 +429,6 @@ pub(crate) trait RegionWords: Sync {
     fn poison(&self) -> &AtomicU64;
     /// Entry `e`'s completion count.
     fn done(&self, e: usize) -> &AtomicU64;
-    /// How many done lines the frame holds (the open reset clears all of them).
-    fn done_lines(&self) -> usize;
     /// Word `word` of claim line `line`.
     fn claim(&self, line: usize, word: usize) -> &AtomicU64;
     /// How many claim lines the frame holds. Debug builds only: the open check is its one reader,
@@ -504,10 +507,6 @@ impl RegionWords for FrameWords<'_> {
         &self.done[e].0[0]
     }
     #[inline]
-    fn done_lines(&self) -> usize {
-        self.done.len()
-    }
-    #[inline]
     fn claim(&self, line: usize, word: usize) -> &AtomicU64 {
         &self.claims[line].0[word]
     }
@@ -550,8 +549,8 @@ impl RegionWords for FrameWords<'_> {
 pub struct RegionLines<'f> {
     /// The sync line (publish, poison).
     pub sync: &'f mut RegionLine,
-    /// The done lines — the WHOLE column, at least one per entry: the open reset after a caught
-    /// poisoned region clears every line passed here.
+    /// The done lines, at least one per entry. Their contents need no reset between regions: each
+    /// published item resets its own line just before its publish.
     pub done: &'f mut [RegionLine],
     /// The receipt lines, at least one per participant.
     pub receipts: &'f mut [RegionLine],
@@ -1021,7 +1020,8 @@ pub(crate) struct OrchStats {
     pub(crate) max_blocks: u32,
 }
 
-/// Reserves the region's epoch range, runs the open reset, stores OPEN; returns `base`.
+/// Reserves the region's epoch range, clears a caught poisoned region's poison, stores OPEN;
+/// returns `base`.
 ///
 /// Participant 0, before any helper exists. **The reservation comes first** (W8): from the moment
 /// this returns — and even if a debug check below unwinds — `*epoch` is past every epoch this
@@ -1043,18 +1043,16 @@ pub(crate) fn open<W: RegionWords>(w: &W, epoch: &mut u64) -> u64 {
     base
 }
 
-/// The open reset after a caught poisoned region: EVERY done line of the column back to 0, then
-/// `poison = 0`. Claim words need no reset (epoch claims).
+/// The open reset after a caught poisoned region: `poison = 0`. Nothing else needs one: a done
+/// line is reset by the next publish of its entry (ruling 17 B1), and claim words are epochs.
 #[cold]
 #[inline(never)]
 fn open_reset<W: RegionWords>(w: &W) {
-    for e in 0..w.done_lines() {
-        w.done(e).store(0, Ordering::Relaxed);
-    }
     w.poison().store(0, Ordering::Relaxed);
 }
 
-/// Debug: every claim epoch is at most `base`, and every done line is 0.
+/// Debug: every claim epoch is at most `base`. (A done line may hold anything at open: each
+/// published item resets its own line before its publish.)
 #[cfg(debug_assertions)]
 #[cold]
 #[inline(never)]
@@ -1069,10 +1067,6 @@ fn debug_open_checks<W: RegionWords>(w: &W, base: u64) {
                  and the claim column belong together)"
             );
         }
-    }
-    for e in 0..w.done_lines() {
-        let v = w.done(e).load(Ordering::Relaxed);
-        assert!(v == 0, "region open: done line {e} holds {v}, not 0, outside a poisoned region");
     }
 }
 
@@ -1114,11 +1108,19 @@ pub(crate) fn run_orchestrator<W: RegionWords, S: RegionStages, P: RegionPolicy,
                  participant ({participants} participants)"
             );
             let x = Exec { e, entry, g: base + 1 + i as u64, hint: hint_of(item, base, i as u64) };
+            let done = w.done(e as usize);
+            // The reset comes BEFORE the publish (ruling 17 B1), so this item's count starts at 0
+            // whatever the line holds, and only this item's adds can complete it. Every add of an
+            // earlier execution of the entry precedes this store in the line's modification order:
+            // in this region, this thread's done-wait read exactly `n_blocks` of them, and every
+            // block was claimed once, so none is still to come; in an earlier region, its scope's
+            // join ordered them before this thread. Relaxed: the Release publish below orders the
+            // reset before every helper's Acquire load of `g`, hence before every add of this item.
+            done.store(0, Ordering::Relaxed);
             // Release: every earlier item's writes (acquired by this thread's done-waits) and the
-            // done reset below happen-before a helper's Acquire load of this epoch.
+            // done reset above happen-before a helper's Acquire load of this epoch.
             publish.store(x.g, Ordering::Release);
             claim_sweep::<W, S, P>(w, stages, &x, 0, part);
-            let done = w.done(e as usize);
             let want = u64::from(n);
             // Acquire: pairs with every block's Release add (one release sequence per line).
             // EXACT equality: a count that overshot must not read as complete.
@@ -1126,8 +1128,6 @@ pub(crate) fn run_orchestrator<W: RegionWords, S: RegionStages, P: RegionPolicy,
                 poisoned_exit(w, part);
                 return stats;
             }
-            // Relaxed: the next Release publish orders this reset before any later add.
-            done.store(0, Ordering::Relaxed);
             stats.published += 1;
             stats.max_blocks = stats.max_blocks.max(n);
         }
@@ -1496,9 +1496,6 @@ impl RegionWords for LoomRegionWords {
     }
     fn done(&self, e: usize) -> &AtomicU64 {
         &self.done[e]
-    }
-    fn done_lines(&self) -> usize {
-        self.done.len()
     }
     fn claim(&self, line: usize, word: usize) -> &AtomicU64 {
         assert!(word < self.words_per_line, "loom region frame: claim word {word} is not stored");
