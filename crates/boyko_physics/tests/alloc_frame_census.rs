@@ -2449,7 +2449,7 @@ fn s1e_rigid_pile_colored_parallel_reuse_off(rows: &mut Vec<Row>) {
 fn s1f_rigid_pile_colored_parallel_d0(rows: &mut Vec<Row>) {
     run_pyramid_arm(
         rows,
-        "S1f — rigid pile, COLORED solve + parallel ON, speculative_distance 0 (S1c's pre-V2 twin)",
+        "S1f — rigid pile, COLORED solve + parallel ON, speculative_distance 0 + speculative_velocity_cap 0 (S1c's pre-V2 twin)",
         true,
         4,
         true,

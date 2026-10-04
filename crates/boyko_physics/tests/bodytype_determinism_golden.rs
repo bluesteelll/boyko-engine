@@ -62,10 +62,11 @@
 //!
 //! ## Speculative contacts (V2, 2026-09-30)
 //!
-//! V2's `PhysicsConfig::speculative_distance` changes the contact rule on every pair type by
-//! design (owner V2a / V2b). Like contact reuse it is a value change, not a solve-order drift,
-//! so the setup sets it to `0`, the overlap-only rule from before V2 — the same adaptation of the
-//! SETUP — and [`GOLDEN`] keeps its value. The shipped V2 default is pinned elsewhere.
+//! V2's `PhysicsConfig::speculative_distance` and `speculative_velocity_cap` change the contact
+//! rule on every pair type by design (owner V2a / V2b). Like contact reuse that is a value change,
+//! not a solve-order drift, so the setup sets BOTH to `0`, the overlap-only rule from before V2
+//! (the two together, never the distance alone: rulings 2026-09-30 item 9) — the same adaptation
+//! of the SETUP — and [`GOLDEN`] keeps its value. The shipped V2 default is pinned elsewhere.
 //!
 //! Spins up `boyko_threadpool` (intractable under Miri — pool is loom+Miri proven
 //! in the ECS Phase-9 series), so `cfg(not(miri))`.

@@ -1837,9 +1837,13 @@ fn a_resting_jolt_pyramid_does_not_creep_with_sleeping_off() {
         a7_r1_arm("contact reuse off", Some(false))
     });
     // V2: the overlap-only rule, with the default's contact reuse.
-    let d0_arm = under_watchdog("A7-R1, speculative_distance 0", JOLT_TIMEOUT, || {
-        a7_r1_arm_with("speculative_distance 0", None, Some(0.0))
-    });
+    let d0_arm = under_watchdog(
+        "A7-R1, speculative_distance 0 + speculative_velocity_cap 0",
+        JOLT_TIMEOUT,
+        || {
+            a7_r1_arm_with("speculative_distance 0 + speculative_velocity_cap 0", None, Some(0.0))
+        },
+    );
     for (arm, reading, pinned, pin) in [
         ("contact reuse on (the default)", default_arm, A7_R1_D_MAX_BITS, "A7_R1_D_MAX_BITS"),
         (
@@ -1848,7 +1852,12 @@ fn a_resting_jolt_pyramid_does_not_creep_with_sleeping_off() {
             A7_R1_D_MAX_BITS_REUSE_OFF,
             "A7_R1_D_MAX_BITS_REUSE_OFF",
         ),
-        ("speculative_distance 0", d0_arm, A7_R1_D_MAX_BITS_D0, "A7_R1_D_MAX_BITS_D0"),
+        (
+            "speculative_distance 0 + speculative_velocity_cap 0",
+            d0_arm,
+            A7_R1_D_MAX_BITS_D0,
+            "A7_R1_D_MAX_BITS_D0",
+        ),
     ] {
         assert_eq!(
             reading.d_max.to_bits(),
