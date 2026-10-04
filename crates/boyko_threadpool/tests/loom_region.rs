@@ -647,9 +647,16 @@ fn m_r14_a_hint_that_names_no_earlier_item_is_no_hint() {
 /// The mutation "`poisoned_exit`'s END stored Relaxed" survives M-R1…M-R14, because no helper
 /// poisons a region in any of them, so `poisoned_exit` never runs (in M-R10 and M-R13 participant
 /// 0 itself unwinds, and its END is `on_unwind`'s). It must be red here.
+///
+/// Self-checking (tester r5 G-VAC): the executions in which the injection fired are counted, and
+/// at least one must have, or a model whose injection is unreachable would pass as a plain
+/// exactly-once model through its `else` branch.
 #[test]
 fn m_r15_the_poisoned_exit_end_carries_the_poison_to_a_third_participant() {
-    model3(|| {
+    // A std atomic, outside loom's view: it orders nothing in the model, it only counts executions.
+    let fired_runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fired_in_model = std::sync::Arc::clone(&fired_runs);
+    model3(move || {
         let (blocks, order) = ([3u16], [0u16]);
         let w = words::<V2Policy>(&blocks, &order, 3, 3, 1);
         let s = Arc::new(ModelStages::new(&blocks).with_helper_panic(1));
@@ -671,6 +678,7 @@ fn m_r15_the_poisoned_exit_end_carries_the_poison_to_a_third_participant() {
             assert_eq!(w.receipt(p).region, base, "M-R15: participant {p}'s receipt tag");
         }
         if s.fired() {
+            fired_in_model.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             assert_eq!(unwound, [true, false], "M-R15: only helper 1 unwound");
             assert_eq!(w.receipt(0).exit, Some(RegionExit::Poisoned), "M-R15: participant 0 took poisoned_exit");
             assert_eq!(w.receipt(1).exit, Some(RegionExit::Panicked), "M-R15: helper 1");
@@ -685,4 +693,6 @@ fn m_r15_the_poisoned_exit_end_carries_the_poison_to_a_third_participant() {
             assert_receipts(&w, 3, base, "M-R15 (not fired)");
         }
     });
+    let fired = fired_runs.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(fired > 0, "M-R15: the injection fired in none of the model's executions (vacuous)");
 }
