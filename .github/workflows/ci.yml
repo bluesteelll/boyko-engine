@@ -730,3 +730,68 @@ jobs:
             exit 1
           fi
           echo "loom: 6 models executed and passed at LOOM_MAX_PREEMPTIONS=$LOOM_MAX_PREEMPTIONS"
+      # loom_region: the SR region protocol's 15 models (`crates/boyko_threadpool/tests/loom_region.rs`,
+      # `docs/physics/perf-campaign/levers/scaling/02-SR-DESIGN.md` §1.5), added by ruling 17 (N5,
+      # 2026-10-05). Until then they ran by hand only.
+      #
+      # HOW `--cfg loom` REACHES rustc HERE is not how the step above does it. The job's RUSTFLAGS
+      # REPLACES every config rustflags source, which is why that step has to repeat the ISA flag by
+      # hand. This step follows the tester's per-target loom recipe (`.claude/agents/tester.md`): it
+      # unsets RUSTFLAGS and passes the cfg through a `target."cfg(…)".rustflags` key, which Cargo
+      # JOINS with `.cargo/config.toml`'s `[target.x86_64-unknown-linux-gnu]` baseline instead of
+      # replacing it - and never through `build.rustflags`, which those per-triple entries override
+      # (measured 2026-09-17: every model then compiles to nothing, `running 0 tests`, exit 0). The
+      # key is `cfg(any(unix, windows))` rather than the recipe's per-host `cfg(windows)` /
+      # `cfg(unix)`, so that this exact command also runs on the owner's Windows box, where it was
+      # run green, against a red model, and without the cfg before it was committed. `-D warnings`
+      # rides in the same key, because the unset RUSTFLAGS was what carried it.
+      #
+      # PROFILE: debug, unlike the step above, because the file's header names it: M-R12's mutation
+      # and M-R13's M-W8 mutation are red only on debug assertions (the END-tag check, the open's
+      # claim check), so a release run would keep those two models green on the defects they exist
+      # for. BOUND: the job's LOOM_MAX_PREEMPTIONS=3. M-R1, M-R4 and M-R15 pin bound 1 inside the
+      # model (three participants gave no verdict at bound 2 in 12+ minutes); the other twelve run
+      # at 3.
+      #
+      # The names are written out AND the count is pinned, for the reasons the step above gives.
+      # ADDING A MODEL: add its name to the list AND bump all three `15`s.
+      - name: cargo test --test loom_region (15 models, count-pinned, debug)
+        shell: bash
+        run: |
+          unset RUSTFLAGS
+          set +e
+          cargo --config 'target."cfg(any(unix, windows))".rustflags=["--cfg","loom","-D","warnings"]' \
+            test --locked -p boyko-threadpool --test loom_region -- \
+            --test-threads=1 --exact \
+            m_r1_stage_writes_are_visible_to_the_next_stage \
+            m_r2_a_helper_that_only_sees_end_touches_nothing \
+            m_r3_the_orchestrator_alone_completes_the_region \
+            m_r4_each_block_is_claimed_exactly_once \
+            m_r5_late_helper_across_a_change_over \
+            m_r6_two_consecutive_regions_rebuild_after_the_join \
+            m_r7_batched_completion_orders_the_writes \
+            m_r8_home_lines_claim_each_block_exactly_once \
+            m_r9_ttas_never_admits_two_winners \
+            m_r10_an_orchestrator_unwind_releases_every_helper \
+            m_r11_epoch_claims \
+            m_r12_the_open_store_hides_the_previous_end \
+            m_r13_a_region_after_a_caught_poisoned_one_completes \
+            m_r14_a_hint_that_names_no_earlier_item_is_no_hint \
+            m_r15_the_poisoned_exit_end_carries_the_poison_to_a_third_participant \
+            > loom_region.log 2>&1
+          status=$?
+          set -e
+          cat loom_region.log
+          if [ "$status" -ne 0 ]; then
+            echo "::error::loom_region models failed (cargo exit $status)"
+            exit "$status"
+          fi
+          if ! grep -qx "running 15 tests" loom_region.log; then
+            echo "::error::loom_region ran the wrong number of models -- expected the line 'running 15 tests'. A build without --cfg loom compiles zero models and exits 0; this is the check that forbids it."
+            exit 1
+          fi
+          if ! grep -q "^test result: ok\. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" loom_region.log; then
+            echo "::error::loom_region summary line did not match '15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' -- a model was ignored, filtered, or added without updating this job."
+            exit 1
+          fi
+          echo "loom_region: 15 models executed and passed at LOOM_MAX_PREEMPTIONS=$LOOM_MAX_PREEMPTIONS"

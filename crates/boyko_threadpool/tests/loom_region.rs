@@ -33,6 +33,10 @@
 //! Every other model runs at bound 2 when `LOOM_MAX_PREEMPTIONS` is unset ([`model`]), so the
 //! default run and `LOOM_MAX_PREEMPTIONS=2` are the same bound; `=3` is a different one.
 //!
+//! CI (`.github/workflows/ci.yml`, the `loom` job's `loom_region` step; ruling 17 N5) runs all 15
+//! in one debug process at `LOOM_MAX_PREEMPTIONS=3`, names listed and the count pinned. A model
+//! added here must be added there, or that step reds on `filtered out`.
+//!
 //! ## Reading, x86_64-pc-windows-msvc, debug, one model per process
 //!
 //! 2026-10-01: the first 13 green, 0.01–16.5 s each. Each model's mutation, applied to a scratch

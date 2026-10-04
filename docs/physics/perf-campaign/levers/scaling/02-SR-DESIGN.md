@@ -162,7 +162,9 @@ census (`REGION_STALL_NS` = 20 µs, helpers' recruitment wait excluded) and `Reg
   (re-expressed for B1); F-FRAME failure B (a poisoned region's count under a re-created sync line, `V2Policy`, a
   rendezvous that holds block 1 while item 1 may run, under a watchdog: red before B1 in release and debug).
 - `tests/loom_region.rs`: M-R1…M-R15 (M-R14: a hint that names no earlier item, both the own-epoch and the
-  lagging-sweep form; M-R15: participant 0's poisoned END carries a helper's poison to a third participant).
+  lagging-sweep form; M-R15: participant 0's poisoned END carries a helper's poison to a third participant). CI's
+  `loom` job runs all fifteen (ruling 17 N5): debug, `LOOM_MAX_PREEMPTIONS=3`, names listed and count pinned, with
+  `--cfg loom` through a `target."cfg(any(unix, windows))".rustflags` key and `RUSTFLAGS` unset.
 - `src/region.rs` unit tests: `hint_of`, `link_hints` and `SchedItem::new` by value (a clamp one step too tight,
   or a hint never used, is correct and only slower, so no exactly-once gate can see it).
 - `tests/region_nested_scope.rs`: the debug guard (`Scope::new` asserts it is not inside a region block — a
