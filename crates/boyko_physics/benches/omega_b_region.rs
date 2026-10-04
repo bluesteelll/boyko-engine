@@ -1572,8 +1572,10 @@ struct Shape3 {
     participants: u32,
     /// Schedule items (stage executions) per region.
     stages: u32,
-    /// Distinct entries the items cycle over (item k executes entry k mod `entries`), so an entry
-    /// re-executes within a region the way a colour does across a step's passes.
+    /// Distinct entries the items cycle over (item k executes entry k mod `entries`). Equal to
+    /// `stages` by default (`--entries stages`): every item is its own entry, run once per region,
+    /// v2's timed shape. Fewer (`--entries E`): an entry re-executes within a region the way a
+    /// colour does across a step's passes, and only its first execution takes the retry.
     entries: u32,
     /// Blocks per entry, `blocks_per_participant × participants`.
     blocks: u32,
