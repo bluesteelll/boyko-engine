@@ -1,5 +1,5 @@
-//! SR (2): loom models M-R1…M-R14 of the region protocol (`02-SR-DESIGN.md`; cut §3 A3; M-R14 from
-//! review r3 W1).
+//! SR (2): loom models M-R1…M-R15 of the region protocol (`02-SR-DESIGN.md`; cut §3 A3; M-R14 from
+//! review r3 W1; M-R15 from tester r4 G-PE / review r4 O1).
 //!
 //! The models drive the PRODUCTION protocol core — `open` (the epoch reservation, the open reset,
 //! OPEN), `run_orchestrator`, `run_helper`, the claim and completion paths and the unwind guards —
@@ -18,7 +18,7 @@
 //!
 //! ```bash
 //! cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' \
-//!   test -p boyko-threadpool --test loom_region -- --list   # must print 14 `: test` lines
+//!   test -p boyko-threadpool --test loom_region -- --list   # must print 15 `: test` lines
 //! LOOM_MAX_PREEMPTIONS=2 cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' \
 //!   test -p boyko-threadpool --test loom_region -- --exact <model> --test-threads=1 --nocapture
 //! ```
@@ -29,15 +29,20 @@
 //!
 //! A filter that matches nothing exits 0: require `running 1 test` per model. The `cfg(windows)`
 //! form is the only one that reaches rustc on both Windows toolchains (`loom_pool.rs`' header).
-//! M-R1 and M-R4 (three participants) pin preemption bound 1 inside the model ([`model3`]).
+//! M-R1, M-R4 and M-R15 (three participants) pin preemption bound 1 inside the model ([`model3`]).
+//! Every other model runs at bound 2 when `LOOM_MAX_PREEMPTIONS` is unset ([`model`]), so the
+//! default run and `LOOM_MAX_PREEMPTIONS=2` are the same bound; `=3` is a different one.
 //!
-//! ## Reading, 2026-10-01, x86_64-pc-windows-msvc, debug, one model per process
+//! ## Reading, x86_64-pc-windows-msvc, debug, one model per process
 //!
-//! All 13 green, 0.01–16.5 s each. Each model's mutation, applied to a scratch copy and restored by
-//! content, is RED; tester round 3 re-ran all 13 at the default bound and at `LOOM_MAX_PREEMPTIONS=2`
-//! (`scratchpad/sr/r3/mut/loom_summary.txt`, `loom_p2_summary.txt`; the round-1 logs this line cited are gone).
+//! 2026-10-01: the first 13 green, 0.01–16.5 s each. Each model's mutation, applied to a scratch
+//! copy and restored by content, is RED; tester round 3 re-ran the 13 twice at bound 2, unset and
+//! `=2` (`scratchpad/sr/r3/mut/loom_summary.txt`, `loom_p2_summary.txt`; the round-1 logs this line
+//! cited are gone). Tester round 4 ran 14 at bound 3 as well (`scratchpad/sr/r4/logs/loom_b3/`).
 //! M-R14 (fix round 3) is red on its parent `fb03a33c`, whose `hint_of` ignores the item index
-//! (`scratchpad/sr/fix_r3/logs/n1_red_loom_mr14.log`):
+//! (`scratchpad/sr/fix_r3/logs/n1_red_loom_mr14.log`). M-R15 (fix round 4) closes a gap rather
+//! than a defect: its mutation survived all 14 earlier models (`scratchpad/sr/r4/` section 4,
+//! "PE"), and is red on M-R15 (`scratchpad/sr/fix_r4/logs/`):
 //!
 //! | model | mutation | red as |
 //! |---|---|---|
@@ -52,6 +57,7 @@
 //! | M-R12 | no OPEN store | the END-tag debug assertion |
 //! | M-R13 | M-W8: epochs advanced only after a normal END | the open's claim check (debug) |
 //! | M-R14 | the parent's `hint_of` (no clamp of `prev_off > i`) | causality violation (a block won twice) |
+//! | M-R15 | `poisoned_exit`'s END stored Relaxed | helper 2 records END, not POISONED |
 #![cfg(loom)]
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -93,20 +99,21 @@ fn quiet_injected_panics() {
 }
 
 /// Loom-tracked stages: the generation instrument and per-(entry, block) run counts, all plain
-/// `UnsafeCell`s, plus an optional one-shot panic on participant 0.
+/// `UnsafeCell`s, plus an optional one-shot panic on participant 0 or on one helper.
 struct ModelStages {
     blocks: Vec<u16>,
     slots: Vec<UnsafeCell<u64>>,
     runs: Vec<UnsafeCell<u32>>,
     stride: usize,
     panic_at: Option<(u32, u32)>,
+    panic_helper: Option<u32>,
     fired: std::sync::atomic::AtomicBool,
 }
 
 // SAFETY: every cell is accessed through loom's `with`/`with_mut`, which REPORT (rather than
 // permit) an access that is not ordered by the region's happens-before edges; `fired` is a std
-// atomic touched by participant 0 only. The region contract gives each (entry, block) of an item
-// one runner, and the barrier orders items.
+// atomic, swapped only by the one participant an injection names and read after the joins. The
+// region contract gives each (entry, block) of an item one runner, and the barrier orders items.
 unsafe impl Sync for ModelStages {}
 
 impl ModelStages {
@@ -118,13 +125,22 @@ impl ModelStages {
             runs: (0..blocks.len() * stride).map(|_| UnsafeCell::new(0)).collect(),
             stride,
             panic_at: None,
+            panic_helper: None,
             fired: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
+    /// Participant 0 panics, once, at the start of `(entry, block)`.
     fn with_panic_at(mut self, entry: u32, block: u32) -> Self {
         quiet_injected_panics();
         self.panic_at = Some((entry, block));
+        self
+    }
+
+    /// Helper `h` panics, once, at the start of the first block it runs (before touching a slot).
+    fn with_helper_panic(mut self, h: u32) -> Self {
+        quiet_injected_panics();
+        self.panic_helper = Some(h);
         self
     }
 
@@ -159,10 +175,12 @@ impl ModelStages {
 
 impl RegionStages for ModelStages {
     fn run_block(&self, entry: u32, block: u32, participant: u32) {
-        if participant == 0
-            && self.panic_at == Some((entry, block))
-            && !self.fired.swap(true, std::sync::atomic::Ordering::Relaxed)
-        {
+        let injected = if participant == 0 {
+            self.panic_at == Some((entry, block))
+        } else {
+            self.panic_helper == Some(participant)
+        };
+        if injected && !self.fired.swap(true, std::sync::atomic::Ordering::Relaxed) {
             std::panic::panic_any(Injected);
         }
         let n = usize::from(self.blocks[entry as usize]);
@@ -604,5 +622,56 @@ fn m_r14_a_hint_that_names_no_earlier_item_is_no_hint() {
         let base = region_once::<V2Policy>(&w, &s, &mut epoch, 1);
         s.assert_exactly_once(&order, "M-R14");
         assert_receipts(&w, 2, base, "M-R14");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// M-R15: the orchestrator's poisoned END, read by a third participant (tester r4 G-PE)
+// ---------------------------------------------------------------------------
+
+/// M-R15: three participants on one entry of three blocks; helper 1 panics, once, in the first
+/// block it runs. Its block is never counted, so participant 0 can only leave through the poison
+/// (its done-wait's Acquire load) and `poisoned_exit`. Helper 2 never synchronises with helper 1:
+/// it reads that END with Acquire and then loads `poison` Relaxed, so `poisoned_exit`'s Release
+/// END is the one edge that carries helper 1's poison store to it, and it must record POISONED.
+/// The mutation "`poisoned_exit`'s END stored Relaxed" survives M-R1…M-R14, which have no third
+/// participant to read that END; it must be red here.
+#[test]
+fn m_r15_the_poisoned_exit_end_carries_the_poison_to_a_third_participant() {
+    model3(|| {
+        let (blocks, order) = ([3u16], [0u16]);
+        let w = words::<V2Policy>(&blocks, &order, 3, 3, 1);
+        let s = Arc::new(ModelStages::new(&blocks).with_helper_panic(1));
+        let mut epoch = 0;
+        let base = region::open(&w, &mut epoch);
+        let hs: Vec<_> = (1..=2u32)
+            .map(|h| {
+                let (w, s) = (Arc::clone(&w), Arc::clone(&s));
+                // A panic that leaves a loom thread ends the model, so helper 1's unwind is caught
+                // inside its thread, after its guard has run (the pool's task boundary does that).
+                thread::spawn(move || {
+                    catch_unwind(AssertUnwindSafe(|| region::run_helper::<_, V2Policy>(&w, base, h, &*s))).is_err()
+                })
+            })
+            .collect();
+        region::run_orchestrator::<_, V2Policy>(&w, base, &*s);
+        let unwound: Vec<bool> = hs.into_iter().map(|h| h.join().expect("model: a helper thread")).collect();
+        for p in 0..3 {
+            assert_eq!(w.receipt(p).region, base, "M-R15: participant {p}'s receipt tag");
+        }
+        if s.fired() {
+            assert_eq!(unwound, [true, false], "M-R15: only helper 1 unwound");
+            assert_eq!(w.receipt(0).exit, Some(RegionExit::Poisoned), "M-R15: participant 0 took poisoned_exit");
+            assert_eq!(w.receipt(1).exit, Some(RegionExit::Panicked), "M-R15: helper 1");
+            assert_eq!(w.receipt(2).exit, Some(RegionExit::Poisoned), "M-R15: helper 2 read the poison through the END");
+            assert_eq!(w.poison_value(), 1, "M-R15: poison");
+            for b in 0..3 {
+                assert!(s.runs(0, b) <= 1, "M-R15: block {b} ran {} times", s.runs(0, b));
+            }
+        } else {
+            assert_eq!(unwound, [false, false], "M-R15 (not fired): no helper unwound");
+            s.assert_exactly_once(&order, "M-R15 (not fired)");
+            assert_receipts(&w, 3, base, "M-R15 (not fired)");
+        }
     });
 }

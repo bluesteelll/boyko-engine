@@ -365,7 +365,7 @@ pub mod loom_exports {
         crate::worker::publish_fence();
     }
 
-    /// SR — the region protocol's production core for `tests/loom_region.rs` (M-R1…M-R13).
+    /// SR — the region protocol's production core for `tests/loom_region.rs` (M-R1…M-R15).
     ///
     /// No `PoolInner` can be built under loom, so the models drive the protocol below the pool:
     /// the real `open` (the epoch reservation, the open reset, OPEN), the real participant loops
