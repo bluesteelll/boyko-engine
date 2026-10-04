@@ -150,25 +150,39 @@
 //! `Rb` home claim lines, `Rc` TTAS claims, `Rd` helpers PAUSE for 50 µs before yielding, `Rd2`
 //! helpers PAUSE only (ruling 2026-09-30 Q6's "PAUSE-only vs PAUSE+yield" axis), `Re` the
 //! orchestrator yields after `REGION_STALL_NS`, and `all`. v2's own arm (`--mode omega-b2`) is the
-//! reference and is unchanged. Each block runs v2's calibrated work on its own payload line; the
-//! schedule cycles `--stages` items over `--entries` entries (default 36 over 3: twelve passes of three
-//! colours), so an entry re-executes within a region as a colour does across a step, and the first
-//! execution of each entry in a region takes the epoch claim's one retry; `--gap-us` puts an inline
-//! item of that length before every stage. The receipt of every region — exactly once, every
-//! participant's END and tag, every claim word at its entry's last epoch — is checked outside the
-//! timing, timed rows included.
+//! reference and is unchanged. Each block runs v2's calibrated work on its own payload line, and
+//! `--gap-us` puts an inline item of that length before every stage. The receipt of every region —
+//! exactly once, every participant's END and tag, every claim word at its entry's last epoch — is
+//! checked outside the timing, timed rows included.
+//!
+//! **The schedule's shape (`--entries`).** By default (`--entries stages`) every item is its own
+//! entry: `--stages S` distinct stages, each run once per region, which is v2's timed shape (its rows
+//! run `S` distinct stages once each, on claim words reset outside the timing). It is M3 check (1)'s
+//! comparator: the same claim-line footprint as v2's row, and every item is its entry's first
+//! execution in the region, so every claim takes the epoch claim's one retry — the upper bound of
+//! what the epoch claims cost against v2's fresh words. `--entries E` instead cycles the items over
+//! `E` entries (item k executes entry k mod E), so an entry re-executes within a region as a colour
+//! does across a step's passes and only its first execution takes the retry; that shape is not v2's
+//! and is not M3 (1)'s comparator.
 //!
 //! ```text
-//! omega_b_region.exe --bench --mode region --policy v2epoch,Ra,Rb,Rc,Rd,Rd2,Re,all //!     --participants 2,4,8,16 --bpp 1,2,4,6 --route worker
+//! omega_b_region.exe --bench --mode region --policy v2epoch,Ra,Rb,Rc,Rd,Rd2,Re,all \
+//!     --participants 2,4,8,16 --stages 36,72 --blocks-per-participant 1,2,4,6 --route worker
 //! ```
 //!
-//! Optional: `--regions R` (1000), `--stages S` (36), `--entries E` (3), `--work-ns N` (700),
-//! `--gap-us G,..` (0). One `CALIBRATION` line, then one `SUMMARY {json}` line per (participants,
-//! blocks per participant, policy, gap), each naming `"bench":"omega_b3","version":3`.
+//! Optional: `--regions R` (1000), `--stages S,..` (36), `--entries stages|E` (stages),
+//! `--work-ns N` (700), `--gap-us G,..` (0); `--bpp` is `--blocks-per-participant`. One `CALIBRATION`
+//! line, then one `SUMMARY {json}` line per (participants, stages, blocks per participant, policy,
+//! gap), in that nesting order, each naming `"bench":"omega_b3","version":3`. **`--plan`** appended
+//! to a row's arguments times nothing: it parses them, prints one `PLAN {json}` line per cell the row
+//! would run (in the same order, with the same identifying fields) and `PLAN_CELLS n`, and exits 0 —
+//! no calibration, no pool. A window's pre-flight runs each v3 row that way, so an argument the
+//! parser rejects stops the pre-flight, not the timed block.
 //!
 //! v3's self-check (the bare run, after v1's and v2's) runs every policy, bounded, at 2, 4, 8 and 16
-//! participants, 1 and 6 blocks per participant, both routes, with and without a 20 µs gap, three
-//! regions over one frame each, and asserts the receipt above plus that helpers ran blocks somewhere.
+//! participants, 1 and 6 blocks per participant, both routes, with and without a 20 µs gap, 12 items
+//! over 3 entries and over 12 (one entry per item, the comparator's shape), three regions over one
+//! frame each, and asserts the receipt above plus that helpers ran blocks somewhere.
 
 use std::hint::spin_loop;
 use std::process::ExitCode;
@@ -1710,17 +1724,43 @@ impl Frame3 {
     }
 }
 
+/// How a v3 row maps its schedule items onto stage entries (`--entries`; module docs, "The
+/// schedule's shape").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Entries {
+    /// One entry per item — v2's timed shape, M3 check (1)'s comparator (`--entries stages`).
+    PerItem,
+    /// The items cycle over this many entries (`--entries E`).
+    Cycle(u32),
+}
+
+impl Entries {
+    /// The entry count of a row with `stages` items.
+    fn resolve(self, stages: u32) -> u32 {
+        match self {
+            Self::PerItem => stages,
+            Self::Cycle(e) => e,
+        }
+    }
+}
+
+/// The largest entry count a v3 frame takes: entry indices are `u16`, and the gap entry takes the
+/// index after the last stage entry.
+const V3_MAX_ENTRIES: u32 = u16::MAX as u32 - 1;
+
 /// `--mode region`'s arguments.
 struct ArgsV3 {
     participants: Vec<u32>,
     route: Route,
     regions: u32,
-    stages: u32,
-    entries: u32,
+    stages: Vec<u32>,
+    entries: Entries,
     blocks_per_participant: Vec<u32>,
     policies: Vec<V3Policy>,
     work_ns: u64,
     gaps_us: Vec<u64>,
+    /// `--plan`: print the cells, run nothing.
+    plan: bool,
 }
 
 /// Whether the command line selects v3 (`--bench --mode region`).
@@ -1733,12 +1773,13 @@ fn parse_args_v3(raw: &[String]) -> Result<ArgsV3, String> {
         participants: vec![2, 4, 8, 16],
         route: Route::Worker,
         regions: 1000,
-        stages: 36,
-        entries: 3,
+        stages: vec![36],
+        entries: Entries::PerItem,
         blocks_per_participant: vec![1, 2, 4, 6],
         policies: V3Policy::ALL.to_vec(),
         work_ns: 700,
         gaps_us: vec![0],
+        plan: false,
     };
     let mut it = raw.iter().cloned();
     while let Some(flag) = it.next() {
@@ -1756,8 +1797,14 @@ fn parse_args_v3(raw: &[String]) -> Result<ArgsV3, String> {
                 }
             }
             "--regions" => a.regions = parse_one("--regions", it.next())?,
-            "--stages" => a.stages = parse_one("--stages", it.next())?,
-            "--entries" => a.entries = parse_one("--entries", it.next())?,
+            "--stages" => a.stages = parse_list("--stages", it.next())?,
+            "--entries" => {
+                a.entries = match it.next() {
+                    Some(v) if v == "stages" => Entries::PerItem,
+                    v => Entries::Cycle(parse_one("--entries", v)?),
+                }
+            }
+            "--plan" => a.plan = true,
             "--bpp" | "--blocks-per-participant" => a.blocks_per_participant = parse_list("--bpp", it.next())?,
             "--policy" => {
                 let names: Vec<String> = parse_list("--policy", it.next())?;
@@ -1777,32 +1824,59 @@ fn parse_args_v3(raw: &[String]) -> Result<ArgsV3, String> {
     if a.blocks_per_participant.iter().any(|&b| b == 0 || b > REGION_MAX_BLOCKS_PER_PARTICIPANT) {
         return Err(format!("region: blocks per participant must be 1..={REGION_MAX_BLOCKS_PER_PARTICIPANT}"));
     }
-    if a.stages == 0 || a.entries == 0 || a.regions == 0 || a.work_ns == 0 || a.policies.is_empty() {
+    if a.stages.contains(&0) || a.entries == Entries::Cycle(0) || a.regions == 0 || a.work_ns == 0 || a.policies.is_empty() {
         return Err("region: stages, entries, regions, work ns and the policy list must be non-empty".into());
+    }
+    if a.stages.iter().any(|&s| a.entries.resolve(s) > V3_MAX_ENTRIES) {
+        return Err(format!("region: at most {V3_MAX_ENTRIES} entries (with --entries stages, at most that many stages)"));
     }
     Ok(a)
 }
 
-/// `--mode region`: the calibration, then every row.
+/// `--mode region`: the calibration, then every row; under `--plan`, only the cells (one loop nest
+/// serves both, so the plan is exactly what a run would execute).
 fn run_v3(a: &ArgsV3) {
-    let (work_iters, work_ns_calibrated) = calibrate(a.work_ns);
+    let (work_iters, work_ns_calibrated) = if a.plan { (0, 0.0) } else { calibrate(a.work_ns) };
+    let mut cells = 0usize;
     for &p in &a.participants {
-        let pool = ThreadPoolBuilder::new().num_threads(p as usize).build();
-        for &bpp in &a.blocks_per_participant {
-            for &policy in &a.policies {
-                for &gap_us in &a.gaps_us {
-                    let shape = Shape3 {
-                        participants: p,
-                        stages: a.stages,
-                        entries: a.entries,
-                        blocks: bpp * p,
-                        work_iters,
-                        gap: Duration::from_micros(gap_us),
-                    };
-                    with_v3_policy!(policy, Plain, omega_b3_row(&pool, a, shape, policy, bpp, gap_us, work_ns_calibrated));
+        let pool = (!a.plan).then(|| ThreadPoolBuilder::new().num_threads(p as usize).build());
+        for &stages in &a.stages {
+            for &bpp in &a.blocks_per_participant {
+                for &policy in &a.policies {
+                    for &gap_us in &a.gaps_us {
+                        let shape = Shape3 {
+                            participants: p,
+                            stages,
+                            entries: a.entries.resolve(stages),
+                            blocks: bpp * p,
+                            work_iters,
+                            gap: Duration::from_micros(gap_us),
+                        };
+                        cells += 1;
+                        match &pool {
+                            Some(pool) => with_v3_policy!(
+                                policy,
+                                Plain,
+                                omega_b3_row(pool, a, shape, policy, bpp, gap_us, work_ns_calibrated)
+                            ),
+                            None => println!(
+                                "PLAN {{\"bench\":\"omega_b3\",\"version\":3,\"route\":\"{}\",\"policy\":\"{}\",\
+                                 \"participants\":{p},\"stages\":{stages},\"entries\":{},\"blocks\":{},\
+                                 \"blocks_per_participant\":{bpp},\"gap_us\":{gap_us},\"regions\":{}}}",
+                                a.route.name(),
+                                policy.name(),
+                                shape.entries,
+                                shape.blocks,
+                                a.regions,
+                            ),
+                        }
+                    }
                 }
             }
         }
+    }
+    if a.plan {
+        println!("PLAN_CELLS {cells}");
     }
 }
 
@@ -1859,9 +1933,10 @@ fn omega_b3_row<P: RegionPolicy + 'static>(
 }
 
 /// v3's untimed self-check: every policy at 2, 4, 8 and 16 participants, 1 and 6 blocks per
-/// participant, both routes, with and without a gap; three regions each over one frame (so the
-/// second and third take the first-execution retry on words the previous region wrote); exactly
-/// once, every receipt, every claim word at its entry's last epoch. Bounded waits.
+/// participant, both routes, with and without a gap, 12 items over 3 entries and over 12 (one entry
+/// per item, the timed rows' default shape); three regions each over one frame (so the second and
+/// third take the first-execution retry on words the previous region wrote); exactly once, every
+/// receipt, every claim word at its entry's last epoch. Bounded waits.
 fn self_check_v3() {
     println!("omega_b_region: v3 (region.rs) self-check");
     let mut helped = 0usize;
@@ -1871,15 +1946,18 @@ fn self_check_v3() {
             for policy in V3Policy::ALL {
                 for bpp in [1u32, 6] {
                     for gap in [Duration::ZERO, Duration::from_micros(20)] {
-                        let shape = Shape3 {
-                            participants,
-                            stages: 12,
-                            entries: 3,
-                            blocks: bpp * participants,
-                            work_iters: SELF_CHECK_WORK_ITERS,
-                            gap,
-                        };
-                        helped += with_v3_policy!(policy, Bounded, self_check_v3_shape(&pool, route, shape, policy));
+                        for entries in [3u32, 12] {
+                            let shape = Shape3 {
+                                participants,
+                                stages: 12,
+                                entries,
+                                blocks: bpp * participants,
+                                work_iters: SELF_CHECK_WORK_ITERS,
+                                gap,
+                            };
+                            helped +=
+                                with_v3_policy!(policy, Bounded, self_check_v3_shape(&pool, route, shape, policy));
+                        }
                     }
                 }
             }
@@ -1896,7 +1974,16 @@ fn self_check_v3() {
 fn self_check_v3_shape<P: RegionPolicy + 'static>(pool: &ThreadPool, route: Route, s: Shape3, policy: V3Policy) -> usize {
     let (frame, stages) = Frame3::new::<P>(s);
     let stages = Arc::new(stages);
-    let what = format!("{} {} participants, {} route, {} blocks, gap {:?}", policy.name(), s.participants, route.name(), s.blocks, s.gap);
+    let what = format!(
+        "{} {} participants, {} route, {} blocks, {} items over {} entries, gap {:?}",
+        policy.name(),
+        s.participants,
+        route.name(),
+        s.blocks,
+        s.stages,
+        s.entries,
+        s.gap
+    );
     let mut frame = Some(frame);
     let mut helped = 0;
     for _ in 0..3 {
