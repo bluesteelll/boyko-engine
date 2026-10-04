@@ -435,7 +435,17 @@ fn frame_b_region<S: RegionStages>(
 ) -> std::thread::Result<RegionReport> {
     pool.install(|_| {
         try_with_active_pool(|inner| {
-            catch_unwind(AssertUnwindSafe(|| inner.region::<S, V2Policy, false>(frame.region_frame(2), stages)))
+            catch_unwind(AssertUnwindSafe(|| {
+                // SAFETY: `frame` is this round's own, built by `Frame::new(2, 2, 2)` (two receipt
+                // lines for P = 2) and never mixed with another `Frame`'s columns or counter; its
+                // counter only grows, through `open`. Between regions A and B the round rewrites
+                // the sync line's CONTENTS (`RegionLine::ZERO`): the same storage, still this
+                // frame's alone, so the contract holds — and the state that leaves (a poisoned
+                // region's count on line 0, no poison to show for it) is the input this test feeds
+                // the region on purpose. `set_table` laid the claim lines out for `V2Policy` at P = 2.
+                let region_frame = unsafe { frame.region_frame(2) };
+                inner.region::<S, V2Policy, false>(region_frame, stages)
+            }))
         })
         .expect("test setup: install sets the active pool")
     })

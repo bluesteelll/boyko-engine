@@ -473,7 +473,13 @@ fn hint_regions<P: RegionPolicy>(p: u32, hint: Hint, regions: u32) -> Result<u64
     for r in 0..regions {
         let stages = HintStages::new(&blocks);
         let report = catch_unwind(AssertUnwindSafe(|| {
-            pool.install(|_| pool.region::<HintStages, P, false>(frame.region_frame(p), &stages))
+            // SAFETY: `frame` was built above by `Frame::new` and is only ever this loop's: its
+            // columns and counter were never mixed with another `Frame`'s, and the counter only
+            // grows. `set_table` laid its claim lines out for `P` at `p` participants and sized the
+            // columns; the hand-built schedule names only the entries it laid out; the receipts
+            // were built for `p`.
+            let region_frame = unsafe { frame.region_frame(p) };
+            pool.install(|_| pool.region::<HintStages, P, false>(region_frame, &stages))
         }))
         .map_err(|e| format!("region {r} panicked: {}", payload_text(&*e)))?;
         for (e, &n) in blocks.iter().enumerate() {

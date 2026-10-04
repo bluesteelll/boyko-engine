@@ -139,19 +139,38 @@ impl Frame {
     }
 
     /// This frame borrowed as a region frame for `participants`.
-    pub fn region_frame(&mut self, participants: u32) -> RegionFrame<'_> {
-        RegionFrame::new(
-            RegionLines {
-                sync: &mut self.sync,
-                done: &mut self.done,
-                receipts: &mut self.receipts,
-                claims: &mut self.claims,
-            },
-            &self.entries,
-            &self.schedule,
-            &mut self.epoch,
-            participants,
-        )
+    ///
+    /// # Safety
+    ///
+    /// [`RegionFrame::new`]'s storage contract, for this `Frame`: its line columns and its `epoch`
+    /// have stayed this `Frame`'s own since [`Frame::new`] built them together — no column or
+    /// counter was moved in from, or shared with, another `Frame`, and the counter was never
+    /// rewound — and `participants` is at most the receipt lines it was built with. Rewriting a
+    /// line's CONTENTS between regions (as the F-FRAME failure-B test does with the sync line)
+    /// keeps the contract: the storage is still this `Frame`'s alone.
+    pub unsafe fn region_frame(&mut self, participants: u32) -> RegionFrame<'_> {
+        // SAFETY: the caller guarantees the columns and the counter are still this Frame's own
+        // (above). `Frame::new` built them together, as zero lines and a zero counter, so every
+        // claim epoch starts at or below the counter, and `open` only ever raises the counter past
+        // what a region writes. `set_table` laid the claim lines out for the policy and
+        // participant count of the table and asserted that the claim and done columns hold them;
+        // `RegionFrame::new` itself asserts the receipt and done line counts. The four groups are
+        // borrowed `&mut` from `self` for the frame's lifetime, so no other frame is over them
+        // while it lives.
+        unsafe {
+            RegionFrame::new(
+                RegionLines {
+                    sync: &mut self.sync,
+                    done: &mut self.done,
+                    receipts: &mut self.receipts,
+                    claims: &mut self.claims,
+                },
+                &self.entries,
+                &self.schedule,
+                &mut self.epoch,
+                participants,
+            )
+        }
     }
 
     /// The first `participants` receipts.
@@ -479,7 +498,12 @@ fn run_on<P: RegionPolicy, const ARMED: bool>(
 ) -> (std::thread::Result<RegionReport>, Duration) {
     let t = Instant::now();
     let r = catch_unwind(AssertUnwindSafe(|| {
-        inner.region::<Stages, P, ARMED>(frame.region_frame(participants), stages)
+        // SAFETY: `frame` is the test's own `Frame`, built by `Frame::new` and moved by value
+        // through `run_region` from region to region. No test moves a column or the counter in
+        // from another `Frame` or rewinds the counter (tests only read the columns and install
+        // tables), and every test sizes its receipts for its participant count.
+        let frame = unsafe { frame.region_frame(participants) };
+        inner.region::<Stages, P, ARMED>(frame, stages)
     }));
     (r, t.elapsed())
 }
@@ -529,7 +553,10 @@ pub fn run_threads<P: RegionPolicy, const ARMED: bool>(
 ) -> Ran {
     let t = Instant::now();
     let result = catch_unwind(AssertUnwindSafe(|| {
-        boyko_threadpool::region_on_threads::<Stages, P, ARMED>(frame.region_frame(participants), &stages)
+        // SAFETY: as in `run_on`: `frame` is the test's own `Frame`, moved by value from region
+        // to region; no test mixes in another `Frame`'s columns or counter or rewinds the counter.
+        let region_frame = unsafe { frame.region_frame(participants) };
+        boyko_threadpool::region_on_threads::<Stages, P, ARMED>(region_frame, &stages)
     }));
     Ran { frame, stages, result, orchestrator_id: u32::MAX, wall: t.elapsed() }
 }

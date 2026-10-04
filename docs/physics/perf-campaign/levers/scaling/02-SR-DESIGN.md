@@ -37,8 +37,18 @@ The frame is plain data the caller owns — the physics solver keeps it in its R
 
 - `RegionLine` is `#[repr(C, align(64))] { w: [u64; 8] }`, `Copy`: a `ScratchColumn<T: Copy>` cannot hold atomics
   (cut F3), and loom's atomics cannot overlay raw memory. `RegionFrame::new` takes `&mut` borrows of the four
-  groups (`RegionLines`) and projects them as atomic lines for the region's lifetime — the borrow checker, not a
-  SAFETY contract, guarantees that nothing else touches them meanwhile. The one `unsafe` block is the projection.
+  groups (`RegionLines`) and projects them as atomic lines for the region's lifetime — the borrow checker
+  guarantees that nothing else touches them meanwhile. The one `unsafe` block inside is the projection.
+- **`RegionFrame::new` is an `unsafe fn`** (ruling 17 A3, 2026-10-05, as the cut first specified; Phase A had made
+  it safe). Its `# Safety` contract is the storage precondition the borrow checker cannot see: the sync, done,
+  receipt and claim lines are exclusively the caller's for the frame's lifetime and not shared with another live
+  frame (no other frame runs over them with a different epoch counter, now or between the owner's regions); they
+  are sized for the schedule (a done line per entry, a receipt line per participant, `claim_lines` per published
+  entry); the counter is the claim column's own (it only grows and is at or above every claim epoch). A broken
+  contract may hang the region or panic; with B1 (§1.3) it can no longer make two items overlap or run a block
+  twice. Every caller carries a `// SAFETY:` naming why the contract holds — the test harness's `Frame` (one value
+  owning its columns and counter, `region_frame` itself an `unsafe fn` forwarding the contract), the ω_b v3 bench's
+  `Frame3` — and Phase B's caller derives it from the solver Resource's exclusively owned `ScratchColumn`s.
 - **Four separate groups, never one merged column** (critique r1 W3(b)): a merged column would let a done or
   receipt value be read as a claim epoch when the table or P changes size.
 - The stage table (`StageEntry`, 16 B: `n_blocks`, `first_claim`, and the caller's opaque `kind`, `color`,

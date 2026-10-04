@@ -47,7 +47,9 @@
 //! The frame — the sync line, the done lines, the receipts, the claim lines — is plain
 //! [`RegionLine`]s the caller owns (the physics solver keeps them in its Resource's
 //! `ScratchColumn`s). [`RegionFrame::new`] borrows them `&mut` for the region and projects them
-//! as atomics; nothing is allocated here except the scope's own task cells.
+//! as atomics; nothing is allocated here except the scope's own task cells. It is an `unsafe fn`
+//! (ruling 17 A3): its `# Safety` contract is the storage precondition — the lines exclusively the
+//! caller's, sized for the schedule, the epoch counter the claim column's own.
 //!
 //! ## Every knob is a compile-time policy
 //!
@@ -569,9 +571,31 @@ pub struct RegionFrame<'f> {
 #[cfg(not(loom))]
 impl<'f> RegionFrame<'f> {
     /// A frame over the caller's `lines`, running `schedule` over `entries` with `participants`
-    /// participants. `epoch` is the caller's region counter: it only grows, and must start at or
-    /// above every epoch the claim lines hold (a fresh counter and fresh zero lines satisfy that;
-    /// keep the counter and the claim column together).
+    /// participants. `epoch` is the caller's region counter.
+    ///
+    /// # Safety
+    ///
+    /// The frame's storage is the caller's own (ruling 17 A3). The caller guarantees that:
+    ///
+    /// * **Exclusively owned.** The sync line, the done lines, the receipt lines and the claim
+    ///   lines are owned by the caller and given to this frame alone for its lifetime, and they are
+    ///   not shared with another live frame — no other region frame, now or between this owner's
+    ///   regions, runs over any of them with a different epoch counter.
+    /// * **Sized for its schedule.** At least one done line per entry, one receipt line per
+    ///   participant, and [`claim_lines`] claim lines for every published entry from its
+    ///   `first_claim`, laid out for the policy and the participant count this frame runs with.
+    /// * **The counter is the claim column's own.** `epoch` only grows, and it is at or above every
+    ///   epoch the claim lines hold. A fresh counter over fresh zero lines satisfies it; keep the
+    ///   counter and the claim column together.
+    ///
+    /// What a broken contract can cost is bounded: the region may hang (a claim word at or above an
+    /// item's epoch is never claimed, so that item never completes) or panic (the asserts below, the
+    /// debug open and table checks, an index past a slice). It cannot make two items overlap or run
+    /// a block twice: each published item resets its own done line just before its publish (ruling
+    /// 17 B1), so it completes only on its own blocks' adds, and a claim word only rises. That is
+    /// the guarantee [`RegionStages::run_block`]'s implementers rely on. That nothing else touches
+    /// the lines while the region runs is not part of this contract: the `&mut` borrows in `lines`
+    /// make it a borrow-checker property.
     ///
     /// # Panics
     ///
@@ -579,7 +603,7 @@ impl<'f> RegionFrame<'f> {
     /// entries are given, or if the table has more entries than a `u16` index can name — table-
     /// build bugs. An item or entry that indexes past its slice panics when it is run.
     #[must_use]
-    pub fn new(
+    pub unsafe fn new(
         lines: RegionLines<'f>,
         entries: &'f [StageEntry],
         schedule: &'f [SchedItem],

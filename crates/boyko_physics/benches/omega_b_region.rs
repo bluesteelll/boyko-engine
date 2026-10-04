@@ -1673,18 +1673,27 @@ impl Frame3 {
 
     /// One region of this frame on `pool` (participant 0 = the calling thread).
     fn run<P: RegionPolicy>(&mut self, pool: &PoolInner, stages: &Stages3, participants: u32) -> RegionReport {
-        let frame = RegionFrame::new(
-            RegionLines {
-                sync: &mut self.sync,
-                done: &mut self.done,
-                receipts: &mut self.receipts,
-                claims: &mut self.claims,
-            },
-            &self.entries,
-            &self.schedule,
-            &mut self.epoch,
-            participants,
-        );
+        // SAFETY: `Frame3::new` built these four line groups and the counter together, as zero
+        // lines and a zero counter, and they are private to this `Frame3`: nothing outside it reads
+        // or writes them, no other frame is built over them, and the counter only grows (through
+        // `open`). They are sized for its one table: one done line per entry, one receipt line per
+        // `s.participants`, and `claim_lines::<P>` claim lines per entry at `s.participants`; both
+        // callers pass that same `s.participants` and the same `P` the frame was built for. The
+        // groups are borrowed `&mut` from `self` for the frame's lifetime.
+        let frame = unsafe {
+            RegionFrame::new(
+                RegionLines {
+                    sync: &mut self.sync,
+                    done: &mut self.done,
+                    receipts: &mut self.receipts,
+                    claims: &mut self.claims,
+                },
+                &self.entries,
+                &self.schedule,
+                &mut self.epoch,
+                participants,
+            )
+        };
         pool.region::<Stages3, P, false>(frame, stages)
     }
 
