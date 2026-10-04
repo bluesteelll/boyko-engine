@@ -385,8 +385,8 @@ const A7_R1_D_MAX_BITS_REUSE_OFF: u32 = 0x3a0a_0e22;
 /// [`A7_R1_D_MAX_BITS`]'s value on the tree before V2 (`16191fda`), read again exactly at V2's
 /// flip.
 ///
-/// **Re-pin rule.** [`A7_R1_D_MAX_BITS`]'s, except that no V2 change may move it:
-/// `speculative_distance = 0` is the contact rule from before V2, bit for bit.
+/// **Re-pin rule.** [`A7_R1_D_MAX_BITS`]'s, except that no V2 change may move it: the overlap-only
+/// rule (both values `0`, not the distance alone) is the contact rule from before V2, bit for bit.
 const A7_R1_D_MAX_BITS_D0: u32 = 0x3a2e_dc99;
 /// A7-R1's standing guard: the largest vertical drop any pile box may have taken by
 /// [`CREEP_FROM`]. Half a box edge — losing one layer costs a full [`BOX_SIZE`], while the

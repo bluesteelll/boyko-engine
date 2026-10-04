@@ -1,17 +1,20 @@
-//! **V2 at `speculative_distance = 0` is the pre-V2 engine, bit for bit — on every pair type.**
+//! **V2's overlap-only rule (`speculative_distance = 0` AND `speculative_velocity_cap = 0`) is
+//! the pre-V2 engine, bit for bit — on every pair type.**
 //!
 //! V2 (owner V2a / V2b, 2026-09-30) changes the contact rule on every pair type the narrowphase
 //! has: box-box, sphere-sphere, sphere-box in both row orders, sphere and box against the SDF
 //! field, and the sensor and kinematic cases that ride on them; the solvers gain a speculative
-//! branch. Its promise is that `PhysicsConfig::speculative_distance = 0` reproduces the rule from
-//! before V2 exactly. The pinned box piles (`default_world_pyramid_determinism.rs`, A7-R1,
+//! branch. Its promise is that `PhysicsConfig::speculative_distance = 0` together with
+//! `speculative_velocity_cap = 0` reproduces the rule from before V2 exactly; the distance at 0
+//! alone does not, since the approach-velocity margin (default cap 0.5 m) still keeps and solves
+//! speculative points. The pinned box piles (`default_world_pyramid_determinism.rs`, A7-R1,
 //! GOLDEN, the parity runner's pose gates) witness that for boxes; this file is the other half: one
 //! small scene per pair type, run through the real schedule, with every step's poses, the solver's
 //! manifold stream and the sensor-overlap stream folded into one FNV-1a 64 hash per scene, pinned.
 //!
 //! The pins were read on the pre-V2 parent (`16191fda`, msvc) and never move: every later commit
-//! sets `speculative_distance = 0` explicitly and must keep them. A red here is a d = 0 leak of the
-//! new rule, never a re-pin.
+//! sets both `speculative_distance = 0` and `speculative_velocity_cap = 0` explicitly and must
+//! keep them. A red here is a leak of the new rule into the overlap-only rule, never a re-pin.
 //!
 //! Each scene runs on the colored solver at one worker and at eight (the {1, N} identity makes
 //! them one pin), and the box-stack scene also on the reference `SoftStepSolver`. Every scene
@@ -326,8 +329,9 @@ fn assert_pinned(name: &str, specs: &[Spec], pipe: Pipe, pin: u64) -> Seen {
         assert_eq!(
             *h, pin,
             "{name} ({pipe:?}) {label}: hash {h:#018x}, pinned {pin:#018x} — the scene's poses, \
-             manifolds or overlaps moved at speculative_distance = 0, which must reproduce the \
-             pre-V2 rule exactly; a d = 0 leak of the new rule, never a re-pin"
+             manifolds or overlaps moved under the overlap-only rule (speculative_distance = 0, \
+             speculative_velocity_cap = 0), which must reproduce the pre-V2 rule exactly; a leak \
+             of the new rule, never a re-pin"
         );
     }
     seen

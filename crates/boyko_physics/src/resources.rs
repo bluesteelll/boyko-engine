@@ -413,9 +413,9 @@ pub struct PhysicsConfig {
     /// it just built, lemma L9-L1), and the serial loop and any partition of the parallel
     /// narrowphase produce the same bits for any worker count.
     ///
-    /// **Default ON** since L9 C4 (window 6's decision). `false` is the exact narrowphase:
-    /// with [`speculative_distance`](Self::speculative_distance) `= 0`, the trajectories from
-    /// before contact reuse, and the arm cross-window bridges run.
+    /// **Default ON** since L9 C4 (window 6's decision). `false` is the exact narrowphase: with
+    /// [`Self::speculative_distance`] and [`Self::speculative_velocity_cap`] both `0`, the
+    /// trajectories from before contact reuse, and the arm cross-window bridges run.
     /// Toggling it at runtime needs no epoch: off, the records are ignored and not written;
     /// on, the next full collision of a slow pair builds one.
     pub contact_reuse: bool,

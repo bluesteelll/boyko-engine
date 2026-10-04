@@ -33,10 +33,11 @@
 //! `contact_reuse = false`, must end in [`PINNED_FINAL_HASH_REUSE_OFF`]: the pre-C4 trajectory,
 //! which every later lane's reuse-off mode has to reproduce bit for bit.
 //!
-//! **The overlap-only arms (V2).** Two more runs set `speculative_distance = 0`, with contact
-//! reuse on and off, and must end in [`PINNED_FINAL_HASH_D0`] and
-//! [`PINNED_FINAL_HASH_REUSE_OFF_D0`]: the trajectories from before V2's speculative contacts,
-//! which `speculative_distance = 0` has to reproduce bit for bit whatever the default is.
+//! **The overlap-only arms (V2).** Two more runs set `speculative_distance = 0` and
+//! `speculative_velocity_cap = 0`, with contact reuse on and off, and must end in
+//! [`PINNED_FINAL_HASH_D0`] and [`PINNED_FINAL_HASH_REUSE_OFF_D0`]: the trajectories from before
+//! V2's speculative contacts, which the two values at `0` together (never the distance alone)
+//! have to reproduce bit for bit whatever the defaults are.
 //!
 //! **The AllPairs arm (the tree broadphase's C4).** The default broadphase is the Tree since C4,
 //! so the reference and every arm above run it. One more run, the reference configuration with
@@ -147,9 +148,9 @@ const PINNED_FINAL_HASH_REUSE_OFF: u64 = if cfg!(debug_assertions) {
 /// release `0xb583_189f_a681_f3a6`, debug `0x839d_9426_8d67_b09f` — [`PINNED_FINAL_HASH`]'s values on
 /// the tree before V2 (`16191fda`), read again unchanged at V2's flip.
 ///
-/// **Never re-pinned by a value change of V2's.** `speculative_distance = 0` is the pre-V2 contact
-/// rule bit for bit; a lever outside V2 that changes values re-pins it under
-/// [`PINNED_FINAL_HASH`]'s rule, from the `d = 0` line.
+/// **Never re-pinned by a value change of V2's.** The overlap-only rule (both values `0`, not the
+/// distance alone) is the pre-V2 contact rule bit for bit; a lever outside V2 that changes values
+/// re-pins it under [`PINNED_FINAL_HASH`]'s rule, from the `d = 0` line.
 const PINNED_FINAL_HASH_D0: u64 = if cfg!(debug_assertions) {
     0x839d_9426_8d67_b09f
 } else {
@@ -442,7 +443,8 @@ fn default_world_pyramid_is_run_to_run_worker_count_and_scalar_identical() {
     let reuse_off = run_with_reuse(1, false, true, Some(false));
     let reuse_off_final = reuse_off.hashes.last().copied().unwrap_or(0);
     println!("  reuse off (1w parallel_solve=false): final hash {reuse_off_final:#018x}");
-    // The overlap-only rule (V2's d = 0), reuse on and off: pinned on their own.
+    // The overlap-only rule (V2's d = 0 and velocity cap 0, both set by `run_with`), reuse on and
+    // off: pinned on their own.
     let d0_final =
         run_with(1, false, true, None, None, Some(0.0)).hashes.last().copied().unwrap_or(0);
     let d0_reuse_off_final =
@@ -499,9 +501,10 @@ fn default_world_pyramid_is_run_to_run_worker_count_and_scalar_identical() {
     ] {
         assert_eq!(
             got, pinned,
-            "the default world's pyramid at speculative_distance = 0 ({label}) moved: final hash \
-             {got:#018x}, pinned {pinned:#018x} (height {PYRAMID_HEIGHT}, {FRAMES} frames). d = 0 is \
-             the overlap-only rule from before V2, bit for bit: a V2 leak, never a re-pin"
+            "the default world's pyramid under the overlap-only rule ({label}) moved: final hash \
+             {got:#018x}, pinned {pinned:#018x} (height {PYRAMID_HEIGHT}, {FRAMES} frames). \
+             speculative_distance = 0 with speculative_velocity_cap = 0 is the contact rule from \
+             before V2, bit for bit: a V2 leak, never a re-pin"
         );
     }
     let all_pairs_first = all_pairs

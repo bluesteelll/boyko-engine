@@ -591,7 +591,8 @@
 //! ```
 //!
 //! (Since V2 S1c and S1e dispatch sixteen colours on every frame, `195 = 1 + 1 + 1 + 12 x 16`,
-//! and S1f is S1c's pile at `d = 0`, which carries S1c's rows from before V2, below.)
+//! and S1f is S1c's pile under the overlap-only rule — `speculative_distance` and
+//! `speculative_velocity_cap` both `0` — which carries S1c's rows from before V2, below.)
 //!
 //! (S1c's rows are the tree after S4: 1 of the scopes and 1 of the chunks are the
 //! narrowphase's, 1 and 1 the solve setup's, every scope holds exactly one chunk, and 12 of the

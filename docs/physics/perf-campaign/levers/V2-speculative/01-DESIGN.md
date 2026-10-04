@@ -27,8 +27,14 @@ A contact point is kept while its separation `s <= d`, `d = PhysicsConfig::specu
 (default `DEFAULT_SPECULATIVE_DISTANCE = 0.02` m from C5; `0` before). The solver treats a point
 whose current separation is positive as speculative: `bias = s / h`, mass scale 1, impulse scale 0,
 in the biased pass and in the relaxation pass alike (Box2D v3 `contact_solver.c`); every other
-point takes today's soft rule. **`d = 0` is the pre-V2 engine, bit for bit** — the value a
-cross-window bridge runs (`--speculative-distance 0` in the parity runner).
+point takes today's soft rule. **`d = 0` together with `speculative_velocity_cap = 0` is the
+pre-V2 engine, bit for bit** — the overlap-only rule a cross-window bridge runs
+(`--speculative-distance 0 --speculative-velocity-cap 0` in the parity runner). `d = 0` alone is
+NOT: the approach-velocity margin (§2.6, default cap 0.5 m) still keeps and solves speculative
+points (S7 lands a cube that way at `d = 0`). This section and §§3-6 were written before §2.6
+existed: wherever they say "`d = 0`" for the pre-V2 rule, read the overlap-only rule (both values
+`0`), and wherever they key a solver branch on "`d > 0`", read `speculative_contacts()` (a positive
+distance or a positive cap), which is what the code keys on.
 
 ### 2.1 Configuration
 
@@ -76,7 +82,7 @@ Every broadphase calls `body_bounding_radius(&BodyState)` directly (AllPairs, Tr
 brute-force oracles), so a margin passed at the call sites would edit the tree-c4 lane's files. The
 one in-bounds route: `BodyState.bp_margin` (`= d / 2`, written by `physics_gather` into every row
 it pushes), and `body_bounding_radius` returns `shape_radius + bp_margin` (`r + 0.0 == r`: every
-pair set at `d = 0` is today's). The predicate `sphere_bound_feasible` and the broadphase kernels are
+pair set at `d = 0` with the velocity term off is today's; §2.6 adds the term to `bp_margin`). The predicate `sphere_bound_feasible` and the broadphase kernels are
 untouched. `physics_gather` reads the live configuration, one stage before the broadphase latches
 it, so `bp_margin` is the one broadphase input read before the latch; nothing writes the
 configuration between the two stages of a step (the same argument as `dt`, which the gather stamps).
@@ -227,8 +233,8 @@ literal sites, the runner, `docs/OPEN-QUESTIONS.md` / `docs/SYSTEMS.md` line num
 colour dispatch's parameter forwarding); Q2 `BodyState.bp_margin`; Q3 the reference solver takes the
 rule; Q4 the restitution guard; Q5 sensors at `d_eff = 0`; Q6 the new fixtures in their own
 measurement directory, never overwriting window 8's or L9/L10/W6's (they are the `d = 0` references);
-Q7 GOLDEN keeps its value through `speculative_distance = 0` in its setup and records the V2
-default's value in its doc; Q8 K3 per F0e(ii), above; Q9 the flip and every cargo re-pin in one
+Q7 GOLDEN keeps its value through the overlap-only rule in its setup (`speculative_distance = 0`
+and `speculative_velocity_cap = 0`) and records the V2 default's value in its doc; Q8 K3 per F0e(ii), above; Q9 the flip and every cargo re-pin in one
 commit; Q10 the `d = 0` arms listed in C2; Q11 zero cost when off is zero extra WORK (census, pose)
 and the `SPEC = false` instruction stream, not zero instructions (the narrowphase compares against a
 loaded `-d`, the gather adds `+0.0` per radius), priced by window 9's `V2-RES` row.
@@ -238,9 +244,10 @@ loaded `-d`, the gather adds `+0.0` per radius), priced by window 9's `V2-RES` r
 - **W1** — the release-only `sleep_settles_box_piles` tests are part of the `d = 0` proof: the
   release `boyko-physics --tests` run is a standing gate of every code commit (§3).
 - **W2 (a)** — the G1 identity pins (`colored_tests.rs`, "a red pin is a defect, never a re-bless")
-  drive the narrowphase through `narrowphase_serial` (`ReuseStep::OFF`, `d = 0`): their solver
-  configuration sets `speculative_distance = 0` too, so both sides run the `d = 0` rule, the one they
-  were pinned under; no direct-drive helper mixes a `d = 0` narrowphase with a `d > 0` solver.
+  drive the narrowphase through `narrowphase_serial` (`ReuseStep::OFF`, the overlap-only
+  `SpecStep`): their solver configuration sets `speculative_distance = 0` and
+  `speculative_velocity_cap = 0` too, so both sides run the overlap-only rule, the one they were
+  pinned under; no direct-drive helper mixes a `d = 0` narrowphase with a `d > 0` solver.
   **(b)** — `sleep_settles_box_piles.rs`'s G2/G7 budgets, `MEASURED_P_*`, the settle limits and G4's
   mover premise are re-derived at C5 by their generator (`flicker_redraw_distribution`) and their own
   rules, as A7b did. **(c)** — the reference solver's acceptance gates (`tests/softstep.rs` and the
@@ -254,7 +261,7 @@ loaded `-d`, the gather adds `+0.0` per radius), priced by window 9's `V2-RES` r
   run first on the parent with the same filters, so a red that already exists there is not
   attributed to V2.
 - **W5** — window 9: `V2-RES` is two rows (the parent binary with no flag, the V2 binary with
-  `--speculative-distance 0`, both against JT500); the `_v2` pose-gate script substitutes the hashes
+  `--speculative-distance 0 --speculative-velocity-cap 0`, both against JT500); the `_v2` pose-gate script substitutes the hashes
   as well as the fixture paths; the V2 W8 fixtures are compared with the W1 recordings, never
   recorded from W8.
 - **O1** anchors fixed in the commit that moves them; **O2** the literal census counted by site
@@ -272,7 +279,8 @@ reuse-off value), A7-R2's freeze step, G2/G7/G8, `alloc_frame_census` S1c/S1e (t
 form, attributed by a same-binary `d = 0` twin, S1f), `bp_query_counts` (its own precedent), the
 fidelity gate's anchors (= the C6 fixtures), and whatever else the C5 census of reds names under its
 own rule. Everything at `d = 0` stays byte-identical: the `d = 0` arms, `v2_speculative_d0_identity`,
-the L10 pose gates run with `--speculative-distance 0` against the committed fixtures (264/264, both
+the L10 pose gates run with `--speculative-distance 0 --speculative-velocity-cap 0` against the
+committed fixtures (264/264, both
 negatives exit 4, 26/26, 17/17), the narrowphase unit oracles, the soft-body baselines. Every
 run-vs-run gate stays unedited and green at the new default (W 1/2/4/8/16, the {1, N} oracle,
 `simd_solve` on/off, the sleep-skip modes, the reuse twins' own comparisons).
@@ -327,8 +335,8 @@ block): 3 of 24 frames take a second block, every one predicted. A 16 B larger t
 | `bp_query_counts` J / kd J | `[1983, 5787, 155, 6368, 16120, 9549]` / `[1777, 3511, 155, 4048, 10671, 9549]` | `[1968, 5575, 155, 6160, 15950, 9570]` / `[1823, 3493, 155, 4024, 10663, 9570]` |
 | fidelity anchors (= the V2 fixtures) | JT500 `0x30c5_438b_c6ad_9ffa` ... | JT500 `0x441a_568e_91a4_f9c9`, JToff500 `0xbc09_a1fa_f7b4_13a8`, JSonT500 `0x130c_76cb_6b46_3ab8`, JSonToff500 `0xc671_8318_9439_4df6` |
 
-The `d = 0` arms read every old value exactly (the pyramid ×2, A7-R1, census S1f — S4's long-run
-histograms bin for bin in both profiles — `bp_query_counts`' overlap-only J and kd J, GOLDEN,
+The `d = 0` arms (each sets the distance and the velocity cap to `0`) read every old value
+exactly (the pyramid ×2, A7-R1, census S1f — S4's long-run histograms bin for bin in both profiles — `bp_query_counts`' overlap-only J and kd J, GOLDEN,
 `v2_speculative_d0_identity`), the L10 pose gates run with both overlap-only flags against the
 committed pre-V2 fixtures read 264/264, both negatives exit 4, 26/26 and 17/17, and the parity
 runner's trunk pins (J500, J500 with contact reuse off, R1100; W 1 and 8) read the pre-V2 hashes
