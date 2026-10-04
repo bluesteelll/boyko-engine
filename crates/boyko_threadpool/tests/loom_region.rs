@@ -1,4 +1,5 @@
-//! SR (2): loom models M-R1…M-R13 of the region protocol (`02-SR-DESIGN.md`; cut §3 A3).
+//! SR (2): loom models M-R1…M-R14 of the region protocol (`02-SR-DESIGN.md`; cut §3 A3; M-R14 from
+//! review r3 W1).
 //!
 //! The models drive the PRODUCTION protocol core — `open` (the epoch reservation, the open reset,
 //! OPEN), `run_orchestrator`, `run_helper`, the claim and completion paths and the unwind guards —
@@ -17,7 +18,7 @@
 //!
 //! ```bash
 //! cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' \
-//!   test -p boyko-threadpool --test loom_region -- --list   # must print 13 `: test` lines
+//!   test -p boyko-threadpool --test loom_region -- --list   # must print 14 `: test` lines
 //! LOOM_MAX_PREEMPTIONS=2 cargo --config 'target."cfg(windows)".rustflags=["--cfg","loom"]' \
 //!   test -p boyko-threadpool --test loom_region -- --exact <model> --test-threads=1 --nocapture
 //! ```
@@ -32,8 +33,11 @@
 //!
 //! ## Reading, 2026-10-01, x86_64-pc-windows-msvc, debug, one model per process
 //!
-//! All 13 green, 0.01–16.5 s each (`scratchpad/sr/logs/loom_a3.log`). Each model's mutation, applied to a scratch
-//! copy and restored by content (`scratchpad/sr/mut/loom_mutations.log`), is RED:
+//! All 13 green, 0.01–16.5 s each. Each model's mutation, applied to a scratch copy and restored by
+//! content, is RED; tester round 3 re-ran all 13 at the default bound and at `LOOM_MAX_PREEMPTIONS=2`
+//! (`scratchpad/sr/r3/mut/loom_summary.txt`, `loom_p2_summary.txt`; the round-1 logs this line cited are gone).
+//! M-R14 (fix round 3) is red on its parent `fb03a33c`, whose `hint_of` ignores the item index
+//! (`scratchpad/sr/fix_r3/logs/n1_red_loom_mr14.log`):
 //!
 //! | model | mutation | red as |
 //! |---|---|---|
@@ -47,6 +51,7 @@
 //! | M-R11 | no retry on `w < g` | branch budget (a block never claimed) |
 //! | M-R12 | no OPEN store | the END-tag debug assertion |
 //! | M-R13 | M-W8: epochs advanced only after a normal END | the open's claim check (debug) |
+//! | M-R14 | the parent's `hint_of` (no clamp of `prev_off > i`) | causality violation (a block won twice) |
 #![cfg(loom)]
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -573,5 +578,31 @@ fn m_r13_a_region_after_a_caught_poisoned_one_completes() {
         assert_receipts(&w, 2, base_b, "M-R13 region B");
         assert_eq!(w.poison_value(), 0, "M-R13: B's open cleared the poison");
         assert_eq!(w.done_value(0), 0, "M-R13: B's open (or A) left entry 0's done line at 0");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// M-R14: a hint that names no earlier item (review r3 W1)
+// ---------------------------------------------------------------------------
+
+/// M-R14: a hint that names no earlier item is no hint. One entry of two blocks runs twice, and
+/// BOTH items carry `SchedItem::new(0, Some(1))` (`prev_off` 2, expected value `base + 2`). For
+/// item 0 that is the NEXT item's epoch; for item 1 it is its OWN epoch. Every block of each
+/// execution must run exactly once. The pre-fix `hint_of`, which ignores the item index, must be red
+/// in two ways. First, item 1's helper wins again a block participant 0 already claimed (`g → g`).
+/// Second, a helper whose sweep of item 0 lags past that item's completion wins again a block that
+/// item 1 claimed, and lowers its word (`g + 1 → g`).
+#[test]
+fn m_r14_a_hint_that_names_no_earlier_item_is_no_hint() {
+    model(|| {
+        let (blocks, order) = ([2u16], [0u16, 0]);
+        let entries = vec![StageEntry::new(0, 0, 2, 0, 0)];
+        let schedule = vec![SchedItem::new(0, Some(1)); 2];
+        let w = Arc::new(LoomRegionWords::new(entries, schedule, 1, 2, 1, 2));
+        let s = Arc::new(ModelStages::new(&blocks));
+        let mut epoch = 0;
+        let base = region_once::<V2Policy>(&w, &s, &mut epoch, 1);
+        s.assert_exactly_once(&order, "M-R14");
+        assert_receipts(&w, 2, base, "M-R14");
     });
 }

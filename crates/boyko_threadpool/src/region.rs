@@ -12,8 +12,11 @@
 //! * **Epoch claims.** Item `i` of a region runs at epoch `g = base + 1 + i`. A block is claimed by
 //!   `compare_exchange(hint, g)` on its claim word; on a failure with `w < g` (a word left at an
 //!   older epoch) the claim retries ONCE with `w`, on `w ≥ g` the block is someone else's. Claim
-//!   words are therefore never reset. `hint` is the entry's previous epoch in this region
-//!   ([`SchedItem::prev_off`]); a wrong hint only costs that one retry.
+//!   words are therefore never reset. `hint` is the epoch of the entry's previous execution in
+//!   this region ([`SchedItem::prev_off`]), and 0 whenever `prev_off` names no earlier item, so
+//!   every expected value is below `g`: a claim word only ever rises, and a wrong hint only costs
+//!   that one retry (an expected value at or above `g` could match a word already claimed at `g`
+//!   and win the block twice — review r3 W1).
 //! * **The epoch range is reserved at entry** (the W8 fix). [`PoolInner::region`] advances the
 //!   caller's epoch counter by `len + 1` BEFORE it writes anything, so every exit — END, poison, an
 //!   unwind, a bound panic — leaves the counter past every epoch the region can have written, and
@@ -182,8 +185,10 @@ pub struct SchedItem {
     pub entry: u16,
     _r: u16,
     /// `(the previous item index of the same entry in this region) + 1`, or 0 on the entry's first
-    /// execution in the region. The claim's expected value is `base + prev_off` (or 0); a wrong
-    /// value costs one CAS retry, never correctness.
+    /// execution in the region. For item `i` the claim's expected value is `base + prev_off` when
+    /// `1 ≤ prev_off ≤ i` (an earlier item), and 0 otherwise. A performance hint only: every value
+    /// — a wrong item, the item's own index + 1, a later item, `u32::MAX` — costs at most one CAS
+    /// retry, never correctness.
     pub prev_off: u32,
 }
 
@@ -191,12 +196,13 @@ const _: () = assert!(size_of::<SchedItem>() == 8);
 
 impl SchedItem {
     /// An item executing `entry`, whose previous execution in the same region was item
-    /// `prev_item` (`None` on the entry's first execution).
+    /// `prev_item` (`None` on the entry's first execution). A `prev_item` that is not an earlier
+    /// item of the schedule is no hint (see [`prev_off`](Self::prev_off)); `u32::MAX` saturates.
     #[inline]
     #[must_use]
     pub const fn new(entry: u16, prev_item: Option<u32>) -> Self {
         let prev_off = match prev_item {
-            Some(j) => j + 1,
+            Some(j) => j.saturating_add(1),
             None => 0,
         };
         Self { entry, _r: 0, prev_off }
@@ -637,10 +643,20 @@ const fn needs_clock(ladder: Ladder, bound_ns: u64, armed: bool) -> bool {
     bound_ns != 0 || armed || matches!(ladder, Ladder::BudgetThenYield { .. })
 }
 
-/// The CAS hint of `item` in a region based at `base`.
+/// The CAS hint of `item`, item `i` of a region based at `base`: the epoch of the earlier item
+/// `prev_off − 1`, or 0 (no hint) when `prev_off` is 0 or names no earlier item (`prev_off > i`).
+///
+/// The clamp is what makes the hint performance-only for every value the safe API can build
+/// (review r3 W1). With every expected value below `g`, every successful claim CAS writes `g` over
+/// a smaller value, so a claim word only ever rises, and a block's word passes from below `g` to
+/// `g` once: exactly one winner per execution. An expected value at `g` (the item's own epoch)
+/// matched a word another participant had already claimed at `g`; one above `g` (a later item's
+/// epoch) matched a word that item had claimed while a sweep of this item still ran, and lowered it.
+/// Both won a block twice. One compare per item per participant, none per block.
 #[inline]
-const fn hint_of(item: SchedItem, base: u64) -> u64 {
-    if item.prev_off == 0 { 0 } else { base + item.prev_off as u64 }
+const fn hint_of(item: SchedItem, base: u64, i: u64) -> u64 {
+    let off = item.prev_off as u64;
+    if off != 0 && off <= i { base + off } else { 0 }
 }
 
 // The nested-scope guard (debug builds; `Scope::new` asserts against it).
@@ -1097,7 +1113,7 @@ pub(crate) fn run_orchestrator<W: RegionWords, S: RegionStages, P: RegionPolicy,
                 "region: entry {e} has {n} blocks, more than {REGION_MAX_BLOCKS_PER_PARTICIPANT} per \
                  participant ({participants} participants)"
             );
-            let x = Exec { e, entry, g: base + 1 + i as u64, hint: hint_of(item, base) };
+            let x = Exec { e, entry, g: base + 1 + i as u64, hint: hint_of(item, base, i as u64) };
             // Release: every earlier item's writes (acquired by this thread's done-waits) and the
             // done reset below happen-before a helper's Acquire load of this epoch.
             publish.store(x.g, Ordering::Release);
@@ -1219,7 +1235,7 @@ pub(crate) fn run_helper<W: RegionWords, S: RegionStages, P: RegionPolicy, const
         let e = u32::from(item.entry);
         let entry = w.entry(e as usize);
         let start = h * u32::from(entry.n_blocks) / participants;
-        claim_sweep::<W, S, P>(w, stages, &Exec { e, entry, g: v, hint: hint_of(item, base) }, start, part);
+        claim_sweep::<W, S, P>(w, stages, &Exec { e, entry, g: v, hint: hint_of(item, base, i) }, start, part);
         last = v;
     }
 }

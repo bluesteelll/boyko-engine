@@ -13,19 +13,24 @@
 //!   larger; the epoch base sequence.
 //! * **T6** the wait bound fires on every ladder, in both roles, within 1 s.
 //! * **T7** the stall census: nothing when disarmed, a counted stall when armed.
+//! * **T8** a hint (`SchedItem::prev_off`) that names no earlier item — the item's own epoch, the
+//!   next item's, one past the region, `u32::MAX` — is no hint: every block still runs exactly once
+//!   and the region completes, under the bounded test policy and under the shipped unbounded
+//!   `V2Policy` on a watchdog thread (review r3 W1).
 //!
 //! Miri runs a reduced matrix (participants 2 and 3, small tables): `cfg(miri)` in
 //! `region_common`. Its wall clock does not measure the protocol, so no time is asserted there.
 
 mod region_common;
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use boyko_threadpool::{
     Ladder, REGION_MAX_BLOCKS_PER_PARTICIPANT, RegionExit, RegionPolicy, RegionReport,
-    RegionWaitBound,
+    RegionStages, RegionWaitBound, SchedItem, V2Policy,
 };
 
 use region_common::{
@@ -359,6 +364,178 @@ fn t7_the_stall_census_is_armed_only() {
         assert!(on.stalls >= 1, "T7: the orchestrator's ~200 µs done-wait is a stall when armed: {on:?}");
         assert!(on.max_wait_ns >= 20_000, "T7: the longest wait is recorded when armed: {on:?}");
     }
+}
+
+/// T8's hand-built hints: every one a value the safe API builds (`SchedItem::new`, then
+/// `RegionFrame::new` and `ThreadPool::region`, none of which rejects it).
+#[derive(Clone, Copy, Debug)]
+enum Hint {
+    /// Item `i` ← `SchedItem::new(0, Some(i))`: the item's OWN epoch `g`. Before the fix, a
+    /// participant that reached a block already claimed at `g` won it again (`CAS(g → g)`).
+    OwnEpoch,
+    /// Item `i` ← `SchedItem::new(0, Some(i + 1))`: the NEXT item's epoch. Before the fix, a sweep
+    /// of item `i` still running after item `i + 1` claimed a block won that block again and
+    /// lowered its word (`CAS(g + 1 → g)`).
+    NextItem,
+    /// Item `i` ← `SchedItem::new(0, Some(len + i))`: an epoch in the next region's range.
+    PastRegion,
+    /// Every item ← `SchedItem::new(0, Some(u32::MAX))`, the constructor's largest input.
+    Max,
+    /// Control: two entries alternate and item `i ≥ 1` names item `i − 1`, the OTHER entry's — an
+    /// earlier item, so a wrong hint below `g` (one retry).
+    EarlierWrong,
+}
+
+/// Items per T8 region.
+const T8_ITEMS: u32 = if cfg!(miri) { 4 } else { 12 };
+
+impl Hint {
+    /// `(blocks per entry, schedule)` at `participants`.
+    fn table(self, participants: u32) -> (Vec<u16>, Vec<SchedItem>) {
+        let per = if cfg!(miri) { 2 } else { REGION_MAX_BLOCKS_PER_PARTICIPANT };
+        let n = (per * participants) as u16;
+        let item = |i: u32| match self {
+            Self::OwnEpoch => SchedItem::new(0, Some(i)),
+            Self::NextItem => SchedItem::new(0, Some(i + 1)),
+            Self::PastRegion => SchedItem::new(0, Some(T8_ITEMS + i)),
+            Self::Max => SchedItem::new(0, Some(u32::MAX)),
+            Self::EarlierWrong => SchedItem::new((i % 2) as u16, i.checked_sub(1)),
+        };
+        let entries = if matches!(self, Self::EarlierWrong) { 2 } else { 1 };
+        (vec![n; entries], (0..T8_ITEMS).map(item).collect())
+    }
+}
+
+/// T8's stages. Atomic run counts only: before the fix a block ran twice, concurrently, and the
+/// generation instrument's plain slots would have made that red a data race. Participant 0's
+/// block 0 of every item waits (bounded) until a helper has started a block in this region, so the
+/// helpers' sweeps reach blocks participant 0 has already claimed.
+struct HintStages {
+    stride: usize,
+    runs: Box<[AtomicU32]>,
+    helper_started: AtomicBool,
+}
+
+impl HintStages {
+    fn new(blocks: &[u16]) -> Self {
+        let stride = usize::from(blocks.iter().copied().max().unwrap_or(1));
+        Self {
+            stride,
+            runs: (0..blocks.len() * stride).map(|_| AtomicU32::new(0)).collect(),
+            helper_started: AtomicBool::new(false),
+        }
+    }
+
+    fn runs(&self, e: usize, b: usize) -> u32 {
+        self.runs[e * self.stride + b].load(Ordering::Relaxed)
+    }
+}
+
+impl RegionStages for HintStages {
+    fn run_block(&self, entry: u32, block: u32, participant: u32) {
+        // Relaxed: a liveness nudge only; it orders no data.
+        if participant != 0 {
+            self.helper_started.store(true, Ordering::Relaxed);
+        } else if block == 0 {
+            let t = Instant::now();
+            while !self.helper_started.load(Ordering::Relaxed) && t.elapsed() < Duration::from_millis(250) {
+                std::hint::spin_loop();
+            }
+        }
+        self.runs[entry as usize * self.stride + block as usize].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A panic payload, as text.
+fn payload_text(e: &(dyn std::any::Any + Send)) -> String {
+    if let Some(b) = e.downcast_ref::<RegionWaitBound>() {
+        format!("{b:?}")
+    } else if let Some(s) = e.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else if let Some(s) = e.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "a non-text payload".to_owned()
+    }
+}
+
+/// `regions` consecutive regions of `hint`'s table over one frame, on a pool of `p`, through the
+/// public entry (`ThreadPool::region` inside `install`). Ok: the helpers' blocks, summed. Err: the
+/// first region that panicked or ran a block other than exactly once per execution.
+fn hint_regions<P: RegionPolicy>(p: u32, hint: Hint, regions: u32) -> Result<u64, String> {
+    let pool = pool(p);
+    let (blocks, schedule) = hint.table(p);
+    let order: Vec<u16> = schedule.iter().map(|it| it.entry).collect();
+    let mut frame = Frame::new(blocks.len(), p as usize, blocks.len() * usize::from(blocks[0]));
+    frame.set_table::<P>(&blocks, &order, p, 0);
+    frame.schedule = schedule;
+    let mut helper_blocks = 0;
+    for r in 0..regions {
+        let stages = HintStages::new(&blocks);
+        let report = catch_unwind(AssertUnwindSafe(|| {
+            pool.install(|_| pool.region::<HintStages, P, false>(frame.region_frame(p), &stages))
+        }))
+        .map_err(|e| format!("region {r} panicked: {}", payload_text(&*e)))?;
+        for (e, &n) in blocks.iter().enumerate() {
+            let execs = frame.execs(e);
+            for b in 0..usize::from(n) {
+                let runs = stages.runs(e, b);
+                if runs != execs {
+                    return Err(format!("region {r}: entry {e} block {b} ran {runs} times in {execs} executions"));
+                }
+            }
+        }
+        let total: u64 = frame.receipts(p).iter().map(|rc| rc.blocks).sum();
+        if total != frame.expected_blocks() {
+            return Err(format!("region {r}: Σ receipt blocks {total} != Σ n_blocks {}", frame.expected_blocks()));
+        }
+        helper_blocks += report.helper_blocks;
+    }
+    Ok(helper_blocks)
+}
+
+/// T8: hints that name no earlier item are no hint. Each (P, hint) runs consecutive regions over
+/// one frame under the bounded `TestPolicy` (a defect panics with `RegionWaitBound`) and under the
+/// shipped `V2Policy` (unbounded: a defect spins forever, so it runs on a watchdog thread that
+/// reads a hang as red; after one hang a hint's later `V2Policy` legs are skipped, so a red run
+/// leaves one spinning region behind per hint, not one per P). Every leg must also have had a
+/// helper run blocks, or no hint was ever contended.
+#[test]
+fn t8_a_hint_that_names_no_earlier_item_is_no_hint() {
+    let counts: &[u32] = if cfg!(miri) { &[2] } else { &[2, 4, 8] };
+    let regions = if cfg!(miri) { 1 } else { 24 };
+    let limit = Duration::from_secs(60);
+    let hints = [Hint::OwnEpoch, Hint::NextItem, Hint::PastRegion, Hint::Max, Hint::EarlierWrong];
+    let mut failures = Vec::new();
+    for hint in hints {
+        let mut v2_hung = false;
+        for &p in counts {
+            let mut legs = Vec::new();
+            if cfg!(miri) {
+                legs.push(("TestPolicy", Some(hint_regions::<TestPolicy>(p, hint, regions))));
+            } else {
+                legs.push(("TestPolicy", within(limit, move || hint_regions::<TestPolicy>(p, hint, regions))));
+                if !v2_hung {
+                    let r = within(limit, move || hint_regions::<V2Policy>(p, hint, regions));
+                    v2_hung = r.is_none();
+                    legs.push(("V2Policy", r));
+                }
+            }
+            for (policy, r) in legs {
+                match r {
+                    None => failures.push(format!(
+                        "P{p} {hint:?} {policy}: no result within {limit:?} (hung, or panicked outside a region)"
+                    )),
+                    Some(Err(e)) => failures.push(format!("P{p} {hint:?} {policy}: {e}")),
+                    Some(Ok(0)) if !cfg!(miri) => {
+                        failures.push(format!("P{p} {hint:?} {policy}: no helper ran a block (vacuous)"));
+                    }
+                    Some(Ok(_)) => {}
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "T8: {} failing legs:\n{}", failures.len(), failures.join("\n"));
 }
 
 /// Miri's Stacked Borrows leg: T1/T2/T3 on the pool-free twin (`region_on_threads`), because the

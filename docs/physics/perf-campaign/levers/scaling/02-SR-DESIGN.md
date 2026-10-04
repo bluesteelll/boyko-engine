@@ -48,8 +48,12 @@ The frame is plain data the caller owns — the physics solver keeps it in its R
 
 - **Epoch claims.** Item `i` runs at epoch `g = base + 1 + i`. A claim is `compare_exchange(hint, g, AcqRel,
   Relaxed)`; on `Err(w)` with `w < g` it retries once with `w`, on `w ≥ g` it skips the block. `hint` is the
-  entry's previous epoch in this region (`base + prev_off`), 0 on its first execution; a wrong hint costs one
-  retry. Claim words are never reset (rev 2's ≈ 800-line serial reset is gone).
+  entry's previous epoch in this region (`base + prev_off`), 0 on its first execution — and 0 whenever `prev_off`
+  names no earlier item (`prev_off > i`), so every expected value is below `g`, every successful claim raises its
+  word, and any `prev_off` costs at most one retry. (Review r3 W1: unclamped, an expected value equal to `g`
+  re-won blocks already claimed at `g`, and one above `g` let a lagging sweep re-win, and lower, a later item's
+  words — both reachable through `SchedItem::new`.) Claim words are never reset (rev 2's ≈ 800-line serial
+  reset is gone).
 - **Tagged END and the open reset.** At open, participant 0 stores `publish = base` (OPEN) before any spawn; END
   is `END_BIT | base`; a helper that reads END debug-asserts the tag. `base ≥ 1` always (critique r1 O1), so a
   zero-initialised publish word or receipt can never read as a region's OPEN or tag.
@@ -102,9 +106,12 @@ census (`REGION_STALL_NS` = 20 µs, helpers' recruitment wait excluded) and `Reg
   of an item reads the previous item's writes, from other participants whenever the block counts differ) over
   seeded random tables at P ∈ {1, 2, 3, 4, 5, 8, 16}, both routes, every policy axis, armed and disarmed, with an
   anti-vacuity guard (helpers ran blocks); T3 report formulas; T4 work conservation; T5 two tables over one frame
-  (the retry path); T6 the bound in every ladder and role; T7 the census.
+  (the retry path); T6 the bound in every ladder and role; T7 the census; T8 hints that name no earlier item (the
+  item's own epoch, the next item's, past the region, `u32::MAX`) under `TestPolicy` and, on a watchdog thread,
+  the shipped unbounded `V2Policy`.
 - `tests/region_panic.rs`: rev 3's four cases at P = 2, 8, 16 with (a) payload, (b) receipts, (c) < 1 s; W8; W3.
-- `tests/loom_region.rs`: M-R1…M-R13.
+- `tests/loom_region.rs`: M-R1…M-R14 (M-R14: a hint that names no earlier item, both the own-epoch and the
+  lagging-sweep form).
 - `tests/region_nested_scope.rs`: the debug guard (`Scope::new` asserts it is not inside a region block — a
   liveness rule: a join inside a block can steal its own region's helper task, which then spins until an END
   that cannot come).
