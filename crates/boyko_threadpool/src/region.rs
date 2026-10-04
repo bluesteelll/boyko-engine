@@ -578,9 +578,11 @@ impl<'f> RegionFrame<'f> {
     /// The frame's storage is the caller's own (ruling 17 A3). The caller guarantees that:
     ///
     /// * **Exclusively owned.** The sync line, the done lines, the receipt lines and the claim
-    ///   lines are owned by the caller and given to this frame alone for its lifetime, and they are
-    ///   not shared with another live frame — no other region frame, now or between this owner's
-    ///   regions, runs over any of them with a different epoch counter.
+    ///   lines belong to one owner — the caller whose `epoch` counter is passed here — and are given
+    ///   to this frame alone for its lifetime (the `&mut` borrows in `lines` already make "nothing
+    ///   else touches them meanwhile" a borrow-checker property). They are not shared with another
+    ///   live frame: no frame over another owner's counter runs over any of them, now or between
+    ///   this owner's regions.
     /// * **Sized for its schedule.** At least one done line per entry, one receipt line per
     ///   participant, and [`claim_lines`] claim lines for every published entry from its
     ///   `first_claim`, laid out for the policy and the participant count this frame runs with.
@@ -588,14 +590,16 @@ impl<'f> RegionFrame<'f> {
     ///   epoch the claim lines hold. A fresh counter over fresh zero lines satisfies it; keep the
     ///   counter and the claim column together.
     ///
-    /// What a broken contract can cost is bounded: the region may hang (a claim word at or above an
-    /// item's epoch is never claimed, so that item never completes) or panic (the asserts below, the
-    /// debug open and table checks, an index past a slice). It cannot make two items overlap or run
-    /// a block twice: each published item resets its own done line just before its publish (ruling
-    /// 17 B1), so it completes only on its own blocks' adds, and a claim word only rises. That is
-    /// the guarantee [`RegionStages::run_block`]'s implementers rely on. That nothing else touches
-    /// the lines while the region runs is not part of this contract: the `&mut` borrows in `lines`
-    /// make it a borrow-checker property.
+    /// What a broken contract can cost is bounded. A breach a caller can make within the borrow
+    /// rules — whatever the lines hold, a counter that is not the claim column's own, a column
+    /// handed to two owners in turn, short columns — may hang the region (a claim word at or above
+    /// an item's epoch is never claimed, so that item never completes) or panic (the asserts below,
+    /// the debug open and table checks, an index past a slice). It cannot make two items overlap
+    /// or run a block twice: each published item resets its own done line just before its publish
+    /// (ruling 17 B1), so it completes only on its own blocks' adds, and a claim word only rises.
+    /// That is the guarantee [`RegionStages::run_block`]'s implementers rely on. (Two frames live
+    /// over the same lines at once would need two `&mut` borrows of them, which the borrow checker
+    /// refuses.)
     ///
     /// # Panics
     ///

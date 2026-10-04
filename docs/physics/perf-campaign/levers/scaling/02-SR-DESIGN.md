@@ -44,9 +44,11 @@ The frame is plain data the caller owns — the physics solver keeps it in its R
   receipt and claim lines are exclusively the caller's for the frame's lifetime and not shared with another live
   frame (no other frame runs over them with a different epoch counter, now or between the owner's regions); they
   are sized for the schedule (a done line per entry, a receipt line per participant, `claim_lines` per published
-  entry); the counter is the claim column's own (it only grows and is at or above every claim epoch). A broken
-  contract may hang the region or panic; with B1 (§1.3) it can no longer make two items overlap or run a block
-  twice. Every caller carries a `// SAFETY:` naming why the contract holds — the test harness's `Frame` (one value
+  entry); the counter is the claim column's own (it only grows and is at or above every claim epoch). A breach a
+  caller can make within the borrow rules (the lines' contents, a counter that is not the claim column's own, a
+  column handed to two owners in turn, short columns) may hang the region or panic; with B1 (§1.3) it can no longer
+  make two items overlap or run a block twice. Two frames live over the same lines at once would need two `&mut`
+  borrows of them, which the borrow checker refuses. Every caller carries a `// SAFETY:` naming why the contract holds — the test harness's `Frame` (one value
   owning its columns and counter, `region_frame` itself an `unsafe fn` forwarding the contract), the ω_b v3 bench's
   `Frame3` — and Phase B's caller derives it from the solver Resource's exclusively owned `ScratchColumn`s.
 - **Four separate groups, never one merged column** (critique r1 W3(b)): a merged column would let a done or
