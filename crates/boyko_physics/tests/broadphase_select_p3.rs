@@ -515,7 +515,8 @@ fn coupling_path_pins_manual_select_and_grid() {
 /// The tree broadphase's C4: the Tree is the default kind, both in `PhysicsConfig::default()` and
 /// as the enum's own default, with the Manual select mode, the serial Grid emit untouched
 /// (`parallel_broadphase` off, design 04 D6) and the Morton leaf-list kernel (ruling 4 of
-/// 2026-09-29: the kd order stays opt-in). No world is built, so it runs under Miri.
+/// 2026-09-29; the kd order was frozen and removed by the 2026-10-01 rulings, 8). No world is
+/// built, so it runs under Miri.
 #[test]
 fn default_broadphase_is_the_tree() {
     let cfg = PhysicsConfig::default();

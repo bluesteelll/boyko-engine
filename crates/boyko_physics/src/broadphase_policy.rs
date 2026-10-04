@@ -235,8 +235,7 @@ pub fn select_broadphase(
 /// binary (placement) term of about 12 % on `all_pairs_into` between builds, which would move
 /// this crossover by about two sizes of the grid, under 1 µs per broadphase step; the shipped
 /// profile's placement is not read (the 2026-10-01 rulings, 9). Measured on the Morton leaf
-/// order; re-derived by the same rule if the default query kernel changes (F3,
-/// `levers/broadphase/06-DESIGN-F3.md`).
+/// order; re-derived by the same rule if the default query kernel changes.
 pub const AUTO_TREE_LO: u32 = 128;
 
 /// Banded HIGH edge of the Tree's side of [`Auto`](crate::resources::BroadphaseSelectMode::Auto):

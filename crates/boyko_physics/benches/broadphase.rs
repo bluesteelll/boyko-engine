@@ -26,13 +26,10 @@
 //! state: three untimed steps first, so a static is a member and every timed step is an
 //! `Identity` verify, the active build, the queries and the assembly). `tree` runs the default
 //! query kernel ([`QueryKernel::LeafList`], C3b); `tree_rowwalk` is the same step with
-//! [`QueryKernel::RowWalk`], C1's per-row walk, and `tree_kd` with [`QueryKernel::LeafListKd`]
-//! (F3: the active tree built in the kd median-split leaf order), so the kernels are compared in
-//! one binary.
+//! [`QueryKernel::RowWalk`], C1's per-row walk, so the two kernels are compared in one binary.
 //! Before timing, each family and size prints a receipt per kernel — the `TreeDiag` counts of the
 //! active leaf nodes each path answered (`leaf_list_leaves`, `fallback_leaves`,
-//! `row_walk_leaves`) and the kd builds (`kd_order_builds`) — and asserts that the kernel it names
-//! is the one that ran; each timed arm
+//! `row_walk_leaves`) — and asserts that the kernel it names is the one that ran; each timed arm
 //! asserts it again on its own instance. Sizes: the design's
 //! {17, 64, 128, 256, 1k, 10k, 100k} for `uniform` (unit spheres on a jittered lattice) and
 //! `disparity` (the O2 W1 scene: small spheres plus four giants); `scene` is Jolt's pyramid on
@@ -380,11 +377,10 @@ fn in_scene(n: usize) -> Vec<BodyState> {
 
 /// Asserts that `d`, a tree's counters after tree-path steps under `kernel`, names `kernel` as
 /// the path that answered its active leaves: the leaf list (some of them possibly through its
-/// fallback) or the per-row walk, and never the other; and that the active tree was built in the
-/// kd order iff `kernel` is `LeafListKd`.
+/// fallback) or the per-row walk, and never the other.
 fn assert_kernel_receipt(d: &TreeDiag, kernel: QueryKernel, what: &str) {
     match kernel {
-        QueryKernel::LeafList | QueryKernel::LeafListKd => {
+        QueryKernel::LeafList => {
             assert!(d.leaf_list_leaves + d.fallback_leaves > 0, "{what}: the leaf list answered no leaf: {d:?}");
             assert_eq!(d.row_walk_leaves, 0, "{what}: the per-row walk ran under the leaf list: {d:?}");
         }
@@ -397,11 +393,6 @@ fn assert_kernel_receipt(d: &TreeDiag, kernel: QueryKernel, what: &str) {
             );
         }
     }
-    assert_eq!(
-        d.kd_order_builds > 0,
-        kernel == QueryKernel::LeafListKd,
-        "{what}: the kd leaf order ran iff {kernel:?} selects it: {d:?}"
-    );
 }
 
 /// The tree arm under `kernel`: its steady state, then the timed step.
@@ -428,7 +419,7 @@ fn bench_tree_arm(
     });
 }
 
-/// The six pair-finding arms over one body set, labelled `param`.
+/// The five pair-finding arms over one body set, labelled `param`.
 fn bench_g4_arms(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     pool: &Arc<ThreadPool>,
@@ -440,7 +431,7 @@ fn bench_g4_arms(
     let mut oracle = ContactPairs::with_capacity(0);
     all_pairs_into(bodies, &mut oracle);
     assert!(!oracle.pairs().is_empty(), "anti-vacuity: {family}/{param} must produce pairs");
-    for kernel in [QueryKernel::LeafList, QueryKernel::RowWalk, QueryKernel::LeafListKd] {
+    for kernel in [QueryKernel::LeafList, QueryKernel::RowWalk] {
         // The Tree's steady state equals the oracle under each kernel, and the receipt names
         // what it holds and the kernel that answered.
         let mut tree = BroadphaseTree::with_capacity(n);
@@ -460,7 +451,7 @@ fn bench_g4_arms(
         eprintln!(
             "bp_g4_{family}/{param}: kernel {kernel:?} rows {n} pairs {} tree members {} \
              static_rebuilds {} wide {} excluded {} leaf_list_leaves {} fallback_leaves {} \
-             row_walk_leaves {} kd_order_builds {}",
+             row_walk_leaves {}",
             oracle.pairs().len(),
             d.members,
             d.static_rebuilds,
@@ -468,8 +459,7 @@ fn bench_g4_arms(
             d.excluded_rows,
             d.leaf_list_leaves,
             d.fallback_leaves,
-            d.row_walk_leaves,
-            d.kd_order_builds
+            d.row_walk_leaves
         );
     }
 
@@ -504,7 +494,6 @@ fn bench_g4_arms(
     });
     bench_tree_arm(group, "tree", QueryKernel::LeafList, param, bodies);
     bench_tree_arm(group, "tree_rowwalk", QueryKernel::RowWalk, param, bodies);
-    bench_tree_arm(group, "tree_kd", QueryKernel::LeafListKd, param, bodies);
 }
 
 /// G4 pair finding: the `uniform` and `disparity` families at the design's sizes, and the

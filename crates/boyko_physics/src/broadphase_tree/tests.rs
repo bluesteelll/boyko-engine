@@ -17,11 +17,6 @@
 //!   active tree over a multi-leaf static tree (C3b review, W1); the max row the cut reads and
 //!   the kept-count pin, the cut's gate in the default test command (W2); the small-segment
 //!   network (F2) against `sort_unstable` on every length it takes.
-//! * **G-F3** (the kd leaf order, `levers/broadphase/06-DESIGN-F3.md` §8) — G-F3-1: `kd_sort` is
-//!   the design model's `kd_order` entry by entry (a literal port, fixed cases and a property
-//!   test); G-F3-2: a kd build packs that order; G-F3-3: the G1 property and churn tests draw
-//!   among all three kernels; G-F3-4: a kd step's `ContactPairs` are a Morton step's byte for
-//!   byte while its query stream differs; G-F3-5: `kd_order_builds` names the kd build.
 //!
 //! Every test is device-free and heap-light; under Miri the property tests shrink to 16 cases
 //! at n ≤ 24 and the kernel is the scalar arm.
@@ -36,8 +31,8 @@ use crate::resources::{BodyState, ContactPairs};
 use crate::row_identity::{NO_ROW, RowIdentity, RowKey, RowRemap};
 
 use super::bvh::{
-    Item, LANES, LEAF_MAXROW, LEAF_R, LEAF_ROW, LEAF_X, LEAF_Y, LEAF_Z, Leaf, LeafOrder,
-    NO_LANE_ROW, Node8, PackedBvh8, kd_sort,
+    Item, LANES, LEAF_MAXROW, LEAF_R, LEAF_ROW, LEAF_X, LEAF_Y, LEAF_Z, NO_LANE_ROW, Node8,
+    PackedBvh8,
 };
 use super::kernel::{
     CandList, LEAF_LIST_CAP, NETWORK_SORT_MAX, QueryBox, box_mask, box_mask_scalar, leaf_mask,
@@ -438,11 +433,6 @@ struct Spec {
     kind: u8,
 }
 
-/// A query kernel for the G1 property and churn tests (G-LL2, G-F3-3): each of the three.
-fn any_kernel() -> BoxedStrategy<QueryKernel> {
-    prop_oneof![Just(QueryKernel::RowWalk), Just(QueryKernel::LeafList), Just(QueryKernel::LeafListKd)].boxed()
-}
-
 fn spec() -> BoxedStrategy<Spec> {
     (
         prop::array::uniform3(-10.0f32..10.0f32),
@@ -525,12 +515,12 @@ proptest! {
     fn g1_single_step_worlds_equal_all_pairs(
         specs in prop::collection::vec(spec(), 1..G1_MAX_N),
         sign in 0u8..3u8,
-        kernel in any_kernel(),
+        row_walk in any::<bool>(),
     ) {
         let bodies = world(&specs, sign);
         let mut sim = Sim::new(bodies);
-        // G-LL2 / G-F3-3: the oracle checks the step's own kernel, any of the three.
-        sim.tree.set_query_kernel(kernel);
+        // G-LL2: the oracle checks the step's own kernel, either one.
+        sim.tree.set_query_kernel(if row_walk { QueryKernel::RowWalk } else { QueryKernel::LeafList });
         for _ in 0..3 {
             sim.step_no_gather();
         }
@@ -1059,14 +1049,14 @@ fn morton_codes_over_huge_ranges() {
     let mut tree = PackedBvh8::new(tree_column_id(TREE_ACTIVE), 4096);
     let mut ka = ScratchColumn::<u64>::new(tree_column_id(TREE_SORT_A), 4096);
     let mut kb = ScratchColumn::<u64>::new(tree_column_id(TREE_SORT_B), 4096);
-    let mut items: Vec<Item> = (0..100u32)
+    let items: Vec<Item> = (0..100u32)
         .map(|i| {
             let t = (i % 50) as f32 / 49.0;
             let x = lo[0] + (hi[0] - lo[0]) * t;
             Item::new(x, 0.0, 0.0, 1.0, i)
         })
         .collect();
-    tree.build(&mut items, LeafOrder::Morton, &mut ka, &mut kb);
+    tree.build(&items, &mut ka, &mut kb);
     assert_eq!(tree.leaves(), 100);
     let mut hits = Vec::new();
     tree.query(lo[0], 0.0, 0.0, 1.0, |row| hits.push(row));
@@ -1465,11 +1455,11 @@ proptest! {
     fn g1_random_churn_scripts_equal_all_pairs(
         ops in prop::collection::vec(churn_op(), 4..24),
         dynamics in 4usize..14,
-        kernel in any_kernel(),
+        row_walk in any::<bool>(),
     ) {
         let mut sim = settled(dynamics);
-        // G-LL2 / G-F3-3: the oracle checks the step's own kernel, any of the three.
-        sim.tree.set_query_kernel(kernel);
+        // G-LL2: the oracle checks the step's own kernel, either one.
+        sim.tree.set_query_kernel(if row_walk { QueryKernel::RowWalk } else { QueryKernel::LeafList });
         for op in ops {
             let n = sim.bodies.len();
             match op {
@@ -1767,10 +1757,10 @@ fn leaf_maxrow_is_the_largest_live_row_after_a_build() {
     let mut ka = ScratchColumn::<u64>::new(tree_column_id(TREE_SORT_A), 4096);
     let mut kb = ScratchColumn::<u64>::new(tree_column_id(TREE_SORT_B), 4096);
     // 21 items (two full leaves and one of five), rows scattered and not in position order.
-    let mut items: Vec<Item> = (0..21u32)
+    let items: Vec<Item> = (0..21u32)
         .map(|i| Item::new((i * 7 % 21) as f32, (i % 3) as f32, 0.0, 0.5, (i * 37) % 101 + 3))
         .collect();
-    tree.build(&mut items, LeafOrder::Morton, &mut ka, &mut kb);
+    tree.build(&items, &mut ka, &mut kb);
     assert!(tree.maxrow_valid(), "a build makes the max rows exact");
     let leaves = tree.leaf_nodes();
     assert_eq!(leaves.len(), 3);
@@ -1785,7 +1775,7 @@ fn leaf_maxrow_is_the_largest_live_row_after_a_build() {
     }
     tree.set_leaf_row(3, 999);
     assert!(!tree.maxrow_valid(), "a re-row invalidates the max rows");
-    tree.build(&mut items, LeafOrder::Morton, &mut ka, &mut kb);
+    tree.build(&items, &mut ka, &mut kb);
     assert!(tree.maxrow_valid());
     tree.kill(20);
     assert!(!tree.maxrow_valid(), "a kill invalidates the max rows");
@@ -1863,13 +1853,11 @@ fn gll5_a_collection_over_the_cap_falls_back() {
 }
 
 /// The kernel receipts: every active leaf node of a tree-path step is counted once, by the path
-/// that answered it, and a brute step counts nothing. G-F3-5: `kd_order_builds` counts one kd
-/// build per tree-path step under `LeafListKd`, none under the other kernels or on a brute step.
+/// that answered it, and a brute step counts nothing.
 #[test]
 fn receipts_name_the_kernel_that_ran() {
     let mut sim = settled(30);
     let before = sim.tree.diag();
-    assert_eq!(before.kd_order_builds, 0, "no kd build under the default kernel");
     let leaves = u64::from(sim.tree.active.leaves().div_ceil(LANES as u32));
     assert!(leaves >= 4, "anti-vacuity: several active leaf nodes");
     let d = sim.step();
@@ -1880,15 +1868,6 @@ fn receipts_name_the_kernel_that_ran() {
     assert_eq!(d2.row_walk_leaves - d.row_walk_leaves, leaves, "the per-row walk when selected");
     assert_eq!(d2.leaf_list_leaves, d.leaf_list_leaves);
     assert_eq!(sim.tree.query_kernel(), QueryKernel::RowWalk);
-    assert_eq!(d2.kd_order_builds, 0, "no kd build under the leaf list or the per-row walk");
-    sim.tree.set_query_kernel(QueryKernel::LeafListKd);
-    let d3 = sim.step();
-    assert_eq!(d3.kd_order_builds, 1, "one kd build per tree-path step under LeafListKd");
-    assert_eq!(d3.leaf_list_leaves - d2.leaf_list_leaves, leaves, "LeafListKd's query is the leaf list's");
-    assert_eq!(d3.row_walk_leaves, d2.row_walk_leaves);
-    sim.tree.set_brute_max_rows(1 << 20);
-    let d4 = sim.step();
-    assert_eq!(d4.kd_order_builds, 1, "a brute step builds no tree");
 }
 
 /// The kept-count reference of the review's W2 on the active tree of the last step: per Q row,
@@ -2202,11 +2181,11 @@ proptest! {
     fn g1_sleeper_set_under_random_hints_releases_and_churn(
         ops in prop::collection::vec(churn_op(), 4..24),
         dynamics in 4usize..14,
-        kernel in any_kernel(),
+        row_walk in any::<bool>(),
         seed in 1u64..u64::MAX,
     ) {
         let mut sim = settled(dynamics);
-        sim.tree.set_query_kernel(kernel);
+        sim.tree.set_query_kernel(if row_walk { QueryKernel::RowWalk } else { QueryKernel::LeafList });
         let mut rng = seed;
         for op in ops {
             let n = sim.bodies.len();
@@ -2264,322 +2243,5 @@ proptest! {
             );
             assert_sleeper_invariants(&sim, &hint);
         }
-    }
-}
-
-// ── G-F3: the kd median-split leaf order (levers/broadphase/06-DESIGN-F3.md) ─────────────────────
-
-/// A literal port of the design model's `kd_order` (`c3b/sim.py:130-150`), the reference G-F3-1
-/// holds [`kd_sort`] to. Per node of more than eight rows: the widest axis of the `f64` extents
-/// (numpy's `argmax`, the first maximum), a full sort by `(f64 coordinate, index)` (numpy's
-/// `lexsort`, under which `−0.0 == +0.0`), the left part `ceil(leaves / 2) · 8` rows; a node of
-/// at most eight rows keeps its order (`list(ids)`). It shares no code with `kd_sort`.
-fn kd_order_reference(p: &[[f32; 3]]) -> Vec<usize> {
-    fn rec(p: &[[f32; 3]], ids: Vec<usize>, out: &mut Vec<usize>) {
-        let m = ids.len();
-        if m <= 8 {
-            out.extend(ids);
-            return;
-        }
-        let mut lo = [f64::INFINITY; 3];
-        let mut hi = [f64::NEG_INFINITY; 3];
-        for &i in &ids {
-            for ((l, h), &v) in lo.iter_mut().zip(hi.iter_mut()).zip(&p[i]) {
-                *l = l.min(f64::from(v));
-                *h = h.max(f64::from(v));
-            }
-        }
-        let ext = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
-        let mut ax = 0;
-        for (k, &e) in ext.iter().enumerate().skip(1) {
-            if e > ext[ax] {
-                ax = k;
-            }
-        }
-        let mut o = ids;
-        o.sort_by(|&a, &b| {
-            f64::from(p[a][ax])
-                .partial_cmp(&f64::from(p[b][ax]))
-                .expect("the reference's coordinates are finite")
-                .then(a.cmp(&b))
-        });
-        let left = m.div_ceil(8).div_ceil(2) * 8;
-        let right = o.split_off(left);
-        rec(p, o, out);
-        rec(p, right, out);
-    }
-    let mut out = Vec::with_capacity(p.len());
-    rec(p, (0..p.len()).collect(), &mut out);
-    out
-}
-
-/// [`kd_sort`] over items at `p` whose rows ascend but are not their indices (`3·i + 1`),
-/// mapped back to indices, so the reference's index ties are the production's row ties.
-fn kd_sort_indices(p: &[[f32; 3]]) -> Vec<usize> {
-    let mut items: Vec<Item> =
-        p.iter().enumerate().map(|(i, q)| Item::new(q[0], q[1], q[2], 0.5, 3 * i as u32 + 1)).collect();
-    kd_sort(&mut items);
-    items.iter().map(|it| ((it.row - 1) / 3) as usize).collect()
-}
-
-/// `n` positions from the harness's generator, in `[-scale, scale)` per axis.
-fn kd_random_positions(n: usize, scale: f32, seed: u64) -> Vec<[f32; 3]> {
-    let mut state = seed;
-    let mut unit = move || (next_rand(&mut state) >> 40) as f32 / (1u64 << 24) as f32;
-    (0..n).map(|_| [0; 3].map(|_| scale * (2.0 * unit() - 1.0))).collect()
-}
-
-/// The fixed cases of G-F3-1, named: each is the case one of the design's mutations of
-/// `kd_sort` is shown red on (§8).
-fn kd_fixed_cases() -> Vec<(String, Vec<[f32; 3]>)> {
-    let mut cases = Vec::new();
-    for n in [0usize, 1, 8, 9, 16, 17, 64, 65] {
-        cases.push((format!("random n = {n}"), kd_random_positions(n, 10.0, 0x5eed_0000 + n as u64)));
-    }
-    // A jittered lattice: 5 × 5 × 4.
-    let jitter = kd_random_positions(100, 0.3, 0x5eed_1000);
-    let lattice: Vec<[f32; 3]> = (0..100)
-        .map(|i| {
-            let c = [(i % 5) as f32, (i / 5 % 5) as f32, (i / 25) as f32];
-            [c[0] + jitter[i][0], c[1] + jitter[i][1], c[2] + jitter[i][2]]
-        })
-        .collect();
-    cases.push(("jittered lattice 5 x 5 x 4".to_owned(), lattice));
-    // Exact lattices: equal extents on two axes (a flat 4 × 4) and on three (6 × 6 × 6), where the
-    // first maximum decides, and ties on every coordinate.
-    cases.push((
-        "exact lattice 4 x 4 x 1".to_owned(),
-        (0..16).map(|i| [(i % 4) as f32, (i / 4) as f32, 0.0]).collect(),
-    ));
-    cases.push((
-        "exact lattice 6 x 6 x 6".to_owned(),
-        (0..216).map(|i| [(i % 6) as f32, (i / 6 % 6) as f32, (i / 36) as f32]).collect(),
-    ));
-    cases.push(("all equal".to_owned(), vec![[1.0, 1.0, 1.0]; 40]));
-    cases.push(("collinear".to_owned(), (0..50).map(|i| [0.5 * i as f32, i as f32, 1.5 * i as f32]).collect()));
-    // ±0.0: rows 0..8 at +0.0 and 8..16 at −0.0 on x, the widest axis; one row at each end. The
-    // model ties the zeros by index; a total order puts −0.0 first and moves the split.
-    let mut zeros: Vec<[f32; 3]> = (0..16).map(|i| [if i < 8 { 0.0 } else { -0.0 }, 0.0, 0.0]).collect();
-    zeros.push([100.0, 0.0, 0.0]);
-    zeros.push([-100.0, 0.0, 0.0]);
-    cases.push(("+-0.0 mix".to_owned(), zeros));
-    cases.push(("huge ranges (+-2^59)".to_owned(), kd_random_positions(100, 2.0f32.powi(59), 0x5eed_2000)));
-    // The f32/f64 axis case: x ∈ {0, 2^24}, y ∈ {−1, 2^24}. In f64, y's extent 2^24 + 1 is the
-    // widest; in f32 it rounds to 2^24, ties with x's and loses to it.
-    let big = 2.0f32.powi(24);
-    cases.push((
-        "f32/f64 axis".to_owned(),
-        (0..16).map(|i| [if i % 2 == 0 { 0.0 } else { big }, if i < 8 { -1.0 } else { big }, 0.0]).collect(),
-    ));
-    cases
-}
-
-/// G-F3-1: `kd_sort` is the model's `kd_order` entry by entry on every fixed case. Every
-/// mismatching case is reported, not only the first, so a mutation's red names its case.
-#[test]
-fn kd_order_equals_the_reference() {
-    let mut failed = Vec::new();
-    for (name, p) in kd_fixed_cases() {
-        let got = kd_sort_indices(&p);
-        let want = kd_order_reference(&p);
-        if got != want {
-            let at = got.iter().zip(&want).position(|(a, b)| a != b);
-            failed.push(format!("{name} (n = {}, first difference at {at:?})", p.len()));
-        }
-    }
-    assert!(failed.is_empty(), "G-F3-1: kd_sort differs from the model's kd_order on {failed:?}");
-}
-
-/// A kd coordinate: a range, small integers (ties), both zeros, and huge values.
-fn kd_coord() -> BoxedStrategy<f32> {
-    prop_oneof![
-        4 => -100.0f32..100.0f32,
-        3 => (-4i32..=4).prop_map(|v| v as f32),
-        1 => Just(0.0f32),
-        1 => Just(-0.0f32),
-        1 => -5.0e17f32..5.0e17f32,
-    ]
-    .boxed()
-}
-
-#[cfg(not(miri))]
-const KD_CASES: u32 = 256;
-#[cfg(miri)]
-const KD_CASES: u32 = 16;
-#[cfg(not(miri))]
-const KD_MAX_N: usize = 300;
-#[cfg(miri)]
-const KD_MAX_N: usize = 24;
-
-proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: KD_CASES,
-        failure_persistence: None,
-        ..ProptestConfig::default()
-    })]
-
-    /// G-F3-1 on random rows: `kd_sort` is the model's `kd_order` entry by entry.
-    #[test]
-    fn kd_order_equals_the_reference_on_random_rows(
-        p in prop::collection::vec(prop::array::uniform3(kd_coord()), 0..=KD_MAX_N),
-    ) {
-        prop_assert_eq!(kd_sort_indices(&p), kd_order_reference(&p));
-    }
-}
-
-/// G-F3-2: a kd build packs [`kd_sort`]'s order — slot `s` holds its `s`-th item and the rows are
-/// the input's — and every leaf node's max row is its largest live row.
-#[test]
-fn kd_build_packs_the_kd_order() {
-    crate::scratch_ids::register_tree_column_layouts();
-    let mut tree = PackedBvh8::new(tree_column_id(TREE_ACTIVE), 4096);
-    let mut ka = ScratchColumn::<u64>::new(tree_column_id(TREE_SORT_A), 4096);
-    let mut kb = ScratchColumn::<u64>::new(tree_column_id(TREE_SORT_B), 4096);
-    // 101 rows (twelve full leaf nodes and one of five) on a jittered lattice; the rows ascend
-    // with the index and are not it.
-    let jitter = kd_random_positions(101, 0.3, 0x5eed_3000);
-    let items: Vec<Item> = (0..101u32)
-        .map(|i| {
-            let j = jitter[i as usize];
-            Item::new((i % 7) as f32 + j[0], (i / 7 % 5) as f32 + j[1], (i / 35) as f32 + j[2], 0.5, 2 * i + 3)
-        })
-        .collect();
-    let mut want = items.clone();
-    kd_sort(&mut want);
-    assert!(
-        want.iter().zip(&items).any(|(a, b)| a.row != b.row),
-        "anti-vacuity: the kd order moves rows on this scene"
-    );
-    let mut built = items.clone();
-    tree.build(&mut built, LeafOrder::Kd, &mut ka, &mut kb);
-    assert_eq!(tree.leaves(), 101);
-    for (s, it) in want.iter().enumerate() {
-        let leaf = Leaf { x: it.x, y: it.y, z: it.z, r: it.r, row: it.row };
-        assert_eq!(tree.leaf(s as u32), leaf, "slot {s} holds the kd order's item {s}");
-    }
-    let mut rows: Vec<u32> = (0..101).map(|s| tree.leaf_row(s)).collect();
-    rows.sort_unstable();
-    assert_eq!(rows, items.iter().map(|it| it.row).collect::<Vec<_>>(), "every row has one slot");
-    assert!(tree.maxrow_valid(), "a build makes the max rows exact");
-    let leaves = tree.leaf_nodes();
-    assert_eq!(leaves.len(), 13);
-    for (l, node) in leaves.iter().enumerate() {
-        let live: Vec<u32> = node.p[LEAF_ROW].iter().map(|b| b.to_bits()).filter(|&r| r != NO_LANE_ROW).collect();
-        assert_eq!(live.len(), if l == 12 { 5 } else { 8 }, "leaf {l}'s live lanes");
-        assert_eq!(
-            node.p[LEAF_MAXROW][0].to_bits(),
-            *live.iter().max().expect("a leaf node has a live lane"),
-            "leaf {l}: the max row is the largest live row"
-        );
-    }
-}
-
-/// Jolt's pyramid at t = 0 on its floor (J; the parity runner's spawn order), `height` layers.
-fn kd_jolt_pyramid(height: i32) -> Vec<BodyState> {
-    let mut v = vec![boxed([0.0, -1.0, 0.0], [50.0, 1.0, 50.0], 0.0)];
-    for i in 0..height {
-        let lo = i / 2;
-        let hi = height - (i + 1) / 2;
-        for j in lo..hi {
-            for k in lo..hi {
-                let odd = if i & 1 != 0 { 1.0 } else { 0.0 };
-                let base = -(height as f32);
-                v.push(boxed(
-                    [base + 2.0 * j as f32 + odd, 1.0 + 2.5 * i as f32, base + 2.0 * k as f32 + odd],
-                    [1.0; 3],
-                    0.125,
-                ));
-            }
-        }
-    }
-    v
-}
-
-/// A lattice of `side³` touching spheres; every fourth dynamic when `mixed` (the rest static:
-/// a static tree of many leaf nodes), all dynamic otherwise.
-fn kd_lattice(side: usize, mixed: bool) -> Vec<BodyState> {
-    (0..side * side * side)
-        .map(|i| {
-            let p = [(i % side) as f32 * 0.9, (i / side % side) as f32 * 0.9, (i / (side * side)) as f32 * 0.9];
-            let inv_mass = if !mixed || i % 4 == 0 { 1.0 } else { 0.0 };
-            sphere(p, 0.5, inv_mass, false)
-        })
-        .collect()
-}
-
-/// Small spheres on a jittered lattice, touching their neighbours, beside four giants (the
-/// size-disparity family).
-fn kd_disparity(side: usize) -> Vec<BodyState> {
-    let jitter = kd_random_positions(side * side * side, 0.2, 0x5eed_4000);
-    let mut v: Vec<BodyState> = (0..side * side * side)
-        .map(|i| {
-            let j = jitter[i];
-            let p = [(i % side) as f32 + j[0], (i / side % side) as f32 + j[1], (i / (side * side)) as f32 + j[2]];
-            sphere(p, 0.55, 1.0, false)
-        })
-        .collect();
-    let far = side as f32;
-    for c in [[0.0, 0.0, 0.0], [far, 0.0, 0.0], [0.0, far, 0.0], [far, far, far]] {
-        v.push(sphere(c, 0.25 * far, 1.0, false));
-    }
-    v
-}
-
-/// G-F3-4: on each scene two trees step side by side, one under `LeafList` (Morton leaves) and
-/// one under `LeafListKd`: (i) the kd step's `ContactPairs` — the stream and the withheld list —
-/// are the Morton step's byte for byte, and AllPairs'; (ii) on every scene the two steps' query
-/// streams differ, so the order did move (a `query_stage` re-run does not rebuild, hence
-/// two steps); (iii) G-LL1 on the kd tree: the leaf list writes the per-row walk's bytes there.
-#[test]
-fn kd_order_moves_the_stream_not_the_pairs() {
-    let (height, side) = if cfg!(miri) { (4, 3) } else { (15, 8) };
-    let scenes = [
-        ("J", kd_jolt_pyramid(height), true),
-        ("lattice", kd_lattice(side, false), true),
-        ("disparity", kd_disparity(side), true),
-        ("mixed_static", kd_lattice(side, true), true),
-    ];
-    for (name, bodies, order_moves) in scenes {
-        let n = bodies.len();
-        let mut oracle = ContactPairs::with_capacity(0);
-        all_pairs_into(&bodies, &mut oracle);
-        assert!(!oracle.pairs().is_empty(), "anti-vacuity: {name} has pairs");
-        let mut morton = BroadphaseTree::with_capacity(0);
-        morton.set_brute_max_rows(0);
-        let mut kd = BroadphaseTree::with_capacity(0);
-        kd.set_brute_max_rows(0);
-        kd.set_query_kernel(QueryKernel::LeafListKd);
-        let (mut out_m, mut out_k) = (ContactPairs::with_capacity(0), ContactPairs::with_capacity(0));
-        for step in 0..3 {
-            morton.step_direct(&bodies, &mut out_m);
-            kd.step_direct(&bodies, &mut out_k);
-            assert_eq!(
-                out_k.pairs_stream(),
-                out_m.pairs_stream(),
-                "{name} step {step}: (i) the kd step's stream is the Morton step's"
-            );
-            assert_eq!(
-                out_k.withheld(),
-                out_m.withheld(),
-                "{name} step {step}: (i) the kd step's withheld list is the Morton step's"
-            );
-            assert_eq!(out_k.pairs(), oracle.pairs(), "{name} step {step}: the kd step's pair set is AllPairs'");
-            assert_kernels_agree(&mut kd, n);
-        }
-        let morton_stage = query_stage(&mut morton, n, QueryKernel::LeafList);
-        let kd_stage = query_stage(&mut kd, n, QueryKernel::LeafListKd);
-        let moved = kd_stage.0 != morton_stage.0;
-        if order_moves && !cfg!(miri) {
-            assert!(
-                moved,
-                "{name}: (ii) anti-vacuity: the kd step's query stream equals the Morton step's (the order did not move)"
-            );
-        }
-        assert_eq!(
-            (kd.diag().kd_order_builds, morton.diag().kd_order_builds),
-            (3, 0),
-            "{name}: the kd order built on every kd step and on no Morton step"
-        );
-        println!("{name}: {n} rows, {} pairs; the kd order moved the query stream: {moved}", oracle.pairs().len());
     }
 }
