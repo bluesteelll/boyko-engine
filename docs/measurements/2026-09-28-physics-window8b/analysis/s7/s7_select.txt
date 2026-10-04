@@ -1,0 +1,19 @@
+# S7-AB selection: 176 records = 173 timed processes + 3 warm-ups
+attempts: {'original': 171, 'rerun': 2}
+validity problems (recomputed): 0
+driver 'invalid' field disagrees with the recomputation: 0
+warm-ups valid: 3 of 3 (untimed; not used)
+unclean processes: 2
+  p1 r0 seq 6 S7-JA#s7t@W8 original 2026-09-29T17:58:38.385+03:00: ['witness 2.29']
+  p2 r0 seq 18 S7-JT-W1#s7t@W1 original 2026-09-29T18:08:51.730+03:00: ['receipt after 6.5', 'witness 3.95']
+processes without a placement receipt (main_cycle_frac + top3): 0
+processes with main_share_top_est null (main_cpu_s 0 at a 15.6-ms tick): 11
+slots 171; used 171; dropped 0; re-runs used in place of a hot original: 2
+  slot (1, 0, 'S7-JA', 's7t', 8): original [['witness 2.29']] -> re-run used
+  slot (2, 0, 'S7-JT-W1', 's7t', 1): original [['receipt after 6.5', 'witness 3.95']] -> re-run used
+cells 19; K per cell: [9]
+K per (cell, pass): [3]
+J-T: 126 used processes; pose hashes ['0x30c5438bc6ad9ffa']; distinct per-step manifold sequences 1; manifolds/step [0,500) [4482.78], [100,500) [4467.665]
+J-A: 45 used processes; pose hashes ['0x30c5438bc6ad9ffa']; distinct per-step manifold sequences 1; manifolds/step [0,500) [4482.78], [100,500) [4467.665]
+SUMMARY host objects: {'{"logical_cores": 16}': 171}
+per-process [0,500) means equal the driver's mean_ms: 171/171

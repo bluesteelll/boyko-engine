@@ -1,0 +1,172 @@
+{
+ "dis": "apinto_16191fda.dis",
+ "size": 480,
+ "reloc_bytes": 4,
+ "exes": {
+  "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/238150a2-5c92-4147-8309-b6428586e8a7/scratchpad/win9a/bin/broadphase_g4rT_50e31f1a.exe": {
+   "hits": [
+    "0xab080"
+   ],
+   "rva_mod16": 0,
+   "rva_mod32": 0,
+   "rva_mod64": 0,
+   "loop_head_rva_mod32": 0,
+   "loop_head_rva_mod64": 32,
+   "loop_bytes": 178,
+   "loop_32B_blocks": 6,
+   "loop_64B_lines": 4,
+   "jcc_in_loop": [
+    {
+     "off": "0xfd",
+     "insn": "je\t0x80",
+     "abs_mod32": 29,
+     "len": 2,
+     "crosses32": false,
+     "ends_on32": false
+    },
+    {
+     "off": "0x105",
+     "insn": "je\t0x124",
+     "abs_mod32": 5,
+     "len": 2,
+     "crosses32": false,
+     "ends_on32": false
+    },
+    {
+     "off": "0x12f",
+     "insn": "jne\t0x14e",
+     "abs_mod32": 15,
+     "len": 2,
+     "crosses32": false,
+     "ends_on32": false
+    },
+    {
+     "off": "0x182",
+     "insn": "jb\t0xf0",
+     "abs_mod32": 2,
+     "len": 6,
+     "crosses32": false,
+     "ends_on32": false
+    },
+    {
+     "off": "0x18c",
+     "insn": "jne\t0xe0",
+     "abs_mod32": 12,
+     "len": 6,
+     "crosses32": false,
+     "ends_on32": false
+    }
+   ]
+  },
+  "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/238150a2-5c92-4147-8309-b6428586e8a7/scratchpad/win9a/bin/broadphase_g4ref_16191fda.exe": {
+   "hits": [
+    "0xab080"
+   ],
+   "rva_mod16": 0,
+   "rva_mod32": 0,
+   "rva_mod64": 0,
+   "loop_head_rva_mod32": 0,
+   "loop_head_rva_mod64": 32,
+   "loop_bytes": 178,
+   "loop_32B_blocks": 6,
+   "loop_64B_lines": 4,
+   "jcc_in_loop": [
+    {
+     "off": "0xfd",
+     "insn": "je\t0x80",
+     "abs_mod32": 29,
+     "len": 2,
+     "crosses32": false,
+     "ends_on32": false
+    },
+    {
+     "off": "0x105",
+     "insn": "je\t0x124",
+     "abs_mod32": 5,
+     "len": 2,
+     "crosses32": false,
+     "ends_on32": false
+    },
+    {
+     "off": "0x12f",
+     "insn": "jne\t0x14e",
+     "abs_mod32": 15,
+     "len": 2,
+     "crosses32": false,
+     "ends_on32": false
+    },
+    {
+     "off": "0x182",
+     "insn": "jb\t0xf0",
+     "abs_mod32": 2,
+     "len": 6,
+     "crosses32": false,
+     "ends_on32": false
+    },
+    {
+     "off": "0x18c",
+     "insn": "jne\t0xe0",
+     "abs_mod32": 12,
+     "len": 6,
+     "crosses32": false,
+     "ends_on32": false
+    }
+   ]
+  },
+  "C:/Users/flint/AppData/Local/Temp/claude/D--claude-BoykoEngine/238150a2-5c92-4147-8309-b6428586e8a7/scratchpad/win9a/bin/bpbench_g4ref_93b2615b.exe": {
+   "hits": [
+    "0x92da0"
+   ],
+   "rva_mod16": 0,
+   "rva_mod32": 0,
+   "rva_mod64": 32,
+   "loop_head_rva_mod32": 0,
+   "loop_head_rva_mod64": 0,
+   "loop_bytes": 178,
+   "loop_32B_blocks": 6,
+   "loop_64B_lines": 3,
+   "jcc_in_loop": [
+    {
+     "off": "0xfd",
+     "insn": "je\t0x80",
+     "abs_mod32": 29,
+     "len": 2,
+     "crosses32": false,
+     "ends_on32": false
+    },
+    {
+     "off": "0x105",
+     "insn": "je\t0x124",
+     "abs_mod32": 5,
+     "len": 2,
+     "crosses32": false,
+     "ends_on32": false
+    },
+    {
+     "off": "0x12f",
+     "insn": "jne\t0x14e",
+     "abs_mod32": 15,
+     "len": 2,
+     "crosses32": false,
+     "ends_on32": false
+    },
+    {
+     "off": "0x182",
+     "insn": "jb\t0xf0",
+     "abs_mod32": 2,
+     "len": 6,
+     "crosses32": false,
+     "ends_on32": false
+    },
+    {
+     "off": "0x18c",
+     "insn": "jne\t0xe0",
+     "abs_mod32": 12,
+     "len": 6,
+     "crosses32": false,
+     "ends_on32": false
+    }
+   ]
+  }
+ }
+}

@@ -1,0 +1,9 @@
+2026-10-01T03:06:57.457+03:00 WINDOW START cutoff 2026-10-01T23:59:00 blocks ['RERUN-T'] test True resume False
+2026-10-01T03:06:57.661+03:00 RERUN-T-p0: idle rule (wait_idle9a.ps1, up to 30 polls)
+2026-10-01T03:06:57.672+03:00 RERUN-T-p0: idle reached; {'time': '2026-10-01T03:06:57.672+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-10-01T03:06:58.259+03:00 RERUN-T-p0: opening receipt 40.27% (build procs busy [], presence {'build': [], 'lane': []})
+2026-10-01T03:06:59.174+03:00   RERUN-T-p0 r0 [  1] RR-a#tip W=1: pose 0x3c1f644743b89079 expect none rb 40.27% ra 91.6% others 31.08% exit 0 waited 0.0s CONTAMINATED-before(40.27%) CONTAMINATED-after(91.6%) OTHERS-BUSY(31.08%)
+2026-10-01T03:07:00.121+03:00   RERUN-T-p0 r1 [  2] RR-a#tip W=1: pose 0x3c1f644743b89079 expect none rb 91.6% ra 94.73% others 30.88% exit 0 waited 0.0s CONTAMINATED-before(91.6%) CONTAMINATED-after(94.73%) OTHERS-BUSY(30.88%)
+2026-10-01T03:07:01.081+03:00   RERUN-T-p0 r2 [  3] RR-a#tip W=1: pose 0x3c1f644743b89079 expect none rb 94.73% ra 95.03% others 31.0% exit 0 waited 0.0s CONTAMINATED-before(94.73%) CONTAMINATED-after(95.03%) OTHERS-BUSY(31.0%)
+2026-10-01T03:07:01.084+03:00 RERUN-T-p0: done
+2026-10-01T03:07:01.183+03:00 WINDOW END exit 0: complete; counters {'timed': 3, 'rerun': 0, 'warm': 0, 'voided_processes': 0}; binaries after all match

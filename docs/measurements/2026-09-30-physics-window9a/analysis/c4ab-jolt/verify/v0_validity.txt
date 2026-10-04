@@ -1,0 +1,48 @@
+C4-AB pass_done passes: [0, 1, 2]
+voided pass records: 0
+timed processes 379: {'original': 306, 'rerun': 73}; warm-ups (excluded) 3
+invalid (mine): 0
+disagree with driver valid flag: 0 of 379
+unclean: 119 (by pass: {0: 84, 1: 3, 2: 32})
+slots 306; used 260 (reruns used 50); dropped 46 (by pass {0: 46})
+pass 0: 140 processes (102 originals, 38 re-runs); unclean 84; originals unclean 74; witness median originals 3.33 %
+pass 1: 105 processes (102 originals, 3 re-runs); unclean 3; originals unclean 2; witness median originals 0.44 %
+pass 2: 134 processes (102 originals, 32 re-runs); unclean 32; originals unclean 20; witness median originals 0.91 %
+pass-cells 102; my K == driver k_clean on 102/102
+short pass-cells (K<3): 30; by pass {0: 30}
+p0 full pass-cells: ['C4-JA#tip@W1', 'C4-JD#tip@W16', 'C4-jolt56#j56@W16', 'C4-rung#tip@W8']
+  SHORT p0 C4-JA#parent@W1 K=2
+  SHORT p0 C4-JA#parent@W8 K=1
+  SHORT p0 C4-JA#parent@W16 K=2
+  SHORT p0 C4-JA#tip@W8 K=1
+  SHORT p0 C4-JA#tip@W16 K=2
+  SHORT p0 C4-JD#tip@W1 K=1
+  SHORT p0 C4-JD#tip@W2 K=2
+  SHORT p0 C4-JD#tip@W4 K=1
+  SHORT p0 C4-JD#tip@W8 K=1
+  SHORT p0 C4-JDap#tip@W1 K=1
+  SHORT p0 C4-JDap#tip@W2 K=2
+  SHORT p0 C4-JDap#tip@W4 K=1
+  SHORT p0 C4-JDap#tip@W8 K=1
+  SHORT p0 C4-JDap#tip@W16 K=2
+  SHORT p0 C4-JDpar#parent@W1 K=2
+  SHORT p0 C4-JDpar#parent@W2 K=2
+  SHORT p0 C4-JDpar#parent@W4 K=1
+  SHORT p0 C4-JDpar#parent@W8 K=1
+  SHORT p0 C4-JDpar#parent@W16 K=2
+  SHORT p0 C4-JT#parent@W1 K=2
+  SHORT p0 C4-JT#parent@W8 K=2
+  SHORT p0 C4-JT#parent@W16 K=2
+  SHORT p0 C4-JT#tip@W1 K=1
+  SHORT p0 C4-JT#tip@W8 K=1
+  SHORT p0 C4-JT#tip@W16 K=1
+  SHORT p0 C4-jolt56#j56@W1 K=2
+  SHORT p0 C4-jolt56#j56@W2 K=2
+  SHORT p0 C4-jolt56#j56@W4 K=1
+  SHORT p0 C4-jolt56#j56@W8 K=0
+  SHORT p0 C4-rung#tip@W16 K=2
+used hashes: {('runner', '0x30c5438bc6ad9ffa'): 222, ('jolt', '0xb8522b4e3fc62cfe'): 38}
+used jolt processes: 38
+void_steps over used runner: Counter({0: 222})
+sleeping over used runner: Counter({False: 222})
+top other process on unclean runs: [('Telegram.exe', 47), ('browser.exe', 41), ('claude.exe', 24), ('CurseForge.exe', 4), ('gh.exe', 1), ('explorer.exe', 1)]

@@ -1,0 +1,116 @@
+records 1107: processes 848, warm-ups 18, passes done 17, voided passes 0, blocks skipped []
+incomplete passes (process records, no pass_done / voided_pass): 1
+INCOMPLETE C4-BR-p0 (run 191354, attempt 0): 8 process record(s), no pass_done: cut by the cutoff / the STOP flag or the driver died; a cut inside the re-run stage leaves NO passcell records; --resume re-runs the pass whole - use passes with a pass_done record only
+block          row                          bin     W   n rerun valid clean before after build witness hang notmeas void
+C4-AB          C4-rung                      tip    16  11     2    11     8      0     0     0       3    0       0    0
+C4-AB          C4-JDpar                     parent  16  12     3    12     8      0     1     0       3    0       0    0
+C4-AB          C4-JDap                      tip    16  11     2    11     8      0     0     0       3    0       0    0
+C4-AB          C4-JD                        tip    16  11     2    11     9      0     0     0       2    0       0    0
+C4-AB          C4-jolt56                    j56    16  12     3    12     9      0     1     0       3    0       0    0
+C4-AB          C4-JT                        tip    16  12     3    12     7      0     0     0       5    0       0    0
+C4-AB          C4-JT                        parent  16  14     5    14     8      0     1     0       6    0       0    0
+C4-AB          C4-JA                        tip    16  13     4    13     8      0     3     0       5    0       0    0
+C4-AB          C4-JA                        parent  16  12     3    12     8      0     2     0       4    0       0    0
+C4-AB          C4-rung                      tip     8  16     7    16     9      0     4     0       4    0       0    0
+C4-AB          C4-JDpar                     parent   8  10     1    10     7      0     0     0       3    0       0    0
+C4-AB          C4-JDap                      tip     8  11     2    11     7      0     1     0       3    0       0    0
+C4-AB          C4-JD                        tip     8  11     2    11     7      0     2     0       3    0       0    0
+C4-AB          C4-jolt56                    j56     8  11     2    11     6      0     2     0       4    0       0    0
+C4-AB          C4-JT                        tip     8  14     5    14     7      0     2     0       6    0       0    0
+C4-AB          C4-JT                        parent   8  11     2    11     8      0     2     0       1    0       0    0
+C4-AB          C4-JA                        tip     8  10     1    10     7      0     0     0       3    0       0    0
+C4-AB          C4-JA                        parent   8   9     0     9     7      0     1     0       2    0       0    0
+C4-AB          C4-JDpar                     parent   4  10     1    10     7      0     3     0       2    0       0    0
+C4-AB          C4-JDap                      tip     4  11     2    11     7      0     0     0       4    0       0    0
+C4-AB          C4-JD                        tip     4  10     1    10     7      0     1     0       3    0       0    0
+C4-AB          C4-jolt56                    j56     4  10     1    10     7      0     1     0       2    0       0    0
+C4-AB          C4-JDpar                     parent   2  11     2    11     8      0     0     0       3    0       0    0
+C4-AB          C4-JDap                      tip     2  11     2    11     8      0     0     0       3    0       0    0
+C4-AB          C4-JD                        tip     2  10     1    10     8      0     1     0       2    0       0    0
+C4-AB          C4-jolt56                    j56     2  10     1    10     8      0     1     0       2    0       0    0
+C4-AB          C4-JDpar                     parent   1  10     1    10     8      0     1     0       2    0       0    0
+C4-AB          C4-JDap                      tip     1  11     2    11     7      0     1     0       4    0       0    0
+C4-AB          C4-JD                        tip     1  11     2    11     7      0     1     0       4    0       0    0
+C4-AB          C4-jolt56                    j56     1  11     2    11     8      0     1     0       2    0       0    0
+C4-AB          C4-JT                        tip     1  10     1    10     7      0     1     0       2    0       0    0
+C4-AB          C4-JT                        parent   1  12     3    12     8      0     3     0       3    0       0    0
+C4-AB          C4-JA                        tip     1  11     2    11     9      0     0     0       2    0       0    0
+C4-AB          C4-JA                        parent   1   9     0     9     8      0     1     0       0    0       0    0
+C4-RAPIER      RP-M                         rs4    16  10     1    10     9      0     0     0       1    0       0    0
+C4-RAPIER      RP-M                         rs8    16  14     5    14     9      0     1     0       5    0       0    0
+C4-RAPIER      RP-D                         rs4    16   9     0     9     9      0     0     0       0    0       0    0
+C4-RAPIER      RP-D                         rs8    16  13     4    13     9      0     2     0       4    0       0    0
+C4-RAPIER      RP-M                         rs4     8   9     0     9     9      0     0     0       0    0       0    0
+C4-RAPIER      RP-M                         rs8     8  10     1    10     9      0     0     0       1    0       0    0
+C4-RAPIER      RP-D                         rs4     8  14     5    14     9      0     1     0       5    0       0    0
+C4-RAPIER      RP-D                         rs8     8  12     3    12     9      0     1     0       3    0       0    0
+C4-RAPIER      RP-M                         rs4     4  10     1    10     9      0     0     0       1    0       0    0
+C4-RAPIER      RP-M                         rs8     4  12     3    12     9      0     0     0       3    0       0    0
+C4-RAPIER      RP-D                         rs4     4  13     4    13     9      0     1     0       4    0       0    0
+C4-RAPIER      RP-D                         rs8     4  10     1    10     9      0     0     0       1    0       0    0
+C4-RAPIER      RP-M                         rs4     2  11     2    11     9      0     1     0       2    0       0    0
+C4-RAPIER      RP-M                         rs8     2  10     1    10     9      0     0     0       1    0       0    0
+C4-RAPIER      RP-D                         rs4     2  10     1    10     9      0     1     0       0    0       0    0
+C4-RAPIER      RP-D                         rs8     2   9     0     9     9      0     0     0       0    0       0    0
+C4-RAPIER      RP-M                         rs4     1   9     0     9     9      0     0     0       0    0       0    0
+C4-RAPIER      RP-M                         rs8     1  10     1    10     9      0     0     0       1    0       0    0
+C4-RAPIER      RP-D                         rs4     1   9     0     9     9      0     0     0       0    0       0    0
+C4-RAPIER      RP-D                         rs8     1  10     1    10     9      0     1     0       0    0       0    0
+C4-G5          C4-Rap                       tip     8   9     0     9     9      0     0     0       0    0       0    0
+C4-G5          C4-R                         tip     8   9     0     9     9      0     0     0       0    0       0    0
+C4-G5          C4-JDap-armed                tip     8   9     0     9     9      0     0     0       0    0       0    0
+C4-G5          C4-JD-armed                  tip     8   9     0     9     9      0     0     0       0    0       0    0
+C4-G5          C4-S16ap                     tip     1  13     4    13     9      0     0     0       4    0       0    0
+C4-G5          C4-S16                       tip     1   9     0     9     9      0     0     0       0    0       0    0
+C4-G5          C4-Rap                       tip     1   9     0     9     9      0     0     0       0    0       0    0
+C4-G5          C4-R                         tip     1  10     1    10     9      0     1     0       1    0       0    0
+C4-G5          C4-JDap-armed                tip     1   9     0     9     9      0     0     0       0    0       0    0
+C4-G5          C4-JD-armed                  tip     1   9     0     9     9      0     0     0       0    0       0    0
+C4-BR          C4-BR                        g4rT    0   6     0     6     5      0     1     0       0    0       0    0
+C4-BR          C4-BR                        g4r8b   0   6     0     5     5      0     0     0       0    0       0    0
+C4-BR          C4-BR                        g4r7    0   5     0     5     5      0     0     0       0    0       0    0
+C4-CGU         C4-JDcgu                     tipcgu1  16  12     3    12     9      0     0     0       3    0       0    0
+C4-CGU         C4-JDcgu                     tip    16  16     7    16     9      0     0     0       7    0       0    0
+C4-CGU         C4-JDcgu                     tipcgu1   8  10     1    10     9      0     0     0       1    0       0    0
+C4-CGU         C4-JDcgu                     tip     8  10     1    10     9      0     0     0       1    0       0    0
+C4-CGU         C4-JDcgu                     tipcgu1   4   9     0     9     9      0     0     0       0    0       0    0
+C4-CGU         C4-JDcgu                     tip     4  11     2    11     9      0     0     0       2    0       0    0
+C4-CGU         C4-JDcgu                     tipcgu1   2  14     5    14     9      0     1     0       5    0       0    0
+C4-CGU         C4-JDcgu                     tip     2  10     1    10     9      0     0     0       1    0       0    0
+C4-CGU         C4-JDcgu                     tipcgu1   1  10     1    10     9      0     0     0       1    0       0    0
+C4-CGU         C4-JDcgu                     tip     1  11     2    11     9      0     0     0       2    0       0    0
+C4-G4          C4-G4                        g4rT    0   9     0     9     9      0     0     0       0    0       0    0
+C4-G4-kd       C4-G4-kd                     g4rT    0   3     0     3     3      0     0     0       0    0       0    0
+pass-cells (ruling 8): 229, every slot clean 199, short 30, gating (k_clean >= 3) 199, NOT gating 30; re-runs spent 135, deepest re-run 4
+SHORT C4-AB-p0 C4-JA#parent@W1: k_clean 2 of 3 (unclean rounds [2], 0 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JA#parent@W8: k_clean 1 of 3 (unclean rounds [1, 2], 0 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JA#parent@W16: k_clean 2 of 3 (unclean rounds [2], 2 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JA#tip@W8: k_clean 1 of 3 (unclean rounds [1, 2], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JA#tip@W16: k_clean 2 of 3 (unclean rounds [2], 2 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JD#tip@W1: k_clean 1 of 3 (unclean rounds [1, 2], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JD#tip@W2: k_clean 2 of 3 (unclean rounds [1], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JD#tip@W4: k_clean 1 of 3 (unclean rounds [1, 2], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JD#tip@W8: k_clean 1 of 3 (unclean rounds [0, 1], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JDap#tip@W1: k_clean 1 of 3 (unclean rounds [1, 2], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JDap#tip@W2: k_clean 2 of 3 (unclean rounds [1], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JDap#tip@W4: k_clean 1 of 3 (unclean rounds [1, 2], 0 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JDap#tip@W8: k_clean 1 of 3 (unclean rounds [1, 2], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JDap#tip@W16: k_clean 2 of 3 (unclean rounds [0], 2 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JDpar#parent@W1: k_clean 2 of 3 (unclean rounds [1], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JDpar#parent@W2: k_clean 2 of 3 (unclean rounds [1], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JDpar#parent@W4: k_clean 1 of 3 (unclean rounds [1, 2], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JDpar#parent@W8: k_clean 1 of 3 (unclean rounds [1, 2], 0 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JDpar#parent@W16: k_clean 2 of 3 (unclean rounds [2], 2 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JT#parent@W1: k_clean 2 of 3 (unclean rounds [1], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JT#parent@W8: k_clean 2 of 3 (unclean rounds [0], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JT#parent@W16: k_clean 2 of 3 (unclean rounds [0], 2 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JT#tip@W1: k_clean 1 of 3 (unclean rounds [1, 2], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JT#tip@W8: k_clean 1 of 3 (unclean rounds [0, 2], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-JT#tip@W16: k_clean 1 of 3 (unclean rounds [0, 1], 2 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-jolt56#j56@W1: k_clean 2 of 3 (unclean rounds [2], 0 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-jolt56#j56@W2: k_clean 2 of 3 (unclean rounds [1], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-jolt56#j56@W4: k_clean 1 of 3 (unclean rounds [0, 2], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-jolt56#j56@W8: k_clean 0 of 3 (unclean rounds [0, 1, 2], 1 re-runs)  -> does not gate
+SHORT C4-AB-p0 C4-rung#tip@W16: k_clean 2 of 3 (unclean rounds [0], 2 re-runs)  -> does not gate
+R4 pose compares: 13, equal 13, DIFFER 0, missing 0
+placement receipts: 847 of 847 launched processes carry the main-thread cycle fraction, 731 the top-CPU share estimate; 847 carry the per-CPU ranking

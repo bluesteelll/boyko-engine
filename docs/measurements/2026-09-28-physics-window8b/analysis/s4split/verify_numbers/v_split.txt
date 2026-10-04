@@ -1,0 +1,111 @@
+== units: CSV [0,500) per wave (ticks / ticks_per_ns) vs SUMMARY w8s fields, max rel diff over armed PARENT processes
+processes 36 {'first_ramp': '0.0e+00', 'first_tail': '0.0e+00', 'pass_ramp': '0.0e+00', 'ramp': '0.0e+00', 'tail': '0.0e+00', 'join': '0.0e+00', 'imb': '0.0e+00', 'np_ramp': '0.0e+00', 'np_tail': '0.0e+00', 'np_join': '0.0e+00', 'np_imb': '0.0e+00', 'ramp_helped': '0.0e+00'}
+raw CSV ramp per wave / SUMMARY ns ramp: min 3.2934 max 3.2937 (equals ticks_per_ns when the CSV is in ticks)
+ticks_per_ns range: 3.2933578912569184 3.293702333367463
+
+W1 SPLIT-J-T-a: every dispatch counter is 0 over [0,500) in 9 processes; the waves column (inline colour waves) reads 49404.0
+
+== SPLIT-J-T-a per wave, window [100..500), ns, median [min-max], n
+  W8 first_ramp       4117.328 [4059.697-4170.155] n 9
+  W8 first_tail       1038.513 [780.762-1188.148] n 9
+  W8 pass_ramp        2960.189 [2932.797-2978.482] n 9
+  W8 other_ramp       301.592 [298.413-312.578] n 9
+  W8 helped           96.000 [96.000-96.000] n 9
+  W8 waves            96.000 [96.000-96.000] n 9
+  W8 ramp_helped      633.780 [630.106-642.949] n 9
+  W8 ramp             633.780 [630.106-642.949] n 9
+  W8 tail             992.002 [954.492-1021.554] n 9
+  W8 join             273.574 [265.759-278.094] n 9
+  W8 imb              717.831 [688.543-747.008] n 9
+  W8 np_ramp          835.353 [795.021-929.679] n 9
+  W8 np_tail          10614.564 [10096.701-11766.519] n 9
+  W8 np_join          2537.144 [2301.363-2849.823] n 9
+  W8 np_imb           8100.232 [7744.738-8959.852] n 9
+  W8 np_route_worker  400.000 [400.000-400.000] n 9
+  W8 route_ext        0.000 [0.000-0.000] n 9
+  W8 inflight         7.998 [7.997-7.999] n 9
+  W8 lanes            7.998 [7.997-7.999] n 9
+  W16 first_ramp       4195.062 [4151.699-4248.430] n 9
+  W16 first_tail       1713.490 [1596.536-1808.750] n 9
+  W16 pass_ramp        2871.512 [2833.781-2903.576] n 9
+  W16 other_ramp       352.761 [345.231-358.696] n 9
+  W16 helped           96.000 [96.000-96.000] n 9
+  W16 waves            96.000 [96.000-96.000] n 9
+  W16 ramp_helped      665.887 [660.354-673.782] n 9
+  W16 ramp             665.887 [660.354-673.782] n 9
+  W16 tail             1602.621 [1552.409-1670.648] n 9
+  W16 join             460.536 [453.994-471.821] n 9
+  W16 imb              1142.174 [1088.566-1198.827] n 9
+  W16 np_ramp          978.400 [946.676-1060.301] n 9
+  W16 np_tail          11025.508 [10291.992-11476.699] n 9
+  W16 np_join          2208.610 [2029.229-2358.504] n 9
+  W16 np_imb           8794.278 [8184.212-9143.207] n 9
+  W16 np_route_worker  400.000 [400.000-400.000] n 9
+  W16 route_ext        0.000 [0.000-0.000] n 9
+  W16 inflight         14.514 [14.394-14.542] n 9
+  W16 lanes            15.355 [15.275-15.397] n 9
+
+== SPLIT-J-T-a per wave, window [0..500), ns, median [min-max], n
+  W8 first_ramp       4133.999 [4083.252-4180.925] n 9
+  W8 first_tail       1047.783 [838.103-1238.929] n 9
+  W8 pass_ramp        2962.182 [2924.929-2981.375] n 9
+  W8 other_ramp       304.575 [301.191-316.321] n 9
+  W8 helped           98.808 [98.808-98.808] n 9
+  W8 waves            98.808 [98.808-98.808] n 9
+  W8 ramp_helped      626.340 [622.050-637.824] n 9
+  W8 ramp             626.340 [622.050-637.824] n 9
+  W8 tail             982.823 [947.145-1012.906] n 9
+  W8 join             276.090 [268.085-280.044] n 9
+  W8 imb              706.733 [679.059-735.810] n 9
+  W8 np_ramp          934.391 [892.099-1000.357] n 9
+  W8 np_tail          14270.055 [13435.677-14658.399] n 9
+  W8 np_join          2651.640 [2499.355-2924.059] n 9
+  W8 np_imb           11455.979 [10784.036-11968.111] n 9
+  W8 np_route_worker  500.000 [500.000-500.000] n 9
+  W8 route_ext        0.000 [0.000-0.000] n 9
+  W8 inflight         7.942 [7.941-7.943] n 9
+  W8 lanes            7.942 [7.942-7.943] n 9
+  W16 first_ramp       4232.074 [4190.119-4267.801] n 9
+  W16 first_tail       1721.020 [1584.302-1889.706] n 9
+  W16 pass_ramp        2881.461 [2859.634-2921.537] n 9
+  W16 other_ramp       357.215 [350.625-364.402] n 9
+  W16 helped           98.808 [98.808-98.808] n 9
+  W16 waves            98.808 [98.808-98.808] n 9
+  W16 ramp_helped      663.289 [659.804-671.442] n 9
+  W16 ramp             663.289 [659.804-671.442] n 9
+  W16 tail             1606.673 [1564.632-1687.765] n 9
+  W16 join             466.077 [459.893-478.070] n 9
+  W16 imb              1142.597 [1093.684-1209.695] n 9
+  W16 np_ramp          1104.681 [1068.827-1245.829] n 9
+  W16 np_tail          14515.154 [13443.049-14942.819] n 9
+  W16 np_join          2531.176 [2366.970-2632.726] n 9
+  W16 np_imb           11934.227 [11076.079-12404.728] n 9
+  W16 np_route_worker  500.000 [500.000-500.000] n 9
+  W16 route_ext        0.000 [0.000-0.000] n 9
+  W16 inflight         14.262 [14.136-14.283] n 9
+  W16 lanes            15.087 [14.964-15.121] n 9
+
+== D(W), omega; window [100..500) (ms, medians over K=9)
+  T_d {1: 4.1755, 8: 1.948, 16: 2.185} T_a {1: 4.2179, 8: 2.0377, 16: 2.2879}
+  W8: D = [+0.0897] - [+0.0424] - dr 0.0272 - du 0.0002 = +0.0200 ms (0.208 us/wave); r 0.02990 (col 0.02990) u 0.01099 (col 0.01099)
+      L_wide 0.3195 ms, waves 96.00, omega 3.328 us, after D 3.120 us
+  W16: D = [+0.1029] - [+0.0424] - dr 0.0374 - du 0.0005 = +0.0226 ms (0.235 us/wave); r 0.04017 (col 0.04017) u 0.01128 (col 0.01128)
+      L_wide 0.6505 ms, waves 96.00, omega 6.776 us, after D 6.541 us
+
+== serial stages, SPLIT-J-T-a W8 [100,500) (ms)
+  setup      0.2988
+  pc         0.2582
+  warm       0.3079
+  bp         0.2655
+  bp_query   0.2078
+  graph      0.1195
+  integ_grp  0.1218
+  narrow     0.0479
+  np_ser     0.0352
+
+== D(W), omega; window [0..500) (ms, medians over K=9)
+  T_d {1: 4.3986, 8: 1.9909, 16: 2.2239} T_a {1: 4.4517, 8: 2.0852, 16: 2.3288}
+  W8: D = [+0.0942] - [+0.0531] - dr 0.0276 - du 0.0001 = +0.0134 ms (0.136 us/wave); r 0.03034 (col 0.03034) u 0.01065 (col 0.01065)
+      L_wide 0.3231 ms, waves 98.81, omega 3.270 us, after D 3.135 us
+  W16: D = [+0.1049] - [+0.0531] - dr 0.0379 - du 0.0005 = +0.0134 ms (0.136 us/wave); r 0.04068 (col 0.04068) u 0.01099 (col 0.01099)
+      L_wide 0.6612 ms, waves 98.81, omega 6.691 us, after D 6.556 us

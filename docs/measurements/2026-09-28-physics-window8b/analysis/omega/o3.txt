@@ -1,0 +1,72 @@
+# o3 v1 continuity; window 8 micro: 37 processes, 36 used, 0 dropped slots; window 8 exe sha ffcac12f8b1f
+window 8b omega-v1-cont: 8 used (planned 12), dropped slots 4
+
+## omega_b v1, route worker (ns); window 8 rows omega-b-s{36,72}-worker, 8b rows omega1-s{36,72}-worker
+  P2: w8 region36 16000 [IQR 1075, SE 393, 14900-16900] n=6; region72 28300 [IQR 1675, SE 868, 27200-31800] n=6
+       8b region36 15250 [IQR 650, SE 815, 14600-15900] n=2; region72 31200 [IQR 1100, SE 1379, 30100-32300] n=2
+       slope w8 341.7 [worst pairing 286.1..469.4] | 8b 443.1 [worst pairing 394.4..491.7] | 8b/w8 1.297 | paired per-round slope w8 353 [IQR 64, SE 33, 292-469] n=6 | 8b 443 [IQR 12, SE 16, 431-456] n=2
+       region36 8b vs w8: B-A -750 (-4.7 %) n/n/n bars r 30.3 / i 15.9 / s 11.8 % (K>=3 guard) | guard waived n/n/n
+       region72 8b vs w8: B-A +2900 (+10.2 %) n/n/n bars r 35.4 / i 13.8 / s 10.8 % (K>=3 guard) | guard waived n/n/n
+       paired slope 8b vs w8: B-A +90 (+25.6 %) n/n/n bars r 101.4 / i 36.7 / s 20.1 % | guard waived n/n/Y
+  P4: w8 region36 39900 [IQR 10200, SE 3558, 38500-52900] n=6; region72 82600 [IQR 14525, SE 6268, 73300-105800] n=6
+       8b region36 44500 [IQR 2500, SE 3133, 42000-47000] n=2; region72 86200 [IQR 7200, SE 9024, 79000-93400] n=2
+       slope w8 1186.1 [worst pairing 566.7..1869.4] | 8b 1158.3 [worst pairing 888.9..1427.8] | 8b/w8 0.977 | paired per-round slope w8 1079 [IQR 467, SE 230, 567-1844] n=6 | 8b 1158 [IQR 131, SE 164, 1028-1289] n=2
+       region36 8b vs w8: B-A +4600 (+11.5 %) n/n/n bars r 75.6 / i 52.3 / s 22.7 % (K>=3 guard) | guard waived n/n/n
+       region72 8b vs w8: B-A +3600 (+4.4 %) n/n/n bars r 85.5 / i 38.9 / s 25.9 % (K>=3 guard) | guard waived n/n/n
+       paired slope 8b vs w8: B-A +79 (+7.3 %) n/n/n bars r 241.1 / i 89.4 / s 51.2 % | guard waived n/n/n
+  P8: w8 region36 118650 [IQR 23875, SE 7128, 101800-132700] n=6; region72 226650 [IQR 40175, SE 14856, 200500-272200] n=6
+       8b region36 110400 [IQR 600, SE 752, 109800-111000] n=2; region72 218200 [IQR 1400, SE 1755, 216800-219600] n=2
+       slope w8 3000.0 [worst pairing 1883.3..4733.3] | 8b 2994.4 [worst pairing 2938.9..3050.0] | 8b/w8 0.998 | paired per-round slope w8 3453 [IQR 715, SE 401, 1883-4031] n=6 | 8b 2994 [IQR 56, SE 70, 2939-3050] n=2
+       region36 8b vs w8: B-A -8250 (-7.0 %) n/n/n bars r 52.1 / i 40.3 / s 12.1 % (K>=3 guard) | guard waived n/n/n
+       region72 8b vs w8: B-A -8450 (-3.7 %) n/n/n bars r 63.3 / i 35.5 / s 13.2 % (K>=3 guard) | guard waived n/n/n
+       paired slope 8b vs w8: B-A -458 (-13.3 %) n/n/n bars r 124.6 / i 41.6 / s 23.7 % | guard waived n/n/n
+  P16: w8 region36 217450 [IQR 12125, SE 4742, 198000-218500] n=6; region72 399200 [IQR 32550, SE 10652, 380700-430700] n=6
+       8b region36 210800 [IQR 5600, SE 7018, 205200-216400] n=2; region72 424500 [IQR 20000, SE 25066, 404500-444500] n=2
+       slope w8 5048.6 [worst pairing 4505.6..6463.9] | 8b 5936.1 [worst pairing 5225.0..6647.2] | 8b/w8 1.176 | paired per-round slope w8 5311 [IQR 926, SE 358, 4517-6344] n=6 | 8b 5936 [IQR 711, SE 891, 5225-6647] n=2
+       region36 8b vs w8: B-A -6650 (-3.1 %) n/n/n bars r 21.6 / i 12.4 / s 8.0 % (K>=3 guard) | guard waived n/n/n
+       region72 8b vs w8: B-A +25300 (+6.3 %) n/n/n bars r 31.3 / i 18.8 / s 13.0 % (K>=3 guard) | guard waived n/n/n
+       paired slope 8b vs w8: B-A +625 (+11.8 %) n/n/n bars r 83.9 / i 42.3 / s 32.9 % | guard waived n/n/n
+
+## omega_b v1, route external (ns); window 8 rows omega-b-s{36,72}-external, 8b rows omega1-s{36,72}-external
+  P2: w8 region36 15350 [IQR 625, SE 209, 15200-16100] n=6; region72 29850 [IQR 2850, SE 910, 28400-32600] n=6
+       8b region36 16500 [IQR 400, SE 501, 16100-16900] n=2; region72 33700 [IQR 700, SE 877, 33000-34400] n=2
+       slope w8 402.8 [worst pairing 341.7..483.3] | 8b 477.8 [worst pairing 447.2..508.3] | 8b/w8 1.186 | paired per-round slope w8 407 [IQR 62, SE 21, 361-461] n=6 | 8b 486 [IQR 0, SE 0, 486-486] n=1
+       region36 8b vs w8: B-A +1150 (+7.5 %) n/n/n bars r 15.2 / i 9.5 / s 6.7 % (K>=3 guard) | guard waived n/n/Y
+       region72 8b vs w8: B-A +3850 (+12.9 %) n/n/n bars r 29.3 / i 19.5 / s 8.0 % (K>=3 guard) | guard waived n/n/Y
+       paired slope 8b vs w8: B-A +79 (+19.5 %) n/n/n bars r 49.1 / i 30.7 / s 10.3 % | guard waived n/n/n
+  P4: w8 region36 41600 [IQR 4975, SE 1813, 38500-47500] n=6; region72 77150 [IQR 8050, SE 2724, 72600-85400] n=6
+       8b region36 41450 [IQR 150, SE 188, 41300-41600] n=2; region72 100200 [IQR 8200, SE 10277, 92000-108400] n=2
+       slope w8 987.5 [worst pairing 697.2..1302.8] | 8b 1631.9 [worst pairing 1400.0..1863.9] | 8b/w8 1.653 | paired per-round slope w8 1011 [IQR 205, SE 92, 761-1250] n=6 | 8b 1400 [IQR 0, SE 0, 1400-1400] n=1
+       region36 8b vs w8: B-A -150 (-0.4 %) n/n/n bars r 43.3 / i 23.9 / s 8.8 % (K>=3 guard) | guard waived n/n/n
+       region72 8b vs w8: B-A +23050 (+29.9 %) n/n/n bars r 46.6 / i 26.5 / s 21.7 % (K>=3 guard) | guard waived n/Y/Y
+       paired slope 8b vs w8: B-A +389 (+38.5 %) n/n/n bars r 96.7 / i 40.5 / s 18.1 % | guard waived n/n/n
+  P8: w8 region36 110500 [IQR 10650, SE 3936, 97000-116400] n=6; region72 212200 [IQR 12100, SE 13094, 199600-270300] n=6
+       8b region36 108150 [IQR 2150, SE 2695, 106000-110300] n=2; region72 223150 [IQR 1550, SE 1943, 221600-224700] n=2
+       slope w8 2825.0 [worst pairing 2311.1..4813.9] | 8b 3194.4 [worst pairing 3091.7..3297.2] | 8b/w8 1.131 | paired per-round slope w8 2974 [IQR 316, SE 328, 2481-4325] n=6 | 8b 3211 [IQR 0, SE 0, 3211-3211] n=1
+       region36 8b vs w8: B-A -2350 (-2.1 %) n/n/n bars r 36.0 / i 19.7 / s 8.7 % (K>=3 guard) | guard waived n/n/n
+       region72 8b vs w8: B-A +10950 (+5.2 %) n/n/n bars r 66.7 / i 11.5 / s 12.5 % (K>=3 guard) | guard waived n/n/n
+       paired slope 8b vs w8: B-A +238 (+8.0 %) n/n/n bars r 124.1 / i 21.3 / s 22.0 % | guard waived n/n/n
+  P16: w8 region36 198100 [IQR 18275, SE 6018, 191700-217800] n=6; region72 394800 [IQR 29475, SE 10897, 380100-430800] n=6
+       8b region36 222950 [IQR 1250, SE 1567, 221700-224200] n=2; region72 400450 [IQR 9850, SE 12345, 390600-410300] n=2
+       slope w8 5463.9 [worst pairing 4508.3..6641.7] | 8b 4930.6 [worst pairing 4622.2..5238.9] | 8b/w8 0.902 | paired per-round slope w8 5535 [IQR 395, SE 345, 4508-6572] n=6 | 8b 4622 [IQR 0, SE 0, 4622-4622] n=1
+       region36 8b vs w8: B-A +24850 (+12.5 %) n/n/n bars r 26.4 / i 18.5 / s 6.2 % (K>=3 guard) | guard waived n/n/Y
+       region72 8b vs w8: B-A +5650 (+1.4 %) n/n/n bars r 27.5 / i 15.7 / s 8.3 % (K>=3 guard) | guard waived n/n/n
+       paired slope 8b vs w8: B-A -912 (-16.5 %) n/n/n bars r 74.6 / i 14.3 / s 12.5 % | guard waived n/n/n
+
+## omega(W, gap) 8b (omega-wgap-*) vs window 8 (omega-*), scope_ns_median cells (post hoc)
+  worker W8 gap  0: w8 7600 [IQR 225, SE 147, 6900-7600] n=6 | 8b 7100 [IQR 600, SE 155, 6400-7400] n=9 | B-A -500 (-6.6 %) n/n/Y bars r 33.7 / i 17.9 / s 5.8 %
+  worker W8 gap  5: w8 2550 [IQR 325, SE 157, 2400-3200] n=6 | 8b 2800 [IQR 300, SE 300, 2600-4900] n=9 | B-A +250 (+9.8 %) n/n/n bars r 175.9 / i 33.3 / s 24.7 %
+  worker W8 gap 20: w8 9700 [IQR 75, SE 84, 9500-10000] n=6 | 8b 9300 [IQR 200, SE 218, 8800-10700] n=9 | B-A -400 (-4.1 %) n/n/n bars r 42.1 / i 4.6 / s 5.0 %
+  worker W8 gap 80: w8 9800 [IQR 150, SE 106, 9400-10000] n=6 | 8b 9100 [IQR 400, SE 215, 8800-10500] n=9 | B-A -700 (-7.1 %) n/n/Y bars r 39.3 / i 9.3 / s 5.2 %
+  worker W16 gap  0: w8 10600 [IQR 75, SE 26, 10600-10700] n=6 | 8b 10500 [IQR 400, SE 115, 9900-10800] n=9 | B-A -100 (-0.9 %) n/n/n bars r 17.2 / i 7.7 / s 2.2 %
+  worker W16 gap  5: w8 11250 [IQR 100, SE 54, 11100-11400] n=6 | 8b 11100 [IQR 300, SE 152, 10200-11400] n=9 | B-A -150 (-1.3 %) n/n/n bars r 22.3 / i 5.7 / s 2.9 %
+  worker W16 gap 20: w8 20100 [IQR 0, SE 50, 19900-20200] n=6 | 8b 20600 [IQR 200, SE 310, 20200-22700] n=9 | B-A +500 (+2.5 %) n/Y/n bars r 24.5 / i 1.9 / s 3.1 %
+  worker W16 gap 80: w8 20100 [IQR 75, SE 39, 20000-20200] n=6 | 8b 20700 [IQR 300, SE 140, 20300-21300] n=9 | B-A +600 (+3.0 %) n/n/Y bars r 9.9 / i 3.0 / s 1.4 %
+  external W8 gap  0: w8 4900 [IQR 150, SE 77, 4700-5100] n=6 | 8b 4700 [IQR 0, SE 72, 4500-5100] n=9 | B-A -200 (-4.1 %) n/n/n bars r 30.3 / i 6.1 / s 4.4 %
+  external W8 gap  5: w8 4150 [IQR 650, SE 193, 3600-4400] n=6 | 8b 4300 [IQR 200, SE 122, 3700-4600] n=9 | B-A +150 (+3.6 %) n/n/n bars r 56.9 / i 32.7 / s 10.9 %
+  external W8 gap 20: w8 10900 [IQR 75, SE 39, 10800-11000] n=6 | 8b 11000 [IQR 200, SE 47, 10800-11100] n=9 | B-A +100 (+0.9 %) n/n/n bars r 6.6 / i 3.9 / s 1.1 %
+  external W8 gap 80: w8 11000 [IQR 75, SE 39, 10900-11100] n=6 | 8b 10900 [IQR 100, SE 42, 10800-11100] n=9 | B-A -100 (-0.9 %) n/n/n bars r 6.6 / i 2.3 / s 1.0 %
+  external W16 gap  0: w8 5200 [IQR 75, SE 53, 5000-5300] n=6 | 8b 5200 [IQR 100, SE 47, 5000-5300] n=9 | B-A +0 (+0.0 %) n/n/n bars r 16.3 / i 4.8 / s 2.7 %
+  external W16 gap  5: w8 6900 [IQR 150, SE 72, 6700-7100] n=6 | 8b 6600 [IQR 200, SE 57, 6400-6800] n=9 | B-A -300 (-4.3 %) n/n/Y bars r 16.8 / i 7.5 / s 2.7 %
+  external W16 gap 20: w8 21200 [IQR 550, SE 164, 20800-21500] n=6 | 8b 21600 [IQR 300, SE 233, 20800-22700] n=9 | B-A +400 (+1.9 %) n/n/n bars r 18.8 / i 5.9 / s 2.7 %
+  external W16 gap 80: w8 21150 [IQR 375, SE 117, 21000-21500] n=6 | 8b 22200 [IQR 1000, SE 291, 21400-23500] n=9 | B-A +1050 (+5.0 %) n/n/Y bars r 19.5 / i 9.7 / s 2.8 %

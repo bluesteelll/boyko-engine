@@ -1,0 +1,17 @@
+# o1c: dropped gap-row slots put back (post hoc)
+slot ('omega-v2', 0, 1, 'omega2-gap-external') original (['witness 4.03']): {'spin@20': 23286, 'spin@80': 83586, 'park@20': 29356, 'park@80': 89400}
+slot ('omega-v2', 0, 1, 'omega2-gap-external') rerun (['receipt after 7.54', 'witness 2.33']): {'spin@20': 22697, 'spin@80': 82881, 'park@20': 29797, 'park@80': 89939}
+slot ('omega-v2', 0, 2, 'omega2-gap-worker') original (['receipt after 7.27', 'witness 5.97']): {'spin@20': 23567, 'spin@80': 83344, 'park@20': 28672, 'park@80': 89547}
+slot ('omega-v2', 0, 2, 'omega2-gap-worker') rerun (['witness 2.79']): {'spin@20': 23228, 'spin@80': 82842, 'park@20': 28989, 'park@80': 89439}
+
+## with the dropped slots filled by their original
+worker gap 20: spin 23156 [IQR 144, SE 74, 22950-23567] n=9 | park 29156 [IQR 111, SE 71, 28672-29208] n=9 | B-A +6000 (+25.9 %) Y/Y/Y bars r 6.5 / i 1.5 / s 0.8 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+worker gap 80: spin 83128 [IQR 42, SE 36, 83019-83344] n=9 | park 89442 [IQR 158, SE 52, 89281-89656] n=9 | B-A +6314 (+7.6 %) Y/Y/Y bars r 1.1 / i 0.4 / s 0.1 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+external gap 20: spin 22781 [IQR 669, SE 156, 22556-23508] n=9 | park 28989 [IQR 117, SE 59, 28883-29356] n=9 | B-A +6208 (+27.3 %) Y/Y/Y bars r 9.0 / i 5.9 / s 1.4 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+external gap 80: spin 83203 [IQR 661, SE 140, 82717-83586] n=9 | park 89328 [IQR 83, SE 31, 89206-89414] n=9 | B-A +6125 (+7.4 %) Y/Y/Y bars r 2.1 / i 1.6 / s 0.3 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+
+## with the dropped slots filled by their rerun
+worker gap 20: spin 23156 [IQR 144, SE 43, 22950-23244] n=9 | park 29156 [IQR 111, SE 38, 28961-29208] n=9 | B-A +6000 (+25.9 %) Y/Y/Y bars r 3.1 / i 1.5 / s 0.5 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+worker gap 80: spin 83125 [IQR 64, SE 44, 82842-83172] n=9 | park 89439 [IQR 117, SE 49, 89281-89656] n=9 | B-A +6314 (+7.6 %) Y/Y/Y bars r 1.2 / i 0.3 / s 0.2 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+external gap 20: spin 22697 [IQR 594, SE 150, 22556-23508] n=9 | park 28989 [IQR 117, SE 117, 28883-29797] n=9 | B-A +6292 (+27.7 %) Y/Y/Y bars r 10.5 / i 5.3 / s 1.6 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+external gap 80: spin 83047 [IQR 503, SE 126, 82717-83508] n=9 | park 89328 [IQR 83, SE 93, 89206-89939] n=9 | B-A +6281 (+7.6 %) Y/Y/Y bars r 2.5 / i 1.2 / s 0.4 % | pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG

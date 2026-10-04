@@ -1,0 +1,396 @@
+# S4-AB (block S4-AB, K = 9 = 3 passes x 3 rounds; B = TIP, A = PARENT; flags r/i/s)
+
+## S4-JT disarmed wall, window [0..500) ms
+W1: gain PARENT-TIP -0.0283 ms (-0.64 %)
+  A 4.4217 [4.3833-4.5336] K=9 (IQR 0.0920, SE 0.0235; r 3.40 / i 2.08 / s 0.53 %)
+  B 4.4500 [4.3918-4.5231] K=9 (IQR 0.0349, SE 0.0166; r 2.95 / i 0.78 / s 0.37 %)
+  pooled B/A 1.0064 (+0.64 %, d +0.0283) n/n/n bars r 9.00 / i 4.45 / s 1.30 %
+  pass 0 (K=3/3): A 4.4217 B 4.4376  B/A 1.0036 (+0.36 %, d +0.0159) n/n/n bars r 2.96 / i 1.48 / s 1.10 %
+  pass 1 (K=3/3): A 4.3837 B 4.4500  B/A 1.0151 (+1.51 %, d +0.0664) n/n/n bars r 4.36 / i 2.18 / s 1.66 %
+  pass 2 (K=3/3): A 4.5070 B 4.4658  B/A 0.9908 (-0.92 %, d -0.0413) n/n/n bars r 3.57 / i 1.79 / s 1.30 %
+  -> NOT CLAIMED
+  TIP faster: NOT CLAIMED; TIP slower: not claimed slower
+W2: gain PARENT-TIP +0.0808 ms (+2.62 %)
+  A 3.0807 [3.0534-3.2259] K=9 (IQR 0.0369, SE 0.0234; r 5.60 / i 1.20 / s 0.76 %)
+  B 2.9998 [2.9650-3.0208] K=9 (IQR 0.0130, SE 0.0075; r 1.86 / i 0.43 / s 0.25 %)
+  pooled B/A 0.9738 (-2.62 %, d -0.0808) n/Y/Y bars r 11.80 / i 2.55 / s 1.60 %
+  pass 0 (K=3/3): A 3.0788 B 2.9961  B/A 0.9732 (-2.68 %, d -0.0826) n/Y/Y bars r 5.16 / i 2.58 / s 1.87 %
+  pass 1 (K=3/3): A 3.0807 B 2.9998  B/A 0.9738 (-2.62 %, d -0.0808) n/Y/Y bars r 3.21 / i 1.61 / s 1.18 %
+  pass 2 (K=3/3): A 3.1694 B 3.0032  B/A 0.9475 (-5.25 %, d -0.1663) n/Y/Y bars r 9.81 / i 4.90 / s 3.59 %
+  -> CLAIMED
+  TIP faster: CLAIMED; TIP slower: not claimed slower
+W4: gain PARENT-TIP +0.1549 ms (+6.58 %)
+  A 2.3529 [2.3376-2.4170] K=9 (IQR 0.0234, SE 0.0111; r 3.37 / i 0.99 / s 0.47 %)
+  B 2.1981 [2.1857-2.2100] K=9 (IQR 0.0159, SE 0.0039; r 1.11 / i 0.72 / s 0.18 %)
+  pooled B/A 0.9342 (-6.58 %, d -0.1549) n/Y/Y bars r 7.10 / i 2.46 / s 1.01 %
+  pass 0 (K=3/3): A 2.3403 B 2.2004  B/A 0.9402 (-5.98 %, d -0.1399) Y/Y/Y bars r 1.69 / i 0.84 / s 0.64 %
+  pass 1 (K=3/3): A 2.3438 B 2.1880  B/A 0.9335 (-6.65 %, d -0.1558) Y/Y/Y bars r 2.34 / i 1.17 / s 0.91 %
+  pass 2 (K=3/3): A 2.3869 B 2.2086  B/A 0.9253 (-7.47 %, d -0.1783) Y/Y/Y bars r 5.03 / i 2.52 / s 1.87 %
+  -> CLAIMED
+  TIP faster: CLAIMED; TIP slower: not claimed slower
+W8: gain PARENT-TIP +0.1705 ms (+8.58 %)
+  A 1.9859 [1.9780-2.0244] K=9 (IQR 0.0071, SE 0.0069; r 2.34 / i 0.36 / s 0.35 %)
+  B 1.8154 [1.7937-1.8472] K=9 (IQR 0.0230, SE 0.0070; r 2.94 / i 1.27 / s 0.39 %)
+  pooled B/A 0.9142 (-8.58 %, d -0.1705) Y/Y/Y bars r 7.52 / i 2.64 / s 1.04 %
+  pass 0 (K=3/3): A 1.9812 B 1.8262  B/A 0.9218 (-7.82 %, d -0.1550) Y/Y/Y bars r 5.88 / i 2.94 / s 2.14 %
+  pass 1 (K=3/3): A 1.9859 B 1.8118  B/A 0.9123 (-8.77 %, d -0.1741) Y/Y/Y bars r 1.21 / i 0.60 / s 0.44 %
+  pass 2 (K=3/3): A 2.0159 B 1.8348  B/A 0.9102 (-8.98 %, d -0.1810) Y/Y/Y bars r 4.26 / i 2.13 / s 1.66 %
+  -> CLAIMED (STRONG)
+  TIP faster: CLAIMED; TIP slower: not claimed slower
+W16: gain PARENT-TIP +0.1700 ms (+7.66 %)
+  A 2.2203 [2.2104-2.4401] K=9 (IQR 0.0332, SE 0.0305; r 10.34 / i 1.49 / s 1.37 %)
+  B 2.0502 [2.0357-2.0744] K=9 (IQR 0.0154, SE 0.0049; r 1.89 / i 0.75 / s 0.24 %)
+  pooled B/A 0.9234 (-7.66 %, d -0.1700) n/Y/Y bars r 21.03 / i 3.34 / s 2.79 %
+  pass 0 (K=3/3): A 2.2199 B 2.0502  B/A 0.9236 (-7.64 %, d -0.1696) Y/Y/Y bars r 1.79 / i 0.90 / s 0.70 %
+  pass 1 (K=3/3): A 2.2288 B 2.0466  B/A 0.9183 (-8.17 %, d -0.1822) Y/Y/Y bars r 4.68 / i 2.34 / s 1.75 %
+  pass 2 (K=3/3): A 2.2669 B 2.0587  B/A 0.9082 (-9.18 %, d -0.2082) n/n/Y bars r 19.96 / i 9.98 / s 7.56 %
+  -> NOT CLAIMED
+  TIP faster: NOT CLAIMED; TIP slower: not claimed slower
+
+## S4-JT-a armed wall, window [0..500) ms
+W8: gain PARENT-TIP +0.1781 ms
+  A 2.0806 [2.0746-2.1475] K=9 (IQR 0.0103, SE 0.0095; r 3.51 / i 0.50 / s 0.46 %)
+  B 1.9025 [1.8925-1.9318] K=9 (IQR 0.0171, SE 0.0058; r 2.07 / i 0.90 / s 0.30 %)
+  pooled B/A 0.9144 (-8.56 %, d -0.1781) Y/Y/Y bars r 8.14 / i 2.05 / s 1.09 %
+  pass 0 (K=3/3): A 2.0783 B 1.8942  B/A 0.9114 (-8.86 %, d -0.1841) Y/Y/Y bars r 3.38 / i 1.69 / s 1.37 %
+  pass 1 (K=3/3): A 2.0912 B 1.8983  B/A 0.9078 (-9.22 %, d -0.1929) Y/Y/Y bars r 7.51 / i 3.75 / s 2.95 %
+  pass 2 (K=3/3): A 2.0806 B 1.9059  B/A 0.9160 (-8.40 %, d -0.1747) Y/Y/Y bars r 1.66 / i 0.83 / s 0.63 %
+  -> CLAIMED (STRONG)
+W16: gain PARENT-TIP +0.1810 ms
+  A 2.3339 [2.3160-2.5028] K=9 (IQR 0.0205, SE 0.0278; r 8.00 / i 0.88 / s 1.19 %)
+  B 2.1529 [2.1367-2.1889] K=9 (IQR 0.0132, SE 0.0066; r 2.42 / i 0.62 / s 0.31 %)
+  pooled B/A 0.9225 (-7.75 %, d -0.1810) n/Y/Y bars r 16.73 / i 2.14 / s 2.46 %
+  pass 0 (K=3/3): A 2.3167 B 2.1390  B/A 0.9233 (-7.67 %, d -0.1776) Y/Y/Y bars r 2.39 / i 1.20 / s 0.98 %
+  pass 1 (K=3/3): A 2.3466 B 2.1529  B/A 0.9175 (-8.25 %, d -0.1937) n/Y/Y bars r 9.95 / i 4.97 / s 3.93 %
+  pass 2 (K=3/3): A 2.3278 B 2.1557  B/A 0.9261 (-7.39 %, d -0.1721) n/n/Y bars r 15.54 / i 7.77 / s 6.45 %
+  -> NOT CLAIMED
+
+## S4-JT-a phys_solve_build span (armed), window [0..500) ms
+W8: span gain PARENT-TIP +0.1894 ms
+  A 0.3038 [0.2999-0.3119] K=9 (IQR 0.0014, SE 0.0014; r 3.97 / i 0.45 / s 0.45 %)
+  B 0.1144 [0.1137-0.1155] K=9 (IQR 0.0006, SE 0.0002; r 1.59 / i 0.51 / s 0.19 %)
+  pooled B/A 0.3766 (-62.34 %, d -0.1894) Y/Y/Y bars r 8.55 / i 1.35 / s 0.97 %
+  pass 0 (K=3/3): A 0.3040 B 0.1140  B/A 0.3751 (-62.49 %, d -0.1900) Y/Y/Y bars r 1.44 / i 0.72 / s 0.52 %
+  pass 1 (K=3/3): A 0.3031 B 0.1146  B/A 0.3780 (-62.20 %, d -0.1885) Y/Y/Y bars r 8.03 / i 4.01 / s 3.01 %
+  pass 2 (K=3/3): A 0.3038 B 0.1147  B/A 0.3775 (-62.25 %, d -0.1891) Y/Y/Y bars r 2.52 / i 1.26 / s 0.94 %
+  -> CLAIMED (STRONG)
+    phys_sb_bodies_ns: PARENT 0.0039 TIP 0.0040 d +0.0000 ms
+    phys_sb_pa_ns: PARENT 0.0065 TIP 0.0062 d -0.0004 ms
+    phys_sb_pb_ns: PARENT 0.0314 TIP 0.0314 d -0.0000 ms
+    phys_sb_pc_ns: PARENT 0.2615 TIP 0.0706 d -0.1909 ms
+W16: span gain PARENT-TIP +0.1949 ms
+  A 0.3110 [0.3067-0.4428] K=9 (IQR 0.0130, SE 0.0229; r 43.76 / i 4.17 / s 7.36 %)
+  B 0.1161 [0.1157-0.1196] K=9 (IQR 0.0011, SE 0.0005; r 3.39 / i 0.91 / s 0.44 %)
+  pooled B/A 0.3733 (-62.67 %, d -0.1949) n/Y/Y bars r 87.79 / i 8.53 / s 14.75 %
+  pass 0 (K=3/3): A 0.3087 B 0.1158  B/A 0.3752 (-62.48 %, d -0.1929) Y/Y/Y bars r 9.66 / i 4.83 / s 3.80 %
+  pass 1 (K=3/3): A 0.3142 B 0.1170  B/A 0.3723 (-62.77 %, d -0.1972) n/Y/Y bars r 73.63 / i 36.81 / s 30.35 %
+  pass 2 (K=3/3): A 0.3091 B 0.1164  B/A 0.3767 (-62.33 %, d -0.1927) n/Y/Y bars r 87.94 / i 43.97 / s 36.48 %
+  -> CLAIMED
+    phys_sb_bodies_ns: PARENT 0.0040 TIP 0.0040 d +0.0000 ms
+    phys_sb_pa_ns: PARENT 0.0066 TIP 0.0063 d -0.0003 ms
+    phys_sb_pb_ns: PARENT 0.0311 TIP 0.0312 d +0.0000 ms
+    phys_sb_pc_ns: PARENT 0.2689 TIP 0.0721 d -0.1968 ms
+
+## S4-JT disarmed wall, window [100..500) ms
+W1: gain PARENT-TIP -0.0165 ms (-0.39 %)
+  A 4.1994 [4.1565-4.3054] K=9 (IQR 0.0818, SE 0.0222; r 3.55 / i 1.95 / s 0.53 %)
+  B 4.2159 [4.1636-4.2971] K=9 (IQR 0.0323, SE 0.0166; r 3.17 / i 0.77 / s 0.39 %)
+  pooled B/A 1.0039 (+0.39 %, d +0.0165) n/n/n bars r 9.51 / i 4.19 / s 1.32 %
+  pass 0 (K=3/3): A 4.1994 B 4.2085  B/A 1.0022 (+0.22 %, d +0.0092) n/n/n bars r 2.98 / i 1.49 / s 1.11 %
+  pass 1 (K=3/3): A 4.1570 B 4.2159  B/A 1.0142 (+1.42 %, d +0.0588) n/n/n bars r 4.62 / i 2.31 / s 1.82 %
+  pass 2 (K=3/3): A 4.2707 B 4.2408  B/A 0.9930 (-0.70 %, d -0.0299) n/n/n bars r 3.60 / i 1.80 / s 1.33 %
+  -> NOT CLAIMED
+  TIP faster: NOT CLAIMED; TIP slower: not claimed slower
+W2: gain PARENT-TIP +0.0837 ms (+2.83 %)
+  A 2.9584 [2.9283-3.0948] K=9 (IQR 0.0324, SE 0.0230; r 5.63 / i 1.10 / s 0.78 %)
+  B 2.8747 [2.8384-2.8987] K=9 (IQR 0.0125, SE 0.0079; r 2.10 / i 0.43 / s 0.27 %)
+  pooled B/A 0.9717 (-2.83 %, d -0.0837) n/Y/Y bars r 12.02 / i 2.36 / s 1.65 %
+  pass 0 (K=3/3): A 2.9503 B 2.8721  B/A 0.9735 (-2.65 %, d -0.0782) n/n/Y bars r 5.53 / i 2.76 / s 2.01 %
+  pass 1 (K=3/3): A 2.9584 B 2.8747  B/A 0.9717 (-2.83 %, d -0.0837) n/Y/Y bars r 3.53 / i 1.77 / s 1.29 %
+  pass 2 (K=3/3): A 3.0466 B 2.8749  B/A 0.9436 (-5.64 %, d -0.1717) n/Y/Y bars r 9.62 / i 4.81 / s 3.55 %
+  -> NOT CLAIMED
+  TIP faster: NOT CLAIMED; TIP slower: not claimed slower
+W4: gain PARENT-TIP +0.1547 ms (+6.78 %)
+  A 2.2828 [2.2559-2.3418] K=9 (IQR 0.0214, SE 0.0114; r 3.76 / i 0.94 / s 0.50 %)
+  B 2.1280 [2.1137-2.1395] K=9 (IQR 0.0108, SE 0.0039; r 1.21 / i 0.51 / s 0.18 %)
+  pooled B/A 0.9322 (-6.78 %, d -0.1547) n/Y/Y bars r 7.90 / i 2.13 / s 1.07 %
+  pass 0 (K=3/3): A 2.2692 B 2.1280  B/A 0.9378 (-6.22 %, d -0.1412) Y/Y/Y bars r 2.51 / i 1.26 / s 0.91 %
+  pass 1 (K=3/3): A 2.2693 B 2.1198  B/A 0.9341 (-6.59 %, d -0.1495) Y/Y/Y bars r 2.52 / i 1.26 / s 0.98 %
+  pass 2 (K=3/3): A 2.3183 B 2.1374  B/A 0.9220 (-7.80 %, d -0.1808) Y/Y/Y bars r 5.26 / i 2.63 / s 1.95 %
+  -> CLAIMED
+  TIP faster: CLAIMED; TIP slower: not claimed slower
+W8: gain PARENT-TIP +0.1691 ms (+8.71 %)
+  A 1.9428 [1.9356-1.9853] K=9 (IQR 0.0063, SE 0.0075; r 2.56 / i 0.32 / s 0.39 %)
+  B 1.7737 [1.7522-1.8004] K=9 (IQR 0.0191, SE 0.0064; r 2.72 / i 1.08 / s 0.36 %)
+  pooled B/A 0.9129 (-8.71 %, d -0.1691) Y/Y/Y bars r 7.46 / i 2.25 / s 1.06 %
+  pass 0 (K=3/3): A 1.9382 B 1.7842  B/A 0.9205 (-7.95 %, d -0.1540) Y/Y/Y bars r 5.42 / i 2.71 / s 2.00 %
+  pass 1 (K=3/3): A 1.9428 B 1.7717  B/A 0.9119 (-8.81 %, d -0.1711) Y/Y/Y bars r 1.16 / i 0.58 / s 0.44 %
+  pass 2 (K=3/3): A 1.9762 B 1.7902  B/A 0.9059 (-9.41 %, d -0.1860) Y/Y/Y bars r 4.64 / i 2.32 / s 1.78 %
+  -> CLAIMED (STRONG)
+  TIP faster: CLAIMED; TIP slower: not claimed slower
+W16: gain PARENT-TIP +0.1707 ms (+7.82 %)
+  A 2.1831 [2.1702-2.3903] K=9 (IQR 0.0172, SE 0.0293; r 10.08 / i 0.79 / s 1.34 %)
+  B 2.0124 [1.9982-2.0411] K=9 (IQR 0.0180, SE 0.0056; r 2.13 / i 0.89 / s 0.28 %)
+  pooled B/A 0.9218 (-7.82 %, d -0.1707) n/Y/Y bars r 20.61 / i 2.38 / s 2.74 %
+  pass 0 (K=3/3): A 2.1794 B 2.0124  B/A 0.9234 (-7.66 %, d -0.1670) Y/Y/Y bars r 2.22 / i 1.11 / s 0.82 %
+  pass 1 (K=3/3): A 2.1908 B 2.0070  B/A 0.9161 (-8.39 %, d -0.1838) Y/Y/Y bars r 4.46 / i 2.23 / s 1.76 %
+  pass 2 (K=3/3): A 2.2296 B 2.0203  B/A 0.9062 (-9.38 %, d -0.2092) n/n/Y bars r 19.44 / i 9.72 / s 7.32 %
+  -> NOT CLAIMED
+  TIP faster: NOT CLAIMED; TIP slower: not claimed slower
+
+## S4-JT-a armed wall, window [100..500) ms
+W8: gain PARENT-TIP +0.1790 ms
+  A 2.0339 [2.0296-2.0832] K=9 (IQR 0.0046, SE 0.0071; r 2.64 / i 0.23 / s 0.35 %)
+  B 1.8548 [1.8436-1.8990] K=9 (IQR 0.0132, SE 0.0079; r 2.99 / i 0.71 / s 0.42 %)
+  pooled B/A 0.9120 (-8.80 %, d -0.1790) Y/Y/Y bars r 7.97 / i 1.49 / s 1.10 %
+  pass 0 (K=3/3): A 2.0325 B 1.8483  B/A 0.9094 (-9.06 %, d -0.1842) Y/Y/Y bars r 5.04 / i 2.52 / s 2.00 %
+  pass 1 (K=3/3): A 2.0508 B 1.8548  B/A 0.9045 (-9.55 %, d -0.1959) Y/Y/Y bars r 6.80 / i 3.40 / s 2.67 %
+  pass 2 (K=3/3): A 2.0339 B 1.8633  B/A 0.9161 (-8.39 %, d -0.1706) Y/Y/Y bars r 1.48 / i 0.74 / s 0.54 %
+  -> CLAIMED (STRONG)
+W16: gain PARENT-TIP +0.1810 ms
+  A 2.2918 [2.2747-2.4581] K=9 (IQR 0.0181, SE 0.0269; r 8.00 / i 0.79 / s 1.17 %)
+  B 2.1108 [2.0982-2.1461] K=9 (IQR 0.0109, SE 0.0062; r 2.27 / i 0.52 / s 0.29 %)
+  pooled B/A 0.9210 (-7.90 %, d -0.1810) n/Y/Y bars r 16.63 / i 1.89 / s 2.42 %
+  pass 0 (K=3/3): A 2.2756 B 2.0993  B/A 0.9225 (-7.75 %, d -0.1763) Y/Y/Y bars r 2.21 / i 1.10 / s 0.90 %
+  pass 1 (K=3/3): A 2.3009 B 2.1108  B/A 0.9174 (-8.26 %, d -0.1901) n/Y/Y bars r 9.29 / i 4.64 / s 3.71 %
+  pass 2 (K=3/3): A 2.2847 B 2.1129  B/A 0.9248 (-7.52 %, d -0.1718) n/n/Y bars r 15.70 / i 7.85 / s 6.52 %
+  -> NOT CLAIMED
+
+## S4-JT-a phys_solve_build span (armed), window [100..500) ms
+W8: span gain PARENT-TIP +0.1865 ms
+  A 0.2992 [0.2962-0.3093] K=9 (IQR 0.0012, SE 0.0016; r 4.38 / i 0.41 / s 0.53 %)
+  B 0.1127 [0.1121-0.1135] K=9 (IQR 0.0007, SE 0.0002; r 1.28 / i 0.58 / s 0.18 %)
+  pooled B/A 0.3766 (-62.34 %, d -0.1865) Y/Y/Y bars r 9.13 / i 1.42 / s 1.11 %
+  pass 0 (K=3/3): A 0.2995 B 0.1121  B/A 0.3744 (-62.56 %, d -0.1873) Y/Y/Y bars r 0.62 / i 0.31 / s 0.25 %
+  pass 1 (K=3/3): A 0.2989 B 0.1128  B/A 0.3773 (-62.27 %, d -0.1861) Y/Y/Y bars r 8.89 / i 4.45 / s 3.39 %
+  pass 2 (K=3/3): A 0.2984 B 0.1129  B/A 0.3784 (-62.16 %, d -0.1854) Y/Y/Y bars r 2.29 / i 1.14 / s 0.84 %
+  -> CLAIMED (STRONG)
+    phys_sb_bodies_ns: PARENT 0.0038 TIP 0.0039 d +0.0000 ms
+    phys_sb_pa_ns: PARENT 0.0060 TIP 0.0057 d -0.0004 ms
+    phys_sb_pb_ns: PARENT 0.0307 TIP 0.0307 d +0.0000 ms
+    phys_sb_pc_ns: PARENT 0.2585 TIP 0.0701 d -0.1884 ms
+W16: span gain PARENT-TIP +0.1925 ms
+  A 0.3069 [0.3022-0.4349] K=9 (IQR 0.0122, SE 0.0220; r 43.25 / i 3.99 / s 7.18 %)
+  B 0.1145 [0.1141-0.1177] K=9 (IQR 0.0009, SE 0.0005; r 3.12 / i 0.82 / s 0.42 %)
+  pooled B/A 0.3729 (-62.71 %, d -0.1925) n/Y/Y bars r 86.73 / i 8.14 / s 14.39 %
+  pass 0 (K=3/3): A 0.3050 B 0.1142  B/A 0.3745 (-62.55 %, d -0.1908) Y/Y/Y bars r 9.58 / i 4.79 / s 3.72 %
+  pass 1 (K=3/3): A 0.3092 B 0.1152  B/A 0.3725 (-62.75 %, d -0.1940) n/Y/Y bars r 70.87 / i 35.43 / s 29.30 %
+  pass 2 (K=3/3): A 0.3050 B 0.1148  B/A 0.3763 (-62.37 %, d -0.1903) n/Y/Y bars r 87.25 / i 43.62 / s 36.06 %
+  -> CLAIMED
+    phys_sb_bodies_ns: PARENT 0.0039 TIP 0.0039 d +0.0000 ms
+    phys_sb_pa_ns: PARENT 0.0061 TIP 0.0058 d -0.0003 ms
+    phys_sb_pb_ns: PARENT 0.0305 TIP 0.0305 d +0.0000 ms
+    phys_sb_pc_ns: PARENT 0.2661 TIP 0.0720 d -0.1941 ms
+
+## S4-JT disarmed wall, window [0..100) ms
+W1: gain PARENT-TIP -0.0544 ms (-1.02 %)
+  A 5.3114 [5.2902-5.4799] K=9 (IQR 0.1050, SE 0.0307; r 3.57 / i 1.98 / s 0.58 %)
+  B 5.3658 [5.3048-5.4269] K=9 (IQR 0.0549, SE 0.0179; r 2.28 / i 1.02 / s 0.33 %)
+  pooled B/A 1.0102 (+1.02 %, d +0.0544) n/n/n bars r 8.47 / i 4.45 / s 1.33 %
+  pass 0 (K=3/3): A 5.3114 B 5.3539  B/A 1.0080 (+0.80 %, d +0.0425) n/n/n bars r 2.93 / i 1.47 / s 1.07 %
+  pass 1 (K=3/3): A 5.2904 B 5.3867  B/A 1.0182 (+1.82 %, d +0.0963) n/Y/Y bars r 3.56 / i 1.78 / s 1.30 %
+  pass 2 (K=3/3): A 5.4464 B 5.3658  B/A 0.9852 (-1.48 %, d -0.0806) n/n/n bars r 4.63 / i 2.32 / s 1.68 %
+  -> NOT CLAIMED
+  TIP faster: NOT CLAIMED; TIP slower: not claimed slower
+W2: gain PARENT-TIP +0.0971 ms (+2.70 %)
+  A 3.5979 [3.5540-3.7499] K=9 (IQR 0.0474, SE 0.0255; r 5.44 / i 1.32 / s 0.71 %)
+  B 3.5008 [3.4715-3.5161] K=9 (IQR 0.0188, SE 0.0067; r 1.27 / i 0.54 / s 0.19 %)
+  pooled B/A 0.9730 (-2.70 %, d -0.0971) n/n/Y bars r 11.18 / i 2.84 / s 1.47 %
+  pass 0 (K=3/3): A 3.5927 B 3.4922  B/A 0.9720 (-2.80 %, d -0.1005) n/Y/Y bars r 4.13 / i 2.06 / s 1.50 %
+  pass 1 (K=3/3): A 3.5979 B 3.5006  B/A 0.9729 (-2.71 %, d -0.0974) n/Y/Y bars r 3.14 / i 1.57 / s 1.16 %
+  pass 2 (K=3/3): A 3.6607 B 3.5113  B/A 0.9592 (-4.08 %, d -0.1494) n/n/Y bars r 10.45 / i 5.22 / s 3.78 %
+  -> NOT CLAIMED
+  TIP faster: NOT CLAIMED; TIP slower: not claimed slower
+W4: gain PARENT-TIP +0.1724 ms (+6.49 %)
+  A 2.6562 [2.6247-2.7178] K=9 (IQR 0.0307, SE 0.0121; r 3.51 / i 1.16 / s 0.45 %)
+  B 2.4838 [2.4608-2.4971] K=9 (IQR 0.0173, SE 0.0051; r 1.46 / i 0.70 / s 0.21 %)
+  pooled B/A 0.9351 (-6.49 %, d -0.1724) n/Y/Y bars r 7.60 / i 2.70 / s 1.00 %
+  pass 0 (K=3/3): A 2.6336 B 2.4897  B/A 0.9454 (-5.46 %, d -0.1439) Y/Y/Y bars r 3.51 / i 1.75 / s 1.32 %
+  pass 1 (K=3/3): A 2.6418 B 2.4747  B/A 0.9367 (-6.33 %, d -0.1672) Y/Y/Y bars r 3.03 / i 1.52 / s 1.10 %
+  pass 2 (K=3/3): A 2.6661 B 2.4920  B/A 0.9347 (-6.53 %, d -0.1741) Y/Y/Y bars r 4.59 / i 2.30 / s 1.85 %
+  -> CLAIMED
+  TIP faster: CLAIMED; TIP slower: not claimed slower
+W8: gain PARENT-TIP +0.1759 ms (+8.15 %)
+  A 2.1583 [2.1474-2.1810] K=9 (IQR 0.0100, SE 0.0046; r 1.55 / i 0.46 / s 0.21 %)
+  B 1.9825 [1.9600-2.0345] K=9 (IQR 0.0330, SE 0.0099; r 3.76 / i 1.66 / s 0.50 %)
+  pooled B/A 0.9185 (-8.15 %, d -0.1759) Y/Y/Y bars r 8.13 / i 3.45 / s 1.09 %
+  pass 0 (K=3/3): A 2.1531 B 1.9943  B/A 0.9262 (-7.38 %, d -0.1589) n/Y/Y bars r 7.50 / i 3.75 / s 2.72 %
+  pass 1 (K=3/3): A 2.1583 B 1.9720  B/A 0.9137 (-8.63 %, d -0.1864) Y/Y/Y bars r 1.52 / i 0.76 / s 0.59 %
+  pass 2 (K=3/3): A 2.1745 B 2.0050  B/A 0.9220 (-7.80 %, d -0.1696) Y/Y/Y bars r 3.90 / i 1.95 / s 1.47 %
+  -> CLAIMED
+  TIP faster: CLAIMED; TIP slower: not claimed slower
+W16: gain PARENT-TIP +0.1735 ms (+7.29 %)
+  A 2.3807 [2.3691-2.6393] K=9 (IQR 0.0414, SE 0.0369; r 11.35 / i 1.74 / s 1.55 %)
+  B 2.2072 [2.1764-2.2169] K=9 (IQR 0.0080, SE 0.0056; r 1.83 / i 0.36 / s 0.26 %)
+  pooled B/A 0.9271 (-7.29 %, d -0.1735) n/Y/Y bars r 23.00 / i 3.55 / s 3.14 %
+  pass 0 (K=3/3): A 2.3791 B 2.1855  B/A 0.9186 (-8.14 %, d -0.1935) Y/Y/Y bars r 3.86 / i 1.93 / s 1.46 %
+  pass 1 (K=3/3): A 2.3807 B 2.2048  B/A 0.9261 (-7.39 %, d -0.1760) n/Y/Y bars r 8.50 / i 4.25 / s 3.39 %
+  pass 2 (K=3/3): A 2.4161 B 2.2092  B/A 0.9143 (-8.57 %, d -0.2070) n/n/Y bars r 21.92 / i 10.96 / s 8.53 %
+  -> NOT CLAIMED
+  TIP faster: NOT CLAIMED; TIP slower: not claimed slower
+
+## S4-JT-a armed wall, window [0..100) ms
+W8: gain PARENT-TIP +0.1919 ms
+  A 2.2652 [2.2527-2.4048] K=9 (IQR 0.0115, SE 0.0202; r 6.71 / i 0.51 / s 0.89 %)
+  B 2.0733 [2.0596-2.1062] K=9 (IQR 0.0245, SE 0.0067; r 2.25 / i 1.18 / s 0.32 %)
+  pooled B/A 0.9153 (-8.47 %, d -0.1919) n/Y/Y bars r 14.16 / i 2.57 / s 1.90 %
+  pass 0 (K=3/3): A 2.2614 B 2.0691  B/A 0.9149 (-8.51 %, d -0.1923) Y/Y/Y bars r 3.71 / i 1.85 / s 1.39 %
+  pass 1 (K=3/3): A 2.2559 B 2.0722  B/A 0.9186 (-8.14 %, d -0.1837) n/Y/Y bars r 13.52 / i 6.76 / s 5.59 %
+  pass 2 (K=3/3): A 2.2674 B 2.0935  B/A 0.9233 (-7.67 %, d -0.1739) Y/Y/Y bars r 3.87 / i 1.93 / s 1.48 %
+  -> CLAIMED
+W16: gain PARENT-TIP +0.1816 ms
+  A 2.5022 [2.4809-2.6818] K=9 (IQR 0.0298, SE 0.0316; r 8.03 / i 1.19 / s 1.26 %)
+  B 2.3207 [2.2907-2.3600] K=9 (IQR 0.0227, SE 0.0087; r 2.99 / i 0.98 / s 0.38 %)
+  pooled B/A 0.9274 (-7.26 %, d -0.1816) n/Y/Y bars r 17.13 / i 3.08 / s 2.64 %
+  pass 0 (K=3/3): A 2.4810 B 2.2978  B/A 0.9262 (-7.38 %, d -0.1832) Y/Y/Y bars r 3.09 / i 1.54 / s 1.26 %
+  pass 1 (K=3/3): A 2.5296 B 2.3215  B/A 0.9177 (-8.23 %, d -0.2081) n/Y/Y bars r 12.36 / i 6.18 / s 4.77 %
+  pass 2 (K=3/3): A 2.5001 B 2.3270  B/A 0.9308 (-6.92 %, d -0.1731) n/n/Y bars r 14.95 / i 7.48 / s 6.22 %
+  -> NOT CLAIMED
+
+## S4-JT-a phys_solve_build span (armed), window [0..100) ms
+W8: span gain PARENT-TIP +0.2020 ms
+  A 0.3234 [0.3147-0.3263] K=9 (IQR 0.0042, SE 0.0015; r 3.61 / i 1.29 / s 0.48 %)
+  B 0.1214 [0.1201-0.1235] K=9 (IQR 0.0014, SE 0.0005; r 2.84 / i 1.18 / s 0.42 %)
+  pooled B/A 0.3754 (-62.46 %, d -0.2020) Y/Y/Y bars r 9.18 / i 3.50 / s 1.27 %
+  pass 0 (K=3/3): A 0.3234 B 0.1205  B/A 0.3727 (-62.73 %, d -0.2028) Y/Y/Y bars r 6.47 / i 3.24 / s 2.56 %
+  pass 1 (K=3/3): A 0.3199 B 0.1209  B/A 0.3780 (-62.20 %, d -0.1990) Y/Y/Y bars r 5.43 / i 2.72 / s 2.01 %
+  pass 2 (K=3/3): A 0.3255 B 0.1217  B/A 0.3739 (-62.61 %, d -0.2038) Y/Y/Y bars r 3.58 / i 1.79 / s 1.38 %
+  -> CLAIMED (STRONG)
+    phys_sb_bodies_ns: PARENT 0.0044 TIP 0.0044 d -0.0000 ms
+    phys_sb_pa_ns: PARENT 0.0086 TIP 0.0082 d -0.0004 ms
+    phys_sb_pb_ns: PARENT 0.0341 TIP 0.0340 d -0.0001 ms
+    phys_sb_pc_ns: PARENT 0.2757 TIP 0.0726 d -0.2030 ms
+W16: span gain PARENT-TIP +0.2044 ms
+  A 0.3275 [0.3230-0.4745] K=9 (IQR 0.0136, SE 0.0263; r 46.24 / i 4.15 / s 8.04 %)
+  B 0.1231 [0.1207-0.1274] K=9 (IQR 0.0009, SE 0.0007; r 5.41 / i 0.73 / s 0.61 %)
+  pooled B/A 0.3760 (-62.40 %, d -0.2044) n/Y/Y bars r 93.10 / i 8.43 / s 16.12 %
+  pass 0 (K=3/3): A 0.3232 B 0.1222  B/A 0.3783 (-62.17 %, d -0.2009) Y/Y/Y bars r 10.92 / i 5.46 / s 4.45 %
+  pass 1 (K=3/3): A 0.3340 B 0.1239  B/A 0.3709 (-62.91 %, d -0.2101) n/Y/Y bars r 83.87 / i 41.93 / s 34.22 %
+  pass 2 (K=3/3): A 0.3275 B 0.1231  B/A 0.3760 (-62.40 %, d -0.2044) n/Y/Y bars r 91.24 / i 45.62 / s 37.86 %
+  -> CLAIMED
+    phys_sb_bodies_ns: PARENT 0.0043 TIP 0.0044 d +0.0001 ms
+    phys_sb_pa_ns: PARENT 0.0087 TIP 0.0083 d -0.0004 ms
+    phys_sb_pb_ns: PARENT 0.0338 TIP 0.0340 d +0.0001 ms
+    phys_sb_pc_ns: PARENT 0.2801 TIP 0.0741 d -0.2060 ms
+
+# Resolution (TIP only; same block, same rounds)
+
+## S4-rung (TIP W8, --canary-frac 1 --canary-ref-ns 60000 = 0.060 ms serial) vs S4-JT#tip@W8, [0..500)
+rise +0.0475 ms (injected 0.0600; rise/inj 0.791)
+  A 1.8154 [1.7937-1.8472] K=9 (IQR 0.0230, SE 0.0070; r 2.94 / i 1.27 / s 0.39 %)
+  B 1.8629 [1.8588-1.8876] K=9 (IQR 0.0138, SE 0.0042; r 1.55 / i 0.74 / s 0.23 %)
+  pooled B/A 1.0262 (+2.62 %, d +0.0475) n/n/Y bars r 6.65 / i 2.94 / s 0.90 %
+  pass 0 (K=3/3): A 1.8262 B 1.8592  B/A 1.0181 (+1.81 %, d +0.0330) n/n/n bars r 5.86 / i 2.93 / s 2.13 %
+  pass 1 (K=3/3): A 1.8118 B 1.8740  B/A 1.0343 (+3.43 %, d +0.0622) Y/Y/Y bars r 2.86 / i 1.43 / s 1.04 %
+  pass 2 (K=3/3): A 1.8348 B 1.8689  B/A 1.0186 (+1.86 %, d +0.0341) n/Y/Y bars r 3.03 / i 1.51 / s 1.21 %
+  -> NOT CLAIMED
+  R_8 <= 0.060 ms demonstrated: NO
+
+## S4-zone-N30000 vs S4-JT-a#tip@W8, [0..500): phys_solve_build span
+span rise +0.0303 ms (injected 0.0300; rise/inj 1.010)
+  A 0.1144 [0.1137-0.1155] K=9 (IQR 0.0006, SE 0.0002; r 1.59 / i 0.51 / s 0.19 %)
+  B 0.1447 [0.1439-0.1473] K=9 (IQR 0.0016, SE 0.0005; r 2.34 / i 1.08 / s 0.34 %)
+  pooled B/A 1.2648 (+26.48 %, d +0.0303) Y/Y/Y bars r 5.67 / i 2.38 / s 0.78 %
+  pass 0 (K=3/3): A 0.1140 B 0.1446  B/A 1.2676 (+26.76 %, d +0.0305) Y/Y/Y bars r 1.59 / i 0.80 / s 0.61 %
+  pass 1 (K=3/3): A 0.1146 B 0.1452  B/A 1.2672 (+26.72 %, d +0.0306) Y/Y/Y bars r 3.52 / i 1.76 / s 1.30 %
+  pass 2 (K=3/3): A 0.1147 B 0.1461  B/A 1.2742 (+27.42 %, d +0.0314) Y/Y/Y bars r 3.98 / i 1.99 / s 1.46 %
+  -> CLAIMED (STRONG)
+## S4-zone-N30000 wall vs S4-JT-a#tip@W8, [0..500)
+wall rise +0.0377 ms
+  A 1.9025 [1.8925-1.9318] K=9 (IQR 0.0171, SE 0.0058; r 2.07 / i 0.90 / s 0.30 %)
+  B 1.9402 [1.9175-1.9485] K=9 (IQR 0.0232, SE 0.0053; r 1.60 / i 1.19 / s 0.27 %)
+  pooled B/A 1.0198 (+1.98 %, d +0.0377) n/n/Y bars r 5.22 / i 2.99 / s 0.82 %
+  pass 0 (K=3/3): A 1.8942 B 1.9217  B/A 1.0145 (+1.45 %, d +0.0275) n/n/Y bars r 3.56 / i 1.78 / s 1.43 %
+  pass 1 (K=3/3): A 1.8983 B 1.9473  B/A 1.0258 (+2.58 %, d +0.0490) n/Y/Y bars r 4.31 / i 2.16 / s 1.79 %
+  pass 2 (K=3/3): A 1.9059 B 1.9475  B/A 1.0219 (+2.19 %, d +0.0417) Y/Y/Y bars r 1.56 / i 0.78 / s 0.60 %
+  -> NOT CLAIMED
+
+## S4-zone-N60000 vs S4-JT-a#tip@W8, [0..500): phys_solve_build span
+span rise +0.0604 ms (injected 0.0600; rise/inj 1.007)
+  A 0.1144 [0.1137-0.1155] K=9 (IQR 0.0006, SE 0.0002; r 1.59 / i 0.51 / s 0.19 %)
+  B 0.1749 [0.1733-0.1759] K=9 (IQR 0.0015, SE 0.0004; r 1.47 / i 0.87 / s 0.22 %)
+  pooled B/A 1.5283 (+52.83 %, d +0.0604) Y/Y/Y bars r 4.33 / i 2.01 / s 0.59 %
+  pass 0 (K=3/3): A 0.1140 B 0.1753  B/A 1.5371 (+53.71 %, d +0.0612) Y/Y/Y bars r 2.73 / i 1.37 / s 1.02 %
+  pass 1 (K=3/3): A 0.1146 B 0.1740  B/A 1.5184 (+51.84 %, d +0.0594) Y/Y/Y bars r 2.06 / i 1.03 / s 0.78 %
+  pass 2 (K=3/3): A 0.1147 B 0.1755  B/A 1.5303 (+53.03 %, d +0.0608) Y/Y/Y bars r 2.33 / i 1.16 / s 0.87 %
+  -> CLAIMED (STRONG)
+## S4-zone-N60000 wall vs S4-JT-a#tip@W8, [0..500)
+wall rise +0.0626 ms
+  A 1.9025 [1.8925-1.9318] K=9 (IQR 0.0171, SE 0.0058; r 2.07 / i 0.90 / s 0.30 %)
+  B 1.9651 [1.9427-1.9812] K=9 (IQR 0.0059, SE 0.0046; r 1.96 / i 0.30 / s 0.24 %)
+  pooled B/A 1.0329 (+3.29 %, d +0.0626) n/Y/Y bars r 5.69 / i 1.90 / s 0.77 %
+  pass 0 (K=3/3): A 1.8942 B 1.9595  B/A 1.0345 (+3.45 %, d +0.0654) n/Y/Y bars r 3.77 / i 1.88 / s 1.53 %
+  pass 1 (K=3/3): A 1.8983 B 1.9654  B/A 1.0353 (+3.53 %, d +0.0671) n/Y/Y bars r 4.02 / i 2.01 / s 1.65 %
+  pass 2 (K=3/3): A 1.9059 B 1.9653  B/A 1.0312 (+3.12 %, d +0.0594) Y/Y/Y bars r 2.12 / i 1.06 / s 0.85 %
+  -> CLAIMED
+
+## S4-rung (TIP W8, --canary-frac 1 --canary-ref-ns 60000 = 0.060 ms serial) vs S4-JT#tip@W8, [100..500)
+rise +0.0468 ms (injected 0.0600; rise/inj 0.780)
+  A 1.7737 [1.7522-1.8004] K=9 (IQR 0.0191, SE 0.0064; r 2.72 / i 1.08 / s 0.36 %)
+  B 1.8205 [1.8120-1.8373] K=9 (IQR 0.0153, SE 0.0037; r 1.39 / i 0.84 / s 0.20 %)
+  pooled B/A 1.0264 (+2.64 %, d +0.0468) n/n/Y bars r 6.10 / i 2.73 / s 0.83 %
+  pass 0 (K=3/3): A 1.7842 B 1.8173  B/A 1.0186 (+1.86 %, d +0.0332) n/n/n bars r 5.44 / i 2.72 / s 2.00 %
+  pass 1 (K=3/3): A 1.7717 B 1.8328  B/A 1.0345 (+3.45 %, d +0.0610) Y/Y/Y bars r 1.79 / i 0.90 / s 0.72 %
+  pass 2 (K=3/3): A 1.7902 B 1.8275  B/A 1.0208 (+2.08 %, d +0.0372) n/Y/Y bars r 3.09 / i 1.54 / s 1.18 %
+  -> NOT CLAIMED
+  R_8 <= 0.060 ms demonstrated: NO
+
+## S4-zone-N30000 vs S4-JT-a#tip@W8, [100..500): phys_solve_build span
+span rise +0.0304 ms (injected 0.0300; rise/inj 1.012)
+  A 0.1127 [0.1121-0.1135] K=9 (IQR 0.0007, SE 0.0002; r 1.28 / i 0.58 / s 0.18 %)
+  B 0.1430 [0.1421-0.1456] K=9 (IQR 0.0016, SE 0.0005; r 2.40 / i 1.13 / s 0.36 %)
+  pooled B/A 1.2694 (+26.94 %, d +0.0304) Y/Y/Y bars r 5.45 / i 2.54 / s 0.81 %
+  pass 0 (K=3/3): A 0.1121 B 0.1424  B/A 1.2703 (+27.03 %, d +0.0303) Y/Y/Y bars r 0.90 / i 0.45 / s 0.34 %
+  pass 1 (K=3/3): A 0.1128 B 0.1439  B/A 1.2758 (+27.58 %, d +0.0311) Y/Y/Y bars r 3.88 / i 1.94 / s 1.41 %
+  pass 2 (K=3/3): A 0.1129 B 0.1441  B/A 1.2761 (+27.61 %, d +0.0312) Y/Y/Y bars r 3.83 / i 1.92 / s 1.40 %
+  -> CLAIMED (STRONG)
+## S4-zone-N30000 wall vs S4-JT-a#tip@W8, [100..500)
+wall rise +0.0377 ms
+  A 1.8548 [1.8436-1.8990] K=9 (IQR 0.0132, SE 0.0079; r 2.99 / i 0.71 / s 0.42 %)
+  B 1.8925 [1.8748-1.9091] K=9 (IQR 0.0232, SE 0.0054; r 1.81 / i 1.23 / s 0.28 %)
+  pooled B/A 1.0203 (+2.03 %, d +0.0377) n/n/Y bars r 6.99 / i 2.83 / s 1.02 %
+  pass 0 (K=3/3): A 1.8483 B 1.8793  B/A 1.0167 (+1.67 %, d +0.0310) n/n/n bars r 5.07 / i 2.53 / s 2.02 %
+  pass 1 (K=3/3): A 1.8548 B 1.9039  B/A 1.0264 (+2.64 %, d +0.0490) n/n/Y bars r 5.65 / i 2.83 / s 2.31 %
+  pass 2 (K=3/3): A 1.8633 B 1.8976  B/A 1.0184 (+1.84 %, d +0.0343) n/Y/Y bars r 1.94 / i 0.97 / s 0.71 %
+  -> NOT CLAIMED
+
+## S4-zone-N60000 vs S4-JT-a#tip@W8, [100..500): phys_solve_build span
+span rise +0.0604 ms (injected 0.0600; rise/inj 1.006)
+  A 0.1127 [0.1121-0.1135] K=9 (IQR 0.0007, SE 0.0002; r 1.28 / i 0.58 / s 0.18 %)
+  B 0.1731 [0.1714-0.1740] K=9 (IQR 0.0014, SE 0.0004; r 1.50 / i 0.81 / s 0.23 %)
+  pooled B/A 1.5359 (+53.59 %, d +0.0604) Y/Y/Y bars r 3.95 / i 2.00 / s 0.58 %
+  pass 0 (K=3/3): A 0.1121 B 0.1736  B/A 1.5478 (+54.78 %, d +0.0614) Y/Y/Y bars r 2.58 / i 1.29 / s 0.99 %
+  pass 1 (K=3/3): A 0.1128 B 0.1723  B/A 1.5277 (+52.77 %, d +0.0595) Y/Y/Y bars r 1.93 / i 0.97 / s 0.72 %
+  pass 2 (K=3/3): A 0.1129 B 0.1737  B/A 1.5383 (+53.83 %, d +0.0608) Y/Y/Y bars r 1.92 / i 0.96 / s 0.71 %
+  -> CLAIMED (STRONG)
+## S4-zone-N60000 wall vs S4-JT-a#tip@W8, [100..500)
+wall rise +0.0635 ms
+  A 1.8548 [1.8436-1.8990] K=9 (IQR 0.0132, SE 0.0079; r 2.99 / i 0.71 / s 0.42 %)
+  B 1.9183 [1.8948-1.9361] K=9 (IQR 0.0059, SE 0.0049; r 2.15 / i 0.31 / s 0.26 %)
+  pooled B/A 1.0342 (+3.42 %, d +0.0635) n/Y/Y bars r 7.36 / i 1.55 / s 0.99 %
+  pass 0 (K=3/3): A 1.8483 B 1.9173  B/A 1.0373 (+3.73 %, d +0.0690) n/Y/Y bars r 5.58 / i 2.79 / s 2.23 %
+  pass 1 (K=3/3): A 1.8548 B 1.9168  B/A 1.0334 (+3.34 %, d +0.0620) n/Y/Y bars r 5.21 / i 2.61 / s 2.13 %
+  pass 2 (K=3/3): A 1.8633 B 1.9227  B/A 1.0319 (+3.19 %, d +0.0594) Y/Y/Y bars r 2.02 / i 1.01 / s 0.79 %
+  -> CLAIMED
+
+# Setup counters (armed, [0,500) summaries): setup_steps / setup_tasks per process
+S4-JT-a#parent@W8: [(0, 0)] (n=9)
+S4-JT-a#tip@W8: [(500, 15980)] (n=9)
+S4-JT-a#parent@W16: [(0, 0)] (n=9)
+S4-JT-a#tip@W16: [(500, 15980)] (n=9)
+S4-zone-N30000#tip@W8: [(500, 15980)]
+S4-zone-N60000#tip@W8: [(500, 15980)]
+
+# poses: distinct pose hashes over every used S4-AB process: ['0x30c5438bc6ad9ffa']
+
+# per manifold, [100,500): ns per manifold on each process own manifold mean (S4-JT)
+W1 parent: 939.9 ns/manifold [930.4-963.7], manifolds 4467.665 [4467.665-4467.665]
+W1 tip: 943.6 ns/manifold [931.9-961.8], manifolds 4467.665 [4467.665-4467.665]
+W2 parent: 662.2 ns/manifold [655.4-692.7], manifolds 4467.665 [4467.665-4467.665]
+W2 tip: 643.4 ns/manifold [635.3-648.8], manifolds 4467.665 [4467.665-4467.665]
+W4 parent: 511.0 ns/manifold [504.9-524.2], manifolds 4467.665 [4467.665-4467.665]
+W4 tip: 476.3 ns/manifold [473.1-478.9], manifolds 4467.665 [4467.665-4467.665]
+W8 parent: 434.9 ns/manifold [433.2-444.4], manifolds 4467.665 [4467.665-4467.665]
+W8 tip: 397.0 ns/manifold [392.2-403.0], manifolds 4467.665 [4467.665-4467.665]
+W16 parent: 488.6 ns/manifold [485.8-535.0], manifolds 4467.665 [4467.665-4467.665]
+W16 tip: 450.4 ns/manifold [447.3-456.9], manifolds 4467.665 [4467.665-4467.665]

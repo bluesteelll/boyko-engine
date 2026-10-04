@@ -1,0 +1,10 @@
+=== gate8b micro start
+micro omega2-worker            exit 0 summaries 36 calibration lines 1 park rows 18 (no park taken at gap 0: 15) PASS
+micro omega2-external          exit 0 summaries 36 calibration lines 1 park rows 18 (no park taken at gap 0: 18) PASS
+micro omega2-gap-worker        exit 0 summaries 8 calibration lines 1 park rows 4 (no park taken at gap 0: 0) PASS
+micro omega2-gap-external      exit 0 summaries 8 calibration lines 1 park rows 4 (no park taken at gap 0: 0) PASS
+micro omega1-s36-worker        exit 0 summaries 4 calibration lines 0 park rows 0 (no park taken at gap 0: 0) PASS
+micro omega1-s36-external      exit 0 summaries 4 calibration lines 0 park rows 0 (no park taken at gap 0: 0) PASS
+micro omega1-s72-worker        exit 0 summaries 4 calibration lines 0 park rows 0 (no park taken at gap 0: 0) PASS
+micro omega1-s72-external      exit 0 summaries 4 calibration lines 0 park rows 0 (no park taken at gap 0: 0) PASS
+=== gate8b micro end

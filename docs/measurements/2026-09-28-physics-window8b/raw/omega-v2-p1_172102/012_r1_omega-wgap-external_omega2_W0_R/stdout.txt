@@ -1,0 +1,8 @@
+SUMMARY {"bench":"omega","route":"external","workers":8,"gap_us":0,"tasks":32,"reps":2000,"scope_ns_median":4700,"scope_ns_mean":4726.15,"helped_reps":2000,"first_helper_ns_median":300}
+SUMMARY {"bench":"omega","route":"external","workers":8,"gap_us":5,"tasks":32,"reps":2000,"scope_ns_median":3700,"scope_ns_mean":7465.9,"helped_reps":2000,"first_helper_ns_median":1000}
+SUMMARY {"bench":"omega","route":"external","workers":8,"gap_us":20,"tasks":32,"reps":2000,"scope_ns_median":10800,"scope_ns_mean":10789.1,"helped_reps":1999,"first_helper_ns_median":3500}
+SUMMARY {"bench":"omega","route":"external","workers":8,"gap_us":80,"tasks":32,"reps":2000,"scope_ns_median":10900,"scope_ns_mean":10885.75,"helped_reps":2000,"first_helper_ns_median":3600}
+SUMMARY {"bench":"omega","route":"external","workers":16,"gap_us":0,"tasks":32,"reps":2000,"scope_ns_median":5000,"scope_ns_mean":5055.05,"helped_reps":2000,"first_helper_ns_median":300}
+SUMMARY {"bench":"omega","route":"external","workers":16,"gap_us":5,"tasks":32,"reps":2000,"scope_ns_median":6800,"scope_ns_mean":7749.7,"helped_reps":2000,"first_helper_ns_median":400}
+SUMMARY {"bench":"omega","route":"external","workers":16,"gap_us":20,"tasks":32,"reps":2000,"scope_ns_median":20800,"scope_ns_mean":22908.3,"helped_reps":2000,"first_helper_ns_median":3600}
+SUMMARY {"bench":"omega","route":"external","workers":16,"gap_us":80,"tasks":32,"reps":2000,"scope_ns_median":21400,"scope_ns_mean":23439.15,"helped_reps":2000,"first_helper_ns_median":3700}

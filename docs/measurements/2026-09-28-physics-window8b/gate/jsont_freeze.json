@@ -1,0 +1,39 @@
+{
+ "per_process": {
+  "JSonT@W1": {
+   "first_zero_awake_csv_row": 273,
+   "csv_first_frozen_step": 274,
+   "summary_first_frozen_step": 274,
+   "awake_stays_zero": true,
+   "rows": 500
+  },
+  "JSonT@W8": {
+   "first_zero_awake_csv_row": 273,
+   "csv_first_frozen_step": 274,
+   "summary_first_frozen_step": 274,
+   "awake_stays_zero": true,
+   "rows": 500
+  },
+  "JSonT-a@W1": {
+   "first_zero_awake_csv_row": 273,
+   "csv_first_frozen_step": 274,
+   "summary_first_frozen_step": 274,
+   "awake_stays_zero": true,
+   "rows": 500
+  },
+  "JSonT-a@W8": {
+   "first_zero_awake_csv_row": 273,
+   "csv_first_frozen_step": 274,
+   "summary_first_frozen_step": 274,
+   "awake_stays_zero": true,
+   "rows": 500
+  }
+ },
+ "consistent": true,
+ "first_frozen_step": 274,
+ "post_freeze_window": [
+  274,
+  500
+ ],
+ "note": "the post-freeze window starts at the first step of the frozen pile (first_frozen_step), window 8's [274, 500) convention"
+}

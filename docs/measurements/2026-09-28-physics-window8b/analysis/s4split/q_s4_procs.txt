@@ -1,0 +1,111 @@
+
+## S4-JT W16
+parent p0 r0 original: mean 2.2203 median-step 2.1836 ms, frames>1.2xmed 1.4 %, span -, start 17:23:48, witness 0.18 %, rcpt 0.43/2.67, top3 [[10, 72.6], [12, 44.4], [14, 38.4]], main_share_top 1.000, main_cycle_frac 0.0048
+parent p0 r1 original: mean 2.2199 median-step 2.1807 ms, frames>1.2xmed 2.2 %, span -, start 17:25:36, witness 0.27 %, rcpt 1.20/0.38, top3 [[10, 73.6], [12, 50.0], [14, 45.8]], main_share_top 1.000, main_cycle_frac 0.0048
+parent p0 r2 original: mean 2.2147 median-step 2.1755 ms, frames>1.2xmed 3.8 %, span -, start 17:27:24, witness 0.35 %, rcpt 1.31/0.62, top3 [[10, 74.0], [12, 51.4], [0, 50.0]], main_share_top 0.000, main_cycle_frac 0.0048
+parent p1 r0 original: mean 2.2478 median-step 2.1854 ms, frames>1.2xmed 4.6 %, span -, start 17:32:49, witness 0.95 %, rcpt 0.70/0.28, top3 [[10, 77.0], [12, 56.2], [1, 50.0]], main_share_top 1.000, main_cycle_frac 0.0048
+parent p1 r1 original: mean 2.2288 median-step 2.1795 ms, frames>1.2xmed 3.0 %, span -, start 17:34:37, witness 0.53 %, rcpt 0.76/0.21, top3 [[10, 79.5], [2, 45.8], [4, 45.2]], main_share_top 1.000, main_cycle_frac 0.0047
+parent p1 r2 original: mean 2.2104 median-step 2.1756 ms, frames>1.2xmed 1.8 %, span -, start 17:36:26, witness 0.44 %, rcpt 0.45/0.55, top3 [[10, 73.0], [12, 48.6], [14, 45.2]], main_share_top 1.000, main_cycle_frac 0.0047
+parent p2 r0 original: mean 2.2146 median-step 2.1733 ms, frames>1.2xmed 3.0 %, span -, start 17:39:43, witness 0.09 %, rcpt 0.30/4.08, top3 [[10, 79.2], [12, 45.8], [14, 43.1]], main_share_top 0.000, main_cycle_frac 0.0048
+parent p2 r1 original: mean 2.4401 median-step 2.3947 ms, frames>1.2xmed 3.4 %, span -, start 17:41:31, witness 0.88 %, rcpt 0.91/0.41, top3 [[10, 80.0], [12, 56.2], [14, 42.5]], main_share_top 1.000, main_cycle_frac 0.0048
+parent p2 r2 original: mean 2.2669 median-step 2.2151 ms, frames>1.2xmed 2.8 %, span -, start 17:43:19, witness 0.69 %, rcpt 0.91/0.50, top3 [[10, 71.6], [12, 47.3], [0, 41.9]], main_share_top 1.000, main_cycle_frac 0.0048
+tip p0 r0 original: mean 2.0357 median-step 2.0026 ms, frames>1.2xmed 2.0 %, span -, start 17:23:41, witness 0.19 %, rcpt 1.09/0.43, top3 [[10, 66.7], [12, 59.1], [0, 53.0]], main_share_top 1.000, main_cycle_frac 0.0047
+tip p0 r1 original: mean 2.0533 median-step 2.0166 ms, frames>1.2xmed 2.4 %, span -, start 17:25:30, witness 0.10 %, rcpt 0.53/1.20, top3 [[10, 62.7], [12, 55.2], [1, 47.1]], main_share_top 1.000, main_cycle_frac 0.0046
+tip p0 r2 original: mean 2.0502 median-step 2.0086 ms, frames>1.2xmed 2.4 %, span -, start 17:27:18, witness 0.19 %, rcpt 0.30/1.31, top3 [[0, 79.1], [2, 67.2], [10, 62.7]], main_share_top 1.000, main_cycle_frac 0.0049
+tip p1 r0 original: mean 2.0466 median-step 2.0120 ms, frames>1.2xmed 2.2 %, span -, start 17:32:55, witness 0.19 %, rcpt 0.28/1.74, top3 [[10, 79.1], [14, 43.3], [6, 43.3]], main_share_top 1.000, main_cycle_frac 0.0047
+tip p1 r1 original: mean 2.0744 median-step 2.0253 ms, frames>1.2xmed 3.6 %, span -, start 17:34:44, witness 0.47 %, rcpt 0.21/0.52, top3 [[10, 75.0], [12, 65.7], [2, 57.4]], main_share_top 1.000, main_cycle_frac 0.0047
+tip p1 r2 original: mean 2.0410 median-step 2.0067 ms, frames>1.2xmed 3.0 %, span -, start 17:36:32, witness 0.10 %, rcpt 0.55/0.27, top3 [[10, 74.6], [14, 52.2], [12, 51.5]], main_share_top 0.000, main_cycle_frac 0.0046
+tip p2 r0 original: mean 2.0433 median-step 2.0103 ms, frames>1.2xmed 2.4 %, span -, start 17:39:36, witness 0.57 %, rcpt 1.14/0.30, top3 [[10, 80.6], [14, 53.7], [12, 53.7]], main_share_top 0.000, main_cycle_frac 0.0047
+tip p2 r1 original: mean 2.0595 median-step 2.0274 ms, frames>1.2xmed 2.8 %, span -, start 17:41:25, witness 0.66 %, rcpt 1.11/0.91, top3 [[10, 85.3], [0, 50.7], [12, 49.3]], main_share_top 1.000, main_cycle_frac 0.0046
+tip p2 r2 original: mean 2.0587 median-step 2.0168 ms, frames>1.2xmed 3.2 %, span -, start 17:43:13, witness 0.38 %, rcpt 0.76/0.91, top3 [[10, 71.6], [2, 44.8], [0, 43.3]], main_share_top 1.000, main_cycle_frac 0.0046
+
+## S4-JT-a W16
+parent p0 r0 original: mean 2.3167 median-step 2.2771 ms, frames>1.2xmed 2.0 %, span 0.3087, start 17:23:35, witness 0.48 %, rcpt 0.53/1.09, top3 [[10, 71.6], [12, 58.2], [14, 48.8]], main_share_top 1.000, main_cycle_frac 0.009
+parent p0 r1 original: mean 2.3160 median-step 2.2732 ms, frames>1.2xmed 2.4 %, span 0.3067, start 17:25:23, witness 0.16 %, rcpt 0.41/0.53, top3 [[10, 74.7], [12, 50.6], [1, 40.0]], main_share_top 1.000, main_cycle_frac 0.0088
+parent p0 r2 original: mean 2.3415 median-step 2.2919 ms, frames>1.2xmed 2.6 %, span 0.3216, start 17:27:11, witness 0.00 %, rcpt 0.97/0.30, top3 [[10, 77.8], [12, 51.2], [2, 50.0]], main_share_top 1.000, main_cycle_frac 0.0087
+parent p1 r0 original: mean 2.3339 median-step 2.2900 ms, frames>1.2xmed 2.0 %, span 0.3110, start 17:33:02, witness 1.11 %, rcpt 1.74/0.84, top3 [[10, 73.8], [0, 55.7], [2, 47.5]], main_share_top 1.000, main_cycle_frac 0.0086
+parent p1 r1 rerun: mean 2.4484 median-step 2.4004 ms, frames>1.2xmed 3.6 %, span 0.4266, start 17:36:51, witness 0.23 %, rcpt 0.72/0.37, top3 [[10, 79.5], [12, 55.4], [0, 55.4]], main_share_top 1.000, main_cycle_frac 0.0086
+parent p1 r2 original: mean 2.3466 median-step 2.2952 ms, frames>1.2xmed 3.4 %, span 0.3142, start 17:36:38, witness 0.00 %, rcpt 0.27/0.57, top3 [[10, 71.6], [12, 55.0], [14, 45.7]], main_share_top 1.000, main_cycle_frac 0.0087
+parent p2 r0 original: mean 2.5028 median-step 2.4518 ms, frames>1.2xmed 3.2 %, span 0.4428, start 17:39:30, witness 0.37 %, rcpt 0.36/1.14, top3 [[10, 73.3], [12, 61.2], [14, 48.8]], main_share_top 1.000, main_cycle_frac 0.0086
+parent p2 r1 original: mean 2.3278 median-step 2.2840 ms, frames>1.2xmed 1.6 %, span 0.3072, start 17:41:18, witness 0.71 %, rcpt 0.59/1.11, top3 [[10, 68.8], [2, 44.3], [12, 43.0]], main_share_top 1.000, main_cycle_frac 0.0087
+parent p2 r2 original: mean 2.3262 median-step 2.2801 ms, frames>1.2xmed 2.4 %, span 0.3091, start 17:43:07, witness 0.95 %, rcpt 0.71/0.76, top3 [[10, 77.5], [12, 39.2], [2, 39.2]], main_share_top 1.000, main_cycle_frac 0.0086
+tip p0 r0 original: mean 2.1367 median-step 2.1028 ms, frames>1.2xmed 2.2 %, span 0.1157, start 17:23:29, witness 0.09 %, rcpt 0.45/0.53, top3 [[10, 76.7], [2, 52.1], [14, 49.3]], main_share_top 1.000, main_cycle_frac 0.0083
+tip p0 r1 original: mean 2.1390 median-step 2.1067 ms, frames>1.2xmed 1.8 %, span 0.1158, start 17:25:17, witness 0.09 %, rcpt 0.45/0.41, top3 [[10, 71.6], [12, 55.4], [14, 50.0]], main_share_top 1.000, main_cycle_frac 0.0085
+tip p0 r2 original: mean 2.1468 median-step 2.1159 ms, frames>1.2xmed 2.0 %, span 0.1161, start 17:27:05, witness 0.60 %, rcpt 0.91/0.97, top3 [[10, 83.8], [12, 63.0], [14, 54.1]], main_share_top 1.000, main_cycle_frac 0.0084
+tip p1 r0 original: mean 2.1633 median-step 2.1275 ms, frames>1.2xmed 2.2 %, span 0.1172, start 17:33:08, witness 0.17 %, rcpt 0.84/0.75, top3 [[10, 74.7], [12, 59.5], [2, 52.7]], main_share_top 1.000, main_cycle_frac 0.0085
+tip p1 r1 original: mean 2.1425 median-step 2.1082 ms, frames>1.2xmed 2.2 %, span 0.1159, start 17:34:56, witness 0.17 %, rcpt 1.08/0.37, top3 [[10, 87.7], [12, 63.0], [6, 57.5]], main_share_top 1.000, main_cycle_frac 0.0084
+tip p1 r2 original: mean 2.1529 median-step 2.1130 ms, frames>1.2xmed 2.6 %, span 0.1170, start 17:36:44, witness 0.77 %, rcpt 0.57/0.72, top3 [[10, 74.3], [12, 56.2], [0, 49.3]], main_share_top 1.000, main_cycle_frac 0.0084
+tip p2 r0 original: mean 2.1557 median-step 2.1199 ms, frames>1.2xmed 2.2 %, span 0.1164, start 17:39:24, witness 0.17 %, rcpt 0.51/0.36, top3 [[10, 67.6], [12, 59.5], [3, 56.8]], main_share_top 1.000, main_cycle_frac 0.0084
+tip p2 r1 original: mean 2.1531 median-step 2.1147 ms, frames>1.2xmed 3.6 %, span 0.1161, start 17:41:12, witness 0.09 %, rcpt 0.65/0.59, top3 [[10, 73.3], [12, 50.0], [14, 48.0]], main_share_top 1.000, main_cycle_frac 0.0085
+tip p2 r2 original: mean 2.1889 median-step 2.1373 ms, frames>1.2xmed 4.6 %, span 0.1196, start 17:43:01, witness 0.26 %, rcpt 0.34/0.71, top3 [[10, 76.0], [2, 46.7], [12, 45.3]], main_share_top 1.000, main_cycle_frac 0.0086
+
+## S4-JT W8
+parent p0 r0 original: mean 1.9780 median-step 1.9213 ms, frames>1.2xmed 4.4 %, span -, start 17:24:30, witness 0.10 %, rcpt 0.34/0.83, top3 [[10, 95.4], [14, 43.1], [12, 42.2]], main_share_top 1.000, main_cycle_frac 0.01
+parent p0 r1 rerun: mean 1.9829 median-step 1.9228 ms, frames>1.2xmed 4.6 %, span -, start 17:28:53, witness 0.88 %, rcpt 0.90/0.31, top3 [[10, 89.2], [12, 53.1], [14, 43.1]], main_share_top 1.000, main_cycle_frac 0.0098
+parent p0 r2 original: mean 1.9812 median-step 1.9231 ms, frames>1.2xmed 4.4 %, span -, start 17:28:07, witness 0.10 %, rcpt 0.41/0.85, top3 [[10, 92.4], [14, 45.5], [12, 44.6]], main_share_top 1.000, main_cycle_frac 0.0101
+parent p1 r0 original: mean 1.9859 median-step 1.9283 ms, frames>1.2xmed 5.6 %, span -, start 17:32:06, witness 0.00 %, rcpt 0.97/0.77, top3 [[10, 84.6], [12, 44.6], [14, 41.5]], main_share_top 1.000, main_cycle_frac 0.0099
+parent p1 r1 original: mean 1.9874 median-step 1.9293 ms, frames>1.2xmed 4.2 %, span -, start 17:33:55, witness 0.20 %, rcpt 0.67/1.01, top3 [[10, 90.8], [12, 35.4], [14, 32.3]], main_share_top 1.000, main_cycle_frac 0.0101
+parent p1 r2 original: mean 1.9824 median-step 1.9239 ms, frames>1.2xmed 4.4 %, span -, start 17:35:43, witness 0.20 %, rcpt 0.39/0.56, top3 [[10, 92.3], [12, 48.4], [14, 43.9]], main_share_top 0.000, main_cycle_frac 0.01
+parent p2 r0 original: mean 1.9895 median-step 1.9261 ms, frames>1.2xmed 5.2 %, span -, start 17:40:26, witness 0.00 %, rcpt 1.14/1.02, top3 [[10, 80.0], [12, 42.2], [14, 33.8]], main_share_top 1.000, main_cycle_frac 0.01
+parent p2 r1 original: mean 2.0244 median-step 1.9772 ms, frames>1.2xmed 2.6 %, span -, start 17:42:14, witness 0.10 %, rcpt 0.64/2.64, top3 [[10, 87.9], [12, 49.2], [14, 43.9]], main_share_top 1.000, main_cycle_frac 0.0099
+parent p2 r2 original: mean 2.0159 median-step 1.9682 ms, frames>1.2xmed 3.6 %, span -, start 17:44:03, witness 0.10 %, rcpt 0.34/0.66, top3 [[10, 83.3], [12, 40.0], [7, 37.3]], main_share_top 1.000, main_cycle_frac 0.0099
+tip p0 r0 original: mean 1.7937 median-step 1.7356 ms, frames>1.2xmed 5.0 %, span -, start 17:24:24, witness 0.22 %, rcpt 0.51/0.34, top3 [[10, 93.2], [12, 59.3], [1, 55.2]], main_share_top 1.000, main_cycle_frac 0.0096
+tip p0 r1 original: mean 1.8262 median-step 1.7672 ms, frames>1.2xmed 4.8 %, span -, start 17:26:13, witness 0.22 %, rcpt 0.75/0.75, top3 [[10, 88.3], [1, 45.0], [12, 44.1]], main_share_top 0.000, main_cycle_frac 0.0094
+tip p0 r2 original: mean 1.8472 median-step 1.7639 ms, frames>1.2xmed 9.4 %, span -, start 17:28:01, witness 0.83 %, rcpt 0.59/0.41, top3 [[10, 85.2], [12, 56.7], [14, 46.8]], main_share_top 1.000, main_cycle_frac 0.0096
+tip p1 r0 original: mean 1.8118 median-step 1.7541 ms, frames>1.2xmed 5.2 %, span -, start 17:32:12, witness 0.64 %, rcpt 0.77/1.55, top3 [[10, 93.2], [12, 49.2], [1, 47.5]], main_share_top 1.000, main_cycle_frac 0.0095
+tip p1 r1 original: mean 1.8154 median-step 1.7529 ms, frames>1.2xmed 6.4 %, span -, start 17:34:01, witness 0.00 %, rcpt 1.01/0.49, top3 [[10, 91.7], [12, 54.2], [14, 50.0]], main_share_top 1.000, main_cycle_frac 0.0096
+tip p1 r2 original: mean 1.8055 median-step 1.7502 ms, frames>1.2xmed 4.6 %, span -, start 17:35:49, witness 0.32 %, rcpt 0.56/1.28, top3 [[10, 86.7], [12, 49.2], [9, 44.3]], main_share_top 1.000, main_cycle_frac 0.0097
+tip p2 r0 original: mean 1.8125 median-step 1.7536 ms, frames>1.2xmed 5.0 %, span -, start 17:40:20, witness 0.65 %, rcpt 0.62/1.14, top3 [[10, 89.8], [12, 47.5], [14, 44.1]], main_share_top 1.000, main_cycle_frac 0.0098
+tip p2 r1 original: mean 1.8348 median-step 1.7770 ms, frames>1.2xmed 5.0 %, span -, start 17:42:08, witness 0.53 %, rcpt 0.51/0.64, top3 [[10, 82.0], [12, 43.3], [1, 39.3]], main_share_top 1.000, main_cycle_frac 0.0095
+tip p2 r2 original: mean 1.8352 median-step 1.7743 ms, frames>1.2xmed 6.0 %, span -, start 17:43:56, witness 0.21 %, rcpt 0.49/0.34, top3 [[10, 95.0], [12, 40.0], [1, 37.7]], main_share_top 1.000, main_cycle_frac 0.0095
+
+## S4-rung W8
+tip p0 r0 original: mean 1.8592 median-step 1.7987 ms, frames>1.2xmed 5.8 %, span -, start 17:24:06, witness 0.11 %, rcpt 0.69/1.19, top3 [[10, 90.3], [12, 48.3], [14, 41.0]], main_share_top 1.000, main_cycle_frac 0.0104
+tip p0 r1 original: mean 1.8588 median-step 1.8028 ms, frames>1.2xmed 3.8 %, span -, start 17:25:54, witness 0.00 %, rcpt 0.53/0.90, top3 [[10, 95.1], [12, 56.7], [14, 52.5]], main_share_top 1.000, main_cycle_frac 0.0103
+tip p0 r2 original: mean 1.8602 median-step 1.8019 ms, frames>1.2xmed 5.0 %, span -, start 17:27:42, witness 0.94 %, rcpt 0.53/0.78, top3 [[10, 91.8], [12, 53.3], [14, 50.8]], main_share_top 1.000, main_cycle_frac 0.0105
+tip p1 r0 original: mean 1.8629 median-step 1.8056 ms, frames>1.2xmed 4.8 %, span -, start 17:32:31, witness 0.20 %, rcpt 0.59/1.04, top3 [[10, 98.4], [14, 44.3], [12, 43.3]], main_share_top 1.000, main_cycle_frac 0.0104
+tip p1 r1 original: mean 1.8876 median-step 1.8214 ms, frames>1.2xmed 5.6 %, span -, start 17:34:19, witness 0.51 %, rcpt 0.57/0.73, top3 [[10, 90.3], [12, 45.2], [14, 42.9]], main_share_top 1.000, main_cycle_frac 0.0104
+tip p1 r2 original: mean 1.8740 median-step 1.8161 ms, frames>1.2xmed 4.2 %, span -, start 17:36:07, witness 0.21 %, rcpt 0.57/0.50, top3 [[10, 93.4], [12, 44.3], [14, 42.6]], main_share_top 1.000, main_cycle_frac 0.0104
+tip p2 r0 original: mean 1.8689 median-step 1.8133 ms, frames>1.2xmed 5.2 %, span -, start 17:40:01, witness 0.00 %, rcpt 0.94/1.13, top3 [[10, 83.9], [12, 49.2], [5, 49.2]], main_share_top 1.000, main_cycle_frac 0.0105
+tip p2 r1 original: mean 1.8624 median-step 1.8020 ms, frames>1.2xmed 4.6 %, span -, start 17:41:50, witness 0.42 %, rcpt 0.42/0.87, top3 [[10, 95.1], [12, 48.3], [14, 44.3]], main_share_top 1.000, main_cycle_frac 0.0105
+tip p2 r2 original: mean 1.8787 median-step 1.8231 ms, frames>1.2xmed 4.2 %, span -, start 17:43:38, witness 0.31 %, rcpt 0.39/0.78, top3 [[10, 90.5], [14, 48.4], [12, 47.5]], main_share_top 1.000, main_cycle_frac 0.0103
+
+## S4-JT W1
+parent p0 r0 original: mean 4.4240 median-step 4.1486 ms, frames>1.2xmed 13.6 %, span -, start 17:25:10, witness 0.57 %, rcpt 0.94/0.45, top3 [[10, 94.4], [4, 7.0], [12, 4.9]], main_share_top 1.000, main_cycle_frac 0.0155
+parent p0 r1 original: mean 4.4217 median-step 4.1670 ms, frames>1.2xmed 13.6 %, span -, start 17:26:58, witness 0.27 %, rcpt 0.98/0.91, top3 [[10, 95.8], [2, 7.0], [0, 4.9]], main_share_top 1.000, main_cycle_frac 0.0154
+parent p0 r2 original: mean 4.4153 median-step 4.1612 ms, frames>1.2xmed 13.4 %, span -, start 17:28:46, witness 0.45 %, rcpt 0.48/0.90, top3 [[10, 92.3], [0, 14.1], [2, 8.5]], main_share_top 1.000, main_cycle_frac 0.0155
+parent p1 r0 original: mean 4.3837 median-step 4.1262 ms, frames>1.2xmed 13.4 %, span -, start 17:31:26, witness 0.27 %, rcpt 0.34/0.34, top3 [[10, 93.6], [12, 7.1], [2, 2.8]], main_share_top 1.000, main_cycle_frac 0.0155
+parent p1 r1 original: mean 4.3833 median-step 4.1221 ms, frames>1.2xmed 13.2 %, span -, start 17:33:14, witness 0.05 %, rcpt 0.75/0.59, top3 [[10, 96.5], [2, 3.5], [12, 1.4]], main_share_top 1.000, main_cycle_frac 0.0156
+parent p1 r2 original: mean 4.4060 median-step 4.1467 ms, frames>1.2xmed 13.0 %, span -, start 17:35:03, witness 0.58 %, rcpt 0.37/0.27, top3 [[10, 97.2], [2, 4.2], [12, 2.1]], main_share_top 1.000, main_cycle_frac 0.0154
+parent p2 r0 original: mean 4.5336 median-step 4.2683 ms, frames>1.2xmed 13.4 %, span -, start 17:41:05, witness 0.26 %, rcpt 0.49/0.65, top3 [[10, 95.9], [2, 5.5], [12, 2.7]], main_share_top 1.000, main_cycle_frac 0.0151
+parent p2 r1 original: mean 4.5070 median-step 4.2320 ms, frames>1.2xmed 13.6 %, span -, start 17:42:53, witness 0.22 %, rcpt 1.40/0.34, top3 [[10, 96.6], [0, 8.3], [12, 3.4]], main_share_top 1.000, main_cycle_frac 0.0152
+parent p2 r2 original: mean 4.4980 median-step 4.2454 ms, frames>1.2xmed 13.2 %, span -, start 17:44:42, witness 0.04 %, rcpt 0.75/0.51, top3 [[10, 93.8], [0, 13.8], [12, 6.2]], main_share_top 1.000, main_cycle_frac 0.0152
+tip p0 r0 original: mean 4.4376 median-step 4.1818 ms, frames>1.2xmed 13.2 %, span -, start 17:25:02, witness 0.31 %, rcpt 0.46/0.94, top3 [[10, 95.2], [0, 13.3], [2, 4.9]], main_share_top 1.000, main_cycle_frac 0.0152
+tip p0 r1 original: mean 4.4568 median-step 4.1856 ms, frames>1.2xmed 13.2 %, span -, start 17:26:50, witness 0.35 %, rcpt 0.57/0.98, top3 [[10, 97.9], [2, 2.1], [14, 1.4]], main_share_top 1.000, main_cycle_frac 0.0154
+tip p0 r2 original: mean 4.3918 median-step 4.1332 ms, frames>1.2xmed 13.4 %, span -, start 17:28:39, witness 0.44 %, rcpt 0.69/0.48, top3 [[10, 93.0], [3, 4.3], [12, 2.1]], main_share_top 0.000, main_cycle_frac 0.0156
+tip p1 r0 original: mean 4.5231 median-step 4.2725 ms, frames>1.2xmed 13.0 %, span -, start 17:31:33, witness 0.22 %, rcpt 0.34/1.00, top3 [[10, 97.9], [0, 11.0], [2, 3.4]], main_share_top 1.000, main_cycle_frac 0.015
+tip p1 r1 original: mean 4.4500 median-step 4.1891 ms, frames>1.2xmed 13.2 %, span -, start 17:33:22, witness 0.09 %, rcpt 0.59/0.63, top3 [[10, 96.6], [12, 2.8], [11, 1.4]], main_share_top 1.000, main_cycle_frac 0.0152
+tip p1 r2 original: mean 4.4289 median-step 4.1643 ms, frames>1.2xmed 13.4 %, span -, start 17:35:10, witness 0.66 %, rcpt 0.27/0.36, top3 [[10, 95.8], [2, 7.7], [8, 5.6]], main_share_top 1.000, main_cycle_frac 0.0154
+tip p2 r0 original: mean 4.4309 median-step 4.1673 ms, frames>1.2xmed 13.6 %, span -, start 17:40:58, witness 0.44 %, rcpt 0.51/0.49, top3 [[10, 93.7], [0, 15.4], [12, 5.6]], main_share_top 1.000, main_cycle_frac 0.0155
+tip p2 r1 original: mean 4.5024 median-step 4.2398 ms, frames>1.2xmed 13.6 %, span -, start 17:42:46, witness 0.00 %, rcpt 0.42/1.40, top3 [[10, 95.9], [12, 3.4], [15, 0.7]], main_share_top 1.000, main_cycle_frac 0.0151
+tip p2 r2 original: mean 4.4658 median-step 4.2104 ms, frames>1.2xmed 13.4 %, span -, start 17:44:34, witness 0.48 %, rcpt 0.36/0.75, top3 [[10, 96.5], [2, 5.6], [12, 4.2]], main_share_top 1.000, main_cycle_frac 0.0154
+
+## S4-JT W2
+parent p0 r0 original: mean 3.0534 median-step 2.9030 ms, frames>1.2xmed 11.0 %, span -, start 17:24:56, witness 0.19 %, rcpt 0.82/0.46, top3 [[10, 97.0], [12, 61.6], [2, 8.1]], main_share_top 1.000, main_cycle_frac 0.0146
+parent p0 r1 original: mean 3.0788 median-step 2.9242 ms, frames>1.2xmed 12.2 %, span -, start 17:26:44, witness 0.06 %, rcpt 0.42/0.57, top3 [[10, 95.0], [12, 63.0], [13, 2.0]], main_share_top 1.000, main_cycle_frac 0.0145
+parent p0 r2 original: mean 3.1084 median-step 2.9567 ms, frames>1.2xmed 10.6 %, span -, start 17:28:32, witness 0.06 %, rcpt 0.47/0.69, top3 [[10, 95.0], [12, 69.3], [0, 8.9]], main_share_top 1.000, main_cycle_frac 0.0143
+parent p1 r0 original: mean 3.0715 median-step 2.9154 ms, frames>1.2xmed 11.6 %, span -, start 17:31:41, witness 0.45 %, rcpt 1.00/0.43, top3 [[10, 97.0], [12, 60.0], [2, 8.0]], main_share_top 1.000, main_cycle_frac 0.0147
+parent p1 r1 original: mean 3.0807 median-step 2.9324 ms, frames>1.2xmed 10.6 %, span -, start 17:33:29, witness 0.38 %, rcpt 0.63/0.59, top3 [[10, 96.0], [12, 61.0], [0, 13.0]], main_share_top 1.000, main_cycle_frac 0.0147
+parent p1 r2 original: mean 3.0987 median-step 2.9433 ms, frames>1.2xmed 11.6 %, span -, start 17:35:17, witness 0.45 %, rcpt 0.36/1.48, top3 [[10, 96.1], [12, 65.3], [2, 7.9]], main_share_top 1.000, main_cycle_frac 0.0143
+parent p2 r0 original: mean 3.2259 median-step 3.0726 ms, frames>1.2xmed 11.4 %, span -, start 17:40:51, witness 0.18 %, rcpt 0.57/0.51, top3 [[10, 93.3], [12, 64.4], [14, 3.8]], main_share_top 1.000, main_cycle_frac 0.0142
+parent p2 r1 original: mean 3.1694 median-step 3.0145 ms, frames>1.2xmed 11.2 %, span -, start 17:42:39, witness 0.06 %, rcpt 0.41/0.42, top3 [[10, 94.2], [12, 66.7], [2, 4.9]], main_share_top 1.000, main_cycle_frac 0.0143
+parent p2 r2 original: mean 3.0709 median-step 2.9231 ms, frames>1.2xmed 11.6 %, span -, start 17:44:28, witness 0.06 %, rcpt 0.78/0.36, top3 [[10, 98.0], [12, 58.0], [2, 6.0]], main_share_top 1.000, main_cycle_frac 0.0147
+tip p0 r0 original: mean 2.9650 median-step 2.8118 ms, frames>1.2xmed 12.2 %, span -, start 17:24:49, witness 0.26 %, rcpt 1.79/0.82, top3 [[10, 94.8], [12, 69.8], [14, 3.1]], main_share_top 0.000, main_cycle_frac 0.0146
+tip p0 r1 original: mean 2.9961 median-step 2.8447 ms, frames>1.2xmed 11.8 %, span -, start 17:26:37, witness 0.19 %, rcpt 0.42/0.42, top3 [[10, 96.9], [12, 74.2], [2, 4.1]], main_share_top 1.000, main_cycle_frac 0.0144
+tip p0 r2 original: mean 3.0208 median-step 2.8748 ms, frames>1.2xmed 10.8 %, span -, start 17:28:25, witness 0.07 %, rcpt 0.92/0.47, top3 [[10, 93.9], [12, 77.6], [14, 5.1]], main_share_top 1.000, main_cycle_frac 0.0143
+tip p1 r0 original: mean 2.9998 median-step 2.8497 ms, frames>1.2xmed 11.8 %, span -, start 17:31:47, witness 0.13 %, rcpt 0.43/0.67, top3 [[10, 97.9], [12, 71.1], [2, 3.1]], main_share_top 1.000, main_cycle_frac 0.0144
+tip p1 r1 original: mean 2.9749 median-step 2.8215 ms, frames>1.2xmed 11.8 %, span -, start 17:33:36, witness 0.07 %, rcpt 0.59/0.33, top3 [[10, 97.9], [12, 64.6], [2, 2.1]], main_share_top 1.000, main_cycle_frac 0.0146
+tip p1 r2 original: mean 3.0152 median-step 2.8707 ms, frames>1.2xmed 11.4 %, span -, start 17:35:24, witness 0.58 %, rcpt 1.48/0.54, top3 [[10, 95.9], [12, 70.1], [14, 3.1]], main_share_top 0.000, main_cycle_frac 0.0144
+tip p2 r0 original: mean 2.9970 median-step 2.8411 ms, frames>1.2xmed 11.8 %, span -, start 17:40:44, witness 0.13 %, rcpt 0.43/0.57, top3 [[10, 90.8], [12, 61.9], [13, 2.1]], main_share_top 1.000, main_cycle_frac 0.0144
+tip p2 r1 original: mean 3.0032 median-step 2.8488 ms, frames>1.2xmed 12.0 %, span -, start 17:42:33, witness 0.26 %, rcpt 0.59/0.41, top3 [[10, 94.8], [12, 76.3], [2, 7.2]], main_share_top 1.000, main_cycle_frac 0.0146
+tip p2 r2 original: mean 3.0091 median-step 2.8615 ms, frames>1.2xmed 11.6 %, span -, start 17:44:21, witness 0.13 %, rcpt 0.70/0.78, top3 [[10, 93.9], [12, 71.1], [14, 3.1]], main_share_top 1.000, main_cycle_frac 0.0145

@@ -1,0 +1,3 @@
+﻿# wait_idle9a.ps1 start 2026-09-30T15:39:41.2048134+03:00; poll every 5 s, max 1 polls; quiet = build procs 0 AND lane-target procs 0 AND cpu10 < 5 % AND 100 <= proc count <= 999; need 3 consecutive
+poll   1 2026-09-30T15:39:41.2368876+03:00 cpu10=30.89% procs=260 build_procs=0 [] lane_target_procs=1 [runner(2356)] D_free_GB=69.52 quiet=False streak=0 top3(cpu s in ~10s): broadphase_g4rT_50e31f1a(19320)=10.45s bpbench_g4ref_93b2615b(5520)=10.42s runner(2356)=7.34s
+# TIMEOUT: never idle after 1 polls at 2026-09-30T15:39:52.3912735+03:00

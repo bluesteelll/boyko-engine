@@ -1,0 +1,98 @@
+# J-Son-T post hoc
+
+## manifold count per window (cell median of process means) - normalisation check
+W1 JSoffT: [0..100) 4543.24; [100..274) 4467.09; [274..500) 4468.11; [277..500) 4468.12; [100..500) 4467.66
+W1 JSonT: [0..100) 4543.24; [100..274) 4467.09; [274..500) 4467.00; [277..500) 4467.00; [100..500) 4467.04
+W8 JSoffT: [0..100) 4543.24; [100..274) 4467.09; [274..500) 4468.11; [277..500) 4468.12; [100..500) 4467.66
+W8 JSonT: [0..100) 4543.24; [100..274) 4467.09; [274..500) 4467.00; [277..500) 4467.00; [100..500) 4467.04
+
+## W8 [0,100) per process (ms) with the placement receipt (recorded, never used to drop)
+  JSoffT    p0 r1 original [0,100) 3.9613 [100,274) 3.6397 [274,500) 3.8572 step0 6.111 witness 1.88 top3 [[10, 92.7], [12, 67.5], [14, 64.2]] top_share_of_proc 0.172
+  JSoffT    p0 r2 original [0,100) 4.1265 [100,274) 3.9388 [274,500) 3.7694 step0 5.657 witness 0.10 top3 [[10, 88.2], [12, 61.1], [14, 60.3]] top_share_of_proc 0.184
+  JSoffT    p1 r0 original [0,100) 4.0931 [100,274) 3.7636 [274,500) 3.7218 step0 5.691 witness 1.78 top3 [[10, 96.0], [12, 68.3], [14, 61.0]] top_share_of_proc 0.182
+  JSoffT    p1 r1 original [0,100) 4.1010 [100,274) 3.9413 [274,500) 3.8641 step0 5.719 witness 0.19 top3 [[10, 91.4], [12, 68.0], [14, 63.3]] top_share_of_proc 0.17
+  JSoffT    p1 r2 original [0,100) 3.9279 [100,274) 3.6911 [274,500) 3.8997 step0 5.459 witness 1.31 top3 [[10, 91.1], [14, 66.1], [12, 60.5]] top_share_of_proc 0.163
+  JSoffT    p2 r0 original [0,100) 4.1307 [100,274) 3.9779 [274,500) 3.8616 step0 5.951 witness 0.15 top3 [[10, 91.4], [12, 58.6], [14, 57.8]] top_share_of_proc 0.184
+  JSoffT    p2 r1 original [0,100) 3.8807 [100,274) 3.7461 [274,500) 3.9422 step0 5.648 witness 1.60 top3 [[10, 90.4], [12, 71.2], [14, 67.2]] top_share_of_proc 0.164
+  JSoffT    p2 r2 original [0,100) 4.1347 [100,274) 3.8653 [274,500) 3.6371 step0 5.572 witness 0.26 top3 [[10, 91.9], [12, 67.5], [14, 62.6]] top_share_of_proc 0.174
+  JSonT     p0 r0 rerun    [0,100) 4.1602 [100,274) 3.9744 [274,500) 0.1366 step0 5.760 witness 0.17 top3 [[10, 93.2], [12, 66.2], [14, 60.8]] top_share_of_proc 0.183
+  JSonT     p0 r1 original [0,100) 4.1547 [100,274) 3.9662 [274,500) 0.1324 step0 5.687 witness 1.61 top3 [[10, 90.5], [14, 60.8], [12, 58.1]] top_share_of_proc 0.18
+  JSonT     p0 r2 rerun    [0,100) 3.9822 [100,274) 3.6844 [274,500) 0.1286 step0 5.699 witness 0.09 top3 [[10, 88.6], [12, 48.6], [14, 47.1]] top_share_of_proc 0.203
+  JSonT     p1 r0 original [0,100) 4.1235 [100,274) 3.9479 [274,500) 0.1395 step0 5.771 witness 0.26 top3 [[10, 87.8], [12, 55.4], [14, 52.7]] top_share_of_proc 0.19
+  JSonT     p1 r1 original [0,100) 3.9033 [100,274) 3.9738 [274,500) 0.1372 step0 5.574 witness 1.30 top3 [[10, 93.2], [14, 58.3], [12, 55.6]] top_share_of_proc 0.193
+  JSonT     p1 r2 original [0,100) 4.1446 [100,274) 3.7645 [274,500) 0.1246 step0 5.546 witness 1.85 top3 [[10, 84.7], [14, 59.2], [12, 57.7]] top_share_of_proc 0.171
+  JSonT     p2 r0 original [0,100) 4.1789 [100,274) 3.7039 [274,500) 0.1293 step0 6.433 witness 0.18 top3 [[10, 90.1], [12, 64.8], [14, 62.0]] top_share_of_proc 0.177
+  JSonT     p2 r1 rerun    [0,100) 3.9542 [100,274) 3.6609 [274,500) 0.1337 step0 5.615 witness 1.01 top3 [[10, 87.1], [12, 62.3], [14, 56.5]] top_share_of_proc 0.176
+  JSonT     p2 r2 rerun    [0,100) 3.8187 [100,274) 3.7600 [274,500) 0.1364 step0 5.551 witness 1.00 top3 [[10, 92.9], [14, 69.6], [12, 68.1]] top_share_of_proc 0.165
+  JSoffT-a  p0 r0 original [0,100) 4.3020 [100,274) 4.0521 [274,500) 3.7988 step0 6.586 witness 0.38 top3 [[10, 88.1], [14, 61.7], [12, 57.1]] top_share_of_proc 0.177
+  JSoffT-a  p0 r1 original [0,100) 4.2259 [100,274) 4.0417 [274,500) 3.8173 step0 6.724 witness 1.36 top3 [[10, 89.5], [12, 58.6], [14, 57.9]] top_share_of_proc 0.181
+  JSoffT-a  p0 r2 original [0,100) 3.9162 [100,274) 3.9820 [274,500) 4.0461 step0 5.621 witness 0.57 top3 [[10, 87.3], [12, 58.2], [14, 57.8]] top_share_of_proc 0.176
+  JSoffT-a  p1 r0 original [0,100) 3.9770 [100,274) 3.9810 [274,500) 4.0067 step0 5.795 witness 1.69 top3 [[10, 87.3], [12, 67.2], [14, 64.9]] top_share_of_proc 0.17
+  JSoffT-a  p1 r1 original [0,100) 4.2507 [100,274) 3.9158 [274,500) 3.8350 step0 6.099 witness 0.43 top3 [[10, 85.8], [12, 68.2], [14, 61.4]] top_share_of_proc 0.16
+  JSoffT-a  p1 r2 original [0,100) 4.2209 [100,274) 4.0431 [274,500) 3.9985 step0 5.974 witness 1.52 top3 [[10, 90.4], [12, 61.0], [14, 58.1]] top_share_of_proc 0.183
+  JSoffT-a  p2 r0 original [0,100) 3.9791 [100,274) 3.8414 [274,500) 4.0195 step0 5.681 witness 1.57 top3 [[10, 89.5], [14, 56.8], [12, 53.8]] top_share_of_proc 0.188
+  JSoffT-a  p2 r1 original [0,100) 4.2645 [100,274) 4.0678 [274,500) 3.7288 step0 6.375 witness 1.24 top3 [[10, 93.2], [12, 59.1], [14, 56.1]] top_share_of_proc 0.196
+  JSoffT-a  p2 r2 original [0,100) 4.2635 [100,274) 4.1218 [274,500) 4.0900 step0 5.862 witness 0.54 top3 [[10, 80.4], [12, 65.2], [14, 60.4]] top_share_of_proc 0.156
+  JSonT-a   p0 r0 rerun    [0,100) 4.2935 [100,274) 4.0610 [274,500) 0.1365 step0 6.826 witness 0.16 top3 [[10, 88.8], [12, 55.7], [14, 55.0]] top_share_of_proc 0.186
+  JSonT-a   p0 r1 original [0,100) 4.1999 [100,274) 4.0738 [274,500) 0.1370 step0 6.281 witness 1.66 top3 [[10, 87.5], [14, 56.2], [7, 52.5]] top_share_of_proc 0.177
+  JSonT-a   p0 r2 original [0,100) 4.2392 [100,274) 3.8026 [274,500) 0.1260 step0 6.623 witness 0.25 top3 [[10, 82.9], [14, 56.6], [12, 56.6]] top_share_of_proc 0.177
+  JSonT-a   p1 r0 original [0,100) 4.2764 [100,274) 4.0523 [274,500) 0.1294 step0 6.440 witness 1.82 top3 [[10, 83.5], [12, 54.4], [14, 53.2]] top_share_of_proc 0.192
+  JSonT-a   p1 r1 original [0,100) 4.1794 [100,274) 4.0894 [274,500) 0.1335 step0 5.530 witness 0.08 top3 [[10, 90.0], [12, 61.3], [14, 58.8]] top_share_of_proc 0.173
+  JSonT-a   p1 r2 rerun    [0,100) 3.9799 [100,274) 3.8461 [274,500) 0.1334 step0 6.949 witness 0.84 top3 [[10, 88.2], [12, 62.7], [14, 61.8]] top_share_of_proc 0.167
+  JSonT-a   p2 r0 original [0,100) 4.2788 [100,274) 3.9181 [274,500) 0.1242 step0 6.450 witness 0.08 top3 [[10, 89.7], [12, 60.3], [14, 57.7]] top_share_of_proc 0.178
+  JSonT-a   p2 r1 rerun    [0,100) 4.2410 [100,274) 3.7810 [274,500) 0.1246 step0 5.943 witness 1.08 top3 [[10, 87.0], [12, 52.6], [14, 51.3]] top_share_of_proc 0.189
+  JSonT-a   p2 r2 original [0,100) 3.9497 [100,274) 3.9170 [274,500) 0.1371 step0 6.093 witness 0.34 top3 [[10, 84.2], [12, 57.9], [14, 53.2]] top_share_of_proc 0.183
+
+## W1 placement receipts (main_share_top_est: exact at W1 on an idle machine), per row: min / median / max
+  W1 JSoffT: n 7 min 1.000 median 1.000 max 1.000
+  W1 JSonT: n 8 min 1.000 median 1.000 max 1.000
+  W1 JSoffT-a: n 9 min 1.000 median 1.000 max 1.000
+  W1 JSonT-a: n 9 min 1.000 median 1.000 max 1.000
+
+## armed stage spans (us/step, cell median of process means): OFF JSoffT-a vs ON JSonT-a
+[0..100) W1: wall 15919.6->15936.3; bp 303.3->314.8; np 1898.3->1904.1; graph 128.3->138.2; solve 13494.4->13476.9; integrate 0.2->0.2; gather 30.7->31.5; apply 12.9->12.7; select_bp 0.1->0.1; sleep_begin 0.0->3.8; sleep_freeze 0.0->1.7; sleep_end 0.0->4.5; sleep_classify 0.0->9.6; g 54.7->61.6; u 11.6->12.0; r 2.9->2.9; sys_sum 15865.8->15877.9
+[100..274) W1: wall 14913.1->14868.1; bp 295.2->300.9; np 801.1->805.2; graph 132.7->138.4; solve 13588.9->13532.6; integrate 0.2->0.2; gather 29.9->29.2; apply 13.2->13.0; select_bp 0.1->0.1; sleep_begin 0.0->3.7; sleep_freeze 0.0->1.7; sleep_end 0.0->5.1; sleep_classify 0.0->9.8; g 57.0->57.7; u 12.0->12.8; r 2.6->2.6; sys_sum 14851.6->14810.4
+[274..500) W1: wall 14655.1->127.7; bp 291.0->47.6; np 733.4->3.5; graph 134.8->9.2; solve 13410.3->13.7; integrate 0.2->0.1; gather 29.7->28.1; apply 12.9->1.5; select_bp 0.1->0.0; sleep_begin 0.0->2.0; sleep_freeze 0.0->0.0; sleep_end 0.0->4.1; sleep_classify 0.0->19.1; g 63.4->23.8; u 14.9->2.8; r 2.7->0.0; sys_sum 14600.5->103.9
+[277..500) W1: wall 14658.1->111.2; bp 291.3->35.9; np 733.2->0.2; graph 134.9->8.7; solve 13412.7->12.7; integrate 0.2->0.1; gather 29.7->28.1; apply 12.9->1.5; select_bp 0.1->0.0; sleep_begin 0.0->2.0; sleep_freeze 0.0->0.0; sleep_end 0.0->4.1; sleep_classify 0.0->19.1; g 63.7->23.5; u 15.0->2.7; r 2.7->0.0; sys_sum 14603.2->87.3
+   [274..500) W1 bp_queried: OFF 1240.0 ON 16.460176991150444
+   [274..500) W1 bp_pairs: OFF 9545.0 ON 9545.0
+   [274..500) W1 np_pairs: OFF 9545.0 ON 126.70353982300885
+   [274..500) W1 sleep_held: OFF 0.0 ON 1234.513274336283
+   [274..500) W1 waves: OFF 96.0 ON 0.0
+   [274..500) W1 colors: OFF 11.0 ON 0.048672566371681415
+[0..100) W8: wall 4225.9->4239.2; bp 301.5->308.1; np 377.3->378.3; graph 140.9->144.4; solve 3331.5->3316.1; integrate 0.2->0.1; gather 30.8->30.8; apply 11.5->11.5; select_bp 0.1->0.1; sleep_begin 0.0->3.8; sleep_freeze 0.0->2.0; sleep_end 0.0->5.4; sleep_classify 0.0->9.9; g 35.9->35.6; u 10.4->10.4; r 42.1->42.1; sys_sum 4189.8->4203.2
+[100..274) W8: wall 4041.7->3918.1; bp 292.3->293.7; np 199.8->186.6; graph 142.6->141.0; solve 3329.3->3225.9; integrate 0.1->0.1; gather 30.0->29.4; apply 11.7->11.6; select_bp 0.1->0.1; sleep_begin 0.0->3.7; sleep_freeze 0.0->1.9; sleep_end 0.0->5.3; sleep_classify 0.0->8.6; g 34.6->33.9; u 10.2->10.7; r 39.3->38.6; sys_sum 4006.8->3884.2
+[274..500) W8: wall 3998.5->133.4; bp 289.7->50.7; np 182.0->1.3; graph 142.8->10.1; solve 3301.6->15.1; integrate 0.1->0.0; gather 30.0->29.8; apply 11.7->1.6; select_bp 0.1->0.0; sleep_begin 0.0->2.1; sleep_freeze 0.0->0.0; sleep_end 0.0->4.6; sleep_classify 0.0->20.2; g 34.5->24.1; u 12.6->3.0; r 38.9->0.0; sys_sum 3963.8->109.2
+[277..500) W8: wall 3998.5->117.7; bp 289.9->38.1; np 181.9->0.3; graph 142.6->9.5; solve 3301.4->13.9; integrate 0.1->0.0; gather 30.1->29.8; apply 11.7->1.6; select_bp 0.1->0.0; sleep_begin 0.0->2.1; sleep_freeze 0.0->0.0; sleep_end 0.0->4.6; sleep_classify 0.0->20.2; g 34.5->24.0; u 12.6->2.9; r 38.9->0.0; sys_sum 3963.8->93.5
+   [274..500) W8 bp_queried: OFF 1240.0 ON 16.460176991150444
+   [274..500) W8 bp_pairs: OFF 9545.0 ON 9545.0
+   [274..500) W8 np_pairs: OFF 9545.0 ON 126.70353982300885
+   [274..500) W8 sleep_held: OFF 0.0 ON 1234.513274336283
+   [274..500) W8 waves: OFF 96.0 ON 0.0
+   [274..500) W8 colors: OFF 11.0 ON 0.048672566371681415
+
+## per-step wall around the freeze, disarmed ON (median over the K processes, us); step = CSV row
+W1: 268: 14533, 269: 14528, 270: 14557, 271: 14615, 272: 14554, 273: 1342, 274: 1900, 275: 1771, 276: 393, 277: 671, 278: 104, 279: 104, 280: 103, 281: 103, 282: 105, 283: 105, 300: 106, 400: 102, 499: 100
+W1 OFF: 0: 17979, 1: 13858, 2: 13674, 50: 17263, 99: 15560, 150: 15100, 273: 14526, 274: 14512, 300: 14631, 499: 14502
+W1 ON first steps: 0: 18142, 1: 13980, 2: 13752, 50: 17095, 99: 15513
+W8: 268: 3804, 269: 3756, 270: 3716, 271: 3846, 272: 3723, 273: 807, 274: 1446, 275: 1830, 276: 511, 277: 750, 278: 110, 279: 128, 280: 109, 281: 122, 282: 123, 283: 117, 300: 114, 400: 109, 499: 106
+W8 OFF: 0: 5674, 1: 3974, 2: 3667, 50: 4421, 99: 4057, 150: 3785, 273: 3891, 274: 3814, 300: 3804, 499: 3760
+W8 ON first steps: 0: 5687, 1: 4107, 2: 3733, 50: 4287, 99: 4173
+
+## stdout L10 lines of one ON process per W (verbatim)
+  W1 p0 r0: no-awake fast path (L10 C3a): 227 steps
+  W1 p0 r0: sleep-skip (L10 C3b): mode Sets, 225 steps with a held row, at most 1240 rows held, last step SleepSkipStats { held_islands: 1, held_rows: 1240, held_manifolds: 4467, withheld_pairs: 9545, held_skipped_pairs: 0, restored_pairs: 0, computed: 0, restored: 0, moved_in: 0, released_rows: 0, flushes: 0, fast_path: 1 }, rules SleepRuleCounts { d1_member: 0, d1a_anchor: 0, d8_latch: 0, d2_scan: 0, d3_cle
+  W1 p0 r0: tree seam (L10 C3c): 223 steps with a withheld pair, at most 9545 withheld, every dynamic row held from step Some(276), sleepers at the end 1240
+  W1 p0 r0: SUMMARY {"runner":"jolt_parity_pyramid fixed-window runner v1","label":"JSonT#tip@W1","args":["--scene","jolt","--gap","0.5","--cfg","a","--broadphase","tree","--sleeping","on","--workers","1","--steps","500","--window","0..500","--csv","C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8b\\raw\\J-Son-T-p0_172102\\008_r0_JSo
+  W8 p0 r0: no-awake fast path (L10 C3a): 227 steps
+  W8 p0 r0: sleep-skip (L10 C3b): mode Sets, 225 steps with a held row, at most 1240 rows held, last step SleepSkipStats { held_islands: 1, held_rows: 1240, held_manifolds: 4467, withheld_pairs: 9545, held_skipped_pairs: 0, restored_pairs: 0, computed: 0, restored: 0, moved_in: 0, released_rows: 0, flushes: 0, fast_path: 1 }, rules SleepRuleCounts { d1_member: 0, d1a_anchor: 0, d8_latch: 0, d2_scan: 0, d3_cle
+  W8 p0 r0: tree seam (L10 C3c): 223 steps with a withheld pair, at most 9545 withheld, every dynamic row held from step Some(276), sleepers at the end 1240
+  W8 p0 r0: SUMMARY {"runner":"jolt_parity_pyramid fixed-window runner v1","label":"JSonT#tip@W8","args":["--scene","jolt","--gap","0.5","--cfg","a","--broadphase","tree","--sleeping","on","--workers","8","--steps","500","--window","0..500","--csv","C:\\Users\\flint\\AppData\\Local\\Temp\\claude\\D--claude-BoykoEngine\\238150a2-5c92-4147-8309-b6428586e8a7\\scratchpad\\win8b\\raw\\J-Son-T-p0_172102\\004_r0_JSo
+
+## L10 serial pieces on JSonT-a: per-process sum of sleep_begin + freeze + end + classify (us/step), median; and as a share of the OFF (JSoffT-a) wall cell
+  [0..100) W1: L10 serial sum 19.60 us/step = 0.123 % of the OFF wall 15919.6 us
+  [100..274) W1: L10 serial sum 20.34 us/step = 0.136 % of the OFF wall 14913.1 us
+  [274..500) W1: L10 serial sum 25.16 us/step = 0.172 % of the OFF wall 14655.1 us
+  [0..100) W8: L10 serial sum 21.16 us/step = 0.501 % of the OFF wall 4225.9 us
+  [100..274) W8: L10 serial sum 19.48 us/step = 0.482 % of the OFF wall 4041.7 us
+  [274..500) W8: L10 serial sum 27.01 us/step = 0.676 % of the OFF wall 3998.5 us

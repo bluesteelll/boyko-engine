@@ -1,0 +1,9 @@
+window 8 omega-b processes 24 slots 24 used 24 pin ffcac12f
+worker   P2  w8 16000/28300 (K 6/6) 8b 15250/31200 (K 2/2) | slope w8 341.7 8b 443.1 ratio 1.297 [8b worst pairing 394..492] | region36 n/n/n (no guard n/n/n) region72 n/n/n (no guard n/n/n) | paired w8 353 (n 6) / 8b 443 (n 2)
+worker   P4  w8 39900/82600 (K 6/6) 8b 44500/86200 (K 2/2) | slope w8 1186.1 8b 1158.3 ratio 0.977 [8b worst pairing 889..1428] | region36 n/n/n (no guard n/n/n) region72 n/n/n (no guard n/n/n) | paired w8 1079 (n 6) / 8b 1158 (n 2)
+worker   P8  w8 118650/226650 (K 6/6) 8b 110400/218200 (K 2/2) | slope w8 3000.0 8b 2994.4 ratio 0.998 [8b worst pairing 2939..3050] | region36 n/n/n (no guard n/n/n) region72 n/n/n (no guard n/n/n) | paired w8 3453 (n 6) / 8b 2994 (n 2)
+worker   P16 w8 217450/399200 (K 6/6) 8b 210800/424500 (K 2/2) | slope w8 5048.6 8b 5936.1 ratio 1.176 [8b worst pairing 5225..6647] | region36 n/n/n (no guard n/n/n) region72 n/n/n (no guard n/n/n) | paired w8 5311 (n 6) / 8b 5936 (n 2)
+external P2  w8 15350/29850 (K 6/6) 8b 16500/33700 (K 2/2) | slope w8 402.8 8b 477.8 ratio 1.186 [8b worst pairing 447..508] | region36 n/n/n (no guard n/n/Y) region72 n/n/n (no guard n/n/Y) | paired w8 407 (n 6) / 8b 486 (n 1)
+external P4  w8 41600/77150 (K 6/6) 8b 41450/100200 (K 2/2) | slope w8 987.5 8b 1631.9 ratio 1.653 [8b worst pairing 1400..1864] | region36 n/n/n (no guard n/n/n) region72 n/n/n (no guard n/Y/Y) | paired w8 1011 (n 6) / 8b 1400 (n 1)
+external P8  w8 110500/212200 (K 6/6) 8b 108150/223150 (K 2/2) | slope w8 2825.0 8b 3194.4 ratio 1.131 [8b worst pairing 3092..3297] | region36 n/n/n (no guard n/n/n) region72 n/n/n (no guard n/n/n) | paired w8 2974 (n 6) / 8b 3211 (n 1)
+external P16 w8 198100/394800 (K 6/6) 8b 222950/400450 (K 2/2) | slope w8 5463.9 8b 4930.6 ratio 0.902 [8b worst pairing 4622..5239] | region36 n/n/n (no guard n/n/Y) region72 n/n/n (no guard n/n/n) | paired w8 5535 (n 6) / 8b 4622 (n 1)

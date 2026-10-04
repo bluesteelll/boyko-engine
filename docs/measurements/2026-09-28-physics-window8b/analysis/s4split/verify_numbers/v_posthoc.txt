@@ -1,0 +1,15 @@
+S7-AB slots 171 used 171
+== S7-AB ladder, s7p (= runner_tip_16191fda.exe), [0,500) wall, ruling 1
+  ref S7-JT s7p W8 median 1.8152; W16 2.0502
+  ladder8-F0.5           n 9/9 B-A +0.0337 (+1.86 %) pooled n/n/Y passes n/Y/Y n/n/n n/n/n -> NOT CLAIMED
+  ladder8-F1             n 9/9 B-A +0.0660 (+3.63 %) pooled n/Y/Y passes Y/Y/Y Y/Y/Y n/Y/Y -> CLAIMED
+  ladder8-F1.5           n 9/9 B-A +0.0911 (+5.02 %) pooled n/Y/Y passes n/Y/Y Y/Y/Y n/Y/Y -> CLAIMED
+  ladder8-F2             n 9/9 B-A +0.1257 (+6.93 %) pooled Y/Y/Y passes Y/Y/Y Y/Y/Y Y/Y/Y -> CLAIMED STRONG
+  ladder16-F0.5          n 9/9 B-A +0.0545 (+2.66 %) pooled n/Y/Y passes n/Y/Y Y/Y/Y Y/Y/Y -> CLAIMED
+  ladder16-F1            n 9/9 B-A +0.1139 (+5.56 %) pooled Y/Y/Y passes Y/Y/Y Y/Y/Y Y/Y/Y -> CLAIMED STRONG
+  ladder16-F1.5          n 9/9 B-A +0.1599 (+7.80 %) pooled Y/Y/Y passes Y/Y/Y Y/Y/Y Y/Y/Y -> CLAIMED STRONG
+  ladder16-F2            n 9/9 B-A +0.2146 (+10.47 %) pooled Y/Y/Y passes Y/Y/Y Y/Y/Y Y/Y/Y -> CLAIMED STRONG
+
+== S4-AB armed W8 [100,500): per-wave TIP vs PARENT (ns), medians over K=9
+  parent: waves/step 96.00 first ramp 4124.8 pass ramp 2972.8 join/wave 283.0
+  tip: waves/step 96.00 first ramp 4069.4 pass ramp 2890.6 join/wave 284.5

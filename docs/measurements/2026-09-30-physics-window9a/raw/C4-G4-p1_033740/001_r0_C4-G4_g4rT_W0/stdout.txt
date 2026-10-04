@@ -1,0 +1,80 @@
+bp_g4_uniform/all_pairs/96
+                        time:   [5.9350 µs 5.9401 µs 5.9452 µs]
+bp_g4_uniform/tree/96   time:   [8.8440 µs 9.0033 µs 9.1312 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+bp_g4_uniform/all_pairs/104
+                        time:   [7.0243 µs 7.0312 µs 7.0383 µs]
+bp_g4_uniform/tree/104  time:   [9.4208 µs 9.4708 µs 9.5208 µs]
+bp_g4_uniform/all_pairs/112
+                        time:   [8.0333 µs 8.0393 µs 8.0449 µs]
+bp_g4_uniform/tree/112  time:   [9.8601 µs 9.9417 µs 10.034 µs]
+Found 4 outliers among 10 measurements (40.00%)
+  2 (20.00%) low severe
+  2 (20.00%) high severe
+bp_g4_uniform/all_pairs/120
+                        time:   [9.1643 µs 9.1709 µs 9.1774 µs]
+bp_g4_uniform/tree/120  time:   [10.383 µs 10.450 µs 10.517 µs]
+bp_g4_uniform/all_pairs/128
+                        time:   [11.255 µs 11.270 µs 11.286 µs]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high severe
+bp_g4_uniform/tree/128  time:   [11.133 µs 11.217 µs 11.293 µs]
+bp_g4_uniform/all_pairs/136
+                        time:   [12.585 µs 12.590 µs 12.596 µs]
+bp_g4_uniform/tree/136  time:   [11.887 µs 11.958 µs 12.022 µs]
+bp_g4_uniform/all_pairs/144
+                        time:   [14.027 µs 14.041 µs 14.054 µs]
+bp_g4_uniform/tree/144  time:   [12.281 µs 12.414 µs 12.534 µs]
+bp_g4_uniform/all_pairs/152
+                        time:   [15.426 µs 15.457 µs 15.508 µs]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high severe
+bp_g4_uniform/tree/152  time:   [13.073 µs 13.129 µs 13.190 µs]
+bp_g4_uniform/all_pairs/160
+                        time:   [17.204 µs 17.353 µs 17.510 µs]
+bp_g4_uniform/tree/160  time:   [13.458 µs 13.623 µs 13.769 µs]
+
+bp_g4_disparity/all_pairs/96
+                        time:   [7.1401 µs 7.1444 µs 7.1489 µs]
+bp_g4_disparity/tree/96 time:   [10.800 µs 10.859 µs 10.920 µs]
+bp_g4_disparity/all_pairs/104
+                        time:   [8.0640 µs 8.0906 µs 8.1154 µs]
+bp_g4_disparity/tree/104
+                        time:   [11.552 µs 11.607 µs 11.667 µs]
+bp_g4_disparity/all_pairs/112
+                        time:   [9.2831 µs 9.2898 µs 9.2967 µs]
+bp_g4_disparity/tree/112
+                        time:   [12.424 µs 12.474 µs 12.529 µs]
+bp_g4_disparity/all_pairs/120
+                        time:   [10.578 µs 10.598 µs 10.620 µs]
+bp_g4_disparity/tree/120
+                        time:   [12.878 µs 12.927 µs 12.978 µs]
+bp_g4_disparity/all_pairs/128
+                        time:   [13.450 µs 13.466 µs 13.485 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+bp_g4_disparity/tree/128
+                        time:   [13.596 µs 13.688 µs 13.790 µs]
+bp_g4_disparity/all_pairs/136
+                        time:   [14.935 µs 14.972 µs 15.005 µs]
+bp_g4_disparity/tree/136
+                        time:   [14.123 µs 14.211 µs 14.314 µs]
+bp_g4_disparity/all_pairs/144
+                        time:   [16.561 µs 16.607 µs 16.660 µs]
+bp_g4_disparity/tree/144
+                        time:   [15.226 µs 15.288 µs 15.355 µs]
+bp_g4_disparity/all_pairs/152
+                        time:   [18.214 µs 18.244 µs 18.270 µs]
+bp_g4_disparity/tree/152
+                        time:   [16.135 µs 16.196 µs 16.261 µs]
+bp_g4_disparity/all_pairs/160
+                        time:   [20.016 µs 20.028 µs 20.040 µs]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low severe
+  1 (10.00%) high severe
+bp_g4_disparity/tree/160
+                        time:   [16.760 µs 16.843 µs 16.937 µs]
+

@@ -1,0 +1,10 @@
+tree_kd / tree per size (ratio > 1: kd slower); flags r/i/s
+   uniform 128 1.0203 nnn; 136 1.0043 nnn; 144 1.0307 nYY; 152 1.0064 nnn; 160 1.0491 YYY; 176 1.0555 nYY; 256 1.0582 YYY; 1000 1.1653 YYY
+   disparity 128 0.9752 nnn; 136 0.9933 nnn; 144 0.9640 nYY; 152 1.0061 nnn; 160 0.9725 nnY; 176 1.0351 nnY; 256 1.0458 nYY; 1000 1.1394 YYY
+window 7 Q3 processes: 3
+window 7 ids: 54 K per id: [3]
+  all_pairs: shared 14, 8b/w7 median 1.1380, range 1.1210-1.1577
+  tree: shared 14, 8b/w7 median 1.0189, range 1.0044-1.0848
+  tree_rowwalk: shared 2, 8b/w7 median 1.0230, range 1.0191-1.0268
+  window 7 all_pairs/tree at 144 uniform: 1.0076
+  window 7 all_pairs/tree at 144 disparity: 0.9929

@@ -1,0 +1,571 @@
+reference validator: C:\Users\flint\AppData\Local\Temp\claude\D--claude-BoykoEngine\238150a2-5c92-4147-8309-b6428586e8a7\scratchpad\win9a\gate\rapier\void_check.py sha256 5756f4112778ce06...
+  equals the harness dir's void_check.py: True
+  mutations_ref.py is a verbatim excerpt of the harness analyze.py: True
+
+== A. the 20 timed-shape twins of the harness gate g2t: both validators must say VALID ==
+AGREE A simd8 rapier-default W1: reference VALID driver VALID
+AGREE A simd8 rapier-default W2: reference VALID driver VALID
+AGREE A simd8 rapier-default W4: reference VALID driver VALID
+AGREE A simd8 rapier-default W8: reference VALID driver VALID
+AGREE A simd8 rapier-default W16: reference VALID driver VALID
+AGREE A simd8 matched W1: reference VALID driver VALID
+AGREE A simd8 matched W2: reference VALID driver VALID
+AGREE A simd8 matched W4: reference VALID driver VALID
+AGREE A simd8 matched W8: reference VALID driver VALID
+AGREE A simd8 matched W16: reference VALID driver VALID
+AGREE A simd4 rapier-default W1: reference VALID driver VALID
+AGREE A simd4 rapier-default W2: reference VALID driver VALID
+AGREE A simd4 rapier-default W4: reference VALID driver VALID
+AGREE A simd4 rapier-default W8: reference VALID driver VALID
+AGREE A simd4 rapier-default W16: reference VALID driver VALID
+AGREE A simd4 matched W1: reference VALID driver VALID
+AGREE A simd4 matched W2: reference VALID driver VALID
+AGREE A simd4 matched W4: reference VALID driver VALID
+AGREE A simd4 matched W8: reference VALID driver VALID
+AGREE A simd4 matched W16: reference VALID driver VALID
+
+== B. the harness's 33 gv mutations: on its two baselines and on all 20 twins ==
+AGREE B simd8 rapier-default W8 [V1 exit code 4]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE B simd8 rapier-default W8 [V1 exit code 3]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE B simd8 rapier-default W8 [V1 hang]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE B simd8 rapier-default W8 [V2 no SUMMARY line]: reference ['V2'] driver ['V2'] (must include ['V2'])
+AGREE B simd8 rapier-default W8 [V2 two SUMMARY lines]: reference ['V2'] driver ['V2'] (must include ['V2'])
+AGREE B simd8 rapier-default W8 [V2 unparsable SUMMARY]: reference ['V2'] driver ['V2'] (must include ['V2'])
+AGREE B simd8 rapier-default W8 [V3 pool_threads_max = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE B simd8 rapier-default W8 [V3 pool_threads_min = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE B simd8 rapier-default W8 [V3 install_receipt = [W, W+1]]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE B simd8 rapier-default W8 [V3 loop_on_pool_worker false]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE B simd8 rapier-default W8 [V3 CSV pool_threads row 250 = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE B simd8 rapier-default W8 [V3 CSV pool_threads column absent (the rev-1 timed CSV)]: reference ['V3', 'V8'] driver ['V3', 'V8'] (must include ['V3', 'V8'])
+AGREE B simd8 rapier-default W8 [V4 features.simd8 flipped]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE B simd8 rapier-default W8 [V4 features.simd4 flipped]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE B simd8 rapier-default W8 [V4 features.enhanced_determinism true]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE B simd8 rapier-default W8 [V4 rapier_version 0.35.0]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE B simd8 rapier-default W8 [V4 avx2 false]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE B simd8 rapier-default W8 [V4 exe sha256 swapped to the other arm's exe]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE B simd8 rapier-default W8 [V4 SUMMARY arm label swapped]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE B simd8 rapier-default W8 [V4 source hash edited]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE B simd8 rapier-default W8 [V5 num_solver_iterations 4 -> 3]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE B simd8 rapier-default W8 [V5 counters_enabled true]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE B simd8 rapier-default W8 [V5 the other config's parameters]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE B simd8 rapier-default W8 [V6 spawn hash edited]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE B simd8 rapier-default W8 [V6 perturb not null]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE B simd8 rapier-default W8 [V6 first_equals_ours false]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE B simd8 rapier-default W8 [V7 final pose differs by 1 ulp]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE B simd8 rapier-default W8 [V7 SUMMARY expect_pose mismatch]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE B simd8 rapier-default W8 [V8 CSV has 499 rows]: reference ['V3', 'V8'] driver ['V3', 'V8'] (must include ['V8'])
+AGREE B simd8 rapier-default W8 [V8 wall_ns 0 in row 10]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE B simd8 rapier-default W8 [V8 CSV carries receipt columns]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE B simd8 rapier-default W8 [V9 --receipt among the args]: reference ['V9'] driver ['V9'] (must include ['V9'])
+AGREE B simd8 rapier-default W8 [V9 the prep twin of the cell failed]: reference ['V9'] driver ['V9'] (must include ['V9'])
+AGREE B simd4 matched W16 [V1 exit code 4]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE B simd4 matched W16 [V1 exit code 3]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE B simd4 matched W16 [V1 hang]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE B simd4 matched W16 [V2 no SUMMARY line]: reference ['V2'] driver ['V2'] (must include ['V2'])
+AGREE B simd4 matched W16 [V2 two SUMMARY lines]: reference ['V2'] driver ['V2'] (must include ['V2'])
+AGREE B simd4 matched W16 [V2 unparsable SUMMARY]: reference ['V2'] driver ['V2'] (must include ['V2'])
+AGREE B simd4 matched W16 [V3 pool_threads_max = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE B simd4 matched W16 [V3 pool_threads_min = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE B simd4 matched W16 [V3 install_receipt = [W, W+1]]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE B simd4 matched W16 [V3 loop_on_pool_worker false]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE B simd4 matched W16 [V3 CSV pool_threads row 250 = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE B simd4 matched W16 [V3 CSV pool_threads column absent (the rev-1 timed CSV)]: reference ['V3', 'V8'] driver ['V3', 'V8'] (must include ['V3', 'V8'])
+AGREE B simd4 matched W16 [V4 features.simd8 flipped]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE B simd4 matched W16 [V4 features.simd4 flipped]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE B simd4 matched W16 [V4 features.enhanced_determinism true]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE B simd4 matched W16 [V4 rapier_version 0.35.0]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE B simd4 matched W16 [V4 avx2 false]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE B simd4 matched W16 [V4 exe sha256 swapped to the other arm's exe]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE B simd4 matched W16 [V4 SUMMARY arm label swapped]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE B simd4 matched W16 [V4 source hash edited]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE B simd4 matched W16 [V5 num_solver_iterations 4 -> 3]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE B simd4 matched W16 [V5 counters_enabled true]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE B simd4 matched W16 [V5 the other config's parameters]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE B simd4 matched W16 [V6 spawn hash edited]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE B simd4 matched W16 [V6 perturb not null]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE B simd4 matched W16 [V6 first_equals_ours false]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE B simd4 matched W16 [V7 final pose differs by 1 ulp]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE B simd4 matched W16 [V7 SUMMARY expect_pose mismatch]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE B simd4 matched W16 [V8 CSV has 499 rows]: reference ['V3', 'V8'] driver ['V3', 'V8'] (must include ['V8'])
+AGREE B simd4 matched W16 [V8 wall_ns 0 in row 10]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE B simd4 matched W16 [V8 CSV carries receipt columns]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE B simd4 matched W16 [V9 --receipt among the args]: reference ['V9'] driver ['V9'] (must include ['V9'])
+AGREE B simd4 matched W16 [V9 the prep twin of the cell failed]: reference ['V9'] driver ['V9'] (must include ['V9'])
+B*: 660 (twin x mutation) cases compared; disagreements so far 0
+
+== C. the harness's own g5 red-control runs (real logs), each with the twin's CSV and pose of its (arm, cfg, W) ==
+AGREE C simd8 rapier-default counters_off_receipt (rc 3, judged at W4): reference ['V1', 'V6', 'V7', 'V9'] driver ['V1', 'V6', 'V7', 'V9']
+AGREE C simd8 rapier-default counters_on_timed (rc 0, judged at W4): reference ['V5'] driver ['V5']
+AGREE C simd8 rapier-default expect_flip_0 (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd8 rapier-default expect_flip_1239 (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd8 rapier-default expect_flip_617 (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd8 rapier-default expect_missing (rc 2, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd8 rapier-default expect_other_arm (rc 0, judged at W4): reference VALID driver VALID
+AGREE C simd8 rapier-default expect_other_cfg (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd8 rapier-default expect_pad (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd8 rapier-default expect_steps501 (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd8 rapier-default expect_trunc (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd8 matched counters_off_receipt (rc 3, judged at W4): reference ['V1', 'V6', 'V7', 'V9'] driver ['V1', 'V6', 'V7', 'V9']
+AGREE C simd8 matched counters_on_timed (rc 0, judged at W4): reference ['V5'] driver ['V5']
+AGREE C simd8 matched expect_flip_0 (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd8 matched expect_flip_1239 (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd8 matched expect_flip_617 (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd8 matched expect_missing (rc 2, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd8 matched expect_other_arm (rc 0, judged at W4): reference VALID driver VALID
+AGREE C simd8 matched expect_other_cfg (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd8 matched expect_pad (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd8 matched expect_steps501 (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd8 matched expect_trunc (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd4 rapier-default counters_off_receipt (rc 3, judged at W4): reference ['V1', 'V6', 'V7', 'V9'] driver ['V1', 'V6', 'V7', 'V9']
+AGREE C simd4 rapier-default counters_on_timed (rc 0, judged at W4): reference ['V5'] driver ['V5']
+AGREE C simd4 rapier-default expect_flip_0 (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd4 rapier-default expect_flip_1239 (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd4 rapier-default expect_flip_617 (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd4 rapier-default expect_missing (rc 2, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd4 rapier-default expect_other_arm (rc 0, judged at W4): reference VALID driver VALID
+AGREE C simd4 rapier-default expect_other_cfg (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd4 rapier-default expect_pad (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd4 rapier-default expect_steps501 (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd4 rapier-default expect_trunc (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd4 matched counters_off_receipt (rc 3, judged at W4): reference ['V1', 'V6', 'V7', 'V9'] driver ['V1', 'V6', 'V7', 'V9']
+AGREE C simd4 matched counters_on_timed (rc 0, judged at W4): reference ['V5'] driver ['V5']
+AGREE C simd4 matched expect_flip_0 (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd4 matched expect_flip_1239 (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd4 matched expect_flip_617 (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd4 matched expect_missing (rc 2, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd4 matched expect_other_arm (rc 0, judged at W4): reference VALID driver VALID
+AGREE C simd4 matched expect_other_cfg (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd4 matched expect_pad (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd4 matched expect_steps501 (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE C simd4 matched expect_trunc (rc 4, judged at W4): reference ['V1', 'V7'] driver ['V1', 'V7']
+C: 44 g5 runs compared
+
+== D. extra mutations (rules the 33 do not reach), on four twins ==
+AGREE D simd8 rapier-default W8 [V1 exit code 2 (usage)]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE D simd8 rapier-default W8 [V1 exit code -1 (a crash)]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE D simd8 rapier-default W8 [V1 exit None]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE D simd8 rapier-default W8 [V3 summary workers = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd8 rapier-default W8 [V3 pool_threads_requested = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd8 rapier-default W8 [V3 threads object absent]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd8 rapier-default W8 [V3 install_receipt = [W]]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd8 rapier-default W8 [V3 CSV pool_threads row 0 = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd8 rapier-default W8 [V3 CSV pool_threads last row = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd8 rapier-default W8 [V4 target_env gnu]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 rapier-default W8 [V4 debug_assertions true]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 rapier-default W8 [V4 simd_lanes swapped]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 rapier-default W8 [V4 features.parallel false]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 rapier-default W8 [V4 target_features carries an extra key]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 rapier-default W8 [V4 target_features.fma false]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 rapier-default W8 [V4 bmi2 false]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 rapier-default W8 [V4 engine label]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 rapier-default W8 [V4 source_fnv1a64 cargo_lock edited]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 rapier-default W8 [V4 source_fnv1a64 absent]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 rapier-default W8 [V4 exe sha256 one hex digit off]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 rapier-default W8 [V4 exe sha256 MISSING (the exe is not there)]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 rapier-default W8 [V5 install step]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd8 rapier-default W8 [V5 cfg label = the other config]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd8 rapier-default W8 [V5 counters_enabled field absent]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd8 rapier-default W8 [V5 config object absent]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd8 rapier-default W8 [V5 dt edited]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd8 rapier-default W8 [V5 can_sleep true]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd8 rapier-default W8 [V6 colliders 1240]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd8 rapier-default W8 [V6 dynamic_bodies 1239]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd8 rapier-default W8 [V6 uniform_boxes false]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd8 rapier-default W8 [V6 inv_inertia_ulps_vs_ours [0,0,1]]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd8 rapier-default W8 [V6 inv_mass_ulps_vs_ours 1]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd8 rapier-default W8 [V6 scene_identity absent]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd8 rapier-default W8 [V6 void true (with a reason)]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd8 rapier-default W8 [V6 void field absent]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd8 rapier-default W8 [V7 summary pose_hash edited]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd8 rapier-default W8 [V7 summary expect_pose absent]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd8 rapier-default W8 [V7 pose file one byte shorter]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd8 rapier-default W8 [V7 pose file one byte longer]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd8 rapier-default W8 [V7 pose file empty]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd8 rapier-default W8 [V7 the OTHER config's fixture bytes]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd8 rapier-default W8 [V8 empty CSV]: reference ['V3', 'V8'] driver ['V3', 'V8'] (must include ['V8'])
+AGREE D simd8 rapier-default W8 [V8 header columns reordered]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE D simd8 rapier-default W8 [V8 one CSV row too many]: reference ['V3', 'V8'] driver ['V3', 'V8'] (must include ['V8'])
+AGREE D simd8 rapier-default W8 [V8 steps not 0..N-1 (rows 5 and 6 swapped)]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE D simd8 rapier-default W8 [V8 wall_ns negative in row 300]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE D simd8 rapier-default W8 [V8 wall_ns not a number in row 3]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE D simd8 rapier-default W8 [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V9'] driver ['V9'] (must include ['V9'])
+AGREE D simd8 rapier-default W8 [V9 the twin flag of this W absent]: reference ['V9'] driver ['V9'] (must include ['V9'])
+AGREE D simd8 rapier-default W8 [V2 SUMMARY line indented (not at the line start)]: reference ['V2'] driver ['V2'] (must include ['V2'])
+AGREE D simd8 rapier-default W8 [V2 truncated SUMMARY (cut in the middle)]: reference ['V2'] driver ['V2'] (must include ['V2'])
+AGREE D simd4 matched W16 [V1 exit code 2 (usage)]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE D simd4 matched W16 [V1 exit code -1 (a crash)]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE D simd4 matched W16 [V1 exit None]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE D simd4 matched W16 [V3 summary workers = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd4 matched W16 [V3 pool_threads_requested = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd4 matched W16 [V3 threads object absent]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd4 matched W16 [V3 install_receipt = [W]]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd4 matched W16 [V3 CSV pool_threads row 0 = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd4 matched W16 [V3 CSV pool_threads last row = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd4 matched W16 [V4 target_env gnu]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 matched W16 [V4 debug_assertions true]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 matched W16 [V4 simd_lanes swapped]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 matched W16 [V4 features.parallel false]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 matched W16 [V4 target_features carries an extra key]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 matched W16 [V4 target_features.fma false]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 matched W16 [V4 bmi2 false]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 matched W16 [V4 engine label]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 matched W16 [V4 source_fnv1a64 cargo_lock edited]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 matched W16 [V4 source_fnv1a64 absent]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 matched W16 [V4 exe sha256 one hex digit off]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 matched W16 [V4 exe sha256 MISSING (the exe is not there)]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 matched W16 [V5 install step]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd4 matched W16 [V5 cfg label = the other config]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd4 matched W16 [V5 counters_enabled field absent]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd4 matched W16 [V5 config object absent]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd4 matched W16 [V5 dt edited]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd4 matched W16 [V5 can_sleep true]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd4 matched W16 [V6 colliders 1240]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd4 matched W16 [V6 dynamic_bodies 1239]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd4 matched W16 [V6 uniform_boxes false]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd4 matched W16 [V6 inv_inertia_ulps_vs_ours [0,0,1]]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd4 matched W16 [V6 inv_mass_ulps_vs_ours 1]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd4 matched W16 [V6 scene_identity absent]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd4 matched W16 [V6 void true (with a reason)]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd4 matched W16 [V6 void field absent]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd4 matched W16 [V7 summary pose_hash edited]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd4 matched W16 [V7 summary expect_pose absent]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd4 matched W16 [V7 pose file one byte shorter]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd4 matched W16 [V7 pose file one byte longer]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd4 matched W16 [V7 pose file empty]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd4 matched W16 [V7 the OTHER config's fixture bytes]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd4 matched W16 [V8 empty CSV]: reference ['V3', 'V8'] driver ['V3', 'V8'] (must include ['V8'])
+AGREE D simd4 matched W16 [V8 header columns reordered]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE D simd4 matched W16 [V8 one CSV row too many]: reference ['V3', 'V8'] driver ['V3', 'V8'] (must include ['V8'])
+AGREE D simd4 matched W16 [V8 steps not 0..N-1 (rows 5 and 6 swapped)]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE D simd4 matched W16 [V8 wall_ns negative in row 300]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE D simd4 matched W16 [V8 wall_ns not a number in row 3]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE D simd4 matched W16 [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V9'] driver ['V9'] (must include ['V9'])
+AGREE D simd4 matched W16 [V9 the twin flag of this W absent]: reference ['V9'] driver ['V9'] (must include ['V9'])
+AGREE D simd4 matched W16 [V2 SUMMARY line indented (not at the line start)]: reference ['V2'] driver ['V2'] (must include ['V2'])
+AGREE D simd4 matched W16 [V2 truncated SUMMARY (cut in the middle)]: reference ['V2'] driver ['V2'] (must include ['V2'])
+AGREE D simd8 matched W1 [V1 exit code 2 (usage)]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE D simd8 matched W1 [V1 exit code -1 (a crash)]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE D simd8 matched W1 [V1 exit None]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE D simd8 matched W1 [V3 summary workers = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd8 matched W1 [V3 pool_threads_requested = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd8 matched W1 [V3 threads object absent]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd8 matched W1 [V3 install_receipt = [W]]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd8 matched W1 [V3 CSV pool_threads row 0 = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd8 matched W1 [V3 CSV pool_threads last row = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd8 matched W1 [V4 target_env gnu]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 matched W1 [V4 debug_assertions true]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 matched W1 [V4 simd_lanes swapped]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 matched W1 [V4 features.parallel false]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 matched W1 [V4 target_features carries an extra key]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 matched W1 [V4 target_features.fma false]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 matched W1 [V4 bmi2 false]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 matched W1 [V4 engine label]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 matched W1 [V4 source_fnv1a64 cargo_lock edited]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 matched W1 [V4 source_fnv1a64 absent]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 matched W1 [V4 exe sha256 one hex digit off]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 matched W1 [V4 exe sha256 MISSING (the exe is not there)]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd8 matched W1 [V5 install step]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd8 matched W1 [V5 cfg label = the other config]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd8 matched W1 [V5 counters_enabled field absent]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd8 matched W1 [V5 config object absent]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd8 matched W1 [V5 dt edited]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd8 matched W1 [V5 can_sleep true]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd8 matched W1 [V6 colliders 1240]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd8 matched W1 [V6 dynamic_bodies 1239]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd8 matched W1 [V6 uniform_boxes false]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd8 matched W1 [V6 inv_inertia_ulps_vs_ours [0,0,1]]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd8 matched W1 [V6 inv_mass_ulps_vs_ours 1]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd8 matched W1 [V6 scene_identity absent]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd8 matched W1 [V6 void true (with a reason)]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd8 matched W1 [V6 void field absent]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd8 matched W1 [V7 summary pose_hash edited]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd8 matched W1 [V7 summary expect_pose absent]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd8 matched W1 [V7 pose file one byte shorter]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd8 matched W1 [V7 pose file one byte longer]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd8 matched W1 [V7 pose file empty]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd8 matched W1 [V7 the OTHER config's fixture bytes]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd8 matched W1 [V8 empty CSV]: reference ['V3', 'V8'] driver ['V3', 'V8'] (must include ['V8'])
+AGREE D simd8 matched W1 [V8 header columns reordered]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE D simd8 matched W1 [V8 one CSV row too many]: reference ['V3', 'V8'] driver ['V3', 'V8'] (must include ['V8'])
+AGREE D simd8 matched W1 [V8 steps not 0..N-1 (rows 5 and 6 swapped)]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE D simd8 matched W1 [V8 wall_ns negative in row 300]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE D simd8 matched W1 [V8 wall_ns not a number in row 3]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE D simd8 matched W1 [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V9'] driver ['V9'] (must include ['V9'])
+AGREE D simd8 matched W1 [V9 the twin flag of this W absent]: reference ['V9'] driver ['V9'] (must include ['V9'])
+AGREE D simd8 matched W1 [V2 SUMMARY line indented (not at the line start)]: reference ['V2'] driver ['V2'] (must include ['V2'])
+AGREE D simd8 matched W1 [V2 truncated SUMMARY (cut in the middle)]: reference ['V2'] driver ['V2'] (must include ['V2'])
+AGREE D simd4 rapier-default W2 [V1 exit code 2 (usage)]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE D simd4 rapier-default W2 [V1 exit code -1 (a crash)]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE D simd4 rapier-default W2 [V1 exit None]: reference ['V1'] driver ['V1'] (must include ['V1'])
+AGREE D simd4 rapier-default W2 [V3 summary workers = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd4 rapier-default W2 [V3 pool_threads_requested = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd4 rapier-default W2 [V3 threads object absent]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd4 rapier-default W2 [V3 install_receipt = [W]]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd4 rapier-default W2 [V3 CSV pool_threads row 0 = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd4 rapier-default W2 [V3 CSV pool_threads last row = W+1]: reference ['V3'] driver ['V3'] (must include ['V3'])
+AGREE D simd4 rapier-default W2 [V4 target_env gnu]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 rapier-default W2 [V4 debug_assertions true]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 rapier-default W2 [V4 simd_lanes swapped]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 rapier-default W2 [V4 features.parallel false]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 rapier-default W2 [V4 target_features carries an extra key]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 rapier-default W2 [V4 target_features.fma false]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 rapier-default W2 [V4 bmi2 false]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 rapier-default W2 [V4 engine label]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 rapier-default W2 [V4 source_fnv1a64 cargo_lock edited]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 rapier-default W2 [V4 source_fnv1a64 absent]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 rapier-default W2 [V4 exe sha256 one hex digit off]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 rapier-default W2 [V4 exe sha256 MISSING (the exe is not there)]: reference ['V4'] driver ['V4'] (must include ['V4'])
+AGREE D simd4 rapier-default W2 [V5 install step]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd4 rapier-default W2 [V5 cfg label = the other config]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd4 rapier-default W2 [V5 counters_enabled field absent]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd4 rapier-default W2 [V5 config object absent]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd4 rapier-default W2 [V5 dt edited]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd4 rapier-default W2 [V5 can_sleep true]: reference ['V5'] driver ['V5'] (must include ['V5'])
+AGREE D simd4 rapier-default W2 [V6 colliders 1240]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd4 rapier-default W2 [V6 dynamic_bodies 1239]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd4 rapier-default W2 [V6 uniform_boxes false]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd4 rapier-default W2 [V6 inv_inertia_ulps_vs_ours [0,0,1]]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd4 rapier-default W2 [V6 inv_mass_ulps_vs_ours 1]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd4 rapier-default W2 [V6 scene_identity absent]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd4 rapier-default W2 [V6 void true (with a reason)]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd4 rapier-default W2 [V6 void field absent]: reference ['V6'] driver ['V6'] (must include ['V6'])
+AGREE D simd4 rapier-default W2 [V7 summary pose_hash edited]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd4 rapier-default W2 [V7 summary expect_pose absent]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd4 rapier-default W2 [V7 pose file one byte shorter]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd4 rapier-default W2 [V7 pose file one byte longer]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd4 rapier-default W2 [V7 pose file empty]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd4 rapier-default W2 [V7 the OTHER config's fixture bytes]: reference ['V7'] driver ['V7'] (must include ['V7'])
+AGREE D simd4 rapier-default W2 [V8 empty CSV]: reference ['V3', 'V8'] driver ['V3', 'V8'] (must include ['V8'])
+AGREE D simd4 rapier-default W2 [V8 header columns reordered]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE D simd4 rapier-default W2 [V8 one CSV row too many]: reference ['V3', 'V8'] driver ['V3', 'V8'] (must include ['V8'])
+AGREE D simd4 rapier-default W2 [V8 steps not 0..N-1 (rows 5 and 6 swapped)]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE D simd4 rapier-default W2 [V8 wall_ns negative in row 300]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE D simd4 rapier-default W2 [V8 wall_ns not a number in row 3]: reference ['V8'] driver ['V8'] (must include ['V8'])
+AGREE D simd4 rapier-default W2 [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V9'] driver ['V9'] (must include ['V9'])
+AGREE D simd4 rapier-default W2 [V9 the twin flag of this W absent]: reference ['V9'] driver ['V9'] (must include ['V9'])
+AGREE D simd4 rapier-default W2 [V2 SUMMARY line indented (not at the line start)]: reference ['V2'] driver ['V2'] (must include ['V2'])
+AGREE D simd4 rapier-default W2 [V2 truncated SUMMARY (cut in the middle)]: reference ['V2'] driver ['V2'] (must include ['V2'])
+
+== E. two mutations at once (the rule sets must still agree) ==
+AGREE E [V1 exit code 4] + [V2 two SUMMARY lines]: reference ['V1', 'V2'] driver ['V1', 'V2']
+AGREE E [V1 exit code 4] + [V3 install_receipt = [W, W+1]]: reference ['V1', 'V3'] driver ['V1', 'V3']
+AGREE E [V1 exit code 4] + [V4 features.simd8 flipped]: reference ['V1', 'V4'] driver ['V1', 'V4']
+AGREE E [V1 exit code 4] + [V4 avx2 false]: reference ['V1', 'V4'] driver ['V1', 'V4']
+AGREE E [V1 exit code 4] + [V5 num_solver_iterations 4 -> 3]: reference ['V1', 'V5'] driver ['V1', 'V5']
+AGREE E [V1 exit code 4] + [V6 perturb not null]: reference ['V1', 'V6'] driver ['V1', 'V6']
+AGREE E [V1 exit code 4] + [V8 CSV has 499 rows]: reference ['V1', 'V3', 'V8'] driver ['V1', 'V3', 'V8']
+AGREE E [V1 exit code 4] + [V9 the prep twin of the cell failed]: reference ['V1', 'V9'] driver ['V1', 'V9']
+AGREE E [V1 exit code 4] + [V3 summary workers = W+1]: reference ['V1', 'V3'] driver ['V1', 'V3']
+AGREE E [V1 exit code 4] + [V3 CSV pool_threads row 0 = W+1]: reference ['V1', 'V3'] driver ['V1', 'V3']
+AGREE E [V1 exit code 4] + [V4 simd_lanes swapped]: reference ['V1', 'V4'] driver ['V1', 'V4']
+AGREE E [V1 exit code 4] + [V4 bmi2 false]: reference ['V1', 'V4'] driver ['V1', 'V4']
+AGREE E [V1 exit code 4] + [V4 exe sha256 one hex digit off]: reference ['V1', 'V4'] driver ['V1', 'V4']
+AGREE E [V1 exit code 4] + [V5 counters_enabled field absent]: reference ['V1', 'V5'] driver ['V1', 'V5']
+AGREE E [V1 exit code 4] + [V6 colliders 1240]: reference ['V1', 'V6'] driver ['V1', 'V6']
+AGREE E [V1 exit code 4] + [V6 inv_mass_ulps_vs_ours 1]: reference ['V1', 'V6'] driver ['V1', 'V6']
+AGREE E [V1 exit code 4] + [V7 summary pose_hash edited]: reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE E [V1 exit code 4] + [V7 pose file empty]: reference ['V1', 'V7'] driver ['V1', 'V7']
+AGREE E [V1 exit code 4] + [V8 one CSV row too many]: reference ['V1', 'V3', 'V8'] driver ['V1', 'V3', 'V8']
+AGREE E [V1 exit code 4] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V1', 'V9'] driver ['V1', 'V9']
+AGREE E [V2 two SUMMARY lines] + [V3 install_receipt = [W, W+1]]: reference ['V2'] driver ['V2']
+AGREE E [V2 two SUMMARY lines] + [V4 features.simd8 flipped]: reference ['V2'] driver ['V2']
+AGREE E [V2 two SUMMARY lines] + [V4 avx2 false]: reference ['V2'] driver ['V2']
+AGREE E [V2 two SUMMARY lines] + [V5 num_solver_iterations 4 -> 3]: reference ['V2'] driver ['V2']
+AGREE E [V2 two SUMMARY lines] + [V6 perturb not null]: reference ['V2'] driver ['V2']
+AGREE E [V2 two SUMMARY lines] + [V8 CSV has 499 rows]: reference ['V2', 'V3', 'V8'] driver ['V2', 'V3', 'V8']
+AGREE E [V2 two SUMMARY lines] + [V9 the prep twin of the cell failed]: reference ['V2'] driver ['V2']
+AGREE E [V2 two SUMMARY lines] + [V3 summary workers = W+1]: reference ['V2'] driver ['V2']
+AGREE E [V2 two SUMMARY lines] + [V3 CSV pool_threads row 0 = W+1]: reference ['V2', 'V3'] driver ['V2', 'V3']
+AGREE E [V2 two SUMMARY lines] + [V4 simd_lanes swapped]: reference ['V2'] driver ['V2']
+AGREE E [V2 two SUMMARY lines] + [V4 bmi2 false]: reference ['V2'] driver ['V2']
+AGREE E [V2 two SUMMARY lines] + [V4 exe sha256 one hex digit off]: reference ['V2'] driver ['V2']
+AGREE E [V2 two SUMMARY lines] + [V5 counters_enabled field absent]: reference ['V2'] driver ['V2']
+AGREE E [V2 two SUMMARY lines] + [V6 colliders 1240]: reference ['V2'] driver ['V2']
+AGREE E [V2 two SUMMARY lines] + [V6 inv_mass_ulps_vs_ours 1]: reference ['V2'] driver ['V2']
+AGREE E [V2 two SUMMARY lines] + [V7 summary pose_hash edited]: reference ['V2'] driver ['V2']
+AGREE E [V2 two SUMMARY lines] + [V7 pose file empty]: reference ['V2', 'V7'] driver ['V2', 'V7']
+AGREE E [V2 two SUMMARY lines] + [V8 one CSV row too many]: reference ['V2', 'V3', 'V8'] driver ['V2', 'V3', 'V8']
+AGREE E [V2 two SUMMARY lines] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V2'] driver ['V2']
+AGREE E [V3 install_receipt = [W, W+1]] + [V4 features.simd8 flipped]: reference ['V3', 'V4'] driver ['V3', 'V4']
+AGREE E [V3 install_receipt = [W, W+1]] + [V4 avx2 false]: reference ['V3', 'V4'] driver ['V3', 'V4']
+AGREE E [V3 install_receipt = [W, W+1]] + [V5 num_solver_iterations 4 -> 3]: reference ['V3', 'V5'] driver ['V3', 'V5']
+AGREE E [V3 install_receipt = [W, W+1]] + [V6 perturb not null]: reference ['V3', 'V6'] driver ['V3', 'V6']
+AGREE E [V3 install_receipt = [W, W+1]] + [V8 CSV has 499 rows]: reference ['V3', 'V8'] driver ['V3', 'V8']
+AGREE E [V3 install_receipt = [W, W+1]] + [V9 the prep twin of the cell failed]: reference ['V3', 'V9'] driver ['V3', 'V9']
+AGREE E [V3 install_receipt = [W, W+1]] + [V3 summary workers = W+1]: reference ['V3'] driver ['V3']
+AGREE E [V3 install_receipt = [W, W+1]] + [V3 CSV pool_threads row 0 = W+1]: reference ['V3'] driver ['V3']
+AGREE E [V3 install_receipt = [W, W+1]] + [V4 simd_lanes swapped]: reference ['V3', 'V4'] driver ['V3', 'V4']
+AGREE E [V3 install_receipt = [W, W+1]] + [V4 bmi2 false]: reference ['V3', 'V4'] driver ['V3', 'V4']
+AGREE E [V3 install_receipt = [W, W+1]] + [V4 exe sha256 one hex digit off]: reference ['V3', 'V4'] driver ['V3', 'V4']
+AGREE E [V3 install_receipt = [W, W+1]] + [V5 counters_enabled field absent]: reference ['V3', 'V5'] driver ['V3', 'V5']
+AGREE E [V3 install_receipt = [W, W+1]] + [V6 colliders 1240]: reference ['V3', 'V6'] driver ['V3', 'V6']
+AGREE E [V3 install_receipt = [W, W+1]] + [V6 inv_mass_ulps_vs_ours 1]: reference ['V3', 'V6'] driver ['V3', 'V6']
+AGREE E [V3 install_receipt = [W, W+1]] + [V7 summary pose_hash edited]: reference ['V3', 'V7'] driver ['V3', 'V7']
+AGREE E [V3 install_receipt = [W, W+1]] + [V7 pose file empty]: reference ['V3', 'V7'] driver ['V3', 'V7']
+AGREE E [V3 install_receipt = [W, W+1]] + [V8 one CSV row too many]: reference ['V3', 'V8'] driver ['V3', 'V8']
+AGREE E [V3 install_receipt = [W, W+1]] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V3', 'V9'] driver ['V3', 'V9']
+AGREE E [V4 features.simd8 flipped] + [V4 avx2 false]: reference ['V4'] driver ['V4']
+AGREE E [V4 features.simd8 flipped] + [V5 num_solver_iterations 4 -> 3]: reference ['V4', 'V5'] driver ['V4', 'V5']
+AGREE E [V4 features.simd8 flipped] + [V6 perturb not null]: reference ['V4', 'V6'] driver ['V4', 'V6']
+AGREE E [V4 features.simd8 flipped] + [V8 CSV has 499 rows]: reference ['V3', 'V4', 'V8'] driver ['V3', 'V4', 'V8']
+AGREE E [V4 features.simd8 flipped] + [V9 the prep twin of the cell failed]: reference ['V4', 'V9'] driver ['V4', 'V9']
+AGREE E [V4 features.simd8 flipped] + [V3 summary workers = W+1]: reference ['V3', 'V4'] driver ['V3', 'V4']
+AGREE E [V4 features.simd8 flipped] + [V3 CSV pool_threads row 0 = W+1]: reference ['V3', 'V4'] driver ['V3', 'V4']
+AGREE E [V4 features.simd8 flipped] + [V4 simd_lanes swapped]: reference ['V4'] driver ['V4']
+AGREE E [V4 features.simd8 flipped] + [V4 bmi2 false]: reference ['V4'] driver ['V4']
+AGREE E [V4 features.simd8 flipped] + [V4 exe sha256 one hex digit off]: reference ['V4'] driver ['V4']
+AGREE E [V4 features.simd8 flipped] + [V5 counters_enabled field absent]: reference ['V4', 'V5'] driver ['V4', 'V5']
+AGREE E [V4 features.simd8 flipped] + [V6 colliders 1240]: reference ['V4', 'V6'] driver ['V4', 'V6']
+AGREE E [V4 features.simd8 flipped] + [V6 inv_mass_ulps_vs_ours 1]: reference ['V4', 'V6'] driver ['V4', 'V6']
+AGREE E [V4 features.simd8 flipped] + [V7 summary pose_hash edited]: reference ['V4', 'V7'] driver ['V4', 'V7']
+AGREE E [V4 features.simd8 flipped] + [V7 pose file empty]: reference ['V4', 'V7'] driver ['V4', 'V7']
+AGREE E [V4 features.simd8 flipped] + [V8 one CSV row too many]: reference ['V3', 'V4', 'V8'] driver ['V3', 'V4', 'V8']
+AGREE E [V4 features.simd8 flipped] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V4', 'V9'] driver ['V4', 'V9']
+AGREE E [V4 avx2 false] + [V5 num_solver_iterations 4 -> 3]: reference ['V4', 'V5'] driver ['V4', 'V5']
+AGREE E [V4 avx2 false] + [V6 perturb not null]: reference ['V4', 'V6'] driver ['V4', 'V6']
+AGREE E [V4 avx2 false] + [V8 CSV has 499 rows]: reference ['V3', 'V4', 'V8'] driver ['V3', 'V4', 'V8']
+AGREE E [V4 avx2 false] + [V9 the prep twin of the cell failed]: reference ['V4', 'V9'] driver ['V4', 'V9']
+AGREE E [V4 avx2 false] + [V3 summary workers = W+1]: reference ['V3', 'V4'] driver ['V3', 'V4']
+AGREE E [V4 avx2 false] + [V3 CSV pool_threads row 0 = W+1]: reference ['V3', 'V4'] driver ['V3', 'V4']
+AGREE E [V4 avx2 false] + [V4 simd_lanes swapped]: reference ['V4'] driver ['V4']
+AGREE E [V4 avx2 false] + [V4 bmi2 false]: reference ['V4'] driver ['V4']
+AGREE E [V4 avx2 false] + [V4 exe sha256 one hex digit off]: reference ['V4'] driver ['V4']
+AGREE E [V4 avx2 false] + [V5 counters_enabled field absent]: reference ['V4', 'V5'] driver ['V4', 'V5']
+AGREE E [V4 avx2 false] + [V6 colliders 1240]: reference ['V4', 'V6'] driver ['V4', 'V6']
+AGREE E [V4 avx2 false] + [V6 inv_mass_ulps_vs_ours 1]: reference ['V4', 'V6'] driver ['V4', 'V6']
+AGREE E [V4 avx2 false] + [V7 summary pose_hash edited]: reference ['V4', 'V7'] driver ['V4', 'V7']
+AGREE E [V4 avx2 false] + [V7 pose file empty]: reference ['V4', 'V7'] driver ['V4', 'V7']
+AGREE E [V4 avx2 false] + [V8 one CSV row too many]: reference ['V3', 'V4', 'V8'] driver ['V3', 'V4', 'V8']
+AGREE E [V4 avx2 false] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V4', 'V9'] driver ['V4', 'V9']
+AGREE E [V5 num_solver_iterations 4 -> 3] + [V6 perturb not null]: reference ['V5', 'V6'] driver ['V5', 'V6']
+AGREE E [V5 num_solver_iterations 4 -> 3] + [V8 CSV has 499 rows]: reference ['V3', 'V5', 'V8'] driver ['V3', 'V5', 'V8']
+AGREE E [V5 num_solver_iterations 4 -> 3] + [V9 the prep twin of the cell failed]: reference ['V5', 'V9'] driver ['V5', 'V9']
+AGREE E [V5 num_solver_iterations 4 -> 3] + [V3 summary workers = W+1]: reference ['V3', 'V5'] driver ['V3', 'V5']
+AGREE E [V5 num_solver_iterations 4 -> 3] + [V3 CSV pool_threads row 0 = W+1]: reference ['V3', 'V5'] driver ['V3', 'V5']
+AGREE E [V5 num_solver_iterations 4 -> 3] + [V4 simd_lanes swapped]: reference ['V4', 'V5'] driver ['V4', 'V5']
+AGREE E [V5 num_solver_iterations 4 -> 3] + [V4 bmi2 false]: reference ['V4', 'V5'] driver ['V4', 'V5']
+AGREE E [V5 num_solver_iterations 4 -> 3] + [V4 exe sha256 one hex digit off]: reference ['V4', 'V5'] driver ['V4', 'V5']
+AGREE E [V5 num_solver_iterations 4 -> 3] + [V5 counters_enabled field absent]: reference ['V5'] driver ['V5']
+AGREE E [V5 num_solver_iterations 4 -> 3] + [V6 colliders 1240]: reference ['V5', 'V6'] driver ['V5', 'V6']
+AGREE E [V5 num_solver_iterations 4 -> 3] + [V6 inv_mass_ulps_vs_ours 1]: reference ['V5', 'V6'] driver ['V5', 'V6']
+AGREE E [V5 num_solver_iterations 4 -> 3] + [V7 summary pose_hash edited]: reference ['V5', 'V7'] driver ['V5', 'V7']
+AGREE E [V5 num_solver_iterations 4 -> 3] + [V7 pose file empty]: reference ['V5', 'V7'] driver ['V5', 'V7']
+AGREE E [V5 num_solver_iterations 4 -> 3] + [V8 one CSV row too many]: reference ['V3', 'V5', 'V8'] driver ['V3', 'V5', 'V8']
+AGREE E [V5 num_solver_iterations 4 -> 3] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V5', 'V9'] driver ['V5', 'V9']
+AGREE E [V6 perturb not null] + [V8 CSV has 499 rows]: reference ['V3', 'V6', 'V8'] driver ['V3', 'V6', 'V8']
+AGREE E [V6 perturb not null] + [V9 the prep twin of the cell failed]: reference ['V6', 'V9'] driver ['V6', 'V9']
+AGREE E [V6 perturb not null] + [V3 summary workers = W+1]: reference ['V3', 'V6'] driver ['V3', 'V6']
+AGREE E [V6 perturb not null] + [V3 CSV pool_threads row 0 = W+1]: reference ['V3', 'V6'] driver ['V3', 'V6']
+AGREE E [V6 perturb not null] + [V4 simd_lanes swapped]: reference ['V4', 'V6'] driver ['V4', 'V6']
+AGREE E [V6 perturb not null] + [V4 bmi2 false]: reference ['V4', 'V6'] driver ['V4', 'V6']
+AGREE E [V6 perturb not null] + [V4 exe sha256 one hex digit off]: reference ['V4', 'V6'] driver ['V4', 'V6']
+AGREE E [V6 perturb not null] + [V5 counters_enabled field absent]: reference ['V5', 'V6'] driver ['V5', 'V6']
+AGREE E [V6 perturb not null] + [V6 colliders 1240]: reference ['V6'] driver ['V6']
+AGREE E [V6 perturb not null] + [V6 inv_mass_ulps_vs_ours 1]: reference ['V6'] driver ['V6']
+AGREE E [V6 perturb not null] + [V7 summary pose_hash edited]: reference ['V6', 'V7'] driver ['V6', 'V7']
+AGREE E [V6 perturb not null] + [V7 pose file empty]: reference ['V6', 'V7'] driver ['V6', 'V7']
+AGREE E [V6 perturb not null] + [V8 one CSV row too many]: reference ['V3', 'V6', 'V8'] driver ['V3', 'V6', 'V8']
+AGREE E [V6 perturb not null] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V6', 'V9'] driver ['V6', 'V9']
+AGREE E [V8 CSV has 499 rows] + [V9 the prep twin of the cell failed]: reference ['V3', 'V8', 'V9'] driver ['V3', 'V8', 'V9']
+AGREE E [V8 CSV has 499 rows] + [V3 summary workers = W+1]: reference ['V3', 'V8'] driver ['V3', 'V8']
+AGREE E [V8 CSV has 499 rows] + [V3 CSV pool_threads row 0 = W+1]: reference ['V3', 'V8'] driver ['V3', 'V8']
+AGREE E [V8 CSV has 499 rows] + [V4 simd_lanes swapped]: reference ['V3', 'V4', 'V8'] driver ['V3', 'V4', 'V8']
+AGREE E [V8 CSV has 499 rows] + [V4 bmi2 false]: reference ['V3', 'V4', 'V8'] driver ['V3', 'V4', 'V8']
+AGREE E [V8 CSV has 499 rows] + [V4 exe sha256 one hex digit off]: reference ['V3', 'V4', 'V8'] driver ['V3', 'V4', 'V8']
+AGREE E [V8 CSV has 499 rows] + [V5 counters_enabled field absent]: reference ['V3', 'V5', 'V8'] driver ['V3', 'V5', 'V8']
+AGREE E [V8 CSV has 499 rows] + [V6 colliders 1240]: reference ['V3', 'V6', 'V8'] driver ['V3', 'V6', 'V8']
+AGREE E [V8 CSV has 499 rows] + [V6 inv_mass_ulps_vs_ours 1]: reference ['V3', 'V6', 'V8'] driver ['V3', 'V6', 'V8']
+AGREE E [V8 CSV has 499 rows] + [V7 summary pose_hash edited]: reference ['V3', 'V7', 'V8'] driver ['V3', 'V7', 'V8']
+AGREE E [V8 CSV has 499 rows] + [V7 pose file empty]: reference ['V3', 'V7', 'V8'] driver ['V3', 'V7', 'V8']
+AGREE E [V8 CSV has 499 rows] + [V8 one CSV row too many]: reference ['V8'] driver ['V8']
+AGREE E [V8 CSV has 499 rows] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V3', 'V8', 'V9'] driver ['V3', 'V8', 'V9']
+AGREE E [V9 the prep twin of the cell failed] + [V3 summary workers = W+1]: reference ['V3', 'V9'] driver ['V3', 'V9']
+AGREE E [V9 the prep twin of the cell failed] + [V3 CSV pool_threads row 0 = W+1]: reference ['V3', 'V9'] driver ['V3', 'V9']
+AGREE E [V9 the prep twin of the cell failed] + [V4 simd_lanes swapped]: reference ['V4', 'V9'] driver ['V4', 'V9']
+AGREE E [V9 the prep twin of the cell failed] + [V4 bmi2 false]: reference ['V4', 'V9'] driver ['V4', 'V9']
+AGREE E [V9 the prep twin of the cell failed] + [V4 exe sha256 one hex digit off]: reference ['V4', 'V9'] driver ['V4', 'V9']
+AGREE E [V9 the prep twin of the cell failed] + [V5 counters_enabled field absent]: reference ['V5', 'V9'] driver ['V5', 'V9']
+AGREE E [V9 the prep twin of the cell failed] + [V6 colliders 1240]: reference ['V6', 'V9'] driver ['V6', 'V9']
+AGREE E [V9 the prep twin of the cell failed] + [V6 inv_mass_ulps_vs_ours 1]: reference ['V6', 'V9'] driver ['V6', 'V9']
+AGREE E [V9 the prep twin of the cell failed] + [V7 summary pose_hash edited]: reference ['V7', 'V9'] driver ['V7', 'V9']
+AGREE E [V9 the prep twin of the cell failed] + [V7 pose file empty]: reference ['V7', 'V9'] driver ['V7', 'V9']
+AGREE E [V9 the prep twin of the cell failed] + [V8 one CSV row too many]: reference ['V3', 'V8', 'V9'] driver ['V3', 'V8', 'V9']
+AGREE E [V9 the prep twin of the cell failed] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V9'] driver ['V9']
+AGREE E [V3 summary workers = W+1] + [V3 CSV pool_threads row 0 = W+1]: reference ['V3'] driver ['V3']
+AGREE E [V3 summary workers = W+1] + [V4 simd_lanes swapped]: reference ['V3', 'V4'] driver ['V3', 'V4']
+AGREE E [V3 summary workers = W+1] + [V4 bmi2 false]: reference ['V3', 'V4'] driver ['V3', 'V4']
+AGREE E [V3 summary workers = W+1] + [V4 exe sha256 one hex digit off]: reference ['V3', 'V4'] driver ['V3', 'V4']
+AGREE E [V3 summary workers = W+1] + [V5 counters_enabled field absent]: reference ['V3', 'V5'] driver ['V3', 'V5']
+AGREE E [V3 summary workers = W+1] + [V6 colliders 1240]: reference ['V3', 'V6'] driver ['V3', 'V6']
+AGREE E [V3 summary workers = W+1] + [V6 inv_mass_ulps_vs_ours 1]: reference ['V3', 'V6'] driver ['V3', 'V6']
+AGREE E [V3 summary workers = W+1] + [V7 summary pose_hash edited]: reference ['V3', 'V7'] driver ['V3', 'V7']
+AGREE E [V3 summary workers = W+1] + [V7 pose file empty]: reference ['V3', 'V7'] driver ['V3', 'V7']
+AGREE E [V3 summary workers = W+1] + [V8 one CSV row too many]: reference ['V3', 'V8'] driver ['V3', 'V8']
+AGREE E [V3 summary workers = W+1] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V3', 'V9'] driver ['V3', 'V9']
+AGREE E [V3 CSV pool_threads row 0 = W+1] + [V4 simd_lanes swapped]: reference ['V3', 'V4'] driver ['V3', 'V4']
+AGREE E [V3 CSV pool_threads row 0 = W+1] + [V4 bmi2 false]: reference ['V3', 'V4'] driver ['V3', 'V4']
+AGREE E [V3 CSV pool_threads row 0 = W+1] + [V4 exe sha256 one hex digit off]: reference ['V3', 'V4'] driver ['V3', 'V4']
+AGREE E [V3 CSV pool_threads row 0 = W+1] + [V5 counters_enabled field absent]: reference ['V3', 'V5'] driver ['V3', 'V5']
+AGREE E [V3 CSV pool_threads row 0 = W+1] + [V6 colliders 1240]: reference ['V3', 'V6'] driver ['V3', 'V6']
+AGREE E [V3 CSV pool_threads row 0 = W+1] + [V6 inv_mass_ulps_vs_ours 1]: reference ['V3', 'V6'] driver ['V3', 'V6']
+AGREE E [V3 CSV pool_threads row 0 = W+1] + [V7 summary pose_hash edited]: reference ['V3', 'V7'] driver ['V3', 'V7']
+AGREE E [V3 CSV pool_threads row 0 = W+1] + [V7 pose file empty]: reference ['V3', 'V7'] driver ['V3', 'V7']
+AGREE E [V3 CSV pool_threads row 0 = W+1] + [V8 one CSV row too many]: reference ['V3', 'V8'] driver ['V3', 'V8']
+AGREE E [V3 CSV pool_threads row 0 = W+1] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V3', 'V9'] driver ['V3', 'V9']
+AGREE E [V4 simd_lanes swapped] + [V4 bmi2 false]: reference ['V4'] driver ['V4']
+AGREE E [V4 simd_lanes swapped] + [V4 exe sha256 one hex digit off]: reference ['V4'] driver ['V4']
+AGREE E [V4 simd_lanes swapped] + [V5 counters_enabled field absent]: reference ['V4', 'V5'] driver ['V4', 'V5']
+AGREE E [V4 simd_lanes swapped] + [V6 colliders 1240]: reference ['V4', 'V6'] driver ['V4', 'V6']
+AGREE E [V4 simd_lanes swapped] + [V6 inv_mass_ulps_vs_ours 1]: reference ['V4', 'V6'] driver ['V4', 'V6']
+AGREE E [V4 simd_lanes swapped] + [V7 summary pose_hash edited]: reference ['V4', 'V7'] driver ['V4', 'V7']
+AGREE E [V4 simd_lanes swapped] + [V7 pose file empty]: reference ['V4', 'V7'] driver ['V4', 'V7']
+AGREE E [V4 simd_lanes swapped] + [V8 one CSV row too many]: reference ['V3', 'V4', 'V8'] driver ['V3', 'V4', 'V8']
+AGREE E [V4 simd_lanes swapped] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V4', 'V9'] driver ['V4', 'V9']
+AGREE E [V4 bmi2 false] + [V4 exe sha256 one hex digit off]: reference ['V4'] driver ['V4']
+AGREE E [V4 bmi2 false] + [V5 counters_enabled field absent]: reference ['V4', 'V5'] driver ['V4', 'V5']
+AGREE E [V4 bmi2 false] + [V6 colliders 1240]: reference ['V4', 'V6'] driver ['V4', 'V6']
+AGREE E [V4 bmi2 false] + [V6 inv_mass_ulps_vs_ours 1]: reference ['V4', 'V6'] driver ['V4', 'V6']
+AGREE E [V4 bmi2 false] + [V7 summary pose_hash edited]: reference ['V4', 'V7'] driver ['V4', 'V7']
+AGREE E [V4 bmi2 false] + [V7 pose file empty]: reference ['V4', 'V7'] driver ['V4', 'V7']
+AGREE E [V4 bmi2 false] + [V8 one CSV row too many]: reference ['V3', 'V4', 'V8'] driver ['V3', 'V4', 'V8']
+AGREE E [V4 bmi2 false] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V4', 'V9'] driver ['V4', 'V9']
+AGREE E [V4 exe sha256 one hex digit off] + [V5 counters_enabled field absent]: reference ['V4', 'V5'] driver ['V4', 'V5']
+AGREE E [V4 exe sha256 one hex digit off] + [V6 colliders 1240]: reference ['V4', 'V6'] driver ['V4', 'V6']
+AGREE E [V4 exe sha256 one hex digit off] + [V6 inv_mass_ulps_vs_ours 1]: reference ['V4', 'V6'] driver ['V4', 'V6']
+AGREE E [V4 exe sha256 one hex digit off] + [V7 summary pose_hash edited]: reference ['V4', 'V7'] driver ['V4', 'V7']
+AGREE E [V4 exe sha256 one hex digit off] + [V7 pose file empty]: reference ['V4', 'V7'] driver ['V4', 'V7']
+AGREE E [V4 exe sha256 one hex digit off] + [V8 one CSV row too many]: reference ['V3', 'V4', 'V8'] driver ['V3', 'V4', 'V8']
+AGREE E [V4 exe sha256 one hex digit off] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V4', 'V9'] driver ['V4', 'V9']
+AGREE E [V5 counters_enabled field absent] + [V6 colliders 1240]: reference ['V5', 'V6'] driver ['V5', 'V6']
+AGREE E [V5 counters_enabled field absent] + [V6 inv_mass_ulps_vs_ours 1]: reference ['V5', 'V6'] driver ['V5', 'V6']
+AGREE E [V5 counters_enabled field absent] + [V7 summary pose_hash edited]: reference ['V5', 'V7'] driver ['V5', 'V7']
+AGREE E [V5 counters_enabled field absent] + [V7 pose file empty]: reference ['V5', 'V7'] driver ['V5', 'V7']
+AGREE E [V5 counters_enabled field absent] + [V8 one CSV row too many]: reference ['V3', 'V5', 'V8'] driver ['V3', 'V5', 'V8']
+AGREE E [V5 counters_enabled field absent] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V5', 'V9'] driver ['V5', 'V9']
+AGREE E [V6 colliders 1240] + [V6 inv_mass_ulps_vs_ours 1]: reference ['V6'] driver ['V6']
+AGREE E [V6 colliders 1240] + [V7 summary pose_hash edited]: reference ['V6', 'V7'] driver ['V6', 'V7']
+AGREE E [V6 colliders 1240] + [V7 pose file empty]: reference ['V6', 'V7'] driver ['V6', 'V7']
+AGREE E [V6 colliders 1240] + [V8 one CSV row too many]: reference ['V3', 'V6', 'V8'] driver ['V3', 'V6', 'V8']
+AGREE E [V6 colliders 1240] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V6', 'V9'] driver ['V6', 'V9']
+AGREE E [V6 inv_mass_ulps_vs_ours 1] + [V7 summary pose_hash edited]: reference ['V6', 'V7'] driver ['V6', 'V7']
+AGREE E [V6 inv_mass_ulps_vs_ours 1] + [V7 pose file empty]: reference ['V6', 'V7'] driver ['V6', 'V7']
+AGREE E [V6 inv_mass_ulps_vs_ours 1] + [V8 one CSV row too many]: reference ['V3', 'V6', 'V8'] driver ['V3', 'V6', 'V8']
+AGREE E [V6 inv_mass_ulps_vs_ours 1] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V6', 'V9'] driver ['V6', 'V9']
+AGREE E [V7 summary pose_hash edited] + [V7 pose file empty]: reference ['V7'] driver ['V7']
+AGREE E [V7 summary pose_hash edited] + [V8 one CSV row too many]: reference ['V3', 'V7', 'V8'] driver ['V3', 'V7', 'V8']
+AGREE E [V7 summary pose_hash edited] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V7', 'V9'] driver ['V7', 'V9']
+AGREE E [V7 pose file empty] + [V8 one CSV row too many]: reference ['V3', 'V7', 'V8'] driver ['V3', 'V7', 'V8']
+AGREE E [V7 pose file empty] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V7', 'V9'] driver ['V7', 'V9']
+AGREE E [V8 one CSV row too many] + [V9 receipt_gates.awake_min 1240 (a --receipt run)]: reference ['V3', 'V8', 'V9'] driver ['V3', 'V8', 'V9']
+E: 210 pairs compared
+
+== F. cases only the driver can see (the reference has no such input); each must be RED in the driver ==
+OK F launch arguments carry --receipt (the SUMMARY args do not): driver ['V9'] (must include V9)
+OK F fixture bytes empty (two empty files must not compare equal): driver ['V7'] (must include V7)
+OK F timed_out with exit 0 (a hang the driver terminated): driver ['V1'] (must include V1)
+OK F steps 12 expected but the CSV has 500 rows: driver ['V3', 'V8'] (must include V8)
+OK F W1: pool_threads_min a JSON true (bool is not the integer 1): driver ['V3'] (must include V3)
+OK F test=True skips V7 (a rehearsal pose is not the fixture): driver VALID
+OK F test=True still flags V1 (only V7 is skipped): driver ['V1']
+
+xcheck_rapier9a: 1279 comparisons, 0 disagreeing

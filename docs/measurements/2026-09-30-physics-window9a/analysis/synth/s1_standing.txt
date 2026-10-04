@@ -1,0 +1,234 @@
+ours census (C4-JD-armed#tip, [100,500)): points 16553.755, manifolds 4467.665, velocity row-iterations 595,935.18
+Jolt/ours work factors: wall 1.0000, velocity rows 0.9494, all rows 1.0538, manifold 1.9001
+Rapier/ours row factors [100,500): RP-D 0.5952, RP-M 1.7974
+
+# 1. Cells, ms (median [min-max] n (p0/p1/p2))
+
+## window [0..500)
+W1:
+   C4-JD#tip      4.5692 [4.4430-4.9939] n=7 (1/3/3)
+   C4-JT#tip      4.5930 [4.4350-4.8287] n=7 (1/3/3)
+   C4-jolt56#j56  10.1435 [9.4989-10.9129] n=8 (2/3/3)
+   RP-D#rs8       4.8228 [4.7138-5.2899] n=9 (3/3/3)
+   RP-D#rs4       5.6190 [5.5432-6.4308] n=9 (3/3/3)
+   RP-M#rs8       7.9267 [7.6747-8.4865] n=9 (3/3/3)
+   RP-M#rs4       10.2521 [9.7764-10.5460] n=9 (3/3/3)
+W2:
+   C4-JD#tip      3.0706 [2.9863-3.1163] n=8 (2/3/3)
+   C4-jolt56#j56  5.8263 [5.6143-5.9624] n=8 (2/3/3)
+   RP-D#rs8       2.9137 [2.8541-3.0999] n=9 (3/3/3)
+   RP-D#rs4       3.3271 [3.1665-3.5467] n=9 (3/3/3)
+   RP-M#rs8       4.6416 [4.5488-5.1958] n=9 (3/3/3)
+   RP-M#rs4       5.7119 [5.5793-5.8750] n=9 (3/3/3)
+W4:
+   C4-JD#tip      2.2356 [2.1959-2.3091] n=7 (1/3/3)
+   C4-jolt56#j56  3.6547 [3.6057-3.7142] n=7 (1/3/3)
+   RP-D#rs8       1.9850 [1.9378-2.0499] n=9 (3/3/3)
+   RP-D#rs4       2.2353 [2.1485-2.2965] n=9 (3/3/3)
+   RP-M#rs8       3.2943 [3.1173-3.4711] n=9 (3/3/3)
+   RP-M#rs4       3.7919 [3.5863-3.9694] n=9 (3/3/3)
+W8:
+   C4-JD#tip      1.8277 [1.8135-2.0274] n=7 (1/3/3)
+   C4-JT#tip      1.8502 [1.8200-2.0088] n=7 (1/3/3)
+   C4-jolt56#j56  2.5311 [2.4772-2.7301] n=6 (0/3/3)
+   RP-D#rs8       1.4091 [1.3724-1.5095] n=9 (3/3/3)
+   RP-D#rs4       1.5663 [1.4774-1.7109] n=9 (3/3/3)
+   RP-M#rs8       2.6293 [2.4463-3.4411] n=9 (3/3/3)
+   RP-M#rs4       2.7664 [2.6524-3.0538] n=9 (3/3/3)
+W16:
+   C4-JD#tip      2.0887 [2.0503-2.2770] n=9 (3/3/3)
+   C4-JT#tip      2.0597 [2.0482-2.2244] n=7 (1/3/3)
+   C4-jolt56#j56  2.4535 [2.3440-2.9357] n=9 (3/3/3)
+   RP-D#rs8       1.5896 [1.5500-1.9522] n=9 (3/3/3)
+   RP-D#rs4       1.6881 [1.5858-2.0609] n=9 (3/3/3)
+   RP-M#rs8       2.8517 [2.7857-3.0723] n=9 (3/3/3)
+   RP-M#rs4       2.9830 [2.8320-3.3640] n=9 (3/3/3)
+
+## window [100..500)
+W1:
+   C4-JD#tip      4.3504 [4.2115-4.7890] n=7 (1/3/3)
+   C4-JT#tip      4.3622 [4.2044-4.6021] n=7 (1/3/3)
+   C4-jolt56#j56  10.0044 [9.3879-10.8886] n=8 (2/3/3)
+   RP-D#rs8       4.9213 [4.8375-5.4518] n=9 (3/3/3)
+   RP-D#rs4       5.7490 [5.6781-6.6849] n=9 (3/3/3)
+   RP-M#rs8       7.7172 [7.4531-8.3237] n=9 (3/3/3)
+   RP-M#rs4       10.0586 [9.5974-10.3638] n=9 (3/3/3)
+W2:
+   C4-JD#tip      2.9392 [2.8604-2.9761] n=8 (2/3/3)
+   C4-jolt56#j56  5.8123 [5.5912-5.9449] n=8 (2/3/3)
+   RP-D#rs8       2.9767 [2.9110-3.1637] n=9 (3/3/3)
+   RP-D#rs4       3.4049 [3.2347-3.6618] n=9 (3/3/3)
+   RP-M#rs8       4.4683 [4.4025-5.0998] n=9 (3/3/3)
+   RP-M#rs4       5.6107 [5.4655-5.7796] n=9 (3/3/3)
+W4:
+   C4-JD#tip      2.1605 [2.1266-2.2431] n=7 (1/3/3)
+   C4-jolt56#j56  3.6881 [3.6354-3.7564] n=7 (1/3/3)
+   RP-D#rs8       2.0129 [1.9577-2.0810] n=9 (3/3/3)
+   RP-D#rs4       2.2866 [2.1798-2.3442] n=9 (3/3/3)
+   RP-M#rs8       3.1927 [3.0170-3.4077] n=9 (3/3/3)
+   RP-M#rs4       3.7311 [3.5323-3.9608] n=9 (3/3/3)
+W8:
+   C4-JD#tip      1.7878 [1.7707-1.9758] n=7 (1/3/3)
+   C4-JT#tip      1.8102 [1.7783-1.9442] n=7 (1/3/3)
+   C4-jolt56#j56  2.5702 [2.5178-2.7753] n=6 (0/3/3)
+   RP-D#rs8       1.4127 [1.3647-1.5236] n=9 (3/3/3)
+   RP-D#rs4       1.5701 [1.4931-1.7401] n=9 (3/3/3)
+   RP-M#rs8       2.5494 [2.3742-3.4557] n=9 (3/3/3)
+   RP-M#rs4       2.7357 [2.6180-3.0167] n=9 (3/3/3)
+W16:
+   C4-JD#tip      2.0486 [2.0110-2.2229] n=9 (3/3/3)
+   C4-JT#tip      2.0181 [2.0076-2.1830] n=7 (1/3/3)
+   C4-jolt56#j56  2.5056 [2.3891-3.0038] n=9 (3/3/3)
+   RP-D#rs8       1.5780 [1.5441-1.9684] n=9 (3/3/3)
+   RP-D#rs4       1.7000 [1.5914-2.0882] n=9 (3/3/3)
+   RP-M#rs8       2.7958 [2.7219-3.0125] n=9 (3/3/3)
+   RP-M#rs4       2.9559 [2.8020-3.3519] n=9 (3/3/3)
+
+## window [0..100)
+W1:
+   C4-JD#tip      5.5295 [5.3693-5.8448] n=7 (1/3/3)
+   C4-JT#tip      5.5164 [5.3576-5.7353] n=7 (1/3/3)
+   C4-jolt56#j56  10.6344 [9.9432-11.0100] n=8 (2/3/3)
+   RP-D#rs8       4.3484 [4.2193-4.6637] n=9 (3/3/3)
+   RP-D#rs4       5.1136 [5.0038-5.4144] n=9 (3/3/3)
+   RP-M#rs8       8.7647 [8.5553-9.2209] n=9 (3/3/3)
+   RP-M#rs4       10.7658 [10.4920-11.2749] n=9 (3/3/3)
+W2:
+   C4-JD#tip      3.5855 [3.4901-3.7066] n=8 (2/3/3)
+   C4-jolt56#j56  5.8793 [5.7069-6.0324] n=8 (2/3/3)
+   RP-D#rs8       2.7219 [2.6240-2.8448] n=9 (3/3/3)
+   RP-D#rs4       3.0162 [2.8939-3.1161] n=9 (3/3/3)
+   RP-M#rs8       5.1997 [5.1134-5.5799] n=9 (3/3/3)
+   RP-M#rs4       6.0898 [5.9948-6.2564] n=9 (3/3/3)
+W4:
+   C4-JD#tip      2.5360 [2.4728-2.6103] n=7 (1/3/3)
+   C4-jolt56#j56  3.5455 [3.4870-3.6927] n=7 (1/3/3)
+   RP-D#rs8       1.8640 [1.8504-1.9766] n=9 (3/3/3)
+   RP-D#rs4       2.0304 [1.9846-2.1388] n=9 (3/3/3)
+   RP-M#rs8       3.5926 [3.5183-4.1191] n=9 (3/3/3)
+   RP-M#rs4       4.0010 [3.8025-4.0539] n=9 (3/3/3)
+W8:
+   C4-JD#tip      2.0064 [1.9803-2.2338] n=7 (1/3/3)
+   C4-JT#tip      2.0022 [1.9807-2.2673] n=7 (1/3/3)
+   C4-jolt56#j56  2.3747 [2.3115-2.5495] n=6 (0/3/3)
+   RP-D#rs8       1.4350 [1.3948-1.4661] n=9 (3/3/3)
+   RP-D#rs4       1.5106 [1.4146-1.5943] n=9 (3/3/3)
+   RP-M#rs8       2.9307 [2.7347-3.3828] n=9 (3/3/3)
+   RP-M#rs4       2.9364 [2.7899-3.2024] n=9 (3/3/3)
+W16:
+   C4-JD#tip      2.2302 [2.2009-2.4931] n=9 (3/3/3)
+   C4-JT#tip      2.2264 [2.1965-2.3902] n=7 (1/3/3)
+   C4-jolt56#j56  2.2492 [2.1636-2.8252] n=9 (3/3/3)
+   RP-D#rs8       1.6227 [1.5651-1.8966] n=9 (3/3/3)
+   RP-D#rs4       1.6135 [1.5632-1.9518] n=9 (3/3/3)
+   RP-M#rs8       3.0750 [2.9982-3.3116] n=9 (3/3/3)
+   RP-M#rs4       3.1458 [2.9523-3.4126] n=9 (3/3/3)
+
+# 2. Ours / Jolt 5.6 (ours = C4-JD#tip)
+[0..500) wall:
+   W1 0.4505 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] i/s/r pooled YYY; nnn(K2/1) YYY(K3/3) YYY(K3/3)
+   W2 0.5270 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] i/s/r pooled YYY; nnn(K2/2) YYY(K3/3) YYY(K3/3)
+   W4 0.6117 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] i/s/r pooled YYY; nnn(K1/1) YYY(K3/3) YYY(K3/3)
+   W8 0.7221 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (ours faster)] i/s/r pooled YYn; nnn(K0/1) YYY(K3/3) YYn(K3/3)
+   W16 0.8513 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] i/s/r pooled nYn; YYn(K3/3) nYn(K3/3) nnn(K3/3)
+[100..500) wall:
+   W1 0.4348 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] i/s/r pooled YYY; nnn(K2/1) YYY(K3/3) YYY(K3/3)
+   W2 0.5057 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] i/s/r pooled YYY; nnn(K2/2) YYY(K3/3) YYY(K3/3)
+   W4 0.5858 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] i/s/r pooled YYY; nnn(K1/1) YYY(K3/3) YYY(K3/3)
+   W8 0.6956 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (ours faster)] i/s/r pooled YYn; nnn(K0/1) YYY(K3/3) YYn(K3/3)
+   W16 0.8176 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] i/s/r pooled nYn; YYn(K3/3) nYn(K3/3) nnn(K3/3)
+[100..500) velocity rows:
+   W1 0.4128 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] i/s/r pooled YYY; nnn(K2/1) YYY(K3/3) YYY(K3/3)
+   W2 0.4801 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] i/s/r pooled YYY; nnn(K2/2) YYY(K3/3) YYY(K3/3)
+   W4 0.5562 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] i/s/r pooled YYY; nnn(K1/1) YYY(K3/3) YYY(K3/3)
+   W8 0.6604 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] i/s/r pooled YYY; nnn(K0/1) YYY(K3/3) YYY(K3/3)
+   W16 0.7763 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] i/s/r pooled nYn; YYn(K3/3) YYn(K3/3) nnn(K3/3)
+[100..500) all rows:
+   W1 0.4583 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] i/s/r pooled YYY; nnn(K2/1) YYY(K3/3) YYY(K3/3)
+   W2 0.5329 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] i/s/r pooled YYY; nnn(K2/2) YYY(K3/3) YYY(K3/3)
+   W4 0.6174 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] i/s/r pooled YYY; nnn(K1/1) YYY(K3/3) YYY(K3/3)
+   W8 0.7330 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (ours faster)] i/s/r pooled YYn; nnn(K0/1) YYY(K3/3) YYn(K3/3)
+   W16 0.8616 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] i/s/r pooled nYn; YYn(K3/3) nnn(K3/3) nnn(K3/3)
+[100..500) manifold:
+   W1 0.8263 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] i/s/r pooled nYn; nnn(K2/1) nYn(K3/3) nYn(K3/3)
+   W2 0.9609 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] i/s/r pooled nYn; nnn(K2/2) nnn(K3/3) nYn(K3/3)
+   W4 1.1131 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (other faster)] i/s/r pooled YYn; nnn(K1/1) YYY(K3/3) YYn(K3/3)
+   W8 1.3217 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (other faster)] i/s/r pooled YYY; nnn(K0/1) YYY(K3/3) YYY(K3/3)
+   W16 1.5536 [LETTER CLAIMED STRONG (other faster) | GATING-ONLY CLAIMED STRONG (other faster)] i/s/r pooled YYY; YYY(K3/3) YYY(K3/3) YYY(K3/3)
+
+# 3. Ours / Rapier 0.36, [100,500) (A = ours, B = Rapier)
+
+## ours = J-T#tip at W1/8/16, J-D#tip at W2/4 (pre-registered)
+RP-D wall:
+   W1: rs8: ours/Rapier 0.8864 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (ours faster)] ; rs4: ours/Rapier 0.7588 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (ours faster)]
+   W2: rs8: ours/Rapier 0.9874 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] ; rs4: ours/Rapier 0.8632 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (ours faster)]
+   W4: rs8: ours/Rapier 1.0733 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] ; rs4: ours/Rapier 0.9449 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED]
+   W8: rs8: ours/Rapier 1.2814 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (other faster)] ; rs4: ours/Rapier 1.1529 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (other faster)]
+   W16: rs8: ours/Rapier 1.2788 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] ; rs4: ours/Rapier 1.1871 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED]
+RP-D row:
+   W1: rs8: ours/Rapier 0.5275 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] ; rs4: ours/Rapier 0.4516 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+   W2: rs8: ours/Rapier 0.5877 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] ; rs4: ours/Rapier 0.5138 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+   W4: rs8: ours/Rapier 0.6388 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] ; rs4: ours/Rapier 0.5624 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+   W8: rs8: ours/Rapier 0.7626 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] ; rs4: ours/Rapier 0.6862 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+   W16: rs8: ours/Rapier 0.7611 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (ours faster)] ; rs4: ours/Rapier 0.7065 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (ours faster)]
+RP-M wall:
+   W1: rs8: ours/Rapier 0.5653 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] ; rs4: ours/Rapier 0.4337 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+   W2: rs8: ours/Rapier 0.6578 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] ; rs4: ours/Rapier 0.5239 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+   W4: rs8: ours/Rapier 0.6767 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] ; rs4: ours/Rapier 0.5791 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+   W8: rs8: ours/Rapier 0.7100 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (ours faster)] ; rs4: ours/Rapier 0.6617 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+   W16: rs8: ours/Rapier 0.7218 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] ; rs4: ours/Rapier 0.6827 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+RP-M row:
+   W1: rs8: ours/Rapier 1.0160 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] ; rs4: ours/Rapier 0.7795 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+   W2: rs8: ours/Rapier 1.1823 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] ; rs4: ours/Rapier 0.9415 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (ours faster)]
+   W4: rs8: ours/Rapier 1.2163 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (other faster)] ; rs4: ours/Rapier 1.0408 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED]
+   W8: rs8: ours/Rapier 1.2762 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] ; rs4: ours/Rapier 1.1893 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (other faster)]
+   W16: rs8: ours/Rapier 1.2974 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (other faster)] ; rs4: ours/Rapier 1.2271 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (other faster)]
+
+## ours = J-D#tip at every W (post hoc)
+RP-D wall:
+   W1: rs8: ours/Rapier 0.8840 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] ; rs4: ours/Rapier 0.7567 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (ours faster)]
+   W2: rs8: ours/Rapier 0.9874 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] ; rs4: ours/Rapier 0.8632 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (ours faster)]
+   W4: rs8: ours/Rapier 1.0733 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] ; rs4: ours/Rapier 0.9449 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED]
+   W8: rs8: ours/Rapier 1.2655 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (other faster)] ; rs4: ours/Rapier 1.1387 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED]
+   W16: rs8: ours/Rapier 1.2982 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] ; rs4: ours/Rapier 1.2051 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED]
+RP-D row:
+   W1: rs8: ours/Rapier 0.5261 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] ; rs4: ours/Rapier 0.4504 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+   W2: rs8: ours/Rapier 0.5877 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] ; rs4: ours/Rapier 0.5138 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+   W4: rs8: ours/Rapier 0.6388 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] ; rs4: ours/Rapier 0.5624 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+   W8: rs8: ours/Rapier 0.7532 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] ; rs4: ours/Rapier 0.6777 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (ours faster)]
+   W16: rs8: ours/Rapier 0.7726 [LETTER CLAIMED (ours faster) | GATING-ONLY CLAIMED (ours faster)] ; rs4: ours/Rapier 0.7172 [LETTER CLAIMED (ours faster) | GATING-ONLY CLAIMED (ours faster)]
+RP-M wall:
+   W1: rs8: ours/Rapier 0.5637 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] ; rs4: ours/Rapier 0.4325 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+   W2: rs8: ours/Rapier 0.6578 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] ; rs4: ours/Rapier 0.5239 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+   W4: rs8: ours/Rapier 0.6767 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)] ; rs4: ours/Rapier 0.5791 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+   W8: rs8: ours/Rapier 0.7012 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (ours faster)] ; rs4: ours/Rapier 0.6535 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED STRONG (ours faster)]
+   W16: rs8: ours/Rapier 0.7328 [LETTER CLAIMED STRONG (ours faster) | GATING-ONLY CLAIMED STRONG (ours faster)] ; rs4: ours/Rapier 0.6931 [LETTER CLAIMED STRONG (ours faster) | GATING-ONLY CLAIMED STRONG (ours faster)]
+RP-M row:
+   W1: rs8: ours/Rapier 1.0132 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] ; rs4: ours/Rapier 0.7774 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (ours faster)]
+   W2: rs8: ours/Rapier 1.1823 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] ; rs4: ours/Rapier 0.9415 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (ours faster)]
+   W4: rs8: ours/Rapier 1.2163 [LETTER NOT CLAIMED | GATING-ONLY CLAIMED (other faster)] ; rs4: ours/Rapier 1.0408 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED]
+   W8: rs8: ours/Rapier 1.2604 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED] ; rs4: ours/Rapier 1.1746 [LETTER NOT CLAIMED | GATING-ONLY NOT CLAIMED]
+   W16: rs8: ours/Rapier 1.3170 [LETTER CLAIMED (other faster) | GATING-ONLY CLAIMED (other faster)] ; rs4: ours/Rapier 1.2457 [LETTER CLAIMED (other faster) | GATING-ONLY CLAIMED (other faster)]
+
+# 4. Headline table, [100,500): ours = C4-JD#tip; Rapier = its faster build (lower median) per cell
+W | ours ms | Jolt ms | RP-D best ms | RP-M best ms | ours/Jolt wall | ours/Jolt per vel. row | ours/Jolt per manifold | ours/RP-D wall | ours/RP-M wall | ours/RP-M per row | ours/RP-D per row
+W1 | 4.3504 | 10.0044 | 4.9213 (rs8) | 7.7172 (rs8) | 0.435 | 0.413 | 0.826 | 0.884 | 0.564 | 1.013 | 0.526
+W2 | 2.9392 | 5.8123 | 2.9767 (rs8) | 4.4683 (rs8) | 0.506 | 0.480 | 0.961 | 0.987 | 0.658 | 1.182 | 0.588
+W4 | 2.1605 | 3.6881 | 2.0129 (rs8) | 3.1927 (rs8) | 0.586 | 0.556 | 1.113 | 1.073 | 0.677 | 1.216 | 0.639
+W8 | 1.7878 | 2.5702 | 1.4127 (rs8) | 2.5494 (rs8) | 0.696 | 0.660 | 1.322 | 1.266 | 0.701 | 1.260 | 0.753
+W16 | 2.0486 | 2.5056 | 1.5780 (rs8) | 2.7958 (rs8) | 0.818 | 0.776 | 1.554 | 1.298 | 0.733 | 1.317 | 0.773
+
+[0,500) wall, ours = C4-JD#tip: W1 0.4505 / W2 0.5270 / W4 0.6117 / W8 0.7221 / W16 0.8513
+
+# 5. Scaling T(1)/T(W), pooled medians
+[0..500) ours J-D : T1/TW 1.488 / 2.044 / 2.500 / 2.188; T16/T8 1.1428
+[0..500) Jolt     : T1/TW 1.741 / 2.776 / 4.008 / 4.134; T16/T8 0.9693
+[0..500) RP-D rs8 : T1/TW 1.655 / 2.430 / 3.423 / 3.034; T16/T8 1.1281
+[0..500) RP-M rs8 : T1/TW 1.708 / 2.406 / 3.015 / 2.780; T16/T8 1.0846
+[100..500) ours J-D : T1/TW 1.480 / 2.014 / 2.433 / 2.124; T16/T8 1.1459
+[100..500) Jolt     : T1/TW 1.721 / 2.713 / 3.892 / 3.993; T16/T8 0.9749
+[100..500) RP-D rs8 : T1/TW 1.653 / 2.445 / 3.484 / 3.119; T16/T8 1.1170
+[100..500) RP-M rs8 : T1/TW 1.727 / 2.417 / 3.027 / 2.760; T16/T8 1.0966
+
+# 6. PRE vs JD comparator: largest |difference| of the ours/Rapier ratio, and any verdict that differs
+max relative difference 1.52 %; verdicts differing (LETTER, GATING-ONLY): [('RP-D', 'wall', 1, 'rs8', ('NOT CLAIMED', 'CLAIMED'), ('NOT CLAIMED', 'NOT CLAIMED')), ('RP-D', 'wall', 8, 'rs4', ('NOT CLAIMED', 'CLAIMED'), ('NOT CLAIMED', 'NOT CLAIMED')), ('RP-D', 'row', 8, 'rs4', ('NOT CLAIMED', 'CLAIMED STRONG'), ('NOT CLAIMED', 'CLAIMED')), ('RP-D', 'row', 16, 'rs8', ('NOT CLAIMED', 'CLAIMED'), ('CLAIMED', 'CLAIMED')), ('RP-D', 'row', 16, 'rs4', ('NOT CLAIMED', 'CLAIMED'), ('CLAIMED', 'CLAIMED')), ('RP-M', 'wall', 16, 'rs8', ('NOT CLAIMED', 'CLAIMED STRONG'), ('CLAIMED STRONG', 'CLAIMED STRONG')), ('RP-M', 'wall', 16, 'rs4', ('NOT CLAIMED', 'CLAIMED STRONG'), ('CLAIMED STRONG', 'CLAIMED STRONG')), ('RP-M', 'row', 1, 'rs4', ('NOT CLAIMED', 'CLAIMED STRONG'), ('NOT CLAIMED', 'CLAIMED')), ('RP-M', 'row', 8, 'rs4', ('NOT CLAIMED', 'CLAIMED'), ('NOT CLAIMED', 'NOT CLAIMED')), ('RP-M', 'row', 16, 'rs8', ('NOT CLAIMED', 'CLAIMED'), ('CLAIMED', 'CLAIMED')), ('RP-M', 'row', 16, 'rs4', ('NOT CLAIMED', 'CLAIMED'), ('CLAIMED', 'CLAIMED'))]

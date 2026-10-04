@@ -1,0 +1,14 @@
+# block-level machine state (used processes): witness % and receipts, median [max]
+  S4-AB    n=153: witness 0.23 [1.22] %, receipt before 0.59 [4.08], after 0.59 [4.08]
+  S7-AB    n=171: witness 0.22 [1.64] %, receipt before 0.62 [3.63], after 0.61 [3.63]
+  SPLIT    n= 54: witness 0.25 [0.81] %, receipt before 0.61 [3.11], after 0.59 [3.11]
+  F3       n=227: witness 0.44 [1.98] %, receipt before 1.70 [4.91], after 1.69 [4.91]
+  J-Son-T  n= 70: witness 0.55 [1.93] %, receipt before 1.90 [4.79], after 1.82 [4.02]
+
+# F3-JT-leaflist#tip per pass ([0,500) wall ms, used processes) vs S4-AB S4-JT#tip
+  W 1: S4-AB 4.4500 [4.3918-4.5231]; F3 per pass p0 4.6630 (K=3); p1 4.6355 (K=3); p2 4.5767 (K=3)
+  W 8: S4-AB 1.8154 [1.7937-1.8472]; F3 per pass p0 2.0514 (K=3); p1 1.9385 (K=2); p2 2.0127 (K=3)
+  W16: S4-AB 2.0502 [2.0357-2.0744]; F3 per pass p0 2.2745 (K=3); p1 2.2889 (K=2); p2 2.2101 (K=3)
+
+# inside F3 (unarmed JT/RT rows): process wall / its cell median vs witness % (Spearman, used processes)
+  n=167; Spearman rho(relative wall, witness %) = -0.004

@@ -1,0 +1,13 @@
+# o1b: K >= 3 guard waived (K >= 2); park vs spin slope, gap rows (P8, bpp 4)
+worker gap 0: pooled n/n/n p0 n/n/n p1 n/n/n p2 n/n/n -> NOT CLAIMED
+   p0 spin values [3294, 3336, 3447] (K 3) | park values [3192, 3317, 3417] (K 3) | p0 B-A -19 (-0.6 %) n/n/n bars r 16.4 / i 8.2 / s 6.0 %
+worker gap 20: pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+   p0 spin values [23156, 23203] (K 2) | park values [29167, 29208] (K 2) | p0 B-A +6008 (+25.9 %) Y/Y/Y bars r 0.5 / i 0.2 / s 0.3 %
+worker gap 80: pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+   p0 spin values [83122, 83156] (K 2) | park values [89486, 89656] (K 2) | p0 B-A +6432 (+7.7 %) Y/Y/Y bars r 0.4 / i 0.2 / s 0.2 %
+external gap 0: pooled n/n/n p0 n/n/n p1 n/Y/Y p2 n/n/n -> NOT CLAIMED
+   p0 spin values [3092, 3275, 3386] (K 3) | park values [3131, 3189, 3667] (K 3) | p0 B-A -86 (-2.6 %) n/n/n bars r 38.1 / i 19.1 / s 14.9 %
+external gap 20: pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+   p0 spin values [22606, 22672] (K 2) | park values [28981, 29053] (K 2) | p0 B-A +6378 (+28.2 %) Y/Y/Y bars r 0.8 / i 0.4 / s 0.5 %
+external gap 80: pooled Y/Y/Y p0 Y/Y/Y p1 Y/Y/Y p2 Y/Y/Y -> CLAIMED STRONG
+   p0 spin values [82717, 83047] (K 2) | park values [89328, 89344] (K 2) | p0 B-A +6454 (+7.8 %) Y/Y/Y bars r 0.8 / i 0.4 / s 0.5 %

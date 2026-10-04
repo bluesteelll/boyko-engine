@@ -1,0 +1,11 @@
+S4-AB: processes (non-warm-up) 155, originals 153, re-runs 2, slots 153, used 153, dropped slots 0
+SPLIT: processes (non-warm-up) 54, originals 54, re-runs 0, slots 54, used 54, dropped slots 0
+S7-AB: processes (non-warm-up) 173, originals 171, re-runs 2, slots 171, used 171, dropped slots 0
+own validity problems: 0
+driver-invalid (valid false): 0
+unclean processes: 4
+   S4-AB p0 r1 S4-JT#parent@W8 original: ['witness 2.16']; witness top [('claude.exe', 0.031), ('browser.exe', 0.031), ('Discord.exe', 0.031)]; re-run: ['2026-09-29T17:28:53.813+03:00 used=True others 0.88 %']
+   S4-AB p1 r1 S4-JT-a#parent@W16 original: ['witness 3.08']; witness top [('Discord.exe', 0.609), ('claude.exe', 0.031)]; re-run: ['2026-09-29T17:36:51.240+03:00 used=True others 0.23 %']
+   S7-AB p1 r0 S7-JA#s7t@W8 original: ['witness 2.29']; witness top [('Discord.exe', 0.906), ('steamwebhelper.exe', 0.016), ('claude.exe', 0.016)]; re-run: ['2026-09-29T18:04:25.044+03:00 used=True others 0.07 %']
+   S7-AB p2 r0 S7-JT-W1#s7t@W1 original: ['receipt after 6.5', 'witness 3.95']; witness top [('RuntimeBroker.exe', 0.609), ('sihost.exe', 0.297), ('backgroundTaskHost.exe', 0.234)]; re-run: ['2026-09-29T18:13:45.826+03:00 used=True others 0.26 %']
+used S4-AB+SPLIT: receipt before max 4.08, after max 4.08, witness max 1.22 %

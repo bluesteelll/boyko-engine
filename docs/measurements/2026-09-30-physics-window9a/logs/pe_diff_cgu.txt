@@ -1,0 +1,17 @@
+# pinned tip vs CONTROL (same export recipe, override unset, new export path)
+section         rawA      rawB diff bytes  sha256(A)[:12] sha256(B)[:12]
+.text        1156096   1156096          0  38199e2798d5 38199e2798d5
+.rdata        224768    224768         25  9fffb11dc0b4 1261143268c4
+.data         258048    258048          0  b28bfe185279 b28bfe185279
+.pdata         32256     32256          0  b952d32b67cb b952d32b67cb
+.reloc          4096      4096          0  e9dee09bcc0e e9dee09bcc0e
+file sizes 1676288 1676288; sections 5 5
+
+# pinned tip vs tipcgu1
+section         rawA      rawB diff bytes  sha256(A)[:12] sha256(B)[:12]
+.text        1156096   1141248    1113445  38199e2798d5 f881406aa4ac
+.rdata        224768    219136     191045  9fffb11dc0b4 fbaaf0532052
+.data         258048    258048      10837  b28bfe185279 41304aeb1a4c
+.pdata         32256     30720      20950  b952d32b67cb 0562abdc42d8
+.reloc          4096      4096       3565  e9dee09bcc0e f1d1131e0f2e
+file sizes 1676288 1654272; sections 5 5

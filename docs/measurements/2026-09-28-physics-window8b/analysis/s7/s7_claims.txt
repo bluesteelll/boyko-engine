@@ -1,0 +1,381 @@
+
+# Resolution ladders, window [0..500) (reference = P plain row at the same W; a rung is SEEN iff its rise is CLAIMED under ruling 1 with the rung slower)
+## ladder8 (ref S7-JT#s7p@W8, rung = F x 60 us per step)
+  S7-ladder8-F0.5 (inj 0.0300 ms): A 1.8152 [1.7989-1.8491] K=9 (r 2.77 / i 0.87 / s 0.36 %)
+                                   B 1.8489 [1.8293-1.8736] K=9 (r 2.39 / i 1.23 / s 0.33 %)
+                                   pooled B/A 1.0186 (+1.86 %, d +0.0337 ms) n/n/Y bars r 7.32 / i 3.02 / s 0.97 %
+                                   p0: A 1.8143 B 1.8573 (A r 1.51 / i 0.76 / s 0.55; B r 0.69 / i 0.35 / s 0.26 %) B/A 1.0237 (+2.37 %, d +0.0430 ms) n/Y/Y bars r 3.33 / i 1.67 / s 1.22 %
+                                   p1: A 1.8123 B 1.8323 (A r 1.40 / i 0.70 / s 0.51; B r 1.13 / i 0.56 / s 0.44 %) B/A 1.0110 (+1.10 %, d +0.0200 ms) n/n/n bars r 3.60 / i 1.80 / s 1.35 %
+                                   p2: A 1.8296 B 1.8489 (A r 1.85 / i 0.93 / s 0.67; B r 2.11 / i 1.06 / s 0.77 %) B/A 1.0106 (+1.06 %, d +0.0194 ms) n/n/n bars r 5.62 / i 2.81 / s 2.05 %
+                                   ruling 1: direction B slower, same sign in every pass True, CLAIMED False, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 3.02 % = 0.0548 ms of A
+      -> rise +0.0337 ms, rise/injected 1.124: not seen
+  S7-ladder8-F1 (inj 0.0600 ms): A 1.8152 [1.7989-1.8491] K=9 (r 2.77 / i 0.87 / s 0.36 %)
+                                 B 1.8812 [1.8677-1.8897] K=9 (r 1.17 / i 0.43 / s 0.15 %)
+                                 pooled B/A 1.0363 (+3.63 %, d +0.0660 ms) n/Y/Y bars r 6.01 / i 1.94 / s 0.77 %
+                                 p0: A 1.8143 B 1.8812 (A r 1.51 / i 0.76 / s 0.55; B r 0.19 / i 0.10 / s 0.07 %) B/A 1.0369 (+3.69 %, d +0.0669 ms) Y/Y/Y bars r 3.05 / i 1.53 / s 1.11 %
+                                 p1: A 1.8123 B 1.8846 (A r 1.40 / i 0.70 / s 0.51; B r 0.71 / i 0.35 / s 0.26 %) B/A 1.0399 (+3.99 %, d +0.0723 ms) Y/Y/Y bars r 3.14 / i 1.57 / s 1.15 %
+                                 p2: A 1.8296 B 1.8764 (A r 1.85 / i 0.93 / s 0.67; B r 1.09 / i 0.55 / s 0.40 %) B/A 1.0256 (+2.56 %, d +0.0469 ms) n/Y/Y bars r 4.30 / i 2.15 / s 1.56 %
+                                 ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 2.15 % = 0.0390 ms of A
+      -> rise +0.0660 ms, rise/injected 1.099: SEEN
+  S7-ladder8-F1.5 (inj 0.0900 ms): A 1.8152 [1.7989-1.8491] K=9 (r 2.77 / i 0.87 / s 0.36 %)
+                                   B 1.9063 [1.8865-1.9368] K=9 (r 2.64 / i 0.89 / s 0.34 %)
+                                   pooled B/A 1.0502 (+5.02 %, d +0.0911 ms) n/Y/Y bars r 7.65 / i 2.49 / s 0.99 %
+                                   p0: A 1.8143 B 1.9063 (A r 1.51 / i 0.76 / s 0.55; B r 2.28 / i 1.14 / s 0.85 %) B/A 1.0507 (+5.07 %, d +0.0920 ms) n/Y/Y bars r 5.48 / i 2.74 / s 2.02 %
+                                   p1: A 1.8123 B 1.9103 (A r 1.40 / i 0.70 / s 0.51; B r 1.52 / i 0.76 / s 0.57 %) B/A 1.0541 (+5.41 %, d +0.0980 ms) Y/Y/Y bars r 4.13 / i 2.07 / s 1.53 %
+                                   p2: A 1.8296 B 1.9052 (A r 1.85 / i 0.93 / s 0.67; B r 1.14 / i 0.57 / s 0.45 %) B/A 1.0413 (+4.13 %, d +0.0756 ms) n/Y/Y bars r 4.35 / i 2.17 / s 1.61 %
+                                   ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 2.74 % = 0.0497 ms of A
+      -> rise +0.0911 ms, rise/injected 1.012: SEEN
+  S7-ladder8-F2 (inj 0.1200 ms): A 1.8152 [1.7989-1.8491] K=9 (r 2.77 / i 0.87 / s 0.36 %)
+                                 B 1.9410 [1.9266-1.9669] K=9 (r 2.07 / i 0.91 / s 0.30 %)
+                                 pooled B/A 1.0693 (+6.93 %, d +0.1257 ms) Y/Y/Y bars r 6.92 / i 2.51 / s 0.93 %
+                                 p0: A 1.8143 B 1.9430 (A r 1.51 / i 0.76 / s 0.55; B r 1.05 / i 0.52 / s 0.40 %) B/A 1.0709 (+7.09 %, d +0.1287 ms) Y/Y/Y bars r 3.68 / i 1.84 / s 1.36 %
+                                 p1: A 1.8123 B 1.9563 (A r 1.40 / i 0.70 / s 0.51; B r 2.05 / i 1.03 / s 0.77 %) B/A 1.0795 (+7.95 %, d +0.1441 ms) Y/Y/Y bars r 4.97 / i 2.49 / s 1.85 %
+                                 p2: A 1.8296 B 1.9357 (A r 1.85 / i 0.93 / s 0.67; B r 0.60 / i 0.30 / s 0.22 %) B/A 1.0580 (+5.80 %, d +0.1061 ms) Y/Y/Y bars r 3.90 / i 1.95 / s 1.41 %
+                                 ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 2.51 % = 0.0456 ms of A
+      -> rise +0.1257 ms, rise/injected 1.048: SEEN
+  => R (ladder8) = 0.0600 ms (F 1.0)
+## ladder16 (ref S7-JT#s7p@W16, rung = F x 105 us per step)
+  S7-ladder16-F0.5 (inj 0.0525 ms): A 2.0502 [2.0393-2.0659] K=9 (r 1.30 / i 0.53 / s 0.17 %)
+                                    B 2.1047 [2.0960-2.1129] K=9 (r 0.80 / i 0.29 / s 0.10 %)
+                                    pooled B/A 1.0266 (+2.66 %, d +0.0545 ms) n/Y/Y bars r 3.05 / i 1.20 / s 0.39 %
+                                    p0: A 2.0545 B 2.1047 (A r 1.18 / i 0.59 / s 0.43; B r 0.65 / i 0.33 / s 0.24 %) B/A 1.0244 (+2.44 %, d +0.0502 ms) n/Y/Y bars r 2.70 / i 1.35 / s 0.98 %
+                                    p1: A 2.0537 B 2.1056 (A r 0.27 / i 0.13 / s 0.10; B r 0.22 / i 0.11 / s 0.08 %) B/A 1.0253 (+2.53 %, d +0.0519 ms) Y/Y/Y bars r 0.69 / i 0.34 / s 0.25 %
+                                    p2: A 2.0437 B 2.1021 (A r 0.49 / i 0.25 / s 0.18; B r 0.52 / i 0.26 / s 0.22 %) B/A 1.0286 (+2.86 %, d +0.0584 ms) Y/Y/Y bars r 1.43 / i 0.72 / s 0.56 %
+                                    ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 1.35 % = 0.0276 ms of A
+      -> rise +0.0545 ms, rise/injected 1.038: SEEN
+  S7-ladder16-F1 (inj 0.1050 ms): A 2.0502 [2.0393-2.0659] K=9 (r 1.30 / i 0.53 / s 0.17 %)
+                                  B 2.1641 [2.1541-2.1929] K=9 (r 1.79 / i 1.11 / s 0.28 %)
+                                  pooled B/A 1.0556 (+5.56 %, d +0.1139 ms) Y/Y/Y bars r 4.42 / i 2.45 / s 0.65 %
+                                  p0: A 2.0545 B 2.1670 (A r 1.18 / i 0.59 / s 0.43; B r 1.56 / i 0.78 / s 0.59 %) B/A 1.0548 (+5.48 %, d +0.1125 ms) Y/Y/Y bars r 3.91 / i 1.96 / s 1.46 %
+                                  p1: A 2.0537 B 2.1596 (A r 0.27 / i 0.13 / s 0.10; B r 0.46 / i 0.23 / s 0.17 %) B/A 1.0516 (+5.16 %, d +0.1059 ms) Y/Y/Y bars r 1.07 / i 0.53 / s 0.39 %
+                                  p2: A 2.0437 B 2.1836 (A r 0.49 / i 0.25 / s 0.18; B r 1.27 / i 0.63 / s 0.48 %) B/A 1.0684 (+6.84 %, d +0.1399 ms) Y/Y/Y bars r 2.72 / i 1.36 / s 1.03 %
+                                  ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 2.45 % = 0.0503 ms of A
+      -> rise +0.1139 ms, rise/injected 1.085: SEEN
+  S7-ladder16-F1.5 (inj 0.1575 ms): A 2.0502 [2.0393-2.0659] K=9 (r 1.30 / i 0.53 / s 0.17 %)
+                                    B 2.2101 [2.2010-2.2294] K=9 (r 1.28 / i 0.46 / s 0.16 %)
+                                    pooled B/A 1.0780 (+7.80 %, d +0.1599 ms) Y/Y/Y bars r 3.65 / i 1.39 / s 0.46 %
+                                    p0: A 2.0545 B 2.2046 (A r 1.18 / i 0.59 / s 0.43; B r 0.68 / i 0.34 / s 0.26 %) B/A 1.0731 (+7.31 %, d +0.1501 ms) Y/Y/Y bars r 2.72 / i 1.36 / s 1.00 %
+                                    p1: A 2.0537 B 2.2134 (A r 0.27 / i 0.13 / s 0.10; B r 0.87 / i 0.44 / s 0.34 %) B/A 1.0778 (+7.78 %, d +0.1597 ms) Y/Y/Y bars r 1.82 / i 0.91 / s 0.70 %
+                                    p2: A 2.0437 B 2.2082 (A r 0.49 / i 0.25 / s 0.18; B r 0.46 / i 0.23 / s 0.18 %) B/A 1.0805 (+8.05 %, d +0.1645 ms) Y/Y/Y bars r 1.36 / i 0.68 / s 0.50 %
+                                    ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 1.39 % = 0.0286 ms of A
+      -> rise +0.1599 ms, rise/injected 1.015: SEEN
+  S7-ladder16-F2 (inj 0.2100 ms): A 2.0502 [2.0393-2.0659] K=9 (r 1.30 / i 0.53 / s 0.17 %)
+                                  B 2.2648 [2.2529-2.2952] K=9 (r 1.87 / i 0.55 / s 0.23 %)
+                                  pooled B/A 1.1047 (+10.47 %, d +0.2146 ms) Y/Y/Y bars r 4.55 / i 1.52 / s 0.58 %
+                                  p0: A 2.0545 B 2.2599 (A r 1.18 / i 0.59 / s 0.43; B r 0.83 / i 0.42 / s 0.30 %) B/A 1.1000 (+10.00 %, d +0.2054 ms) Y/Y/Y bars r 2.88 / i 1.44 / s 1.05 %
+                                  p1: A 2.0537 B 2.2690 (A r 0.27 / i 0.13 / s 0.10; B r 1.68 / i 0.84 / s 0.62 %) B/A 1.1048 (+10.48 %, d +0.2153 ms) Y/Y/Y bars r 3.40 / i 1.70 / s 1.26 %
+                                  p2: A 2.0437 B 2.2648 (A r 0.49 / i 0.25 / s 0.18; B r 0.70 / i 0.35 / s 0.26 %) B/A 1.1082 (+10.82 %, d +0.2211 ms) Y/Y/Y bars r 1.71 / i 0.86 / s 0.63 %
+                                  ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 1.70 % = 0.0348 ms of A
+      -> rise +0.2146 ms, rise/injected 1.022: SEEN
+  => R (ladder16) = 0.0525 ms (F 0.5)
+## JA-ladder16 (ref S7-JA#s7p@W16, rung = F x 105 us per step)
+  S7-JA-ladder16-F1 (inj 0.1050 ms): A 5.2079 [5.1945-5.3156] K=9 (r 2.33 / i 0.38 / s 0.31 %)
+                                     B 5.3174 [5.2999-5.3854] K=9 (r 1.61 / i 0.68 / s 0.22 %)
+                                     pooled B/A 1.0210 (+2.10 %, d +0.1095 ms) n/Y/Y bars r 5.66 / i 1.56 / s 0.76 %
+                                     p0: A 5.2615 B 5.3445 (A r 2.15 / i 1.07 / s 0.78; B r 1.09 / i 0.55 / s 0.41 %) B/A 1.0158 (+1.58 %, d +0.0830 ms) n/n/n bars r 4.82 / i 2.41 / s 1.75 %
+                                     p1: A 5.2079 B 5.3081 (A r 0.33 / i 0.17 / s 0.14; B r 0.89 / i 0.44 / s 0.37 %) B/A 1.0192 (+1.92 %, d +0.1002 ms) Y/Y/Y bars r 1.90 / i 0.95 / s 0.78 %
+                                     p2: A 5.2049 B 5.3130 (A r 0.50 / i 0.25 / s 0.18; B r 0.33 / i 0.16 / s 0.12 %) B/A 1.0208 (+2.08 %, d +0.1080 ms) Y/Y/Y bars r 1.20 / i 0.60 / s 0.44 %
+                                     ruling 1: direction B slower, same sign in every pass True, CLAIMED False, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 2.41 % = 0.1254 ms of A
+      -> rise +0.1095 ms, rise/injected 1.043: not seen
+  => R (JA-ladder16) = NOT DEMONSTRATED (the largest rung is not seen)
+
+# Resolution ladders, window [0..100) (reference = P plain row at the same W; a rung is SEEN iff its rise is CLAIMED under ruling 1 with the rung slower)
+## ladder8 (ref S7-JT#s7p@W8, rung = F x 60 us per step)
+  S7-ladder8-F0.5 (inj 0.0300 ms): A 1.9829 [1.9579-2.0197] K=9 (r 3.12 / i 1.39 / s 0.42 %)
+                                   B 2.0208 [2.0022-2.0535] K=9 (r 2.54 / i 0.59 / s 0.30 %)
+                                   pooled B/A 1.0191 (+1.91 %, d +0.0379 ms) n/n/Y bars r 8.04 / i 3.02 / s 1.04 %
+                                   p0: A 1.9807 B 2.0284 (A r 1.52 / i 0.76 / s 0.57; B r 0.38 / i 0.19 / s 0.14 %) B/A 1.0241 (+2.41 %, d +0.0477 ms) n/Y/Y bars r 3.13 / i 1.56 / s 1.18 %
+                                   p1: A 1.9829 B 2.0191 (A r 1.39 / i 0.70 / s 0.55; B r 0.92 / i 0.46 / s 0.37 %) B/A 1.0183 (+1.83 %, d +0.0362 ms) n/Y/Y bars r 3.33 / i 1.67 / s 1.32 %
+                                   p2: A 2.0143 B 2.0165 (A r 2.09 / i 1.04 / s 0.82; B r 2.11 / i 1.05 / s 0.83 %) B/A 1.0011 (+0.11 %, d +0.0023 ms) n/n/n bars r 5.93 / i 2.97 / s 2.33 %
+                                   ruling 1: direction B slower, same sign in every pass True, CLAIMED False, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 3.02 % = 0.0599 ms of A
+      -> rise +0.0379 ms, rise/injected 1.263: not seen
+  S7-ladder8-F1 (inj 0.0600 ms): A 1.9829 [1.9579-2.0197] K=9 (r 3.12 / i 1.39 / s 0.42 %)
+                                 B 2.0534 [2.0331-2.1331] K=9 (r 4.87 / i 0.31 / s 0.57 %)
+                                 pooled B/A 1.0355 (+3.55 %, d +0.0705 ms) n/Y/Y bars r 11.56 / i 2.85 / s 1.42 %
+                                 p0: A 1.9807 B 2.0556 (A r 1.52 / i 0.76 / s 0.57; B r 0.72 / i 0.36 / s 0.27 %) B/A 1.0378 (+3.78 %, d +0.0749 ms) Y/Y/Y bars r 3.36 / i 1.68 / s 1.27 %
+                                 p1: A 1.9829 B 2.0523 (A r 1.39 / i 0.70 / s 0.55; B r 0.16 / i 0.08 / s 0.06 %) B/A 1.0350 (+3.50 %, d +0.0694 ms) Y/Y/Y bars r 2.80 / i 1.40 / s 1.11 %
+                                 p2: A 2.0143 B 2.0582 (A r 2.09 / i 1.04 / s 0.82; B r 4.86 / i 2.43 / s 1.83 %) B/A 1.0218 (+2.18 %, d +0.0439 ms) n/n/n bars r 10.57 / i 5.29 / s 4.01 %
+                                 ruling 1: direction B slower, same sign in every pass True, CLAIMED False, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 5.29 % = 0.1048 ms of A
+      -> rise +0.0705 ms, rise/injected 1.175: not seen
+  S7-ladder8-F1.5 (inj 0.0900 ms): A 1.9829 [1.9579-2.0197] K=9 (r 3.12 / i 1.39 / s 0.42 %)
+                                   B 2.0772 [2.0539-2.1502] K=9 (r 4.64 / i 1.14 / s 0.59 %)
+                                   pooled B/A 1.0476 (+4.76 %, d +0.0943 ms) n/Y/Y bars r 11.17 / i 3.59 / s 1.45 %
+                                   p0: A 1.9807 B 2.0728 (A r 1.52 / i 0.76 / s 0.57; B r 4.65 / i 2.32 / s 1.78 %) B/A 1.0465 (+4.65 %, d +0.0920 ms) n/n/Y bars r 9.78 / i 4.89 / s 3.74 %
+                                   p1: A 1.9829 B 2.0905 (A r 1.39 / i 0.70 / s 0.55; B r 2.19 / i 1.10 / s 0.82 %) B/A 1.0543 (+5.43 %, d +0.1076 ms) Y/Y/Y bars r 5.20 / i 2.60 / s 1.98 %
+                                   p2: A 2.0143 B 2.0772 (A r 2.09 / i 1.04 / s 0.82; B r 0.79 / i 0.40 / s 0.29 %) B/A 1.0313 (+3.13 %, d +0.0630 ms) n/Y/Y bars r 4.47 / i 2.23 / s 1.74 %
+                                   ruling 1: direction B slower, same sign in every pass True, CLAIMED False, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 4.89 % = 0.0969 ms of A
+      -> rise +0.0943 ms, rise/injected 1.048: not seen
+  S7-ladder8-F2 (inj 0.1200 ms): A 1.9829 [1.9579-2.0197] K=9 (r 3.12 / i 1.39 / s 0.42 %)
+                                 B 2.1113 [2.0990-2.2605] K=9 (r 7.65 / i 0.92 / s 0.99 %)
+                                 pooled B/A 1.0647 (+6.47 %, d +0.1284 ms) n/Y/Y bars r 16.52 / i 3.33 / s 2.16 %
+                                 p0: A 1.9807 B 2.1075 (A r 1.52 / i 0.76 / s 0.57; B r 0.37 / i 0.18 / s 0.13 %) B/A 1.0640 (+6.40 %, d +0.1268 ms) Y/Y/Y bars r 3.12 / i 1.56 / s 1.18 %
+                                 p1: A 1.9829 B 2.1293 (A r 1.39 / i 0.70 / s 0.55; B r 7.58 / i 3.79 / s 2.92 %) B/A 1.0739 (+7.39 %, d +0.1464 ms) n/n/Y bars r 15.42 / i 7.71 / s 5.94 %
+                                 p2: A 2.0143 B 2.1156 (A r 2.09 / i 1.04 / s 0.82; B r 0.74 / i 0.37 / s 0.28 %) B/A 1.0503 (+5.03 %, d +0.1013 ms) Y/Y/Y bars r 4.43 / i 2.22 / s 1.73 %
+                                 ruling 1: direction B slower, same sign in every pass True, CLAIMED False, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 7.71 % = 0.1529 ms of A
+      -> rise +0.1284 ms, rise/injected 1.070: not seen
+  => R (ladder8) = NOT DEMONSTRATED (the largest rung is not seen)
+## ladder16 (ref S7-JT#s7p@W16, rung = F x 105 us per step)
+  S7-ladder16-F0.5 (inj 0.0525 ms): A 2.2008 [2.1875-2.2137] K=9 (r 1.19 / i 0.26 / s 0.14 %)
+                                    B 2.2599 [2.2496-2.2790] K=9 (r 1.30 / i 0.42 / s 0.16 %)
+                                    pooled B/A 1.0268 (+2.68 %, d +0.0591 ms) n/Y/Y bars r 3.53 / i 0.98 / s 0.44 %
+                                    p0: A 2.1987 B 2.2633 (A r 0.49 / i 0.24 / s 0.18; B r 0.61 / i 0.31 / s 0.24 %) B/A 1.0294 (+2.94 %, d +0.0646 ms) Y/Y/Y bars r 1.57 / i 0.79 / s 0.59 %
+                                    p1: A 2.2063 B 2.2599 (A r 0.48 / i 0.24 / s 0.18; B r 0.39 / i 0.19 / s 0.14 %) B/A 1.0243 (+2.43 %, d +0.0536 ms) Y/Y/Y bars r 1.24 / i 0.62 / s 0.46 %
+                                    p2: A 2.1976 B 2.2557 (A r 0.60 / i 0.30 / s 0.23; B r 1.30 / i 0.65 / s 0.50 %) B/A 1.0264 (+2.64 %, d +0.0580 ms) n/Y/Y bars r 2.88 / i 1.44 / s 1.10 %
+                                    ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 1.44 % = 0.0316 ms of A
+      -> rise +0.0591 ms, rise/injected 1.125: SEEN
+  S7-ladder16-F1 (inj 0.1050 ms): A 2.2008 [2.1875-2.2137] K=9 (r 1.19 / i 0.26 / s 0.14 %)
+                                  B 2.3281 [2.3105-2.4620] K=9 (r 6.51 / i 1.56 / s 0.86 %)
+                                  pooled B/A 1.0578 (+5.78 %, d +0.1273 ms) n/Y/Y bars r 13.23 / i 3.17 / s 1.74 %
+                                  p0: A 2.1987 B 2.3429 (A r 0.49 / i 0.24 / s 0.18; B r 6.31 / i 3.15 / s 2.42 %) B/A 1.0656 (+6.56 %, d +0.1442 ms) n/Y/Y bars r 12.65 / i 6.33 / s 4.85 %
+                                  p1: A 2.2063 B 2.3185 (A r 0.48 / i 0.24 / s 0.18; B r 0.76 / i 0.38 / s 0.28 %) B/A 1.0509 (+5.09 %, d +0.1122 ms) Y/Y/Y bars r 1.80 / i 0.90 / s 0.66 %
+                                  p2: A 2.1976 B 2.3507 (A r 0.60 / i 0.30 / s 0.23; B r 2.19 / i 1.10 / s 0.83 %) B/A 1.0696 (+6.96 %, d +0.1530 ms) Y/Y/Y bars r 4.55 / i 2.28 / s 1.72 %
+                                  ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 6.33 % = 0.1392 ms of A
+      -> rise +0.1273 ms, rise/injected 1.212: SEEN
+  S7-ladder16-F1.5 (inj 0.1575 ms): A 2.2008 [2.1875-2.2137] K=9 (r 1.19 / i 0.26 / s 0.14 %)
+                                    B 2.3691 [2.3599-2.3763] K=9 (r 0.69 / i 0.51 / s 0.11 %)
+                                    pooled B/A 1.0765 (+7.65 %, d +0.1683 ms) Y/Y/Y bars r 2.75 / i 1.14 / s 0.37 %
+                                    p0: A 2.1987 B 2.3603 (A r 0.49 / i 0.24 / s 0.18; B r 0.34 / i 0.17 / s 0.14 %) B/A 1.0735 (+7.35 %, d +0.1616 ms) Y/Y/Y bars r 1.19 / i 0.60 / s 0.45 %
+                                    p1: A 2.2063 B 2.3691 (A r 0.48 / i 0.24 / s 0.18; B r 0.63 / i 0.31 / s 0.23 %) B/A 1.0738 (+7.38 %, d +0.1628 ms) Y/Y/Y bars r 1.58 / i 0.79 / s 0.58 %
+                                    p2: A 2.1976 B 2.3729 (A r 0.60 / i 0.30 / s 0.23; B r 0.28 / i 0.14 / s 0.10 %) B/A 1.0798 (+7.98 %, d +0.1753 ms) Y/Y/Y bars r 1.33 / i 0.66 / s 0.50 %
+                                    ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 1.14 % = 0.0251 ms of A
+      -> rise +0.1683 ms, rise/injected 1.069: SEEN
+  S7-ladder16-F2 (inj 0.2100 ms): A 2.2008 [2.1875-2.2137] K=9 (r 1.19 / i 0.26 / s 0.14 %)
+                                  B 2.4205 [2.4068-2.4911] K=9 (r 3.48 / i 0.76 / s 0.48 %)
+                                  pooled B/A 1.0998 (+9.98 %, d +0.2197 ms) Y/Y/Y bars r 7.36 / i 1.60 / s 1.01 %
+                                  p0: A 2.1987 B 2.4172 (A r 0.49 / i 0.24 / s 0.18; B r 0.13 / i 0.06 / s 0.05 %) B/A 1.0994 (+9.94 %, d +0.2185 ms) Y/Y/Y bars r 1.01 / i 0.50 / s 0.37 %
+                                  p1: A 2.2063 B 2.4356 (A r 0.48 / i 0.24 / s 0.18; B r 3.46 / i 1.73 / s 1.27 %) B/A 1.1039 (+10.39 %, d +0.2293 ms) Y/Y/Y bars r 6.99 / i 3.50 / s 2.57 %
+                                  p2: A 2.1976 B 2.4352 (A r 0.60 / i 0.30 / s 0.23; B r 2.02 / i 1.01 / s 0.75 %) B/A 1.1081 (+10.81 %, d +0.2375 ms) Y/Y/Y bars r 4.21 / i 2.10 / s 1.57 %
+                                  ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 3.50 % = 0.0769 ms of A
+      -> rise +0.2197 ms, rise/injected 1.046: SEEN
+  => R (ladder16) = 0.0525 ms (F 0.5)
+## JA-ladder16 (ref S7-JA#s7p@W16, rung = F x 105 us per step)
+  S7-JA-ladder16-F1 (inj 0.1050 ms): A 5.3484 [5.3414-5.4622] K=9 (r 2.26 / i 0.51 / s 0.36 %)
+                                     B 5.4492 [5.4304-5.4649] K=9 (r 0.63 / i 0.21 / s 0.08 %)
+                                     pooled B/A 1.0188 (+1.88 %, d +0.1008 ms) n/Y/Y bars r 4.69 / i 1.11 / s 0.73 %
+                                     p0: A 5.4381 B 5.4456 (A r 2.10 / i 1.05 / s 0.80; B r 0.09 / i 0.05 / s 0.03 %) B/A 1.0014 (+0.14 %, d +0.0075 ms) n/n/n bars r 4.21 / i 2.10 / s 1.60 %
+                                     p1: A 5.3484 B 5.4540 (A r 0.57 / i 0.29 / s 0.22; B r 0.63 / i 0.32 / s 0.23 %) B/A 1.0197 (+1.97 %, d +0.1055 ms) Y/Y/Y bars r 1.70 / i 0.85 / s 0.64 %
+                                     p2: A 5.3445 B 5.4556 (A r 0.16 / i 0.08 / s 0.06; B r 0.29 / i 0.14 / s 0.11 %) B/A 1.0208 (+2.08 %, d +0.1110 ms) Y/Y/Y bars r 0.66 / i 0.33 / s 0.25 %
+                                     ruling 1: direction B slower, same sign in every pass True, CLAIMED False, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 2.10 % = 0.1125 ms of A
+      -> rise +0.1008 ms, rise/injected 0.960: not seen
+  => R (JA-ladder16) = NOT DEMONSTRATED (the largest rung is not seen)
+
+# Resolution ladders, window [100..500) (reference = P plain row at the same W; a rung is SEEN iff its rise is CLAIMED under ruling 1 with the rung slower)
+## ladder8 (ref S7-JT#s7p@W8, rung = F x 60 us per step)
+  S7-ladder8-F0.5 (inj 0.0300 ms): A 1.7746 [1.7583-1.8064] K=9 (r 2.71 / i 0.78 / s 0.35 %)
+                                   B 1.8020 [1.7819-1.8379] K=9 (r 3.11 / i 1.37 / s 0.40 %)
+                                   pooled B/A 1.0155 (+1.55 %, d +0.0274 ms) n/n/Y bars r 8.24 / i 3.15 / s 1.06 %
+                                   p0: A 1.7727 B 1.8151 (A r 1.51 / i 0.76 / s 0.55; B r 0.81 / i 0.40 / s 0.32 %) B/A 1.0239 (+2.39 %, d +0.0424 ms) n/Y/Y bars r 3.43 / i 1.72 / s 1.27 %
+                                   p1: A 1.7696 B 1.7898 (A r 1.41 / i 0.70 / s 0.51; B r 1.42 / i 0.71 / s 0.53 %) B/A 1.0114 (+1.14 %, d +0.0202 ms) n/n/n bars r 4.00 / i 2.00 / s 1.46 %
+                                   p2: A 1.7834 B 1.7978 (A r 1.79 / i 0.89 / s 0.67; B r 2.64 / i 1.32 / s 1.03 %) B/A 1.0081 (+0.81 %, d +0.0144 ms) n/n/n bars r 6.38 / i 3.19 / s 2.45 %
+                                   ruling 1: direction B slower, same sign in every pass True, CLAIMED False, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 3.19 % = 0.0566 ms of A
+      -> rise +0.0274 ms, rise/injected 0.915: not seen
+  S7-ladder8-F1 (inj 0.0600 ms): A 1.7746 [1.7583-1.8064] K=9 (r 2.71 / i 0.78 / s 0.35 %)
+                                 B 1.8336 [1.8264-1.8487] K=9 (r 1.22 / i 0.60 / s 0.17 %)
+                                 pooled B/A 1.0332 (+3.32 %, d +0.0590 ms) n/Y/Y bars r 5.94 / i 1.96 / s 0.78 %
+                                 p0: A 1.7727 B 1.8376 (A r 1.51 / i 0.76 / s 0.55; B r 0.45 / i 0.23 / s 0.16 %) B/A 1.0366 (+3.66 %, d +0.0649 ms) Y/Y/Y bars r 3.16 / i 1.58 / s 1.14 %
+                                 p1: A 1.7696 B 1.8427 (A r 1.41 / i 0.70 / s 0.51; B r 0.86 / i 0.43 / s 0.31 %) B/A 1.0413 (+4.13 %, d +0.0731 ms) Y/Y/Y bars r 3.29 / i 1.65 / s 1.20 %
+                                 p2: A 1.7834 B 1.8270 (A r 1.79 / i 0.89 / s 0.67; B r 0.25 / i 0.13 / s 0.10 %) B/A 1.0244 (+2.44 %, d +0.0436 ms) n/Y/Y bars r 3.61 / i 1.80 / s 1.35 %
+                                 ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 1.96 % = 0.0348 ms of A
+      -> rise +0.0590 ms, rise/injected 0.983: SEEN
+  S7-ladder8-F1.5 (inj 0.0900 ms): A 1.7746 [1.7583-1.8064] K=9 (r 2.71 / i 0.78 / s 0.35 %)
+                                   B 1.8644 [1.8414-1.8834] K=9 (r 2.26 / i 0.65 / s 0.29 %)
+                                   pooled B/A 1.0506 (+5.06 %, d +0.0898 ms) n/Y/Y bars r 7.05 / i 2.03 / s 0.90 %
+                                   p0: A 1.7727 B 1.8647 (A r 1.51 / i 0.76 / s 0.55; B r 1.63 / i 0.81 / s 0.59 %) B/A 1.0519 (+5.19 %, d +0.0920 ms) Y/Y/Y bars r 4.44 / i 2.22 / s 1.62 %
+                                   p1: A 1.7696 B 1.8653 (A r 1.41 / i 0.70 / s 0.51; B r 1.33 / i 0.66 / s 0.49 %) B/A 1.0541 (+5.41 %, d +0.0957 ms) Y/Y/Y bars r 3.87 / i 1.93 / s 1.42 %
+                                   p2: A 1.7834 B 1.8622 (A r 1.79 / i 0.89 / s 0.67; B r 1.23 / i 0.62 / s 0.49 %) B/A 1.0442 (+4.42 %, d +0.0788 ms) Y/Y/Y bars r 4.34 / i 2.17 / s 1.66 %
+                                   ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 2.22 % = 0.0394 ms of A
+      -> rise +0.0898 ms, rise/injected 0.997: SEEN
+  S7-ladder8-F2 (inj 0.1200 ms): A 1.7746 [1.7583-1.8064] K=9 (r 2.71 / i 0.78 / s 0.35 %)
+                                 B 1.8934 [1.8826-1.9131] K=9 (r 1.61 / i 0.92 / s 0.24 %)
+                                 pooled B/A 1.0670 (+6.70 %, d +0.1188 ms) Y/Y/Y bars r 6.30 / i 2.41 / s 0.85 %
+                                 p0: A 1.7727 B 1.9012 (A r 1.51 / i 0.76 / s 0.55; B r 1.27 / i 0.64 / s 0.48 %) B/A 1.0725 (+7.25 %, d +0.1285 ms) Y/Y/Y bars r 3.95 / i 1.98 / s 1.46 %
+                                 p1: A 1.7696 B 1.8934 (A r 1.41 / i 0.70 / s 0.51; B r 1.56 / i 0.78 / s 0.57 %) B/A 1.0700 (+7.00 %, d +0.1238 ms) Y/Y/Y bars r 4.20 / i 2.10 / s 1.53 %
+                                 p2: A 1.7834 B 1.8879 (A r 1.79 / i 0.89 / s 0.67; B r 0.72 / i 0.36 / s 0.27 %) B/A 1.0586 (+5.86 %, d +0.1045 ms) Y/Y/Y bars r 3.85 / i 1.92 / s 1.44 %
+                                 ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 2.41 % = 0.0427 ms of A
+      -> rise +0.1188 ms, rise/injected 0.990: SEEN
+  => R (ladder8) = 0.0600 ms (F 1.0)
+## ladder16 (ref S7-JT#s7p@W16, rung = F x 105 us per step)
+  S7-ladder16-F0.5 (inj 0.0525 ms): A 2.0115 [2.0022-2.0327] K=9 (r 1.51 / i 0.60 / s 0.20 %)
+                                    B 2.0655 [2.0570-2.0714] K=9 (r 0.70 / i 0.23 / s 0.09 %)
+                                    pooled B/A 1.0269 (+2.69 %, d +0.0540 ms) n/Y/Y bars r 3.33 / i 1.28 / s 0.43 %
+                                    p0: A 2.0173 B 2.0644 (A r 1.43 / i 0.71 / s 0.52; B r 0.69 / i 0.35 / s 0.25 %) B/A 1.0234 (+2.34 %, d +0.0471 ms) n/Y/Y bars r 3.17 / i 1.59 / s 1.15 %
+                                    p1: A 2.0155 B 2.0671 (A r 0.47 / i 0.24 / s 0.17; B r 0.17 / i 0.09 / s 0.06 %) B/A 1.0256 (+2.56 %, d +0.0515 ms) Y/Y/Y bars r 1.00 / i 0.50 / s 0.37 %
+                                    p2: A 2.0052 B 2.0652 (A r 0.46 / i 0.23 / s 0.17; B r 0.37 / i 0.19 / s 0.14 %) B/A 1.0299 (+2.99 %, d +0.0599 ms) Y/Y/Y bars r 1.19 / i 0.59 / s 0.45 %
+                                    ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 1.59 % = 0.0319 ms of A
+      -> rise +0.0540 ms, rise/injected 1.029: SEEN
+  S7-ladder16-F1 (inj 0.1050 ms): A 2.0115 [2.0022-2.0327] K=9 (r 1.51 / i 0.60 / s 0.20 %)
+                                  B 2.1231 [2.1150-2.1488] K=9 (r 1.59 / i 0.25 / s 0.21 %)
+                                  pooled B/A 1.0555 (+5.55 %, d +0.1116 ms) Y/Y/Y bars r 4.39 / i 1.30 / s 0.57 %
+                                  p0: A 2.0173 B 2.1230 (A r 1.43 / i 0.71 / s 0.52; B r 0.25 / i 0.13 / s 0.09 %) B/A 1.0524 (+5.24 %, d +0.1057 ms) Y/Y/Y bars r 2.89 / i 1.45 / s 1.05 %
+                                  p1: A 2.0155 B 2.1198 (A r 0.47 / i 0.24 / s 0.17; B r 0.38 / i 0.19 / s 0.14 %) B/A 1.0517 (+5.17 %, d +0.1043 ms) Y/Y/Y bars r 1.21 / i 0.61 / s 0.44 %
+                                  p2: A 2.0052 B 2.1386 (A r 0.46 / i 0.23 / s 0.17; B r 1.16 / i 0.58 / s 0.42 %) B/A 1.0665 (+6.65 %, d +0.1334 ms) Y/Y/Y bars r 2.50 / i 1.25 / s 0.91 %
+                                  ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 1.45 % = 0.0291 ms of A
+      -> rise +0.1116 ms, rise/injected 1.063: SEEN
+  S7-ladder16-F1.5 (inj 0.1575 ms): A 2.0115 [2.0022-2.0327] K=9 (r 1.51 / i 0.60 / s 0.20 %)
+                                    B 2.1704 [2.1613-2.1928] K=9 (r 1.45 / i 0.52 / s 0.19 %)
+                                    pooled B/A 1.0790 (+7.90 %, d +0.1588 ms) Y/Y/Y bars r 4.19 / i 1.59 / s 0.54 %
+                                    p0: A 2.0173 B 2.1656 (A r 1.43 / i 0.71 / s 0.52; B r 0.77 / i 0.39 / s 0.29 %) B/A 1.0736 (+7.36 %, d +0.1484 ms) Y/Y/Y bars r 3.24 / i 1.62 / s 1.18 %
+                                    p1: A 2.0155 B 2.1765 (A r 0.47 / i 0.24 / s 0.17; B r 1.03 / i 0.52 / s 0.39 %) B/A 1.0799 (+7.99 %, d +0.1610 ms) Y/Y/Y bars r 2.27 / i 1.13 / s 0.84 %
+                                    p2: A 2.0052 B 2.1662 (A r 0.46 / i 0.23 / s 0.17; B r 0.55 / i 0.28 / s 0.22 %) B/A 1.0803 (+8.03 %, d +0.1610 ms) Y/Y/Y bars r 1.45 / i 0.72 / s 0.56 %
+                                    ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 1.62 % = 0.0326 ms of A
+      -> rise +0.1588 ms, rise/injected 1.008: SEEN
+  S7-ladder16-F2 (inj 0.2100 ms): A 2.0115 [2.0022-2.0327] K=9 (r 1.51 / i 0.60 / s 0.20 %)
+                                  B 2.2259 [2.2118-2.2462] K=9 (r 1.55 / i 0.34 / s 0.20 %)
+                                  pooled B/A 1.1066 (+10.66 %, d +0.2144 ms) Y/Y/Y bars r 4.33 / i 1.38 / s 0.56 %
+                                  p0: A 2.0173 B 2.2202 (A r 1.43 / i 0.71 / s 0.52; B r 1.07 / i 0.54 / s 0.39 %) B/A 1.1006 (+10.06 %, d +0.2030 ms) Y/Y/Y bars r 3.57 / i 1.78 / s 1.30 %
+                                  p1: A 2.0155 B 2.2274 (A r 0.47 / i 0.24 / s 0.17; B r 1.19 / i 0.59 / s 0.44 %) B/A 1.1051 (+10.51 %, d +0.2118 ms) Y/Y/Y bars r 2.56 / i 1.28 / s 0.95 %
+                                  p2: A 2.0052 B 2.2259 (A r 0.46 / i 0.23 / s 0.17; B r 0.50 / i 0.25 / s 0.20 %) B/A 1.1100 (+11.00 %, d +0.2207 ms) Y/Y/Y bars r 1.37 / i 0.68 / s 0.53 %
+                                  ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 1.78 % = 0.0359 ms of A
+      -> rise +0.2144 ms, rise/injected 1.021: SEEN
+  => R (ladder16) = 0.0525 ms (F 0.5)
+## JA-ladder16 (ref S7-JA#s7p@W16, rung = F x 105 us per step)
+  S7-JA-ladder16-F1 (inj 0.1050 ms): A 5.1745 [5.1554-5.2850] K=9 (r 2.51 / i 0.37 / s 0.32 %)
+                                     B 5.2828 [5.2638-5.3707] K=9 (r 2.02 / i 0.80 / s 0.27 %)
+                                     pooled B/A 1.0209 (+2.09 %, d +0.1083 ms) n/Y/Y bars r 6.44 / i 1.77 / s 0.83 %
+                                     p0: A 5.2113 B 5.3183 (A r 2.28 / i 1.14 / s 0.83; B r 1.38 / i 0.69 / s 0.51 %) B/A 1.0205 (+2.05 %, d +0.1070 ms) n/n/Y bars r 5.32 / i 2.66 / s 1.96 %
+                                     p1: A 5.1745 B 5.2759 (A r 0.30 / i 0.15 / s 0.12; B r 1.04 / i 0.52 / s 0.42 %) B/A 1.0196 (+1.96 %, d +0.1014 ms) n/Y/Y bars r 2.16 / i 1.08 / s 0.87 %
+                                     p2: A 5.1705 B 5.2763 (A r 0.67 / i 0.33 / s 0.24; B r 0.36 / i 0.18 / s 0.13 %) B/A 1.0205 (+2.05 %, d +0.1058 ms) Y/Y/Y bars r 1.51 / i 0.76 / s 0.55 %
+                                     ruling 1: direction B slower, same sign in every pass True, CLAIMED False, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 2.66 % = 0.1377 ms of A
+      -> rise +0.1083 ms, rise/injected 1.031: not seen
+  => R (JA-ladder16) = NOT DEMONSTRATED (the largest rung is not seen)
+
+# Claims, window [0..500) (B against A; ms per step; cell = median over K of process means)
+## C1-JT: T(16) vs T(8), J-T: C1 holds unless T(16) is CLAIMED slower
+  S7-JT#s7t@W16 vs S7-JT#s7t@W8: A 1.8112 [1.8003-1.8536] K=9 (r 2.94 / i 0.51 / s 0.46 %)
+                                 B 2.1902 [2.1816-2.2341] K=9 (r 2.40 / i 0.46 / s 0.30 %)
+                                 pooled B/A 1.2092 (+20.92 %, d +0.3790 ms) Y/Y/Y bars r 7.59 / i 1.37 / s 1.10 %
+                                 p0: A 1.8116 B 2.1898 (A r 2.27 / i 1.14 / s 0.87; B r 2.35 / i 1.18 / s 0.92 %) B/A 1.2088 (+20.88 %, d +0.3783 ms) Y/Y/Y bars r 6.54 / i 3.27 / s 2.54 %
+                                 p1: A 1.8024 B 2.1837 (A r 0.58 / i 0.29 / s 0.22; B r 0.44 / i 0.22 / s 0.17 %) B/A 1.2115 (+21.15 %, d +0.3813 ms) Y/Y/Y bars r 1.45 / i 0.72 / s 0.56 %
+                                 p2: A 1.8117 B 2.1938 (A r 2.94 / i 1.47 / s 1.12; B r 0.23 / i 0.12 / s 0.09 %) B/A 1.2109 (+21.09 %, d +0.3820 ms) Y/Y/Y bars r 5.90 / i 2.95 / s 2.25 %
+                                 ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 3.27 % = 0.0593 ms of A
+  => REFUTED: B slower CLAIMED
+## C1-JA: T(16) vs T(8), J-A: C1 holds unless T(16) is CLAIMED slower
+  S7-JA#s7t@W16 vs S7-JA#s7t@W8: A 5.3040 [5.2953-5.4035] K=9 (r 2.04 / i 0.27 / s 0.26 %)
+                                 B 5.8658 [5.8421-5.9646] K=9 (r 2.09 / i 0.20 / s 0.25 %)
+                                 pooled B/A 1.1059 (+10.59 %, d +0.5617 ms) Y/Y/Y bars r 5.84 / i 0.67 / s 0.73 %
+                                 p0: A 5.3038 B 5.8658 (A r 2.04 / i 1.02 / s 0.82; B r 0.44 / i 0.22 / s 0.18 %) B/A 1.1059 (+10.59 %, d +0.5619 ms) Y/Y/Y bars r 4.17 / i 2.09 / s 1.68 %
+                                 p1: A 5.3031 B 5.8599 (A r 0.53 / i 0.27 / s 0.21; B r 0.27 / i 0.13 / s 0.10 %) B/A 1.1050 (+10.50 %, d +0.5568 ms) Y/Y/Y bars r 1.19 / i 0.59 / s 0.47 %
+                                 p2: A 5.3145 B 5.8716 (A r 0.25 / i 0.13 / s 0.10; B r 1.77 / i 0.89 / s 0.70 %) B/A 1.1048 (+10.48 %, d +0.5571 ms) Y/Y/Y bars r 3.58 / i 1.79 / s 1.42 %
+                                 ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 2.09 % = 0.1107 ms of A
+  => REFUTED: B slower CLAIMED
+## C2-JT: T(8) vs P(8), J-T: C2 holds unless T(8) is CLAIMED slower
+  S7-JT#s7t@W8 vs S7-JT#s7p@W8: A 1.8152 [1.7989-1.8491] K=9 (r 2.77 / i 0.87 / s 0.36 %)
+                                B 1.8112 [1.8003-1.8536] K=9 (r 2.94 / i 0.51 / s 0.46 %)
+                                pooled B/A 0.9978 (-0.22 %, d -0.0040 ms) n/n/n bars r 8.08 / i 2.01 / s 1.16 %
+                                p0: A 1.8143 B 1.8116 (A r 1.51 / i 0.76 / s 0.55; B r 2.27 / i 1.14 / s 0.87 %) B/A 0.9985 (-0.15 %, d -0.0027 ms) n/n/n bars r 5.46 / i 2.73 / s 2.06 %
+                                p1: A 1.8123 B 1.8024 (A r 1.40 / i 0.70 / s 0.51; B r 0.58 / i 0.29 / s 0.22 %) B/A 0.9946 (-0.54 %, d -0.0098 ms) n/n/n bars r 3.03 / i 1.52 / s 1.12 %
+                                p2: A 1.8296 B 1.8117 (A r 1.85 / i 0.93 / s 0.67; B r 2.94 / i 1.47 / s 1.12 %) B/A 0.9902 (-0.98 %, d -0.0179 ms) n/n/n bars r 6.95 / i 3.48 / s 2.61 %
+                                ruling 1: direction B faster, same sign in every pass True, CLAIMED False, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 3.48 % = 0.0631 ms of A
+  => HOLDS: no resolved difference
+## C2-JA: T(8) vs P(8), J-A: C2 holds unless T(8) is CLAIMED slower
+  S7-JA#s7t@W8 vs S7-JA#s7p@W8: A 5.3081 [5.2750-5.3216] K=9 (r 0.88 / i 0.21 / s 0.11 %)
+                                B 5.3040 [5.2953-5.4035] K=9 (r 2.04 / i 0.27 / s 0.26 %)
+                                pooled B/A 0.9992 (-0.08 %, d -0.0040 ms) n/n/n bars r 4.44 / i 0.69 / s 0.57 %
+                                p0: A 5.3123 B 5.3038 (A r 0.32 / i 0.16 / s 0.11; B r 2.04 / i 1.02 / s 0.82 %) B/A 0.9984 (-0.16 %, d -0.0084 ms) n/n/n bars r 4.13 / i 2.06 / s 1.66 %
+                                p1: A 5.2943 B 5.3031 (A r 0.62 / i 0.31 / s 0.23; B r 0.53 / i 0.27 / s 0.21 %) B/A 1.0017 (+0.17 %, d +0.0088 ms) n/n/n bars r 1.64 / i 0.82 / s 0.62 %
+                                p2: A 5.3108 B 5.3145 (A r 0.29 / i 0.15 / s 0.11; B r 0.25 / i 0.13 / s 0.10 %) B/A 1.0007 (+0.07 %, d +0.0036 ms) n/n/n bars r 0.78 / i 0.39 / s 0.29 %
+                                ruling 1: direction B faster, same sign in every pass False, CLAIMED False, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 2.06 % = 0.1096 ms of A
+  => HOLDS: no resolved difference
+## C3-JT: T(16) vs P(16), J-T: C3 = P(16) - T(16), claimed if T(16) is CLAIMED faster
+  S7-JT#s7t@W16 vs S7-JT#s7p@W16: A 2.0502 [2.0393-2.0659] K=9 (r 1.30 / i 0.53 / s 0.17 %)
+                                  B 2.1902 [2.1816-2.2341] K=9 (r 2.40 / i 0.46 / s 0.30 %)
+                                  pooled B/A 1.0683 (+6.83 %, d +0.1400 ms) Y/Y/Y bars r 5.45 / i 1.39 / s 0.69 %
+                                  p0: A 2.0545 B 2.1898 (A r 1.18 / i 0.59 / s 0.43; B r 2.35 / i 1.18 / s 0.92 %) B/A 1.0659 (+6.59 %, d +0.1354 ms) Y/Y/Y bars r 5.26 / i 2.63 / s 2.03 %
+                                  p1: A 2.0537 B 2.1837 (A r 0.27 / i 0.13 / s 0.10; B r 0.44 / i 0.22 / s 0.17 %) B/A 1.0633 (+6.33 %, d +0.1301 ms) Y/Y/Y bars r 1.02 / i 0.51 / s 0.39 %
+                                  p2: A 2.0437 B 2.1938 (A r 0.49 / i 0.25 / s 0.18; B r 0.23 / i 0.12 / s 0.09 %) B/A 1.0734 (+7.34 %, d +0.1501 ms) Y/Y/Y bars r 1.09 / i 0.55 / s 0.40 %
+                                  ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 2.63 % = 0.0540 ms of A
+  => P(16) - T(16) = -0.1400 ms (-6.83 % of P(16)); REFUTED (T slower claimed); bar 0.105 ms NOT met by the point value; predicted +0.166..+0.175
+
+# Claims, window [0..100) (B against A; ms per step; cell = median over K of process means)
+## C1-JT: T(16) vs T(8), J-T: C1 holds unless T(16) is CLAIMED slower
+  S7-JT#s7t@W16 vs S7-JT#s7t@W8: A 1.9740 [1.9632-2.0034] K=9 (r 2.04 / i 0.44 / s 0.32 %)
+                                 B 2.3317 [2.3240-2.3552] K=9 (r 1.34 / i 0.10 / s 0.15 %)
+                                 pooled B/A 1.1812 (+18.12 %, d +0.3576 ms) Y/Y/Y bars r 4.87 / i 0.90 / s 0.71 %
+                                 p0: A 1.9676 B 2.3330 (A r 0.50 / i 0.25 / s 0.19; B r 1.09 / i 0.55 / s 0.43 %) B/A 1.1857 (+18.57 %, d +0.3654 ms) Y/Y/Y bars r 2.40 / i 1.20 / s 0.94 %
+                                 p1: A 1.9740 B 2.3311 (A r 0.38 / i 0.19 / s 0.14; B r 0.33 / i 0.17 / s 0.13 %) B/A 1.1809 (+18.09 %, d +0.3571 ms) Y/Y/Y bars r 1.01 / i 0.51 / s 0.39 %
+                                 p2: A 2.0019 B 2.3317 (A r 2.01 / i 1.00 / s 0.82; B r 0.10 / i 0.05 / s 0.04 %) B/A 1.1647 (+16.47 %, d +0.3298 ms) Y/Y/Y bars r 4.02 / i 2.01 / s 1.65 %
+                                 ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 2.01 % = 0.0397 ms of A
+  => REFUTED: B slower CLAIMED
+## C1-JA: T(16) vs T(8), J-A: C1 holds unless T(16) is CLAIMED slower
+  S7-JA#s7t@W16 vs S7-JA#s7t@W8: A 5.4386 [5.4165-5.4734] K=9 (r 1.05 / i 0.20 / s 0.12 %)
+                                 B 5.9839 [5.9606-6.0614] K=9 (r 1.68 / i 0.20 / s 0.20 %)
+                                 pooled B/A 1.1003 (+10.03 %, d +0.5453 ms) Y/Y/Y bars r 3.97 / i 0.57 / s 0.47 %
+                                 p0: A 5.4336 B 5.9812 (A r 0.18 / i 0.09 / s 0.07; B r 0.39 / i 0.19 / s 0.15 %) B/A 1.1008 (+10.08 %, d +0.5476 ms) Y/Y/Y bars r 0.86 / i 0.43 / s 0.33 %
+                                 p1: A 5.4386 B 5.9845 (A r 1.05 / i 0.52 / s 0.38; B r 0.24 / i 0.12 / s 0.09 %) B/A 1.1004 (+10.04 %, d +0.5459 ms) Y/Y/Y bars r 2.15 / i 1.07 / s 0.79 %
+                                 p2: A 5.4407 B 5.9853 (A r 0.44 / i 0.22 / s 0.16; B r 1.50 / i 0.75 / s 0.59 %) B/A 1.1001 (+10.01 %, d +0.5446 ms) Y/Y/Y bars r 3.13 / i 1.56 / s 1.21 %
+                                 ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 1.56 % = 0.0850 ms of A
+  => REFUTED: B slower CLAIMED
+## C2-JT: T(8) vs P(8), J-T: C2 holds unless T(8) is CLAIMED slower
+  S7-JT#s7t@W8 vs S7-JT#s7p@W8: A 1.9829 [1.9579-2.0197] K=9 (r 3.12 / i 1.39 / s 0.42 %)
+                                B 1.9740 [1.9632-2.0034] K=9 (r 2.04 / i 0.44 / s 0.32 %)
+                                pooled B/A 0.9955 (-0.45 %, d -0.0089 ms) n/n/n bars r 7.45 / i 2.92 / s 1.06 %
+                                p0: A 1.9807 B 1.9676 (A r 1.52 / i 0.76 / s 0.57; B r 0.50 / i 0.25 / s 0.19 %) B/A 0.9934 (-0.66 %, d -0.0132 ms) n/n/n bars r 3.19 / i 1.59 / s 1.21 %
+                                p1: A 1.9829 B 1.9740 (A r 1.39 / i 0.70 / s 0.55; B r 0.38 / i 0.19 / s 0.14 %) B/A 0.9955 (-0.45 %, d -0.0089 ms) n/n/n bars r 2.88 / i 1.44 / s 1.14 %
+                                p2: A 2.0143 B 2.0019 (A r 2.09 / i 1.04 / s 0.82; B r 2.01 / i 1.00 / s 0.82 %) B/A 0.9939 (-0.61 %, d -0.0124 ms) n/n/n bars r 5.79 / i 2.90 / s 2.33 %
+                                ruling 1: direction B faster, same sign in every pass True, CLAIMED False, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 2.92 % = 0.0578 ms of A
+  => HOLDS: no resolved difference
+## C2-JA: T(8) vs P(8), J-A: C2 holds unless T(8) is CLAIMED slower
+  S7-JA#s7t@W8 vs S7-JA#s7p@W8: A 5.4397 [5.4085-5.4594] K=9 (r 0.94 / i 0.21 / s 0.11 %)
+                                B 5.4386 [5.4165-5.4734] K=9 (r 1.05 / i 0.20 / s 0.12 %)
+                                pooled B/A 0.9998 (-0.02 %, d -0.0011 ms) n/n/n bars r 2.81 / i 0.59 / s 0.33 %
+                                p0: A 5.4396 B 5.4336 (A r 0.30 / i 0.15 / s 0.11; B r 0.18 / i 0.09 / s 0.07 %) B/A 0.9989 (-0.11 %, d -0.0060 ms) n/n/n bars r 0.69 / i 0.35 / s 0.26 %
+                                p1: A 5.4328 B 5.4386 (A r 0.58 / i 0.29 / s 0.22; B r 1.05 / i 0.52 / s 0.38 %) B/A 1.0011 (+0.11 %, d +0.0058 ms) n/n/n bars r 2.39 / i 1.19 / s 0.88 %
+                                p2: A 5.4467 B 5.4407 (A r 0.28 / i 0.14 / s 0.11; B r 0.44 / i 0.22 / s 0.16 %) B/A 0.9989 (-0.11 %, d -0.0060 ms) n/n/n bars r 1.04 / i 0.52 / s 0.38 %
+                                ruling 1: direction B faster, same sign in every pass False, CLAIMED False, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 1.19 % = 0.0650 ms of A
+  => HOLDS: no resolved difference
+## C3-JT: T(16) vs P(16), J-T: C3 = P(16) - T(16), claimed if T(16) is CLAIMED faster
+  S7-JT#s7t@W16 vs S7-JT#s7p@W16: A 2.2008 [2.1875-2.2137] K=9 (r 1.19 / i 0.26 / s 0.14 %)
+                                  B 2.3317 [2.3240-2.3552] K=9 (r 1.34 / i 0.10 / s 0.15 %)
+                                  pooled B/A 1.0595 (+5.95 %, d +0.1308 ms) Y/Y/Y bars r 3.58 / i 0.55 / s 0.42 %
+                                  p0: A 2.1987 B 2.3330 (A r 0.49 / i 0.24 / s 0.18; B r 1.09 / i 0.55 / s 0.43 %) B/A 1.0611 (+6.11 %, d +0.1343 ms) Y/Y/Y bars r 2.39 / i 1.20 / s 0.93 %
+                                  p1: A 2.2063 B 2.3311 (A r 0.48 / i 0.24 / s 0.18; B r 0.33 / i 0.17 / s 0.13 %) B/A 1.0566 (+5.66 %, d +0.1248 ms) Y/Y/Y bars r 1.17 / i 0.58 / s 0.45 %
+                                  p2: A 2.1976 B 2.3317 (A r 0.60 / i 0.30 / s 0.23; B r 0.10 / i 0.05 / s 0.04 %) B/A 1.0610 (+6.10 %, d +0.1340 ms) Y/Y/Y bars r 1.22 / i 0.61 / s 0.46 %
+                                  ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 1.20 % = 0.0263 ms of A
+  => P(16) - T(16) = -0.1308 ms (-5.95 % of P(16)); REFUTED (T slower claimed); bar 0.105 ms NOT met by the point value; predicted +0.166..+0.175
+
+# Claims, window [100..500) (B against A; ms per step; cell = median over K of process means)
+## C1-JT: T(16) vs T(8), J-T: C1 holds unless T(16) is CLAIMED slower
+  S7-JT#s7t@W16 vs S7-JT#s7t@W8: A 1.7638 [1.7589-1.8165] K=9 (r 3.27 / i 0.63 / s 0.55 %)
+                                 B 2.1552 [2.1458-2.2038] K=9 (r 2.69 / i 0.57 / s 0.35 %)
+                                 pooled B/A 1.2219 (+22.19 %, d +0.3914 ms) Y/Y/Y bars r 8.47 / i 1.70 / s 1.31 %
+                                 p0: A 1.7707 B 2.1540 (A r 2.94 / i 1.47 / s 1.15; B r 2.69 / i 1.35 / s 1.05 %) B/A 1.2165 (+21.65 %, d +0.3834 ms) Y/Y/Y bars r 7.97 / i 3.99 / s 3.12 %
+                                 p1: A 1.7595 B 2.1469 (A r 0.63 / i 0.32 / s 0.26; B r 0.47 / i 0.23 / s 0.19 %) B/A 1.2201 (+22.01 %, d +0.3874 ms) Y/Y/Y bars r 1.57 / i 0.79 / s 0.63 %
+                                 p2: A 1.7638 B 2.1593 (A r 3.23 / i 1.61 / s 1.30; B r 0.27 / i 0.13 / s 0.10 %) B/A 1.2242 (+22.42 %, d +0.3955 ms) Y/Y/Y bars r 6.48 / i 3.24 / s 2.61 %
+                                 ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 3.99 % = 0.0703 ms of A
+  => REFUTED: B slower CLAIMED
+## C1-JA: T(16) vs T(8), J-A: C1 holds unless T(16) is CLAIMED slower
+  S7-JA#s7t@W16 vs S7-JA#s7t@W8: A 5.2713 [5.2617-5.3960] K=9 (r 2.55 / i 0.30 / s 0.33 %)
+                                 B 5.8369 [5.8124-5.9404] K=9 (r 2.19 / i 0.25 / s 0.27 %)
+                                 pooled B/A 1.1073 (+10.73 %, d +0.5656 ms) Y/Y/Y bars r 6.72 / i 0.78 / s 0.84 %
+                                 p0: A 5.2700 B 5.8369 (A r 2.55 / i 1.27 / s 1.03; B r 0.46 / i 0.23 / s 0.18 %) B/A 1.1076 (+10.76 %, d +0.5670 ms) Y/Y/Y bars r 5.18 / i 2.59 / s 2.10 %
+                                 p1: A 5.2713 B 5.8288 (A r 0.43 / i 0.22 / s 0.17; B r 0.27 / i 0.14 / s 0.11 %) B/A 1.1058 (+10.58 %, d +0.5575 ms) Y/Y/Y bars r 1.03 / i 0.51 / s 0.41 %
+                                 p2: A 5.2836 B 5.8431 (A r 0.30 / i 0.15 / s 0.12; B r 1.84 / i 0.92 / s 0.74 %) B/A 1.1059 (+10.59 %, d +0.5596 ms) Y/Y/Y bars r 3.73 / i 1.87 / s 1.49 %
+                                 ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 2.59 % = 0.1364 ms of A
+  => REFUTED: B slower CLAIMED
+## C2-JT: T(8) vs P(8), J-T: C2 holds unless T(8) is CLAIMED slower
+  S7-JT#s7t@W8 vs S7-JT#s7p@W8: A 1.7746 [1.7583-1.8064] K=9 (r 2.71 / i 0.78 / s 0.35 %)
+                                B 1.7638 [1.7589-1.8165] K=9 (r 3.27 / i 0.63 / s 0.55 %)
+                                pooled B/A 0.9939 (-0.61 %, d -0.0108 ms) n/n/n bars r 8.49 / i 2.00 / s 1.31 %
+                                p0: A 1.7727 B 1.7707 (A r 1.51 / i 0.76 / s 0.55; B r 2.94 / i 1.47 / s 1.15 %) B/A 0.9989 (-0.11 %, d -0.0020 ms) n/n/n bars r 6.61 / i 3.30 / s 2.54 %
+                                p1: A 1.7696 B 1.7595 (A r 1.41 / i 0.70 / s 0.51; B r 0.63 / i 0.32 / s 0.26 %) B/A 0.9943 (-0.57 %, d -0.0101 ms) n/n/n bars r 3.08 / i 1.54 / s 1.14 %
+                                p2: A 1.7834 B 1.7638 (A r 1.79 / i 0.89 / s 0.67; B r 3.23 / i 1.61 / s 1.30 %) B/A 0.9890 (-1.10 %, d -0.0196 ms) n/n/n bars r 7.38 / i 3.69 / s 2.92 %
+                                ruling 1: direction B faster, same sign in every pass True, CLAIMED False, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 3.69 % = 0.0654 ms of A
+  => HOLDS: no resolved difference
+## C2-JA: T(8) vs P(8), J-A: C2 holds unless T(8) is CLAIMED slower
+  S7-JA#s7t@W8 vs S7-JA#s7p@W8: A 5.2737 [5.2417-5.2891] K=9 (r 0.90 / i 0.32 / s 0.11 %)
+                                B 5.2713 [5.2617-5.3960] K=9 (r 2.55 / i 0.30 / s 0.33 %)
+                                pooled B/A 0.9995 (-0.05 %, d -0.0024 ms) n/n/n bars r 5.40 / i 0.88 / s 0.69 %
+                                p0: A 5.2815 B 5.2700 (A r 0.34 / i 0.17 / s 0.12; B r 2.55 / i 1.27 / s 1.03 %) B/A 0.9978 (-0.22 %, d -0.0116 ms) n/n/n bars r 5.14 / i 2.57 / s 2.08 %
+                                p1: A 5.2597 B 5.2713 (A r 0.64 / i 0.32 / s 0.23; B r 0.43 / i 0.22 / s 0.17 %) B/A 1.0022 (+0.22 %, d +0.0116 ms) n/n/n bars r 1.54 / i 0.77 / s 0.58 %
+                                p2: A 5.2737 B 5.2836 (A r 0.38 / i 0.19 / s 0.14; B r 0.30 / i 0.15 / s 0.12 %) B/A 1.0019 (+0.19 %, d +0.0099 ms) n/n/n bars r 0.97 / i 0.49 / s 0.36 %
+                                ruling 1: direction B faster, same sign in every pass False, CLAIMED False, STRONG (r every pass + pooled) False, STRONG (r pooled) False; the rule's binding threshold here 2.57 % = 0.1355 ms of A
+  => HOLDS: no resolved difference
+## C3-JT: T(16) vs P(16), J-T: C3 = P(16) - T(16), claimed if T(16) is CLAIMED faster
+  S7-JT#s7t@W16 vs S7-JT#s7p@W16: A 2.0115 [2.0022-2.0327] K=9 (r 1.51 / i 0.60 / s 0.20 %)
+                                  B 2.1552 [2.1458-2.2038] K=9 (r 2.69 / i 0.57 / s 0.35 %)
+                                  pooled B/A 1.0714 (+7.14 %, d +0.1437 ms) Y/Y/Y bars r 6.18 / i 1.66 / s 0.80 %
+                                  p0: A 2.0173 B 2.1540 (A r 1.43 / i 0.71 / s 0.52; B r 2.69 / i 1.35 / s 1.05 %) B/A 1.0678 (+6.78 %, d +0.1368 ms) Y/Y/Y bars r 6.10 / i 3.05 / s 2.35 %
+                                  p1: A 2.0155 B 2.1469 (A r 0.47 / i 0.24 / s 0.17; B r 0.47 / i 0.23 / s 0.19 %) B/A 1.0652 (+6.52 %, d +0.1314 ms) Y/Y/Y bars r 1.32 / i 0.66 / s 0.51 %
+                                  p2: A 2.0052 B 2.1593 (A r 0.46 / i 0.23 / s 0.17; B r 0.27 / i 0.13 / s 0.10 %) B/A 1.0768 (+7.68 %, d +0.1541 ms) Y/Y/Y bars r 1.07 / i 0.54 / s 0.40 %
+                                  ruling 1: direction B slower, same sign in every pass True, CLAIMED True, STRONG (r every pass + pooled) True, STRONG (r pooled) True; the rule's binding threshold here 3.05 % = 0.0613 ms of A
+  => P(16) - T(16) = -0.1437 ms (-7.14 % of P(16)); REFUTED (T slower claimed); bar 0.105 ms NOT met by the point value; predicted +0.166..+0.175

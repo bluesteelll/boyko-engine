@@ -1,0 +1,67 @@
+F3 records: 302 processes (299 timed: 243 originals, 56 re-runs; 3 warm-ups)
+F3 pass markers: pass_done 3, voided_pass 0
+slots 243, used 227 (40 by re-run), dropped 16; attempts failing my validity re-derivation: 0
+
+== D1: K per pass-cell (row, W, pass) after the slot rule
+pass-cells 81; K distribution {2: 16, 3: 65}
+pass-cells with K < 3: 16
+  F3-JT-kd                 W4   p2  K=2
+  F3-JT-kd                 W16  p1  K=2
+  F3-JT-leaflist           W2   p2  K=2
+  F3-JT-leaflist           W4   p2  K=2
+  F3-JT-leaflist           W8   p1  K=2
+  F3-JT-leaflist           W16  p1  K=2
+  F3-RT-kd                 W2   p0  K=2
+  F3-RT-kd                 W4   p0  K=2
+  F3-RT-kd                 W8   p0  K=2
+  F3-RT-kd                 W16  p0  K=2
+  F3-RT-kd                 W16  p2  K=2
+  F3-RT-leaflist           W1   p0  K=2
+  F3-RT-leaflist           W8   p0  K=2
+  F3-TA-armed-kd           W1   p1  K=2
+  F3-TD-armed-leaflist     W1   p1  K=2
+  F3-TR-armed              W1   p0  K=2
+dropped slots 16 fall in 16 distinct pass-cells; max drops in one pass-cell 1
+cells 27; cells with n < 9: 15; n values {7: 1, 8: 14, 9: 12}
+kd/leaflist pass-pairs with K < 3 on either side: 12
+  F3-JT                W2   p2  K leaflist/kd 2/3
+  F3-JT                W4   p2  K leaflist/kd 2/2
+  F3-JT                W8   p1  K leaflist/kd 2/3
+  F3-JT                W16  p1  K leaflist/kd 2/2
+  F3-RT                W1   p0  K leaflist/kd 2/3
+  F3-RT                W2   p0  K leaflist/kd 3/2
+  F3-RT                W4   p0  K leaflist/kd 3/2
+  F3-RT                W8   p0  K leaflist/kd 2/2
+  F3-RT                W16  p0  K leaflist/kd 3/2
+  F3-RT                W16  p2  K leaflist/kd 3/2
+  F3-TA-armed          W1   p1  K leaflist/kd 3/2
+  F3-TD-armed          W1   p1  K leaflist/kd 2/3
+
+== D2: R2 = t_q(kd) / t_q(leaflist) < 1 claimed, F3-TD-armed, W1 (t_q = per-process median over [100,500) of phys_bp_query_ns)
+  F3-TD-armed-leaflist   p0: r0 205.387 us (original), r1 200.456 us (original), r2 202.771 us (original)
+  F3-TD-armed-leaflist   p1: r1 201.459 us (original), r2 202.493 us (original)
+  F3-TD-armed-leaflist   p2: r0 203.544 us (original), r1 198.967 us (original), r2 199.192 us (original)
+  F3-TD-armed-kd         p0: r0 167.877 us (original), r1 168.341 us (original), r2 164.174 us (original)
+  F3-TD-armed-kd         p1: r0 169.105 us (original), r1 167.868 us (original), r2 166.608 us (original)
+  F3-TD-armed-kd         p2: r0 165.988 us (rerun), r1 169.450 us (original), r2 168.025 us (original)
+  p0     A 202.77 [200.46-205.39] K=3 i 1.22 s 0.88 | B 167.88 [164.17-168.34] K=3 i 1.24 s 0.98 | B/A 0.8279 (-17.21 %) bars 2r/2i/2s 6.95/3.47/2.64 % | flags r/i/s K>=3 rule YYY, K>=2 YYY
+  p1     A 201.98 [201.46-202.49] K=2 i 0.26 s 0.32 | B 167.87 [166.61-169.10] K=3 i 0.74 s 0.54 | B/A 0.8311 (-16.89 %) bars 2r/2i/2s 3.15/1.57/1.25 % | flags r/i/s K>=3 rule nnn, K>=2 YYY
+  p2     A 199.19 [198.97-203.54] K=3 i 1.15 s 0.94 | B 168.03 [165.99-169.45] K=3 i 1.03 s 0.75 | B/A 0.8435 (-15.65 %) bars 2r/2i/2s 6.17/3.09/2.40 % | flags r/i/s K>=3 rule YYY, K>=2 YYY
+  pooled A 201.98 [198.97-205.39] K=8 i 1.40 s 0.48 | B 167.88 [164.17-169.45] K=9 i 1.03 s 0.41 | B/A 0.8312 (-16.88 %) bars 2r/2i/2s 8.94/3.48/1.27 % | flags r/i/s K>=3 rule YYY, K>=2 YYY
+  pooled delta 34.10 us less on kd; leaflist min 198.97 vs kd max 169.45
+  clean (not voided) F3 passes: [0, 1, 2]; passes where both R2 cells kept 3 slots: [0, 2]
+  R2 under LETTER (every non-voided pass gates; no flag at K<3): NOT CLAIMED   [pooled YYY p0 YYY p1 nnn p2 YYY]
+  R2 under K2 (every non-voided pass gates; a K=2 pass-cell judged on its own i and s): STRONG CLAIMED   [pooled YYY p0 YYY p1 YYY p2 YYY]
+  R2 under analyst's CLEAN (only passes with K=3 on both sides gate): STRONG CLAIMED   [pooled YYY p0 YYY p2 YYY]
+
+== D3: attribution A (proportional) vs B (fixed residual), J, W1 -- post hoc, no rule
+observed: c_q leaflist 162.88 ns, kd 135.38 ns; ratio 0.8312; dt_q -34.10 us
+model: base 167.6 ns, kd/F1+F2 ratio 0.7255..0.8085 (from A 121.6..135.5), B modelled part 122..130 ns
+-- model base 167.6 ns (cut.md table, as printed)
+   A: c_q 121.6..135.5 ns [IN ]  ratio 0.7255..0.8085 [out]  dt_q -57.0..-39.8 us [out]
+   B: c_q 131.9..144.2 ns [IN ]  ratio 0.7871..0.8606 [IN ]  dt_q -44.2..-29.0 us [IN ]
+-- this window's leaflist base 162.88 ns (same attribution rule applied)
+   A: c_q 118.2..131.7 ns [out]  ratio 0.7255..0.8085 [out]  dt_q -55.4..-38.7 us [out]
+   B: c_q 127.2..139.5 ns [IN ]  ratio 0.7809..0.8565 [IN ]  dt_q -44.2..-29.0 us [IN ]
+base shift window 8b vs model: -2.81 % (leaflist c_q 162.88 vs 167.6)
+observed ratio vs A upper edge 0.8085: +2.81 %; pooled 2i bar 3.48 %, 2s bar 1.27 %

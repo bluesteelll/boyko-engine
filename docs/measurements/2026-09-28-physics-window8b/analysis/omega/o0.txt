@@ -1,0 +1,149 @@
+# o0 selection: omega-v2 + omega-v1-cont (window 8b, raw/runs.jsonl + per-process stdout.txt)
+processes: 95 timed (66 original, 29 re-run) + 4 warm-ups
+validity (micro8b rules + exit 0 + sha pin, re-applied): 0 invalid of 95
+driver valid flag disagrees with mine: 0
+driver contaminated flag disagrees with window-8 clean rule: 0
+slots 66, used 60 (37 originals, 23 re-runs), dropped 6
+  DROPPED slot ('omega-v1-cont', 0, 0, 'omega1-s72-external'): ["original ['receipt after 5.8', 'witness 6.25']", "rerun ['receipt after 7.6', 'witness 7.7']"]
+  DROPPED slot ('omega-v1-cont', 0, 2, 'omega1-s36-external'): ["original ['witness 6.23']", "rerun ['witness 2.79']"]
+  DROPPED slot ('omega-v1-cont', 0, 2, 'omega1-s36-worker'): ["original ['receipt after 8.02']", "rerun ['receipt after 5.21', 'witness 2.03']"]
+  DROPPED slot ('omega-v1-cont', 0, 2, 'omega1-s72-worker'): ["original ['receipt after 6.21', 'witness 2.87']", "rerun ['receipt after 7.83', 'witness 5.57']"]
+  DROPPED slot ('omega-v2', 0, 1, 'omega2-gap-external'): ["original ['witness 4.03']", "rerun ['receipt after 7.54', 'witness 2.33']"]
+  DROPPED slot ('omega-v2', 0, 2, 'omega2-gap-worker'): ["original ['receipt after 7.27', 'witness 5.97']", "rerun ['witness 2.79']"]
+
+K per (block, row) and pass (used processes):
+  omega-v1-cont  omega1-s36-external    total 2  per pass {0: 2}
+  omega-v1-cont  omega1-s36-worker      total 2  per pass {0: 2}
+  omega-v1-cont  omega1-s72-external    total 2  per pass {0: 2}
+  omega-v1-cont  omega1-s72-worker      total 2  per pass {0: 2}
+  omega-v2       omega-wgap-external    total 9  per pass {0: 3, 1: 3, 2: 3}
+  omega-v2       omega-wgap-worker      total 9  per pass {0: 3, 1: 3, 2: 3}
+  omega-v2       omega2-external        total 9  per pass {0: 3, 1: 3, 2: 3}
+  omega-v2       omega2-gap-external    total 8  per pass {0: 2, 1: 3, 2: 3}
+  omega-v2       omega2-gap-worker      total 8  per pass {0: 2, 1: 3, 2: 3}
+  omega-v2       omega2-worker          total 9  per pass {0: 3, 1: 3, 2: 3}
+
+re-runs used, and why the original was not:
+  omega-v1-cont p0 r0 omega1-s36-external: original ['receipt after 10.01', 'witness 7.34']
+  omega-v1-cont p0 r0 omega1-s36-worker: original ['witness 2.32']
+  omega-v1-cont p0 r1 omega1-s36-worker: original ['receipt after 7.87', 'witness 11.44']
+  omega-v1-cont p0 r1 omega1-s72-worker: original ['receipt after 6.3', 'witness 2.89']
+  omega-v2 p0 r0 omega2-worker: original ['receipt after 7.46', 'witness 2.17']
+  omega-v2 p0 r1 omega2-external: original ['receipt after 10.51', 'witness 3.21']
+  omega-v2 p0 r2 omega-wgap-worker: original ['witness 4.68']
+  omega-v2 p0 r2 omega2-external: original ['receipt after 5.25']
+  omega-v2 p0 r2 omega2-worker: original ['receipt after 5.23']
+  omega-v2 p1 r0 omega2-gap-external: original ['receipt after 13.76', 'witness 2.19']
+  omega-v2 p1 r1 omega-wgap-external: original ['receipt after 14.23', 'witness 7.14']
+  omega-v2 p1 r1 omega2-external: original ['receipt after 7.46', 'witness 6.69']
+  omega-v2 p1 r1 omega2-gap-external: original ['receipt after 11.65', 'witness 5.32']
+  omega-v2 p1 r1 omega2-worker: original ['receipt after 12.27', 'witness 2.51']
+  omega-v2 p1 r2 omega-wgap-external: original ['receipt after 7.84']
+  omega-v2 p1 r2 omega-wgap-worker: original ['receipt after 7.5']
+  omega-v2 p1 r2 omega2-external: original ['receipt after 5.79']
+  omega-v2 p1 r2 omega2-gap-worker: original ['witness 2.03']
+  omega-v2 p2 r0 omega2-gap-worker: original ['receipt after 6.45']
+  omega-v2 p2 r1 omega-wgap-external: original ['witness 2.06']
+  omega-v2 p2 r1 omega-wgap-worker: original ['witness 2.37']
+  omega-v2 p2 r2 omega-wgap-external: original ['witness 3.01']
+  omega-v2 p2 r2 omega-wgap-worker: original ['witness 2.23']
+
+receipts of used processes: before max 4.92 %, after max 4.22 %, witness max 1.85 %, witness median 0.80 %
+
+placement receipts (RECORDED, never used to drop): top CPU and its busy %, main-thread cycle share of the process
+  omega-v1-cont omega1-s36-external  p0 r0 rerun    top3 [[2, 98.0], [4, 84.3], [9, 82.4]] main_cycle_frac 0.0847 main_share_top_est 0.996
+  omega-v1-cont omega1-s36-external  p0 r1 original top3 [[2, 94.1], [4, 84.3], [7, 82.4]] main_cycle_frac 0.0862 main_share_top_est 0.959
+  omega-v1-cont omega1-s36-worker    p0 r0 rerun    top3 [[4, 84.3], [0, 82.4], [7, 78.8]] main_cycle_frac 0.0057 main_share_top_est 1.0
+  omega-v1-cont omega1-s36-worker    p0 r1 rerun    top3 [[10, 86.8], [4, 81.1], [2, 81.1]] main_cycle_frac 0.0061 main_share_top_est 1.0
+  omega-v1-cont omega1-s72-external  p0 r1 original top3 [[2, 81.2], [4, 80.2], [7, 79.2]] main_cycle_frac 0.0898 main_share_top_est 0.818
+  omega-v1-cont omega1-s72-external  p0 r2 original top3 [[2, 82.2], [5, 76.5], [14, 75.7]] main_cycle_frac 0.0886 main_share_top_est 0.83
+  omega-v1-cont omega1-s72-worker    p0 r0 original top3 [[4, 84.6], [0, 83.7], [7, 77.9]] main_cycle_frac 0.0031 main_share_top_est 1.0
+  omega-v1-cont omega1-s72-worker    p0 r1 rerun    top3 [[2, 85.6], [4, 81.4], [0, 81.4]] main_cycle_frac 0.0035 main_share_top_est 1.0
+  omega-v2      omega-wgap-external  p0 r0 original top3 [[2, 59.0], [12, 46.2], [14, 37.5]] main_cycle_frac 0.1924 main_share_top_est 0.626
+  omega-v2      omega-wgap-external  p0 r1 original top3 [[10, 48.7], [12, 46.2], [2, 46.2]] main_cycle_frac 0.1944 main_share_top_est 0.49
+  omega-v2      omega-wgap-external  p0 r2 original top3 [[2, 62.5], [6, 40.0], [0, 40.0]] main_cycle_frac 0.1916 main_share_top_est 0.639
+  omega-v2      omega-wgap-external  p1 r0 original top3 [[2, 58.5], [8, 51.2], [10, 42.9]] main_cycle_frac 0.1878 main_share_top_est 0.595
+  omega-v2      omega-wgap-external  p1 r1 rerun    top3 [[2, 56.4], [4, 47.5], [6, 37.5]] main_cycle_frac 0.1929 main_share_top_est 0.569
+  omega-v2      omega-wgap-external  p1 r2 rerun    top3 [[2, 57.5], [10, 33.3], [0, 33.3]] main_cycle_frac 0.1922 main_share_top_est 0.562
+  omega-v2      omega-wgap-external  p2 r0 original top3 [[2, 65.0], [8, 43.9], [10, 42.5]] main_cycle_frac 0.1898 main_share_top_est 0.673
+  omega-v2      omega-wgap-external  p2 r1 rerun    top3 [[9, 52.5], [10, 50.0], [8, 42.5]] main_cycle_frac 0.1897 main_share_top_est 0.532
+  omega-v2      omega-wgap-external  p2 r2 rerun    top3 [[4, 61.5], [2, 53.8], [10, 48.7]] main_cycle_frac 0.1901 main_share_top_est 0.653
+  omega-v2      omega-wgap-worker    p0 r0 original top3 [[13, 56.4], [14, 38.5], [4, 38.5]] main_cycle_frac 0.0023 main_share_top_est None
+  omega-v2      omega-wgap-worker    p0 r1 original top3 [[14, 62.5], [2, 35.0], [12, 32.5]] main_cycle_frac 0.0022 main_share_top_est 1.0
+  omega-v2      omega-wgap-worker    p0 r2 rerun    top3 [[13, 47.5], [12, 37.5], [14, 35.0]] main_cycle_frac 0.0021 main_share_top_est 1.0
+  omega-v2      omega-wgap-worker    p1 r0 original top3 [[13, 60.0], [10, 57.5], [14, 42.5]] main_cycle_frac 0.0024 main_share_top_est None
+  omega-v2      omega-wgap-worker    p1 r1 original top3 [[9, 65.9], [4, 53.7], [2, 41.5]] main_cycle_frac 0.0029 main_share_top_est 1.0
+  omega-v2      omega-wgap-worker    p1 r2 rerun    top3 [[15, 48.7], [14, 40.0], [10, 38.5]] main_cycle_frac 0.0021 main_share_top_est 1.0
+  omega-v2      omega-wgap-worker    p2 r0 original top3 [[13, 56.4], [4, 51.3], [14, 43.6]] main_cycle_frac 0.0022 main_share_top_est None
+  omega-v2      omega-wgap-worker    p2 r1 rerun    top3 [[13, 60.0], [14, 45.0], [10, 42.5]] main_cycle_frac 0.0023 main_share_top_est None
+  omega-v2      omega-wgap-worker    p2 r2 rerun    top3 [[11, 43.9], [0, 33.3], [5, 32.5]] main_cycle_frac 0.0021 main_share_top_est 1.0
+  omega-v2      omega2-external      p0 r0 original top3 [[0, 64.1], [2, 49.3], [4, 44.8]] main_cycle_frac 0.1986 main_share_top_est 0.642
+  omega-v2      omega2-external      p0 r1 rerun    top3 [[2, 59.9], [4, 50.4], [6, 49.8]] main_cycle_frac 0.1995 main_share_top_est 0.601
+  omega-v2      omega2-external      p0 r2 rerun    top3 [[2, 57.2], [10, 44.1], [0, 43.2]] main_cycle_frac 0.1991 main_share_top_est 0.574
+  omega-v2      omega2-external      p1 r0 original top3 [[4, 66.5], [2, 54.2], [14, 40.8]] main_cycle_frac 0.1998 main_share_top_est 0.668
+  omega-v2      omega2-external      p1 r1 rerun    top3 [[4, 42.5], [10, 39.5], [6, 39.5]] main_cycle_frac 0.2005 main_share_top_est 0.427
+  omega-v2      omega2-external      p1 r2 rerun    top3 [[7, 52.7], [2, 51.3], [4, 46.5]] main_cycle_frac 0.2002 main_share_top_est 0.527
+  omega-v2      omega2-external      p2 r0 original top3 [[2, 58.3], [10, 41.7], [1, 40.5]] main_cycle_frac 0.199 main_share_top_est 0.581
+  omega-v2      omega2-external      p2 r1 original top3 [[2, 82.5], [4, 46.5], [10, 38.2]] main_cycle_frac 0.1992 main_share_top_est 0.829
+  omega-v2      omega2-external      p2 r2 original top3 [[2, 52.9], [15, 44.1], [4, 43.0]] main_cycle_frac 0.2004 main_share_top_est 0.54
+  omega-v2      omega2-gap-external  p0 r0 original top3 [[10, 52.9], [12, 44.0], [14, 43.8]] main_cycle_frac 0.2005 main_share_top_est 0.53
+  omega-v2      omega2-gap-external  p0 r2 original top3 [[14, 49.5], [12, 46.9], [2, 45.6]] main_cycle_frac 0.2005 main_share_top_est 0.496
+  omega-v2      omega2-gap-external  p1 r0 rerun    top3 [[14, 44.7], [10, 44.5], [12, 42.2]] main_cycle_frac 0.2003 main_share_top_est 0.448
+  omega-v2      omega2-gap-external  p1 r1 rerun    top3 [[10, 47.8], [12, 44.5], [6, 43.3]] main_cycle_frac 0.2003 main_share_top_est 0.479
+  omega-v2      omega2-gap-external  p1 r2 original top3 [[10, 51.8], [14, 51.0], [12, 48.2]] main_cycle_frac 0.2004 main_share_top_est 0.519
+  omega-v2      omega2-gap-external  p2 r0 original top3 [[10, 53.7], [14, 48.9], [8, 41.7]] main_cycle_frac 0.2 main_share_top_est 0.537
+  omega-v2      omega2-gap-external  p2 r1 original top3 [[14, 52.9], [10, 52.4], [3, 47.5]] main_cycle_frac 0.1999 main_share_top_est 0.531
+  omega-v2      omega2-gap-external  p2 r2 original top3 [[10, 55.3], [14, 51.5], [2, 44.9]] main_cycle_frac 0.1999 main_share_top_est 0.555
+  omega-v2      omega2-gap-worker    p0 r0 original top3 [[10, 68.6], [12, 68.5], [14, 61.5]] main_cycle_frac 0.0013 main_share_top_est 1.0
+  omega-v2      omega2-gap-worker    p0 r1 original top3 [[10, 73.4], [12, 64.2], [14, 62.2]] main_cycle_frac 0.0013 main_share_top_est 1.0
+  omega-v2      omega2-gap-worker    p1 r0 original top3 [[10, 65.5], [12, 63.9], [14, 59.9]] main_cycle_frac 0.0013 main_share_top_est 1.0
+  omega-v2      omega2-gap-worker    p1 r1 original top3 [[10, 72.1], [12, 63.8], [14, 61.4]] main_cycle_frac 0.0013 main_share_top_est 1.0
+  omega-v2      omega2-gap-worker    p1 r2 rerun    top3 [[10, 65.8], [12, 62.4], [14, 60.2]] main_cycle_frac 0.0012 main_share_top_est 1.0
+  omega-v2      omega2-gap-worker    p2 r0 rerun    top3 [[10, 68.3], [14, 62.0], [1, 47.2]] main_cycle_frac 0.0013 main_share_top_est 1.0
+  omega-v2      omega2-gap-worker    p2 r1 original top3 [[10, 67.7], [12, 67.0], [14, 58.8]] main_cycle_frac 0.0013 main_share_top_est 1.0
+  omega-v2      omega2-gap-worker    p2 r2 original top3 [[10, 72.6], [14, 59.5], [1, 46.2]] main_cycle_frac 0.0013 main_share_top_est 1.0
+  omega-v2      omega2-worker        p0 r0 rerun    top3 [[14, 55.5], [2, 48.6], [10, 44.9]] main_cycle_frac 0.0172 main_share_top_est 1.0
+  omega-v2      omega2-worker        p0 r1 original top3 [[0, 55.6], [14, 48.1], [4, 45.6]] main_cycle_frac 0.0174 main_share_top_est 1.0
+  omega-v2      omega2-worker        p0 r2 rerun    top3 [[4, 48.1], [2, 44.8], [14, 42.1]] main_cycle_frac 0.0174 main_share_top_est 1.0
+  omega-v2      omega2-worker        p1 r0 original top3 [[14, 52.0], [2, 48.8], [12, 47.2]] main_cycle_frac 0.0169 main_share_top_est 1.0
+  omega-v2      omega2-worker        p1 r1 rerun    top3 [[4, 47.7], [2, 46.4], [14, 41.2]] main_cycle_frac 0.0174 main_share_top_est 1.0
+  omega-v2      omega2-worker        p1 r2 original top3 [[0, 52.8], [2, 46.4], [14, 45.8]] main_cycle_frac 0.0182 main_share_top_est 1.0
+  omega-v2      omega2-worker        p2 r0 original top3 [[4, 46.9], [2, 44.4], [0, 43.2]] main_cycle_frac 0.0176 main_share_top_est 1.0
+  omega-v2      omega2-worker        p2 r1 original top3 [[0, 45.2], [14, 44.0], [4, 43.2]] main_cycle_frac 0.0176 main_share_top_est 1.0
+  omega-v2      omega2-worker        p2 r2 original top3 [[4, 46.9], [2, 43.2], [14, 41.1]] main_cycle_frac 0.0176 main_share_top_est 1.0
+
+calibration of used v2 processes (work_ns_calibrated, work_iters):
+  omega2-external      p0 r0 original work_ns_calibrated 577.6 iters 44 probes [15.8646, 15.9903, 16.2045]
+  omega2-gap-external  p0 r0 original work_ns_calibrated 570.1 iters 45 probes [15.3807, 15.3929, 15.3953]
+  omega2-gap-worker    p0 r0 original work_ns_calibrated 574.7 iters 45 probes [15.4789, 15.4944, 15.4911]
+  omega2-worker        p0 r0 rerun    work_ns_calibrated 571.1 iters 45 probes [15.3924, 15.4004, 15.4087]
+  omega2-external      p0 r1 rerun    work_ns_calibrated 571.0 iters 45 probes [15.4028, 15.406, 15.4098]
+  omega2-gap-worker    p0 r1 original work_ns_calibrated 573.6 iters 45 probes [15.4772, 15.5303, 15.494]
+  omega2-worker        p0 r1 original work_ns_calibrated 570.0 iters 45 probes [15.3954, 15.4123, 15.4064]
+  omega2-external      p0 r2 rerun    work_ns_calibrated 571.6 iters 45 probes [15.4617, 15.458, 15.443]
+  omega2-gap-external  p0 r2 original work_ns_calibrated 571.3 iters 45 probes [15.4542, 15.4449, 15.4594]
+  omega2-worker        p0 r2 rerun    work_ns_calibrated 571.6 iters 45 probes [15.4054, 15.4265, 15.4288]
+  omega2-external      p1 r0 original work_ns_calibrated 573.1 iters 45 probes [15.4902, 15.4922, 15.4805]
+  omega2-gap-external  p1 r0 rerun    work_ns_calibrated 568.6 iters 45 probes [15.3775, 15.3944, 15.3977]
+  omega2-gap-worker    p1 r0 original work_ns_calibrated 573.8 iters 45 probes [15.4782, 15.4743, 15.4804]
+  omega2-worker        p1 r0 original work_ns_calibrated 572.6 iters 45 probes [15.3934, 15.3938, 15.4053]
+  omega2-external      p1 r1 rerun    work_ns_calibrated 575.1 iters 45 probes [15.4267, 15.4534, 15.4531]
+  omega2-gap-external  p1 r1 rerun    work_ns_calibrated 571.9 iters 45 probes [15.4024, 15.4479, 15.4587]
+  omega2-gap-worker    p1 r1 original work_ns_calibrated 572.1 iters 44 probes [16.0695, 15.9511, 15.8303]
+  omega2-worker        p1 r1 rerun    work_ns_calibrated 570.4 iters 45 probes [15.4051, 15.4056, 15.4055]
+  omega2-external      p1 r2 rerun    work_ns_calibrated 572.7 iters 45 probes [15.4481, 15.4553, 15.4604]
+  omega2-gap-external  p1 r2 original work_ns_calibrated 571.5 iters 45 probes [15.4556, 15.4406, 15.4988]
+  omega2-gap-worker    p1 r2 rerun    work_ns_calibrated 571.8 iters 45 probes [15.399, 15.4327, 15.4599]
+  omega2-worker        p1 r2 original work_ns_calibrated 571.5 iters 44 probes [15.7263, 15.7585, 16.0098]
+  omega2-external      p2 r0 original work_ns_calibrated 573.1 iters 45 probes [15.4835, 15.4908, 15.5123]
+  omega2-gap-external  p2 r0 original work_ns_calibrated 570.2 iters 45 probes [15.3983, 15.4066, 15.4062]
+  omega2-gap-worker    p2 r0 rerun    work_ns_calibrated 573.2 iters 45 probes [15.4819, 15.4918, 15.4919]
+  omega2-worker        p2 r0 original work_ns_calibrated 573.3 iters 45 probes [15.4816, 15.4945, 15.4918]
+  omega2-external      p2 r1 original work_ns_calibrated 573.4 iters 45 probes [15.4831, 15.5033, 15.4932]
+  omega2-gap-external  p2 r1 original work_ns_calibrated 573.1 iters 45 probes [15.4749, 15.4635, 15.4921]
+  omega2-gap-worker    p2 r1 original work_ns_calibrated 570.0 iters 45 probes [15.4822, 15.474, 15.4104]
+  omega2-worker        p2 r1 original work_ns_calibrated 574.2 iters 45 probes [15.4646, 15.4759, 15.4811]
+  omega2-external      p2 r2 original work_ns_calibrated 571.8 iters 44 probes [15.8069, 15.91, 15.9082]
+  omega2-gap-external  p2 r2 original work_ns_calibrated 570.0 iters 45 probes [15.4062, 15.448, 15.4485]
+  omega2-gap-worker    p2 r2 original work_ns_calibrated 573.2 iters 45 probes [15.4461, 15.4851, 15.4892]
+  omega2-worker        p2 r2 original work_ns_calibrated 571.9 iters 45 probes [15.4791, 15.4763, 15.4906]

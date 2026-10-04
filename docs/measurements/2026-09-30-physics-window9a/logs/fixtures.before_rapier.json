@@ -1,0 +1,138 @@
+{
+ "JT500": {
+  "hash": "0x30c5438bc6ad9ffa",
+  "known": "0x30c5438bc6ad9ffa",
+  "recorded_by": "tip@W1 500 steps",
+  "args": [
+   "--scene",
+   "jolt",
+   "--gap",
+   "0.5",
+   "--cfg",
+   "default",
+   "--sleeping",
+   "off"
+  ],
+  "sha256": "e268d7a5e9ffc4c6b25d403601e119d20b490cbaed5cec4a910e3159f28a5b89",
+  "equal_to_window_8b_bytes": true,
+  "tree_diag": {
+   "static_rebuilds": 1,
+   "sleeper_rebuilds": 0,
+   "evictions": 0,
+   "translations": 0,
+   "patches": 0,
+   "hint_candidates": 0,
+   "wide_rows": 0,
+   "excluded_rows": 0,
+   "locator_resets": 0,
+   "members": 1,
+   "leaf_list_leaves": 77500,
+   "fallback_leaves": 2,
+   "row_walk_leaves": 0,
+   "kd_order_builds": 0,
+   "bp_kernel": "LeafList"
+  },
+  "fail": []
+ },
+ "JA500": {
+  "hash": "0x30c5438bc6ad9ffa",
+  "known": "0x30c5438bc6ad9ffa",
+  "recorded_by": "tip@W1 500 steps",
+  "args": [
+   "--scene",
+   "jolt",
+   "--gap",
+   "0.5",
+   "--cfg",
+   "a"
+  ],
+  "sha256": "e268d7a5e9ffc4c6b25d403601e119d20b490cbaed5cec4a910e3159f28a5b89",
+  "equal_to_window_8b_bytes": true,
+  "tree_diag": {
+   "static_rebuilds": 0,
+   "sleeper_rebuilds": 0,
+   "evictions": 0,
+   "translations": 0,
+   "patches": 0,
+   "hint_candidates": 0,
+   "wide_rows": 0,
+   "excluded_rows": 0,
+   "locator_resets": 0,
+   "members": 0,
+   "leaf_list_leaves": 0,
+   "fallback_leaves": 0,
+   "row_walk_leaves": 0,
+   "kd_order_builds": 0,
+   "bp_kernel": "LeafList"
+  },
+  "fail": []
+ },
+ "RT500": {
+  "hash": "0x6cbe24bf8fafda26",
+  "known": "0x6cbe24bf8fafda26",
+  "recorded_by": "tip@W1 500 steps",
+  "args": [
+   "--scene",
+   "rest",
+   "--cfg",
+   "default",
+   "--sleeping",
+   "off"
+  ],
+  "sha256": "11b83951c3eb8680023b3da576b5898f65f05f83bec3e544f108c4609cddf187",
+  "equal_to_window_8b_bytes": true,
+  "tree_diag": {
+   "static_rebuilds": 1,
+   "sleeper_rebuilds": 0,
+   "evictions": 0,
+   "translations": 0,
+   "patches": 0,
+   "hint_candidates": 0,
+   "wide_rows": 0,
+   "excluded_rows": 0,
+   "locator_resets": 0,
+   "members": 1,
+   "leaf_list_leaves": 77500,
+   "fallback_leaves": 2,
+   "row_walk_leaves": 0,
+   "kd_order_builds": 0,
+   "bp_kernel": "LeafList"
+  },
+  "fail": []
+ },
+ "S16500": {
+  "hash": "0x4470add61a854f4c",
+  "known": null,
+  "recorded_by": "tip@W1 500 steps",
+  "args": [
+   "--scene",
+   "s16",
+   "--cfg",
+   "default",
+   "--sleeping",
+   "off",
+   "--broadphase",
+   "allpairs"
+  ],
+  "sha256": "4bf5e1611e10d4adafe21e3cfba0fff23c19366c0580ddb4921e6ffe87bf0636",
+  "equal_to_window_8b_bytes": null,
+  "tree_diag": {
+   "static_rebuilds": 0,
+   "sleeper_rebuilds": 0,
+   "evictions": 0,
+   "translations": 0,
+   "patches": 0,
+   "hint_candidates": 0,
+   "wide_rows": 0,
+   "excluded_rows": 0,
+   "locator_resets": 0,
+   "members": 0,
+   "leaf_list_leaves": 0,
+   "fallback_leaves": 0,
+   "row_walk_leaves": 0,
+   "kd_order_builds": 0,
+   "bp_kernel": "LeafList"
+  },
+  "fail": []
+ }
+}

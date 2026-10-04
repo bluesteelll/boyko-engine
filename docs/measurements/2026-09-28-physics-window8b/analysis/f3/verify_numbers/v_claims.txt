@@ -1,0 +1,138 @@
+=== R1: F3-TD-armed-kd W1 t_q <= 186 us (constant bar; claim needs |m/b-1| > 2i and > 2s, r = STRONG)
+   pooled: 167.88 us [164.17-169.45] K=9 r 3.14 i 1.03 s 0.41 % m/bar 0.9026 (-9.74 %) YYY bars r 6.28 i 2.06 s 0.82
+   c_q = t_q / 1240 = 135.38 ns
+   pass 0: 167.88 us [164.17-168.34] K=3 r 2.48 i 1.24 s 0.98 % m/bar 0.9026 (-9.74 %) YYY bars r 4.96 i 2.48 s 1.97
+   pass 1: 167.87 us [166.61-169.10] K=3 r 1.49 i 0.74 s 0.54 % m/bar 0.9025 (-9.75 %) YYY bars r 2.97 i 1.49 s 1.08
+   pass 2: 168.03 us [165.99-169.45] K=3 r 2.06 i 1.03 s 0.75 % m/bar 0.9034 (-9.66 %) YYY bars r 4.12 i 2.06 s 1.50
+
+=== R2: t_q kd / leaflist < 1 at W1 (TD)
+R2 t_q: A=F3-TD-armed-leaflist B=F3-TD-armed-kd W1
+   A pooled 201.98 [198.97-205.39] K=8 r 3.18 i 1.40 s 0.48 %
+   B pooled 167.88 [164.17-169.45] K=9 r 3.14 i 1.03 s 0.41 %
+   pooled  ratio 0.8312 (-16.88 %) YYY bars r 8.94 i 3.48 s 1.27 % K 8/9  d -34.099
+   pass 0: A K3 202.771 B K3 167.877 ratio 0.8279 (-17.21 %) YYY bars r 6.95 i 3.47 s 2.64 % K 3/3 | kmin2 YYY dir ok
+   pass 1: A K2 201.976 B K3 167.868 ratio 0.8311 (-16.89 %) nnn bars r 3.15 i 1.57 s 1.25 % K 2/3 | kmin2 YYY dir ok
+   pass 2: A K3 199.192 B K3 168.025 ratio 0.8435 (-15.65 %) YYY bars r 6.17 i 3.09 s 2.40 % K 3/3 | kmin2 YYY dir ok
+   => pooled i&s True  LETTER False  K2 True  CLEAN(full passes only, 2 gate) True  pooled r True
+
+=== R3a: t_qb kd < leaflist at W1 (TD)
+R3a t_qb: A=F3-TD-armed-leaflist B=F3-TD-armed-kd W1
+   A pooled 225.26 [221.89-229.11] K=8 r 3.21 i 2.02 s 0.53 %
+   B pooled 218.81 [214.01-220.85] K=9 r 3.13 i 1.04 s 0.41 %
+   pooled  ratio 0.9714 (-2.86 %) nnY bars r 8.96 i 4.55 s 1.34 % K 8/9  d -6.451
+   pass 0: A K3 226.098 B K3 218.810 ratio 0.9678 (-3.22 %) nnY bars r 7.68 i 3.84 s 2.90 % K 3/3 | kmin2 nnY dir ok
+   pass 1: A K2 225.591 B K3 218.641 ratio 0.9692 (-3.08 %) nnn bars r 4.04 i 2.02 s 1.81 % K 2/3 | kmin2 nYY dir ok
+   pass 2: A K3 222.116 B K3 220.057 ratio 0.9907 (-0.93 %) nnn bars r 5.42 i 2.71 s 2.17 % K 3/3 | kmin2 nnn dir ok
+   => pooled i&s False  LETTER False  K2 False  CLEAN(full passes only, 2 gate) False  pooled r False
+
+=== R3b: t_qb kd not claimed slower at W8 (TD)
+R3b t_qb (kd slower?): A=F3-TD-armed-leaflist B=F3-TD-armed-kd W8
+   A pooled 230.62 [225.27-236.66] K=9 r 4.94 i 1.62 s 0.64 %
+   B pooled 229.22 [220.00-234.14] K=9 r 6.17 i 2.23 s 0.86 %
+   pooled  ratio 0.9940 (-0.60 %) nnn bars r 15.80 i 5.51 s 2.14 % K 9/9  d -1.391
+   pass 0: A K3 231.600 B K3 232.017 ratio 1.0018 (+0.18 %) nnn bars r 12.32 i 6.16 s 4.80 % K 3/3 | kmin2 nnn dir ok
+   pass 1: A K3 228.986 B K3 226.907 ratio 0.9909 (-0.91 %) nnn bars r 5.05 i 2.53 s 1.85 % K 3/3 | kmin2 nnn dir OPPOSITE
+   pass 2: A K3 225.948 B K3 231.532 ratio 1.0247 (+2.47 %) nnn bars r 10.71 i 5.35 s 4.30 % K 3/3 | kmin2 nnn dir ok
+   => pooled i&s False  LETTER False  K2 False  CLEAN(full passes only, 3 gate) False  pooled r False
+
+=== R3c: F3-JT / F3-RT walls [0,500) kd not claimed slower at any W
+R3c JT wall (kd slower?): A=F3-JT-leaflist B=F3-JT-kd W1
+   A pooled 4.64 [4.54-4.94] K=9 r 8.62 i 2.25 s 1.21 %
+   B pooled 4.63 [4.52-4.73] K=9 r 4.38 i 1.34 s 0.56 %
+   pooled  ratio 0.9981 (-0.19 %) nnn bars r 19.34 i 5.23 s 2.67 % K 9/9  d -0.009
+   pass 0: A K3 4.663 B K3 4.590 ratio 0.9843 (-1.57 %) nnn bars r 16.35 i 8.17 s 6.14 % K 3/3 | kmin2 nnn dir OPPOSITE
+   pass 1: A K3 4.636 B K3 4.652 ratio 1.0035 (+0.35 %) nnn bars r 7.05 i 3.53 s 2.64 % K 3/3 | kmin2 nnn dir ok
+   pass 2: A K3 4.577 B K3 4.639 ratio 1.0135 (+1.35 %) nnn bars r 12.98 i 6.49 s 5.11 % K 3/3 | kmin2 nnn dir ok
+   => pooled i&s False  LETTER False  K2 False  CLEAN(full passes only, 3 gate) False  pooled r False
+R3c JT wall (kd slower?): A=F3-JT-leaflist B=F3-JT-kd W2
+   A pooled 3.16 [3.12-3.23] K=8 r 3.43 i 1.64 s 0.55 %
+   B pooled 3.16 [3.09-3.36] K=9 r 8.48 i 3.06 s 1.14 %
+   pooled  ratio 1.0022 (+0.22 %) nnn bars r 18.30 i 6.94 s 2.54 % K 8/9  d +0.007
+   pass 0: A K3 3.119 B K3 3.219 ratio 1.0321 (+3.21 %) nnn bars r 12.93 i 6.46 s 5.06 % K 3/3 | kmin2 nnn dir ok
+   pass 1: A K3 3.149 B K3 3.124 ratio 0.9922 (-0.78 %) nnn bars r 5.45 i 2.72 s 1.97 % K 3/3 | kmin2 nnn dir OPPOSITE
+   pass 2: A K2 3.183 B K3 3.122 ratio 0.9811 (-1.89 %) nnn bars r 10.26 i 5.13 s 4.29 % K 2/3 | kmin2 nnn dir OPPOSITE
+   => pooled i&s False  LETTER False  K2 False  CLEAN(full passes only, 2 gate) False  pooled r False
+R3c JT wall (kd slower?): A=F3-JT-leaflist B=F3-JT-kd W4
+   A pooled 2.37 [2.27-2.38] K=8 r 4.87 i 1.39 s 0.84 %
+   B pooled 2.36 [2.26-2.39] K=8 r 5.49 i 0.74 s 0.74 %
+   pooled  ratio 0.9942 (-0.58 %) nnn bars r 14.67 i 3.14 s 2.23 % K 8/8  d -0.014
+   pass 0: A K3 2.364 B K3 2.356 ratio 0.9965 (-0.35 %) nnn bars r 7.57 i 3.78 s 2.91 % K 3/3 | kmin2 nnn dir OPPOSITE
+   pass 1: A K3 2.374 B K3 2.378 ratio 1.0015 (+0.15 %) nnn bars r 2.97 i 1.48 s 1.10 % K 3/3 | kmin2 nnn dir ok
+   pass 2: A K2 2.325 B K2 2.300 ratio 0.9890 (-1.10 %) nnn bars r 12.28 i 6.14 s 7.69 % K 2/2 | kmin2 nnn dir OPPOSITE
+   => pooled i&s False  LETTER False  K2 False  CLEAN(full passes only, 2 gate) False  pooled r False
+R3c JT wall (kd slower?): A=F3-JT-leaflist B=F3-JT-kd W8
+   A pooled 2.01 [1.89-2.08] K=8 r 9.37 i 3.27 s 1.29 %
+   B pooled 2.02 [1.91-2.05] K=9 r 6.77 i 3.11 s 0.95 %
+   pooled  ratio 1.0078 (+0.78 %) nnn bars r 23.13 i 9.02 s 3.19 % K 8/9  d +0.016
+   pass 0: A K3 2.051 B K3 2.044 ratio 0.9964 (-0.36 %) nnn bars r 7.39 i 3.70 s 2.71 % K 3/3 | kmin2 nnn dir OPPOSITE
+   pass 1: A K2 1.939 B K3 1.967 ratio 1.0147 (+1.47 %) nnn bars r 15.12 i 7.56 s 7.50 % K 2/3 | kmin2 nnn dir ok
+   pass 2: A K3 2.013 B K3 1.993 ratio 0.9902 (-0.98 %) nnn bars r 9.57 i 4.78 s 3.57 % K 3/3 | kmin2 nnn dir OPPOSITE
+   => pooled i&s False  LETTER False  K2 False  CLEAN(full passes only, 2 gate) False  pooled r False
+R3c JT wall (kd slower?): A=F3-JT-leaflist B=F3-JT-kd W16
+   A pooled 2.22 [2.14-2.36] K=8 r 9.87 i 3.27 s 1.35 %
+   B pooled 2.19 [2.14-2.33] K=8 r 8.39 i 2.93 s 1.21 %
+   pooled  ratio 0.9879 (-1.21 %) nnn bars r 25.91 i 8.77 s 3.62 % K 8/8  d -0.027
+   pass 0: A K3 2.274 B K3 2.201 ratio 0.9678 (-3.22 %) nnn bars r 13.74 i 6.87 s 5.08 % K 3/3 | kmin2 nnn dir OPPOSITE
+   pass 1: A K2 2.289 B K2 2.256 ratio 0.9855 (-1.45 %) nnn bars r 17.33 i 8.67 s 10.86 % K 2/2 | kmin2 nnn dir OPPOSITE
+   pass 2: A K3 2.210 B K3 2.171 ratio 0.9822 (-1.78 %) nnn bars r 8.89 i 4.44 s 3.60 % K 3/3 | kmin2 nnn dir OPPOSITE
+   => pooled i&s False  LETTER False  K2 False  CLEAN(full passes only, 2 gate) False  pooled r False
+R3c RT wall (kd slower?): A=F3-RT-leaflist B=F3-RT-kd W1
+   A pooled 6.69 [6.58-6.80] K=8 r 3.34 i 2.24 s 0.58 %
+   B pooled 6.67 [6.48-7.13] K=9 r 9.74 i 2.45 s 1.27 %
+   pooled  ratio 0.9968 (-0.32 %) nnn bars r 20.60 i 6.64 s 2.79 % K 8/9  d -0.021
+   pass 0: A K2 6.700 B K3 6.700 ratio 1.0000 (+0.00 %) nnn bars r 9.71 i 4.85 s 4.49 % K 2/3 | kmin2 nnn dir ok
+   pass 1: A K3 6.667 B K3 6.668 ratio 1.0001 (+0.01 %) nnn bars r 19.84 i 9.92 s 7.37 % K 3/3 | kmin2 nnn dir ok
+   pass 2: A K3 6.794 B K3 6.574 ratio 0.9676 (-3.24 %) nnY bars r 7.75 i 3.87 s 2.92 % K 3/3 | kmin2 nnY dir OPPOSITE
+   => pooled i&s False  LETTER False  K2 False  CLEAN(full passes only, 2 gate) False  pooled r False
+R3c RT wall (kd slower?): A=F3-RT-leaflist B=F3-RT-kd W2
+   A pooled 4.54 [4.43-4.66] K=9 r 5.03 i 1.73 s 0.66 %
+   B pooled 4.50 [4.46-4.55] K=8 r 1.94 i 1.30 s 0.34 %
+   pooled  ratio 0.9914 (-0.86 %) nnn bars r 10.78 i 4.33 s 1.49 % K 9/8  d -0.039
+   pass 0: A K3 4.547 B K2 4.498 ratio 0.9893 (-1.07 %) nnn bars r 10.23 i 5.12 s 3.83 % K 3/2 | kmin2 nnn dir OPPOSITE
+   pass 1: A K3 4.584 B K3 4.539 ratio 0.9903 (-0.97 %) nnn bars r 7.46 i 3.73 s 2.80 % K 3/3 | kmin2 nnn dir OPPOSITE
+   pass 2: A K3 4.514 B K3 4.484 ratio 0.9932 (-0.68 %) nnn bars r 3.02 i 1.51 s 1.22 % K 3/3 | kmin2 nnn dir OPPOSITE
+   => pooled i&s False  LETTER False  K2 False  CLEAN(full passes only, 2 gate) False  pooled r False
+R3c RT wall (kd slower?): A=F3-RT-leaflist B=F3-RT-kd W4
+   A pooled 3.32 [3.26-3.42] K=9 r 4.62 i 1.22 s 0.55 %
+   B pooled 3.28 [3.24-3.40] K=8 r 4.74 i 1.41 s 0.68 %
+   pooled  ratio 0.9884 (-1.16 %) nnn bars r 13.23 i 3.73 s 1.74 % K 9/8  d -0.039
+   pass 0: A K3 3.319 B K2 3.277 ratio 0.9873 (-1.27 %) nnn bars r 2.72 i 1.36 s 1.62 % K 3/2 | kmin2 nnn dir OPPOSITE
+   pass 1: A K3 3.348 B K3 3.271 ratio 0.9772 (-2.28 %) nnY bars r 5.74 i 2.87 s 2.18 % K 3/3 | kmin2 nnY dir OPPOSITE
+   pass 2: A K3 3.290 B K3 3.313 ratio 1.0070 (+0.70 %) nnn bars r 9.08 i 4.54 s 3.32 % K 3/3 | kmin2 nnn dir ok
+   => pooled i&s False  LETTER False  K2 False  CLEAN(full passes only, 2 gate) False  pooled r False
+R3c RT wall (kd slower?): A=F3-RT-leaflist B=F3-RT-kd W8
+   A pooled 2.81 [2.67-3.07] K=8 r 14.13 i 4.08 s 1.92 %
+   B pooled 2.79 [2.68-2.86] K=8 r 6.59 i 2.29 s 0.91 %
+   pooled  ratio 0.9927 (-0.73 %) nnn bars r 31.18 i 9.35 s 4.25 % K 8/8  d -0.021
+   pass 0: A K2 2.834 B K2 2.814 ratio 0.9929 (-0.71 %) nnn bars r 7.98 i 3.99 s 5.00 % K 2/2 | kmin2 nnn dir OPPOSITE
+   pass 1: A K3 2.791 B K3 2.789 ratio 0.9991 (-0.09 %) nnn bars r 15.92 i 7.96 s 5.83 % K 3/3 | kmin2 nnn dir OPPOSITE
+   pass 2: A K3 2.836 B K3 2.748 ratio 0.9687 (-3.13 %) nnn bars r 27.09 i 13.55 s 9.96 % K 3/3 | kmin2 nnn dir OPPOSITE
+   => pooled i&s False  LETTER False  K2 False  CLEAN(full passes only, 2 gate) False  pooled r False
+R3c RT wall (kd slower?): A=F3-RT-leaflist B=F3-RT-kd W16
+   A pooled 3.12 [3.09-3.43] K=9 r 10.88 i 0.67 s 1.43 %
+   B pooled 3.20 [3.09-3.29] K=7 r 6.28 i 5.49 s 1.37 %
+   pooled  ratio 1.0246 (+2.46 %) nnn bars r 25.12 i 11.07 s 3.96 % K 9/7  d +0.077
+   pass 0: A K3 3.120 B K2 3.274 ratio 1.0494 (+4.94 %) nnn bars r 20.99 i 10.49 s 8.54 % K 3/2 | kmin2 nnn dir ok
+   pass 1: A K3 3.102 B K3 3.102 ratio 1.0000 (-0.00 %) nnn bars r 7.41 i 3.70 s 2.88 % K 3/3 | kmin2 nnn dir OPPOSITE
+   pass 2: A K3 3.119 B K2 3.191 ratio 1.0230 (+2.30 %) nnn bars r 12.23 i 6.11 s 7.57 % K 3/2 | kmin2 nnn dir ok
+   => pooled i&s False  LETTER False  K2 False  CLEAN(full passes only, 1 gate) False  pooled r False
+
+=== context: t_b and four-span, W1 and W8 (TD)
+   W1 t_q: leaflist 201.98 (K8) kd 167.88 (K9) d -34.10 us ratio 0.8312 (-16.88 %) YYY bars r 8.94 i 3.48 s 1.27 % K 8/9
+   W1 t_b: leaflist 22.87 (K8) kd 50.92 (K9) d +28.05 us ratio 2.2263 (+122.63 %) YYY bars r 17.86 i 10.98 s 2.93 % K 8/9
+   W1 t_qb: leaflist 225.26 (K8) kd 218.81 (K9) d -6.45 us ratio 0.9714 (-2.86 %) nnY bars r 8.96 i 4.55 s 1.34 % K 8/9
+   W1 four: leaflist 259.74 (K8) kd 253.42 (K9) d -6.32 us ratio 0.9757 (-2.43 %) nnY bars r 8.46 i 4.13 s 1.28 % K 8/9
+   W8 t_q: leaflist 206.93 (K9) kd 174.63 (K9) d -32.29 us ratio 0.8439 (-15.61 %) YYY bars r 11.69 i 4.02 s 1.59 % K 9/9
+   W8 t_b: leaflist 22.29 (K9) kd 54.37 (K9) d +32.08 us ratio 2.4388 (+143.88 %) YYY bars r 34.82 i 15.05 s 4.94 % K 9/9
+   W8 t_qb: leaflist 230.62 (K9) kd 229.22 (K9) d -1.39 us ratio 0.9940 (-0.60 %) nnn bars r 15.80 i 5.51 s 2.14 % K 9/9
+   W8 four: leaflist 267.41 (K9) kd 267.15 (K9) d -0.26 us ratio 0.9990 (-0.10 %) nnn bars r 17.86 i 7.18 s 2.51 % K 9/9
+
+=== context: TA (cfg a) W1 and TR W1
+   TA W1 t_q: leaflist 209.61 [205.55-244.28] K=9 r 18.47 i 1.25 s 2.34 % | kd 172.84 [172.12-176.06] K=8 r 2.28 i 0.62 s 0.33 % | ratio 0.8246 (-17.54 %) nYY bars r 37.23 i 2.79 s 4.72 % K 9/8
+   TR W1 t_q: 405.11 [402.94-416.93] K=8 r 3.45 i 0.82 s 0.50 %
+   TA W1 t_b: leaflist 25.67 [25.41-27.25] K=9 r 7.16 i 3.07 s 1.00 % | kd 54.51 [54.23-54.86] K=8 r 1.16 i 0.30 s 0.15 % | ratio 2.1236 (+112.36 %) YYY bars r 14.51 i 6.16 s 2.03 % K 9/8
+   TR W1 t_b: 23.03 [22.16-23.86] K=8 r 7.38 i 1.67 s 0.98 %
+   TA W1 t_qb: leaflist 235.47 [231.78-272.39] K=9 r 17.25 i 1.09 s 2.22 % | kd 228.00 [227.07-230.88] K=8 r 1.67 i 0.51 s 0.24 % | ratio 0.9683 (-3.17 %) nYn bars r 34.65 i 2.41 s 4.46 % K 9/8
+   TR W1 t_qb: 428.36 [425.16-440.67] K=8 r 3.62 i 0.72 s 0.51 %
+   TA W1 four: leaflist 272.52 [268.25-317.00] K=9 r 17.89 i 0.51 s 2.33 % | kd 264.47 [263.19-267.48] K=8 r 1.62 i 0.49 s 0.22 % | ratio 0.9705 (-2.95 %) nYn bars r 35.93 i 1.41 s 4.67 % K 9/8
+   TR W1 four: 462.86 [459.18-475.80] K=8 r 3.59 i 0.71 s 0.50 %

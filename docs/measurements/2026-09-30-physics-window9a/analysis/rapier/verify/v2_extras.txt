@@ -1,0 +1,25 @@
+stricter Rapier checks (V4 sources/features/lanes, V5 config == pins config_timed, V6 spawn hash present, V7 pose_hash, V9 twin_ok): 0 of 214 processes fail
+
+== post hoc A/A: J-T#tip (A) vs J-D#tip (B), ruling-1 flags (EXCL = skip K<3 passes)
+  [100,500) W1: J-T 4.3622 J-D 4.3504 B/A 0.9973 (-0.27 %) nnn; p0nnn(K1/1) p1nnn(K3/3) p2nnn(K3/3) -> EXCL NOT CLAIMED
+  [100,500) W8: J-T 1.8102 J-D 1.7878 B/A 0.9876 (-1.24 %) nnn; p0nnn(K1/1) p1nnn(K3/3) p2nnn(K3/3) -> EXCL NOT CLAIMED
+  [100,500) W16: J-T 2.0181 J-D 2.0486 B/A 1.0152 (+1.52 %) nnn; p0nnn(K1/3) p1nnn(K3/3) p2nnn(K3/3) -> EXCL NOT CLAIMED
+  [0,100) W1: J-T 5.5164 J-D 5.5295 B/A 1.0024 (+0.24 %) nnn; p0nnn(K1/1) p1nnn(K3/3) p2nnn(K3/3) -> EXCL NOT CLAIMED
+  [0,100) W8: J-T 2.0022 J-D 2.0064 B/A 1.0021 (+0.21 %) nnn; p0nnn(K1/1) p1nnn(K3/3) p2nnn(K3/3) -> EXCL NOT CLAIMED
+  [0,100) W16: J-T 2.2264 J-D 2.2302 B/A 1.0017 (+0.17 %) nnn; p0nnn(K1/3) p1nnn(K3/3) p2nnn(K3/3) -> EXCL NOT CLAIMED
+
+== RP-D rs8 W1, [100,500), every used process by pass/round (ms; receipts before/after/witness)
+  p0 r0 original: 5.0006  (1.11 / 0.69 / 0.20)
+  p0 r1 original: 5.4465  (2.21 / 1.84 / 0.44)
+  p0 r2 original: 5.4518  (1.47 / 0.82 / 1.44)
+  p1 r0 original: 4.8830  (0.77 / 1.13 / 0.33)
+  p1 r1 rerun: 4.9213  (0.22 / 0.85 / 0.29)
+  p1 r2 original: 5.0498  (0.67 / 0.43 / 0.40)
+  p2 r0 original: 4.8938  (1.00 / 0.31 / 0.41)
+  p2 r1 original: 4.8375  (0.78 / 1.99 / 0.29)
+  p2 r2 original: 4.8715  (0.94 / 1.06 / 0.25)
+
+== C4-AB p0 unclean attribution (J-T/J-D/jolt56 rows): top other process of the witness, and of the after-receipt when that flagged
+  witness top: {'Telegram.exe': 21, 'claude.exe': 7, 'browser.exe': 4, 'CurseForge.exe': 3}
+  after-receipt top: {'Telegram.exe': 3, 'claude.exe': 7, 'browser.exe': 3}
+  union per process: {'Telegram.exe': 23, 'claude.exe': 12, 'browser.exe': 6, 'CurseForge.exe': 3}

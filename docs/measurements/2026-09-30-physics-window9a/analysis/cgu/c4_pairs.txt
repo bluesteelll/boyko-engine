@@ -1,0 +1,28 @@
+W1 (pass, round): cgu16 ms, cgu1 ms, cgu1/cgu16, attempts
+  paired ratio: median 0.9937, IQR 0.40 %, min 0.9851, max 1.0159 (n=9)
+W2 (pass, round): cgu16 ms, cgu1 ms, cgu1/cgu16, attempts
+  paired ratio: median 1.0009, IQR 0.28 %, min 0.9655, max 1.0261 (n=9)
+W4 (pass, round): cgu16 ms, cgu1 ms, cgu1/cgu16, attempts
+  paired ratio: median 0.9988, IQR 0.94 %, min 0.9825, max 1.0126 (n=9)
+W8 (pass, round): cgu16 ms, cgu1 ms, cgu1/cgu16, attempts
+  p0 r0: 1.9096 1.9162 1.0034 o/o
+  p0 r1: 1.8188 1.8289 1.0055 o/o
+  p0 r2: 1.8981 1.8699 0.9851 o/o
+  p1 r0: 1.8029 1.8046 1.0009 o/o
+  p1 r1: 1.8379 1.8169 0.9886 r/r
+  p1 r2: 1.8897 1.9012 1.0061 o/o
+  p2 r0: 1.8884 1.8926 1.0022 o/o
+  p2 r1: 1.8071 1.8004 0.9963 o/o
+  p2 r2: 1.8888 1.8948 1.0032 o/o
+  paired ratio: median 1.0022, IQR 0.71 %, min 0.9851, max 1.0061 (n=9)
+W16 (pass, round): cgu16 ms, cgu1 ms, cgu1/cgu16, attempts
+  p0 r0: 2.1576 2.1201 0.9826 r/r
+  p0 r1: 2.1030 2.1419 1.0185 o/o
+  p0 r2: 2.1982 2.1986 1.0002 r/o
+  p1 r0: 2.1178 2.1180 1.0001 o/o
+  p1 r1: 2.0734 2.1705 1.0468 r/o
+  p1 r2: 2.2025 2.2191 1.0075 r/r
+  p2 r0: 2.1488 2.2052 1.0262 r/o
+  p2 r1: 2.2059 2.1348 0.9678 r/o
+  p2 r2: 2.2116 2.2096 0.9991 o/r
+  paired ratio: median 1.0002, IQR 1.94 %, min 0.9678, max 1.0468 (n=9)

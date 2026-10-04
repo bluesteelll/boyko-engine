@@ -1,0 +1,20 @@
+p0: witness median over ALL processes 2.15 % (n=140)
+p1: witness median over ALL processes 0.43 % (n=105)
+p2: witness median over ALL processes 1.06 % (n=134)
+re-run waves p0: Counter({1: 38})
+re-run waves p2: Counter({1: 20, 2: 7, 3: 3, 4: 2})
+p0 slots with unclean original: 74
+re-runs used 50: median ratio to cell originals 1.0378; above 45
+   p0: n=28 median 1.0364
+   p1: n=2 median 0.9990
+   p2: n=20 median 1.0551
+control originals leave-one-out: n=210 median 0.9996; above 100
+Jolt W16 used: [(2.344, 2, 'original'), (2.3603, 2, 'original'), (2.3606, 1, 'original'), (2.4323, 0, 'original'), (2.4535, 1, 'original'), (2.8361, 1, 'original'), (2.9158, 0, 'rerun'), (2.9189, 0, 'rerun'), (2.9357, 2, 'rerun')]
+paired rounds (JD#tip vs jolt56, same pass+round, both originals used, |seq diff|==1):
+  W1: pairs 5 (adjacent 5); ours faster 5/5; median 0.474
+  W2: pairs 7 (adjacent 7); ours faster 7/7; median 0.526
+  W4: pairs 6 (adjacent 6); ours faster 6/6; median 0.608
+  W8: pairs 5 (adjacent 5); ours faster 5/5; median 0.723
+  W16: pairs 6 (adjacent 6); ours faster 6/6; median 0.864
+T16 vs T8 C4-JD: B/A 1.1428 (+14.28 %, B-A +0.2610) pooled YYn (bars i 12.27 s 5.18 r 31.92) passes p0:nnn(sep)(K1/3) p1:YYY(sep)(K3/3) p2:nYn(sep)(K3/3) -> NOT CLAIMED [B>A]
+T16 vs T8 C4-jolt56: B/A 0.9693 (-3.07 %, B-A -0.0776) pooled nnn (bars i 45.57 s 10.02 r 52.21) passes p0:nnn(K0/3) p1:nnn(K3/3) p2:nnn(K3/3) -> NOT CLAIMED [B<A]

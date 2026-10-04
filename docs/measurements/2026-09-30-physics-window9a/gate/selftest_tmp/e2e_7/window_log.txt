@@ -1,0 +1,16 @@
+2026-10-01T03:07:25.999+03:00 WINDOW START cutoff 2026-10-01T23:59:00 blocks ['RERUN-T'] test True resume False
+2026-10-01T03:07:26.214+03:00 RERUN-T-p0: idle rule (wait_idle9a.ps1, up to 30 polls)
+2026-10-01T03:07:26.224+03:00 RERUN-T-p0: idle reached; {'time': '2026-10-01T03:07:26.224+03:00', 'powercfg': 'Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)'}
+2026-10-01T03:07:26.781+03:00 RERUN-T-p0: opening receipt 14.17% (build procs busy [], presence {'build': [], 'lane': []})
+2026-10-01T03:07:27.422+03:00   RERUN-T-p0 r0 [  1] RR-a#tip W=1: pose 0x3c1f644743b89079 expect none rb 14.17% ra 14.99% others 18.12% exit 0 waited 0.0s CONTAMINATED-before(14.17%) CONTAMINATED-after(14.99%) OTHERS-BUSY(18.12%)
+2026-10-01T03:07:28.069+03:00   RERUN-T-p0 r1 [  2] RR-a#tip W=1: pose 0x3c1f644743b89079 expect none rb 14.99% ra 28.52% others 22.17% exit 0 waited 0.0s CONTAMINATED-before(14.99%) CONTAMINATED-after(28.52%) OTHERS-BUSY(22.17%)
+2026-10-01T03:07:28.737+03:00   RERUN-T-p0 r2 [  3] RR-a#tip W=1: pose 0x3c1f644743b89079 expect none rb 28.52% ra 21.72% others 31.4% exit 0 waited 0.0s CONTAMINATED-before(28.52%) CONTAMINATED-after(21.72%) OTHERS-BUSY(31.4%)
+2026-10-01T03:07:28.738+03:00 RERUN-T-p0: re-run wave 1: 1 slot(s) unclean: [(1, 'RR-a', 'tip', 1, 'contaminated')]
+2026-10-01T03:07:29.389+03:00   RERUN-T-p0 r1 [  2] RR-a#tip W=1 RERUN 1 (contaminated): pose 0x3c1f644743b89079 expect none rb 21.72% ra 18.86% others 21.23% exit 0 waited 0.0s CONTAMINATED-before(21.72%) CONTAMINATED-after(18.86%) OTHERS-BUSY(21.23%)
+2026-10-01T03:07:29.389+03:00 RERUN-T-p0: re-run wave 2: 1 slot(s) unclean: [(1, 'RR-a', 'tip', 1, 'contaminated')]
+2026-10-01T03:07:30.044+03:00   RERUN-T-p0 r1 [  2] RR-a#tip W=1 RERUN 2 (contaminated): pose 0x3c1f644743b89079 expect none rb 18.86% ra 21.48% others 36.97% exit 0 waited 0.0s CONTAMINATED-before(18.86%) CONTAMINATED-after(21.48%) OTHERS-BUSY(36.97%)
+2026-10-01T03:07:30.044+03:00 RERUN-T-p0: re-run wave 3: 1 slot(s) unclean: [(1, 'RR-a', 'tip', 1, 'contaminated')]
+2026-10-01T03:07:30.695+03:00   RERUN-T-p0 r1 [  2] RR-a#tip W=1 RERUN 3 (contaminated): pose 0x3c1f644743b89079 expect none rb 21.48% ra 19.37% others 31.25% exit 0 waited 0.0s CONTAMINATED-before(21.48%) CONTAMINATED-after(19.37%) OTHERS-BUSY(31.25%)
+2026-10-01T03:07:30.695+03:00 RERUN-T-p0: re-run stage ended after 3 wave(s); 0 pass-cell(s) short of their slots (k_clean < k_target; K < 3 does not gate): []
+2026-10-01T03:07:30.695+03:00 RERUN-T-p0: done
+2026-10-01T03:07:30.734+03:00 WINDOW END exit 0: complete; counters {'timed': 6, 'rerun': 3, 'warm': 0, 'voided_processes': 0}; binaries after all match
