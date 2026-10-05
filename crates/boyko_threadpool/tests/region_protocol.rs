@@ -366,8 +366,9 @@ fn t7_the_stall_census_is_armed_only() {
     }
 }
 
-/// T8's hand-built hints: every one a value the safe API builds (`SchedItem::new`, then
-/// `RegionFrame::new` and `ThreadPool::region`, none of which rejects it).
+/// T8's hand-built hints: every one a value the public API builds and accepts (`SchedItem::new`,
+/// then `RegionFrame::new` and `ThreadPool::region`, none of which rejects it). Hints are no part
+/// of `RegionFrame::new`'s storage contract, so its `unsafe` excludes none of them.
 #[derive(Clone, Copy, Debug)]
 enum Hint {
     /// Item `i` ← `SchedItem::new(0, Some(i))`: the item's OWN epoch `g`. Before the fix, a
