@@ -138,22 +138,35 @@ impl Frame {
         link_hints(&mut self.schedule, &mut last);
     }
 
-    /// This frame borrowed as a region frame for `participants`.
+    /// This frame borrowed as a region frame for a region that runs policy `P` with
+    /// `participants` participants.
+    ///
+    /// The claim layout and the schedule's entries ([`RegionFrame::new`]'s "sized for its
+    /// schedule" condition, beyond the receipt and done counts `RegionFrame::new` asserts itself)
+    /// are checked here, not assumed: `assert_table_fits` panics unless the installed table is
+    /// laid out for `P` at `participants`. A table laid out by `set_table` for another policy or
+    /// participant count than the region runs is the test's own bug.
     ///
     /// # Safety
     ///
-    /// [`RegionFrame::new`]'s storage contract, for this `Frame`: its line columns and its `epoch`
-    /// have stayed this `Frame`'s own since [`Frame::new`] built them together — no column or
-    /// counter was moved in from, or shared with, another `Frame`, and the counter was never
-    /// rewound — and `participants` is at most the receipt lines it was built with. Rewriting a
-    /// line's CONTENTS between regions (as the F-FRAME failure-B test does with the sync line)
-    /// keeps the contract: the storage is still this `Frame`'s alone.
-    pub unsafe fn region_frame(&mut self, participants: u32) -> RegionFrame<'_> {
-        // SAFETY: the caller guarantees the columns and the counter are still this Frame's own
-        // (above). `Frame::new` built them together, as zero lines and a zero counter, so every
-        // claim epoch starts at or below the counter, and `open` only ever raises the counter past
-        // what a region writes. `set_table` laid the claim lines out for the policy and
-        // participant count of the table and asserted that the claim and done columns hold them;
+    /// [`RegionFrame::new`]'s storage contract, for this `Frame`:
+    ///
+    /// * its line columns and its `epoch` have stayed this `Frame`'s own since [`Frame::new`]
+    ///   built them together — no column or counter was moved in from, or shared with, another
+    ///   `Frame`, and the counter was never rewound;
+    /// * the region the returned frame is given to runs `P`: the layout is checked for `P` only,
+    ///   so a region under another policy could run over claim lines not laid out for it.
+    ///
+    /// Rewriting a line's CONTENTS between regions (as the F-FRAME failure-B test does with the
+    /// sync line) keeps the contract: the storage is still this `Frame`'s alone.
+    pub unsafe fn region_frame<P: RegionPolicy>(&mut self, participants: u32) -> RegionFrame<'_> {
+        self.assert_table_fits::<P>(participants);
+        // SAFETY: the caller guarantees the columns and the counter are still this Frame's own and
+        // that the region runs `P` (above). `Frame::new` built them together, as zero lines and a
+        // zero counter, so every claim epoch starts at or below the counter, and `open` only ever
+        // raises the counter past what a region writes. `assert_table_fits::<P>` (above) checked
+        // that every entry's claim lines for `P` at `participants` lie inside the claim column and
+        // belong to that entry alone, and that every item names an entry of the table;
         // `RegionFrame::new` itself asserts the receipt and done line counts. The four groups are
         // borrowed `&mut` from `self` for the frame's lifetime, so no other frame is over them
         // while it lives.
@@ -170,6 +183,48 @@ impl Frame {
                 &mut self.epoch,
                 participants,
             )
+        }
+    }
+
+    /// Panics unless the installed table is laid out for policy `P` at `participants`: every
+    /// entry's [`claim_lines`] lines from its `first_claim` lie inside the claim column and share
+    /// no line with another entry's, and every scheduled item names an entry of the table.
+    fn assert_table_fits<P: RegionPolicy>(&self, participants: u32) {
+        let mut ranges: Vec<(usize, usize, usize)> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(e, entry)| {
+                let need = claim_lines::<P>(entry.n_blocks, participants) as usize;
+                let first = entry.first_claim as usize;
+                (need > 0).then_some((first, first + need, e))
+            })
+            .collect();
+        ranges.sort_unstable();
+        for &(first, end, e) in &ranges {
+            assert!(
+                end <= self.claims.len(),
+                "test frame: entry {e}'s claim lines {first}..{end} pass the column's {}",
+                self.claims.len()
+            );
+        }
+        // Sorted by first line, the ranges are pairwise disjoint iff each ends before the next.
+        for pair in ranges.windows(2) {
+            let ((first_a, end_a, a), (first_b, end_b, b)) = (pair[0], pair[1]);
+            assert!(
+                end_a <= first_b,
+                "test frame: entries {a} ({first_a}..{end_a}) and {b} ({first_b}..{end_b}) share claim \
+                 lines under this policy at {participants} participants — the table was laid out for \
+                 another policy or participant count than the region runs"
+            );
+        }
+        for (i, item) in self.schedule.iter().enumerate() {
+            assert!(
+                usize::from(item.entry) < self.entries.len(),
+                "test frame: item {i} names entry {} of {}",
+                item.entry,
+                self.entries.len()
+            );
         }
     }
 
@@ -497,14 +552,14 @@ fn run_on<P: RegionPolicy, const ARMED: bool>(
     participants: u32,
 ) -> (std::thread::Result<RegionReport>, Duration) {
     let t = Instant::now();
-    let r = catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: `frame` is the test's own `Frame`, built by `Frame::new` and moved by value
-        // through `run_region` from region to region. No test moves a column or the counter in
-        // from another `Frame` or rewinds the counter (tests only read the columns and install
-        // tables), and every test sizes its receipts for its participant count.
-        let frame = unsafe { frame.region_frame(participants) };
-        inner.region::<Stages, P, ARMED>(frame, stages)
-    }));
+    // Outside `catch_unwind`: a table that does not fit `P` panics the test as a setup bug, never
+    // reads as a poisoned region.
+    // SAFETY: `frame` is the test's own `Frame`, built by `Frame::new` and moved by value through
+    // `run_region` from region to region. No test moves a column or the counter in from another
+    // `Frame` or rewinds the counter (tests only read the columns and install tables). The region
+    // below runs the same `P` this frame's layout is checked for.
+    let frame = unsafe { frame.region_frame::<P>(participants) };
+    let r = catch_unwind(AssertUnwindSafe(|| inner.region::<Stages, P, ARMED>(frame, stages)));
     (r, t.elapsed())
 }
 
@@ -552,12 +607,16 @@ pub fn run_threads<P: RegionPolicy, const ARMED: bool>(
     participants: u32,
 ) -> Ran {
     let t = Instant::now();
-    let result = catch_unwind(AssertUnwindSafe(|| {
+    let result = {
+        // Outside `catch_unwind`, as in `run_on`.
         // SAFETY: as in `run_on`: `frame` is the test's own `Frame`, moved by value from region
         // to region; no test mixes in another `Frame`'s columns or counter or rewinds the counter.
-        let region_frame = unsafe { frame.region_frame(participants) };
-        boyko_threadpool::region_on_threads::<Stages, P, ARMED>(region_frame, &stages)
-    }));
+        // The region below runs the same `P` this frame's layout is checked for.
+        let region_frame = unsafe { frame.region_frame::<P>(participants) };
+        catch_unwind(AssertUnwindSafe(|| {
+            boyko_threadpool::region_on_threads::<Stages, P, ARMED>(region_frame, &stages)
+        }))
+    };
     Ran { frame, stages, result, orchestrator_id: u32::MAX, wall: t.elapsed() }
 }
 

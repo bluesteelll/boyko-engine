@@ -49,8 +49,10 @@ The frame is plain data the caller owns — the physics solver keeps it in its R
   column handed to two owners in turn, short columns) may hang the region or panic; with B1 (§1.3) it can no longer
   make two items overlap or run a block twice. Two frames live over the same lines at once would need two `&mut`
   borrows of them, which the borrow checker refuses. Every caller carries a `// SAFETY:` naming why the contract holds — the test harness's `Frame` (one value
-  owning its columns and counter, `region_frame` itself an `unsafe fn` forwarding the contract), the ω_b v3 bench's
-  `Frame3` — and Phase B's caller derives it from the solver Resource's exclusively owned `ScratchColumn`s.
+  owning its columns and counter; `region_frame::<P>` is an `unsafe fn` that asserts the table's claim layout for the
+  region's policy `P` and forwards the rest of the contract — ownership, the counter, and that the region runs `P`),
+  the ω_b v3 bench's `Frame3` — and Phase B's caller derives it from the solver Resource's exclusively owned
+  `ScratchColumn`s.
 - **Four separate groups, never one merged column** (critique r1 W3(b)): a merged column would let a done or
   receipt value be read as a claim epoch when the table or P changes size.
 - The stage table (`StageEntry`, 16 B: `n_blocks`, `first_claim`, and the caller's opaque `kind`, `color`,

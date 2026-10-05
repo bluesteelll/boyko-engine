@@ -442,8 +442,9 @@ fn frame_b_region<S: RegionStages>(
                 // the sync line's CONTENTS (`RegionLine::ZERO`): the same storage, still this
                 // frame's alone, so the contract holds — and the state that leaves (a poisoned
                 // region's count on line 0, no poison to show for it) is the input this test feeds
-                // the region on purpose. `set_table` laid the claim lines out for `V2Policy` at P = 2.
-                let region_frame = unsafe { frame.region_frame(2) };
+                // the region on purpose. The region below runs `V2Policy`, the policy
+                // `region_frame` checks the table's claim layout for.
+                let region_frame = unsafe { frame.region_frame::<V2Policy>(2) };
                 inner.region::<S, V2Policy, false>(region_frame, stages)
             }))
         })

@@ -475,10 +475,9 @@ fn hint_regions<P: RegionPolicy>(p: u32, hint: Hint, regions: u32) -> Result<u64
         let report = catch_unwind(AssertUnwindSafe(|| {
             // SAFETY: `frame` was built above by `Frame::new` and is only ever this loop's: its
             // columns and counter were never mixed with another `Frame`'s, and the counter only
-            // grows. `set_table` laid its claim lines out for `P` at `p` participants and sized the
-            // columns; the hand-built schedule names only the entries it laid out; the receipts
-            // were built for `p`.
-            let region_frame = unsafe { frame.region_frame(p) };
+            // grows. The region below runs `P`, the policy `region_frame` checks the table's claim
+            // layout and the hand-built schedule's entries for.
+            let region_frame = unsafe { frame.region_frame::<P>(p) };
             pool.install(|_| pool.region::<HintStages, P, false>(region_frame, &stages))
         }))
         .map_err(|e| format!("region {r} panicked: {}", payload_text(&*e)))?;
@@ -551,20 +550,25 @@ fn t8_a_hint_that_names_no_earlier_item_is_no_hint() {
 #[test]
 fn threads_t1_t2_exactly_once_and_visibility() {
     use region_common::run_threads;
+    fn leg<P: RegionPolicy, const ARMED: bool>(blocks: &[u16], order: &[u16], p: u32) -> Ran {
+        let mut frame = Frame::new(blocks.len(), p as usize, blocks.len() * 8 * p as usize);
+        frame.set_table::<P>(blocks, order, p, 0);
+        let stages = Arc::new(Stages::new(&frame).with_work(Duration::from_micros(2)));
+        run_threads::<P, ARMED>(frame, stages, p)
+    }
     let mut helper_blocks = 0u64;
     for p in [2u32, 3] {
         for shape in [2u32, 3] {
             let mut rng = Rng(0x5EED ^ (u64::from(p) * 131 + u64::from(shape)));
             let (blocks, order) = random_table(&mut rng, p, shape);
             for armed in [false, true] {
-                let mut frame = Frame::new(blocks.len(), p as usize, blocks.len() * 8 * p as usize);
-                frame.set_table::<AllAxesPolicy>(&blocks, &order, p, 0);
-                let stages = Arc::new(Stages::new(&frame).with_work(Duration::from_micros(2)));
                 let what = format!("threads P{p} shape {shape} armed {armed} blocks {blocks:?} order {order:?}");
+                // Each leg lays its table out for the policy it runs: `AllAxesPolicy` (home lines,
+                // one claim line per participant) and `TestPolicy` (one per block) differ.
                 let ran = if armed {
-                    run_threads::<AllAxesPolicy, true>(frame, stages, p)
+                    leg::<AllAxesPolicy, true>(&blocks, &order, p)
                 } else {
-                    run_threads::<TestPolicy, false>(frame, stages, p)
+                    leg::<TestPolicy, false>(&blocks, &order, p)
                 };
                 check_report(&ran, p, &what);
                 ran.stages.assert_exactly_once(&ran.frame, &what);
