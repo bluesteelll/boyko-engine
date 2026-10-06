@@ -1203,6 +1203,12 @@ const _: () = assert!(core::mem::offset_of!(Scope<'static>, block) == 16);
 impl<'scope> Scope<'scope> {
     #[inline]
     pub(crate) fn new(inner: &'scope PoolInner, shared: Box<ScopeShared>) -> Self {
+        // SR: a liveness rule, not hygiene — this join could run the enclosing region's own queued
+        // helper task, which then waits for a publish the participant inside this block cannot make.
+        debug_assert!(
+            !crate::region::in_region_block(),
+            "a pool scope or install was opened inside a region block: its join can run this region's own helper task, which waits for a publish that cannot come"
+        );
         // Cold path: runs single-threaded before any task is spawned, so the
         // conversion never races a worker. `Box::into_raw` hands ownership of
         // the allocation to this `NonNull`; `Scope::drop` reclaims it.
