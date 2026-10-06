@@ -2999,9 +2999,11 @@ impl ColoredSoftStepSolver {
             .any(|(row, b)| is_dynamic_row(b.inv_mass) && sleep.is_row_awake(row))
     }
 
-    /// Applies every contact point's seeded accumulated impulse to both bodies'
-    /// velocities (the warm-start apply, run once per substep after gravity) — the
-    /// D7 dispatch fork, the SINGLE site that chooses the apply's shape.
+    /// Applies the seeded accumulated impulse of every contact point of cohorts `[k_lo, k_hi)` to
+    /// both bodies' velocities (the warm-start apply, run once per substep after gravity) — the
+    /// D7 dispatch fork, the SINGLE site that chooses the apply's shape. The serial step passes
+    /// every cohort; the cohorts are walked in order, so applying `[0, k)` then `[k, n)` is the
+    /// whole apply, add for add.
     ///
     /// - `simd == false`, or a non-AVX2 build →
     ///   [`warm_apply_scalar`](Self::warm_apply_scalar), the group-major oracle.
@@ -3019,6 +3021,8 @@ impl ColoredSoftStepSolver {
         cols: &CohortColumns,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
         simd: bool,
+        k_lo: usize,
+        k_hi: usize,
     ) {
         #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
         {
@@ -3030,14 +3034,14 @@ impl ColoredSoftStepSolver {
                 //   `rank_base + depth` is in bounds and every head and block is live and
                 //   64 B-aligned; no worker is live here, so this thread alone reads and
                 //   writes the body rows the apply touches.
-                unsafe { Self::warm_apply_avx2(cols, bodies_eff) };
+                unsafe { Self::warm_apply_avx2(cols, bodies_eff, k_lo, k_hi) };
                 return;
             }
         }
         // Flag off / non-AVX2 build: the group-major oracle.
         #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
         let _ = simd;
-        Self::warm_apply_scalar(cols, bodies_eff);
+        Self::warm_apply_scalar(cols, bodies_eff, k_lo, k_hi);
     }
 
     /// The scalar warm-start apply — the ORACLE the AVX2 apply is gated against
@@ -3048,9 +3052,16 @@ impl ColoredSoftStepSolver {
     /// order the per-point columns had, so every body's add sequence is unchanged.
     /// The apply is a pure accumulation onto velocities and, within a color, the
     /// bodies are disjoint; across colors the seed is independent of order.
-    fn warm_apply_scalar(cols: &CohortColumns, bodies_eff: ScratchSolveView<'_, BodyEffective>) {
+    ///
+    /// Walks cohorts `[k_lo, k_hi)` (`k_hi <= n_heads`, else the slice panics).
+    fn warm_apply_scalar(
+        cols: &CohortColumns,
+        bodies_eff: ScratchSolveView<'_, BodyEffective>,
+        k_lo: usize,
+        k_hi: usize,
+    ) {
         let blocks = cols.blocks();
-        for head in cols.heads() {
+        for head in &cols.heads()[k_lo..k_hi] {
             let rank_base = head.rank_base as usize;
             for l in 0..head.nlanes as usize {
                 let normal = head.normal(l);
@@ -3142,12 +3153,15 @@ impl ColoredSoftStepSolver {
     /// `cols` is a fully built cohort table — every head's `rank_base + depth`
     /// within `blocks`, every head and block live and 64 B-aligned — and that no
     /// other thread reads or writes the body rows of `bodies_eff` while this runs
-    /// (C3 is serial: the apply owns them).
+    /// (C3 is serial: the apply owns them). It walks cohorts `[k_lo, k_hi)`
+    /// (`k_hi <= n_heads`, else the slice panics).
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[target_feature(enable = "avx2")]
     unsafe fn warm_apply_avx2(
         cols: &CohortColumns,
         bodies_eff: ScratchSolveView<'_, BodyEffective>,
+        k_lo: usize,
+        k_hi: usize,
     ) {
         use core::arch::x86_64::{
             _CMP_NEQ_OQ, _mm_loadl_epi64, _mm256_add_ps, _mm256_and_ps, _mm256_castsi256_ps,
@@ -3189,7 +3203,7 @@ impl ColoredSoftStepSolver {
         let neg_one = _mm256_set1_ps(-1.0);
 
         let blocks = cols.blocks();
-        for head in cols.heads() {
+        for head in &cols.heads()[k_lo..k_hi] {
             let nlanes = head.nlanes as usize;
             let depth = head.depth as usize;
             let rank_base = head.rank_base as usize;
@@ -5336,7 +5350,13 @@ impl ColoredSoftStepSolver {
             // so a step never mixes the two.
             {
                 let _z = zone!(PHYS_WARM_APPLY);
-                Self::warm_start_apply(&self.columns, self.bodies.solve_view(), use_simd_solve);
+                Self::warm_start_apply(
+                    &self.columns,
+                    self.bodies.solve_view(),
+                    use_simd_solve,
+                    0,
+                    self.columns.heads.len(),
+                );
             }
 
             // (3)+(4) Soft normal + friction sweep ACROSS colors (Gauss-Seidel).

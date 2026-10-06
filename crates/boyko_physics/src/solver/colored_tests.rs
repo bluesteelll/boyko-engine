@@ -2596,7 +2596,7 @@
         // apply surfaces as an impulse-bit difference instead of being shared.
         let cols_scalar = clone_columns(cols);
         let bodies_scalar = body_scratch_from(bodies);
-        ColoredSoftStepSolver::warm_apply_scalar(&cols_scalar, bodies_scalar.solve_view());
+        ColoredSoftStepSolver::warm_apply_scalar(&cols_scalar, bodies_scalar.solve_view(), 0, cols.heads().len());
 
         let cols_simd = clone_columns(cols);
         let bodies_simd = body_scratch_from(bodies);
@@ -2604,7 +2604,9 @@
         //   running it supports AVX2; `cols_simd` is a deep copy of a fully built
         //   cohort table (every head's `rank_base + depth` within its blocks), and
         //   this thread is the only accessor of `bodies_simd`.
-        unsafe { ColoredSoftStepSolver::warm_apply_avx2(&cols_simd, bodies_simd.solve_view()) };
+        unsafe {
+            ColoredSoftStepSolver::warm_apply_avx2(&cols_simd, bodies_simd.solve_view(), 0, cols.heads().len())
+        };
 
         let (b_scalar, i_scalar) = body_impulse_bits(bodies_scalar.as_read_slice(), &cols_scalar);
         let (b_simd, i_simd) = body_impulse_bits(bodies_simd.as_read_slice(), &cols_simd);
@@ -2696,6 +2698,67 @@
         );
     }
 
+    /// SR (5): the warm apply over cohorts `[0, k)` then `[k, n)` is the whole apply, bit for bit,
+    /// at every cut `k` — for both kernels, over the warm-apply corpus. The solve region runs the
+    /// apply per colour on cohort ranges, so the range bound is the only thing it adds to the
+    /// kernels; this is the gate on it. Red-first: the range end taken one short skips a cohort,
+    /// so the bits differ at every interior cut whose skipped cohort moves a row.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[test]
+    fn warm_range_partition_equals_the_whole_apply() {
+        let mut rng = SplitMix64(0x5B05_C0B0_7A11_0005);
+        let mut cuts_checked = 0usize;
+        let mut interior_moving_cuts = 0usize;
+        for _ in 0..120 {
+            let (groups, bodies) = random_cohort_corpus(&mut rng, OBLIQUE_NORMAL);
+            let solver = build_cohort_solver(&groups, &bodies);
+            let cols = &solver.columns;
+            let n = cols.heads().len();
+            let whole_scalar = body_scratch_from(&bodies);
+            ColoredSoftStepSolver::warm_apply_scalar(cols, whole_scalar.solve_view(), 0, n);
+            let whole_simd = body_scratch_from(&bodies);
+            // SAFETY: the test target is `target_feature = "avx2"`-gated, so the host supports
+            //   AVX2; `cols` is a fully built cohort table and this thread is the only accessor
+            //   of `whole_simd`.
+            unsafe { ColoredSoftStepSolver::warm_apply_avx2(cols, whole_simd.solve_view(), 0, n) };
+            let whole: Vec<[u32; 6]> = whole_scalar.as_read_slice().iter().map(vel_bits).collect();
+            assert_eq!(
+                whole,
+                whole_simd.as_read_slice().iter().map(vel_bits).collect::<Vec<_>>(),
+                "the two whole applies must agree (the G4 differential)"
+            );
+            for k in 0..=n {
+                let split_scalar = body_scratch_from(&bodies);
+                ColoredSoftStepSolver::warm_apply_scalar(cols, split_scalar.solve_view(), 0, k);
+                ColoredSoftStepSolver::warm_apply_scalar(cols, split_scalar.solve_view(), k, n);
+                let split_simd = body_scratch_from(&bodies);
+                // SAFETY: as the whole apply above.
+                unsafe {
+                    ColoredSoftStepSolver::warm_apply_avx2(cols, split_simd.solve_view(), 0, k);
+                    ColoredSoftStepSolver::warm_apply_avx2(cols, split_simd.solve_view(), k, n);
+                }
+                for (name, got) in [("scalar", &split_scalar), ("avx2", &split_simd)] {
+                    let got: Vec<[u32; 6]> = got.as_read_slice().iter().map(vel_bits).collect();
+                    assert_eq!(got, whole, "{name}: [0, {k}) then [{k}, {n}) must equal the whole apply");
+                }
+                cuts_checked += 1;
+                if k > 0 && k < n {
+                    // The cut's left cohort moves a row: a skipped cohort would show here.
+                    let alone = body_scratch_from(&bodies);
+                    ColoredSoftStepSolver::warm_apply_scalar(cols, alone.solve_view(), k - 1, k);
+                    interior_moving_cuts += usize::from(
+                        alone.as_read_slice().iter().zip(&bodies).any(|(a, b)| vel_bits(a) != vel_bits(b)),
+                    );
+                }
+            }
+        }
+        eprintln!("warm range partition: cuts={cuts_checked} interior_moving={interior_moving_cuts}");
+        assert!(
+            interior_moving_cuts > 0,
+            "anti-vacuity: some interior cut must have a left cohort that moves a row ({interior_moving_cuts})"
+        );
+    }
+
     /// G4/C3 test 3 (review O1, the `-0.0` scene): an `inv_mass` of `-0.0` is
     /// IMMOVABLE on both warm-apply paths.
     ///
@@ -2765,7 +2828,7 @@
         // And the `-0.0` row is byte-frozen on the ORACLE path too (the differential
         // above only pins the two paths to each other).
         let scalar = body_scratch_from(&bodies);
-        ColoredSoftStepSolver::warm_apply_scalar(&solver.columns, scalar.solve_view());
+        ColoredSoftStepSolver::warm_apply_scalar(&solver.columns, scalar.solve_view(), 0, solver.columns.heads().len());
         assert_eq!(
             vel_bits(&scalar.as_read_slice()[0]),
             vel_bits(&bodies[0]),
@@ -2909,7 +2972,7 @@
 
         // The oracle's answer for the lanes, computed with no writer in sight.
         let oracle = body_scratch_from(&bodies);
-        ColoredSoftStepSolver::warm_apply_scalar(&solver.columns, oracle.solve_view());
+        ColoredSoftStepSolver::warm_apply_scalar(&solver.columns, oracle.solve_view(), 0, solver.columns.heads().len());
 
         const WRITES: usize = 32;
         let simd = body_scratch_from(&bodies);
@@ -2927,7 +2990,7 @@
             //   supports AVX2; `solver.columns` is a fully built cohort table; the rows
             //   this apply touches are the cohort's two lanes' (rows 1..=4), disjoint
             //   from the writer's row 0.
-            unsafe { ColoredSoftStepSolver::warm_apply_avx2(&solver.columns, view) };
+            unsafe { ColoredSoftStepSolver::warm_apply_avx2(&solver.columns, view, 0, solver.columns.heads().len()) };
         });
 
         let applied = simd.as_read_slice();
