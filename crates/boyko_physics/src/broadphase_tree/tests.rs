@@ -19,12 +19,13 @@
 //!   network (F2) against `sort_unstable` on every length it takes.
 //!
 //! * **S5** (the parallel tree query, `parallel.rs`) — `s5_*`: the chunk count and the region
-//!   layout's closed forms; G1's single-step worlds and churn scripts, the hinted sleeper set,
-//!   a forced overflow (the tail), a lowered cap (the fallback in the tail), the first step
-//!   without history and one lane, each on a serial twin and an S5 tree inside a pool, equal
-//!   on the stream, the withheld list, every row's segment, `TreeDiag` and `LeafListCounts`;
-//!   a helper's panic reaching the caller under a watchdog; and the Miri subset
-//!   (`s5_miri_small_world`).
+//!   layout's closed forms; the inline threshold under the production rules, 31 leaf nodes
+//!   inline and 32 dispatched, in literals; G1's single-step worlds and churn scripts, the
+//!   hinted sleeper set, a forced overflow (the tail), a lowered cap (the fallback in the
+//!   tail), the first step without history and one lane, each on a serial twin and an S5 tree
+//!   inside a pool, equal on the stream, the withheld list, every row's segment, `TreeDiag` and
+//!   `LeafListCounts`; a helper's panic reaching the caller under a watchdog; and the Miri
+//!   subset (`s5_miri_small_world`).
 //!
 //! Every test is device-free and heap-light; under Miri the property tests shrink to 16 cases
 //! at n ≤ 24 and the kernel is the scalar arm.
@@ -2337,6 +2338,16 @@ impl S5Twin {
         twin
     }
 
+    /// The production rules: the switch on and every test hook at its default, so the inline
+    /// threshold and the grain are the production constants, not [`force_s5`]'s.
+    #[cfg(not(miri))]
+    fn production(bodies: Vec<BodyState>, workers: usize) -> Self {
+        let mut twin = Self::new(bodies, workers);
+        twin.par.tree.s5_hooks = super::parallel::TestHooks::default();
+        assert!(twin.par.tree.parallel_query(), "invariant: `of` turned the switch on");
+        twin
+    }
+
     fn of(serial: Sim, mut par: Sim, workers: usize, pool: Option<Arc<ThreadPool>>) -> Self {
         force_s5(&mut par.tree);
         Self { serial, par, pool, workers, dispatched: 0 }
@@ -2400,6 +2411,16 @@ impl S5Twin {
     }
 }
 
+/// `dynamics` touching unit boxes, sixteen to a row, and nothing else: every row is a Q row on
+/// every step (no static waits for admission), so the active tree holds `dynamics.div_ceil(8)`
+/// leaf nodes from the first step on.
+#[cfg(not(miri))]
+fn bare_boxes(dynamics: usize) -> Vec<BodyState> {
+    (0..dynamics)
+        .map(|k| boxed([(k % 16) as f32, 0.5, (k / 16) as f32], [0.5, 0.5, 0.5], 1.0))
+        .collect()
+}
+
 /// One churn edit (`ChurnOp`) on `sim`, as `g1_random_churn_scripts_equal_all_pairs` applies it.
 #[cfg(not(miri))]
 fn apply_churn(sim: &mut Sim, op: ChurnOp) {
@@ -2441,8 +2462,14 @@ fn apply_churn(sim: &mut Sim, op: ChurnOp) {
 /// two-chunk floor (the narrowphase's `chunk_count` twin).
 #[test]
 fn s5_chunk_count_follows_the_dispatch_conditions() {
-    use super::parallel::{S5_CHUNKS_PER_LANE, S5_MAX_CHUNKS, S5_MIN_LEAVES_PER_CHUNK, s5_chunk_count};
-    assert_eq!((S5_MIN_LEAVES_PER_CHUNK, S5_CHUNKS_PER_LANE, S5_MAX_CHUNKS), (4, 4, 256), "the table below is for these");
+    use super::parallel::{
+        S5_CHUNKS_PER_LANE, S5_MAX_CHUNKS, S5_MIN_LEAVES, S5_MIN_LEAVES_PER_CHUNK, s5_chunk_count,
+    };
+    assert_eq!(
+        (S5_MIN_LEAVES, S5_MIN_LEAVES_PER_CHUNK, S5_CHUNKS_PER_LANE, S5_MAX_CHUNKS),
+        (32, 4, 4, 256),
+        "the S5 dispatch constants: this table and `s5_inline_threshold_is_thirty_two_leaf_nodes` are for these"
+    );
     for leaves in [0, 1, 8, 155, 10_000] {
         assert_eq!(s5_chunk_count(leaves, 0), 0, "no lane");
         assert_eq!(s5_chunk_count(leaves, 1), 0, "one lane runs the serial pass at any size");
@@ -2457,6 +2484,37 @@ fn s5_chunk_count_follows_the_dispatch_conditions() {
     assert_eq!(s5_chunk_count(155, 16), 38, "J at W16: grain-bound");
     assert_eq!(s5_chunk_count(10_000, 64), 256, "the cap");
     assert_eq!(super::parallel::chunk_count(3, 2, 1), 3, "a lowered grain");
+}
+
+/// The inline threshold under the production rules (no hook; triage r1 G1): a world of 31 active
+/// leaf nodes runs the query inline at W 2 and 8, and one of 32 dispatches on every step after the
+/// first. The boundary is in literals: the dispatch receipt ([`s5_expected`]) and the parity
+/// runner read [`S5_MIN_LEAVES`](super::parallel::S5_MIN_LEAVES) and move with it, so only this
+/// gate reds when the threshold moves either way.
+#[cfg(not(miri))]
+#[test]
+fn s5_inline_threshold_is_thirty_two_leaf_nodes() {
+    // 248 rows fill 31 leaf nodes; the 249th opens the 32nd.
+    for workers in [2usize, 8] {
+        for (rows, leaf_nodes, want) in [(248usize, 31usize, 0u64), (249, 32, 3)] {
+            let mut twin = S5Twin::production(bare_boxes(rows), workers);
+            for step in 1..=4 {
+                twin.step();
+                assert_eq!(
+                    twin.par.tree.active.leaf_nodes().len(),
+                    leaf_nodes,
+                    "test setup: step {step} over {rows} rows built another active leaf-node count"
+                );
+            }
+            assert_eq!(
+                twin.dispatched, want,
+                "S5: {leaf_nodes} active leaf nodes at W{workers} dispatched {} times over 4 steps, want \
+                 {want}: the inline threshold is 32 leaf nodes - below it the query runs inline, at it \
+                 every step after the first dispatches",
+                twin.dispatched
+            );
+        }
+    }
 }
 
 #[cfg(not(miri))]
