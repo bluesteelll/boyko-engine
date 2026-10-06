@@ -486,6 +486,9 @@ pub struct BroadphaseTree {
     brute_max_rows: u32,
     /// The Q rows' query kernel.
     kernel: QueryKernel,
+    /// S5's switch: `PhysicsConfig::parallel_tree_query` as the broadphase system mirrored it
+    /// on the last Tree step, or what a direct-drive harness set (`false` by default).
+    parallel_query: bool,
     /// The leaf-list collection cap, lowered by the fallback gate (test builds only; every
     /// other build uses `kernel::LEAF_LIST_CAP`).
     #[cfg(test)]
@@ -548,6 +551,7 @@ impl BroadphaseTree {
             rent: [0; 2],
             brute_max_rows: TREE_BRUTE_MAX_ROWS,
             kernel: QueryKernel::default(),
+            parallel_query: false,
             #[cfg(test)]
             leaf_list_cap: LEAF_LIST_CAP,
             #[cfg(any(test, feature = "bp-query-counts"))]
@@ -604,6 +608,22 @@ impl BroadphaseTree {
     #[inline]
     pub fn query_kernel(&self) -> QueryKernel {
         self.kernel
+    }
+
+    /// Sets S5's switch for a direct-drive harness ([`step_direct`](Self::step_direct),
+    /// [`step_translated`](Self::step_translated)). In a world, the broadphase system writes it
+    /// from `PhysicsConfig::parallel_tree_query` before every Tree step, so a write here is
+    /// overwritten by the next step: set the configuration field instead.
+    #[inline]
+    pub fn set_parallel_query(&mut self, on: bool) {
+        self.parallel_query = on;
+    }
+
+    /// S5's switch as the tree last read it: the configuration's `parallel_tree_query` of the
+    /// last Tree step in a world, or what a direct-drive harness set.
+    #[inline]
+    pub fn parallel_query(&self) -> bool {
+        self.parallel_query
     }
 
     /// The leaf-list collection cap: `kernel::LEAF_LIST_CAP`, or the fallback gate's lowered
