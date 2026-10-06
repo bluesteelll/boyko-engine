@@ -78,6 +78,7 @@ use crate::narrowphase::box_box::{
     BoxBoxContact, EdgeRefresh, FeatureRef, Obb, contact_feature, refresh_edge,
 };
 use crate::narrowphase::carry::PairTag;
+use crate::narrowphase::speculative::{SpecMargin, SpecStep};
 use crate::resources::BodyState;
 use crate::sleep_sets::RowCls;
 
@@ -193,11 +194,25 @@ pub(crate) struct ReuseStep {
     /// The step's parity (`PairCarry::open`): the records it writes carry it, the ones it reads
     /// the other.
     pub(crate) parity: bool,
+    /// V2's speculative contact parameters (`PhysicsConfig::speculative_distance`, the
+    /// approach-velocity cap and the step length): every pair type keeps a contact point while its
+    /// separation is at most the pair's `d_eff` ([`SpecMargin`]). [`SpecStep::OVERLAP`] is the
+    /// overlap-only rule, the narrowphase before V2 bit for bit. Independent of [`on`](Self::on):
+    /// it rides here because this is the one per-step parameter both narrowphase paths already
+    /// carry.
+    pub(crate) speculative: SpecStep,
 }
 
 impl ReuseStep {
-    /// Contact reuse off: every pair takes today's path.
-    pub(crate) const OFF: Self = Self { on: false, tau: 0.0, dt2: 0.0, rekey: false, parity: false };
+    /// Contact reuse off and the overlap-only rule: every pair takes today's path.
+    pub(crate) const OFF: Self = Self {
+        on: false,
+        tau: 0.0,
+        dt2: 0.0,
+        rekey: false,
+        parity: false,
+        speculative: SpecStep::OVERLAP,
+    };
 
     /// The parameters of a step with `dt`, the configuration's switch and distance `tau`, and
     /// whether the hysteresis table's key set changed.
@@ -207,7 +222,14 @@ impl ReuseStep {
             !on || (tau.is_finite() && tau >= 0.0),
             "invariant: PhysicsConfig::contact_reuse_distance is finite and >= 0"
         );
-        Self { on, tau, dt2: dt * dt, rekey, parity: false }
+        Self { on, tau, dt2: dt * dt, rekey, parity: false, speculative: SpecStep::OVERLAP }
+    }
+
+    /// This step with V2's speculative contact parameters (built by [`SpecStep::new`], which
+    /// debug-asserts the configuration's distance and cap finite and `>= 0`).
+    #[inline]
+    pub(crate) fn with_speculative(self, speculative: SpecStep) -> Self {
+        Self { speculative, ..self }
     }
 }
 
@@ -536,29 +558,45 @@ pub(crate) enum Refreshed {
 /// * **Face:** each kept point is carried with the incident body, `w = (c_I − c_R) + R_I·lp`, its
 ///   separation re-measured against the reference face, `sep = w·n − h` with
 ///   `n = ±R.axes[i]` (the bits `face_contact` names its reference normal with) and `h` the
-///   reference half-extent; a point with `sep > 0` is dropped, as `face_contact` drops it (a NaN
-///   is dropped too). The anchors are `p_I = c_R + w` and `p_R = p_I − n·sep`, and the normal
-///   runs A→B. For an original incident corner `sep` is its exact distance to the current
-///   reference plane.
+///   reference half-extent; a point whose `sep` is past the pair's speculative margin `sm` (V2's
+///   `d_eff` at the point, [`SpecMargin::keeps`]; the overlap-only rule keeps `sep <= 0`) is
+///   dropped, as `face_contact` drops it (a NaN is dropped too). The anchors are `p_I = c_R + w`
+///   and `p_R = p_I − n·sep`, and the normal runs A→B. For an original incident corner `sep` is
+///   its exact distance to the current reference plane.
 /// * **Edge:** the edge axis re-evaluated as the SAT evaluates it, then today's edge contact — or
 ///   [`Refreshed::Stale`] when the edge claims more than the face allows.
 #[inline]
-pub(crate) fn refresh(r: &ReuseRecord, oa: &Obb, ob: &Obb, a: BodyIndex, b: BodyIndex) -> Refreshed {
+pub(crate) fn refresh(
+    r: &ReuseRecord,
+    oa: &Obb,
+    ob: &Obb,
+    a: BodyIndex,
+    b: BodyIndex,
+    sm: &SpecMargin,
+) -> Refreshed {
     if r.is_edge() {
         let (ea, eb) = (usize::from(r.feat >> 2), usize::from(r.feat & 3));
-        return match refresh_edge(oa, ob, ea, eb, a, b) {
+        return match refresh_edge(oa, ob, ea, eb, a, b, sm) {
             EdgeRefresh::Contact(m) => Refreshed::Contact(m),
             EdgeRefresh::Separated(axis) => Refreshed::Separated(axis),
             EdgeRefresh::Degenerate => Refreshed::Degenerate,
             EdgeRefresh::Stale => Refreshed::Stale,
         };
     }
-    Refreshed::Contact(refresh_face(r, oa, ob, a, b))
+    Refreshed::Contact(refresh_face(r, oa, ob, a, b, sm))
 }
 
-/// The face half of [`refresh`].
+/// The face half of [`refresh`]. `sm` must be the margin the full collision's clip keep used, or
+/// a record would not refresh to its own contact on the poses it was built on.
 #[inline]
-fn refresh_face(r: &ReuseRecord, oa: &Obb, ob: &Obb, a: BodyIndex, b: BodyIndex) -> Manifold {
+fn refresh_face(
+    r: &ReuseRecord,
+    oa: &Obb,
+    ob: &Obb,
+    a: BodyIndex,
+    b: BodyIndex,
+    sm: &SpecMargin,
+) -> Manifold {
     debug_assert!(
         (1..=MAX_CONTACT_POINTS).contains(&usize::from(r.count)) && r.feat < 3,
         "invariant: a face record keeps 1..=4 points on a local axis 0..3"
@@ -579,8 +617,8 @@ fn refresh_face(r: &ReuseRecord, oa: &Obb, ob: &Obb, a: BodyIndex, b: BodyIndex)
     for (lp, &feature_id) in r.lp[..usize::from(r.count)].iter().zip(&r.feature) {
         let w = dc + from_frame(&inc.axes, *lp);
         let separation = w.dot(n) - h;
-        if separation <= 0.0 {
-            let on_incident = rf.center + w;
+        let on_incident = rf.center + w;
+        if sm.keeps(separation, on_incident, m.normal) {
             let on_reference = on_incident - n * separation;
             let (anchor_a, anchor_b) =
                 if ref_is_b { (on_incident, on_reference) } else { (on_reference, on_incident) };
@@ -904,7 +942,7 @@ mod tests {
             };
             let oa = Obb::new(ba.position, ba.rotation, ha);
             let ob = Obb::new(bb.position, bb.rotation, hb);
-            let c = match box_box_classify(&oa, &ob, a, b, None) {
+            let c = match box_box_classify(&oa, &ob, a, b, None, &SpecMargin::OVERLAP) {
                 BoxBoxOutcome::Contact(c) => c,
                 // A best-face answer is never recorded, so no miss emits a refresh of it: it is
                 // not a witness here, by construction rather than by omission.
@@ -915,7 +953,7 @@ mod tests {
             };
             let g = PairGeom::new(&oa, &ob, ha.length(), hb.length(), tau);
             let r = build(&c, &oa, &ob, ba.rotation, bb.rotation, &g, false);
-            if let Refreshed::Contact(m) = refresh(&r, &oa, &ob, a, b) {
+            if let Refreshed::Contact(m) = refresh(&r, &oa, &ob, a, b, &SpecMargin::OVERLAP) {
                 n += u64::from(manifold_words(&m) != manifold_words(&c.manifold));
             }
         }
@@ -1237,7 +1275,7 @@ mod tests {
         let (oa0, ob0) = obbs(&case.pose0);
         let (oa1, ob1) = obbs(&case.pose1);
         let (ra, rb) = (case.ha.length(), case.hb.length());
-        let c = match box_box_classify(&oa0, &ob0, A, B, None) {
+        let c = match box_box_classify(&oa0, &ob0, A, B, None, &SpecMargin::OVERLAP) {
             BoxBoxOutcome::Contact(c) => c,
             // A best-face answer is a contact, but the narrowphase never records it
             // (`BoxBoxOutcome::BestFace`), so there is no record to check.
@@ -1311,7 +1349,7 @@ mod tests {
         }
 
         // (a): the refresh at poses 1 against the exact corner distances.
-        let refreshed = match refresh(&record, &oa1, &ob1, A, B) {
+        let refreshed = match refresh(&record, &oa1, &ob1, A, B, &SpecMargin::OVERLAP) {
             Refreshed::Contact(m) => Some(m),
             Refreshed::Separated(_) | Refreshed::Degenerate | Refreshed::Stale => None,
         };
@@ -1356,7 +1394,7 @@ mod tests {
         // the same contact — no contact at all, or a face contact on the record's reference face.
         // A full collision that switched feature measures its separations along another normal,
         // where the two depths do not compare (`SoundSeen::switched`).
-        let full = match box_box_classify(&oa1, &ob1, A, B, Some(c.reference_axis)) {
+        let full = match box_box_classify(&oa1, &ob1, A, B, Some(c.reference_axis), &SpecMargin::OVERLAP) {
             // The best face's own contact is a contact the pair gets (`box_box_contact` answers it).
             BoxBoxOutcome::Contact(c1) | BoxBoxOutcome::BestFace(c1) => Some(c1),
             BoxBoxOutcome::Separated(_)
@@ -1609,7 +1647,7 @@ mod tests {
             Obb::new(p0[0].0, p0[0].1, ha),
             Obb::new(p0[1].0, p0[1].1, hb),
         );
-        let c = match box_box_classify(&oa0, &ob0, A, B, None) {
+        let c = match box_box_classify(&oa0, &ob0, A, B, None, &SpecMargin::OVERLAP) {
             BoxBoxOutcome::Contact(c) if c.reference_axis >= 6 => c,
             // A face record, a best-face answer (never recorded), or no contact.
             BoxBoxOutcome::Contact(_)
@@ -1637,7 +1675,7 @@ mod tests {
             return;
         }
         seen.hits += 1;
-        match refresh(&record, &oa1, &ob1, A, B) {
+        match refresh(&record, &oa1, &ob1, A, B, &SpecMargin::OVERLAP) {
             Refreshed::Stale => seen.stale += 1,
             Refreshed::Contact(m) => {
                 let claim = deepest(Some(&m));
@@ -1708,7 +1746,7 @@ mod tests {
         );
         let qb1 = q4([0xbf18_a163, 0x3ed7_8959, 0x3eb8_454d, 0x3f14_c903]);
         let (oa0, ob0) = (Obb::new(ca, qa, ha), Obb::new(cb, qb, hb));
-        let c = match box_box_classify(&oa0, &ob0, A, B, None) {
+        let c = match box_box_classify(&oa0, &ob0, A, B, None, &SpecMargin::OVERLAP) {
             BoxBoxOutcome::Contact(c) => c,
             _ => panic!("construction: the witness's poses 0 are a contact"),
         };
@@ -1720,7 +1758,7 @@ mod tests {
         let g0 = PairGeom::new(&oa0, &ob0, ra, rb, T6_TAU);
         let record = build(&c, &oa0, &ob0, qa, qb, &g0, false);
         assert!(record.is_edge(), "construction: an edge record");
-        match refresh(&record, &oa0, &ob0, A, B) {
+        match refresh(&record, &oa0, &ob0, A, B, &SpecMargin::OVERLAP) {
             Refreshed::Contact(m) => assert_eq!(
                 manifold_words(&m),
                 manifold_words(&c.manifold),
@@ -1737,7 +1775,7 @@ mod tests {
             criterion(&record, &oa0, &ob1, qa, qb1, &g1),
             "construction: the criterion keeps the record through the witness's rotation"
         );
-        match refresh(&record, &oa0, &ob1, A, B) {
+        match refresh(&record, &oa0, &ob1, A, B, &SpecMargin::OVERLAP) {
             Refreshed::Stale => {}
             Refreshed::Contact(m) => panic!(
                 "the witness's edge record refreshed to a contact claiming {:e} m where the boxes \
@@ -1757,7 +1795,7 @@ mod tests {
             let mut readings = Vec::new();
             for _ in 0..8 {
                 let _ = fallback_census::take();
-                let _ = refresh(&record, &oa0, &ob1, A, B);
+                let _ = refresh(&record, &oa0, &ob1, A, B, &SpecMargin::OVERLAP);
                 let n = fallback_census::take().refresh_stale;
                 readings.push(n);
                 assert_ne!(n, 0, "the census did not count the witness's stale refresh");
@@ -1801,5 +1839,81 @@ mod tests {
             seen.past_face.is_empty(),
             "an edge record refreshed past the face bound without turning stale: {seen:?}"
         );
+    }
+
+    /// V2 N2 (`refresh_face`): a face record refreshed on its incident box lifted 5 mm clear of
+    /// the reference face keeps its four points, speculative, at `d = 20 mm`, and none at `d = 0`
+    /// (D6). Red under the keep mutation (`separation <= 0.0`): the refresh keeps nothing at `d`,
+    /// and a slow pair within `d` loses the manifold its full collision would give it.
+    /// Native only, as every test here that builds its record through `box_box_classify`.
+    #[cfg(not(miri))]
+    #[test]
+    fn v2_a_face_refresh_keeps_points_lifted_within_d() {
+        let h = Vec3::new(0.5, 0.5, 0.5);
+        let slab = Vec3::new(2.0, 0.5, 2.0);
+        let oa = Obb::new(Vec3::ZERO, Quat::IDENTITY, slab);
+        let ob0 = Obb::new(Vec3::new(0.0, 0.999, 0.0), Quat::IDENTITY, h);
+        let c = match box_box_classify(&oa, &ob0, A, B, None, &SpecMargin::OVERLAP) {
+            BoxBoxOutcome::Contact(c) => c,
+            _ => panic!("construction: a resting face contact"),
+        };
+        let g = PairGeom::new(&oa, &ob0, slab.length(), h.length(), 1.0e-3);
+        let record = build(&c, &oa, &ob0, Quat::IDENTITY, Quat::IDENTITY, &g, false);
+        assert!(!record.is_edge() && record.count == 4, "construction: a four-point face record");
+        let ob1 = Obb::new(Vec3::new(0.0, 1.005, 0.0), Quat::IDENTITY, h);
+        match refresh(&record, &oa, &ob1, A, B, &SpecMargin::fixed(0.02)) {
+            Refreshed::Contact(m) => {
+                assert_eq!(m.count, 4, "V2 N2 refresh: the lifted points are kept within d: {m:?}");
+                for p in &m.points[..4] {
+                    assert!((p.separation - 0.005).abs() < 1e-5, "V2 N2 refresh: s = +5 mm: {m:?}");
+                }
+            }
+            _ => panic!("V2 N2 refresh: a face record refreshes to a contact"),
+        }
+        match refresh(&record, &oa, &ob1, A, B, &SpecMargin::OVERLAP) {
+            Refreshed::Contact(m) => assert_eq!(m.count, 0, "V2 N2 refresh: d = 0 drops every lifted point (D6)"),
+            _ => panic!("V2 N2 refresh: a face record refreshes to a contact"),
+        }
+    }
+
+    /// V2 NV (ruling 9, `refresh_face`): the same record refreshed on its incident box lifted
+    /// 40 mm clear, past `d`, closing at 3 m/s (`d_eff = d + 3 h = 70 mm`): the four points are
+    /// kept, speculative; with the velocity term off, none. Red under the keep mutation that
+    /// forgets the velocity term (the refresh on `d` alone keeps nothing, and a slow pair closing
+    /// fast loses the manifold its full collision would give it).
+    #[cfg(not(miri))]
+    #[test]
+    fn v2_a_face_refresh_keeps_approaching_points_past_d() {
+        use crate::narrowphase::speculative::SpecStep;
+        let h = Vec3::new(0.5, 0.5, 0.5);
+        let slab = Vec3::new(2.0, 0.5, 2.0);
+        let oa = Obb::new(Vec3::ZERO, Quat::IDENTITY, slab);
+        let ob0 = Obb::new(Vec3::new(0.0, 0.999, 0.0), Quat::IDENTITY, h);
+        let c = match box_box_classify(&oa, &ob0, A, B, None, &SpecMargin::OVERLAP) {
+            BoxBoxOutcome::Contact(c) => c,
+            _ => panic!("construction: a resting face contact"),
+        };
+        let g = PairGeom::new(&oa, &ob0, slab.length(), h.length(), 1.0e-3);
+        let record = build(&c, &oa, &ob0, Quat::IDENTITY, Quat::IDENTITY, &g, false);
+        assert!(!record.is_edge() && record.count == 4, "construction: a four-point face record");
+        let ob1 = Obb::new(Vec3::new(0.0, 1.04, 0.0), Quat::IDENTITY, h);
+        let closing = SpecMargin::for_test(
+            SpecStep::new(0.02, 0.5, 1.0 / 60.0),
+            (oa.center, Vec3::ZERO, Vec3::ZERO, slab.length()),
+            (ob1.center, Vec3::new(0.0, -3.0, 0.0), Vec3::ZERO, h.length()),
+        );
+        match refresh(&record, &oa, &ob1, A, B, &closing) {
+            Refreshed::Contact(m) => {
+                assert_eq!(m.count, 4, "V2 NV refresh: the closing points are kept past d: {m:?}");
+                for p in &m.points[..4] {
+                    assert!((p.separation - 0.04).abs() < 1e-5, "V2 NV refresh: s = +40 mm: {m:?}");
+                }
+            }
+            _ => panic!("V2 NV refresh: a face record refreshes to a contact"),
+        }
+        match refresh(&record, &oa, &ob1, A, B, &SpecMargin::fixed(0.02)) {
+            Refreshed::Contact(m) => assert_eq!(m.count, 0, "V2 NV refresh: d alone drops every point 40 mm off"),
+            _ => panic!("V2 NV refresh: a face record refreshes to a contact"),
+        }
     }
 }

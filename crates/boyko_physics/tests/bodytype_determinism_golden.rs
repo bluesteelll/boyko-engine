@@ -60,6 +60,14 @@
 //! shipped reuse default is pinned elsewhere (`default_world_pyramid_determinism.rs`, A7-R1
 //! in `sleep_settles_box_piles.rs`).
 //!
+//! ## Speculative contacts (V2, 2026-09-30)
+//!
+//! V2's `PhysicsConfig::speculative_distance` and `speculative_velocity_cap` change the contact
+//! rule on every pair type by design (owner V2a / V2b). Like contact reuse that is a value change,
+//! not a solve-order drift, so the setup sets BOTH to `0`, the overlap-only rule from before V2
+//! (the two together, never the distance alone: rulings 2026-09-30 item 9) — the same adaptation
+//! of the SETUP — and [`GOLDEN`] keeps its value. The shipped V2 default is pinned elsewhere.
+//!
 //! Spins up `boyko_threadpool` (intractable under Miri — pool is loom+Miri proven
 //! in the ECS Phase-9 series), so `cfg(not(miri))`.
 
@@ -351,6 +359,9 @@ fn run_scene_hash_with(simd_solve: bool) -> u64 {
     // captured on the exact narrowphase, and contact reuse, on by default since L9 C4, changes
     // the trajectory by design without touching the solve order this oracle guards.
     world.resource_mut::<PhysicsConfig>().contact_reuse = false;
+    // V2: the overlap-only rule (module docs, "Speculative contacts").
+    world.resource_mut::<PhysicsConfig>().speculative_distance = 0.0;
+    world.resource_mut::<PhysicsConfig>().speculative_velocity_cap = 0.0;
 
     for _ in 0..STEPS {
         schedule.run(&mut world);

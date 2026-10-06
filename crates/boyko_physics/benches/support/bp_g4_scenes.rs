@@ -187,14 +187,16 @@ fn spawn_box(world: &mut EcsMaster, position: Vec3, dynamic: bool) {
 /// off, one worker, after [`J_SNAPSHOT_STEPS`] steps — the bodies the broadphase read on the
 /// last of them. Contact reuse is left at its default, on since L9 C4.
 pub(crate) fn j_snapshot() -> Vec<BodyState> {
-    j_snapshot_with_reuse(None)
+    j_snapshot_with(None, false)
 }
 
 /// [`j_snapshot`] with [`PhysicsConfig::contact_reuse`] set to `contact_reuse` when it is `Some`
-/// (`None` keeps the default). Contact reuse changes the trajectory of the
-/// [`J_SNAPSHOT_STEPS`] steps, so the snapshot's bodies depend on it: `Some(false)` gives the
-/// bodies of the exact narrowphase, which was the default before L9 C4.
-pub(crate) fn j_snapshot_with_reuse(contact_reuse: Option<bool>) -> Vec<BodyState> {
+/// (`None` keeps the default), and V2's overlap-only rule (`speculative_distance = 0`,
+/// `speculative_velocity_cap = 0`) when `overlap_only`. Both change the trajectory of the
+/// [`J_SNAPSHOT_STEPS`] steps, so the snapshot's bodies depend on them: `(Some(false), true)` gives
+/// the bodies of the exact narrowphase, the default before L9 C4, and `(None, true)` those of the
+/// default before V2. The overlap-only rule also zeroes every row's broadphase margin.
+pub(crate) fn j_snapshot_with(contact_reuse: Option<bool>, overlap_only: bool) -> Vec<BodyState> {
     let mut world = EcsMaster::new();
     spawn_box(&mut world, Vec3::new(0.0, -1.0, 0.0), false);
     let mut boxes = 0usize;
@@ -228,6 +230,10 @@ pub(crate) fn j_snapshot_with_reuse(contact_reuse: Option<bool>) -> Vec<BodyStat
         cfg.broadphase = BroadphaseKind::Tree;
         if let Some(contact_reuse) = contact_reuse {
             cfg.contact_reuse = contact_reuse;
+        }
+        if overlap_only {
+            cfg.speculative_distance = 0.0;
+            cfg.speculative_velocity_cap = 0.0;
         }
     }
     world.resource_mut::<BroadphaseTree>().set_brute_max_rows(0);

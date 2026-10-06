@@ -23,6 +23,7 @@
             simulated: true,
             kinematic: false,
             is_sensor: false,
+            bp_margin: 0.0,
             shape: ColliderShape::Sphere { radius: 1.0 },
         }
     }
@@ -42,6 +43,7 @@
             simulated: false,
             kinematic: false,
             is_sensor: false,
+            bp_margin: 0.0,
             shape: ColliderShape::Sphere { radius: 1.0 },
         }
     }
@@ -286,7 +288,7 @@
         let graph = build_graph(&bodies, &manifolds);
 
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&bodies, &[]);
+        solver.build_bodies(&bodies, &[], false);
         solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
         let cols = &solver.columns;
 
@@ -449,7 +451,7 @@
         proptest!(ProptestConfig::with_cases(400), |(seed in any::<u64>())| {
             let (bodies, manifolds, graph) = random_scene(seed);
             let mut solver = ColoredSoftStepSolver::default();
-            solver.build_bodies(&bodies, &[]);
+            solver.build_bodies(&bodies, &[], false);
             solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
             let cols = &solver.columns;
 
@@ -1177,7 +1179,7 @@
         let manifolds = dense_collision_manifolds(&bodies);
         let graph = build_graph(&bodies, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&bodies, &[]);
+        solver.build_bodies(&bodies, &[], false);
         solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
         let cols = &solver.columns;
         let n_colors = cols.color_offsets().len().saturating_sub(1);
@@ -1595,6 +1597,8 @@
             (1.0 / 60.0) / 4.0,
         );
 
+        let no_deltas = delta_scratch_from(&[]);
+        let step = pre_v2_step(&soft, &no_deltas);
         for bias_active in [true, false] {
             // The pristine pre-solve body state shared by both arms.
             let pristine_bodies: Vec<BodyEffective> = bodies.iter().map(eff_of).collect();
@@ -1605,7 +1609,7 @@
 
             // ── Scalar arm ──────────────────────────────────────────────────
             let mut solver_scalar = ColoredSoftStepSolver::default();
-            solver_scalar.build_bodies(&bodies, &[]);
+            solver_scalar.build_bodies(&bodies, &[], false);
             solver_scalar.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
             let cols_scalar = &solver_scalar.columns;
             let n_colors = cols_scalar.color_offsets().len() - 1;
@@ -1622,9 +1626,7 @@
                         ctx,
                         ctx.g_base,
                         g_hi,
-                        soft.bias_rate,
-                        soft.mass_coeff,
-                        soft.impulse_coeff,
+                        &step,
                         bias_active,
                     );
                 }
@@ -1632,7 +1634,7 @@
 
             // ── SIMD arm ─────────────────────────────────────────────────────
             let mut solver_simd = ColoredSoftStepSolver::default();
-            solver_simd.build_bodies(&bodies, &[]);
+            solver_simd.build_bodies(&bodies, &[], false);
             solver_simd.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
             let cols_simd = &solver_simd.columns;
             let bodies_simd = body_scratch_from(&pristine_bodies);
@@ -1652,9 +1654,7 @@
                             body_view,
                             k_lo,
                             k_hi,
-                            soft.bias_rate,
-                            soft.mass_coeff,
-                            soft.impulse_coeff,
+                            &step,
                             bias_active,
                         );
                     }
@@ -1694,6 +1694,37 @@
             view.extend_from_slice(bodies);
         }
         col
+    }
+
+    /// A fresh `BodyDelta` [`ScratchColumn`] holding `deltas` (V2): the speculative kernels'
+    /// per-row step movement for a direct-kernel drive.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn delta_scratch_from(deltas: &[BodyDelta]) -> ScratchColumn<BodyDelta> {
+        register_scratch_layouts();
+        let mut col = ScratchColumn::<BodyDelta>::new(
+            body_delta_colored_id(),
+            deltas.len().max(scratch_reserve_rows(size_of::<BodyDelta>())),
+        );
+        {
+            let mut view = col.build_view();
+            view.clear();
+            view.extend_from_slice(deltas);
+        }
+        col
+    }
+
+    /// The pre-V2 solve step over `soft`: the speculative branch off (`spec` false, so every
+    /// kernel runs its `SPEC = false` instance and `inv_h` / `deltas` are unread).
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn pre_v2_step<'a>(soft: &SoftCoefficients, deltas: &'a ScratchColumn<BodyDelta>) -> SolveStep<'a> {
+        SolveStep {
+            bias_rate: soft.bias_rate,
+            mass_coeff: soft.mass_coeff,
+            impulse_coeff: soft.impulse_coeff,
+            inv_h: 0.0,
+            spec: false,
+            deltas: deltas.solve_view(),
+        }
     }
 
     /// Deep-copies `src` into a fresh `CohortColumns` (each column refilled from the
@@ -1857,6 +1888,7 @@
                 simulated: true,
                 kinematic: false,
                 is_sensor: false,
+                bp_margin: 0.0,
                 shape: ColliderShape::Sphere { radius: 1.0 },
             })
             .collect();
@@ -1881,7 +1913,7 @@
         }
         let graph = build_graph(&states, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&states, &[]);
+        solver.build_bodies(&states, &[], false);
         solver.build_columns(&manifolds, &graph, &states, None, RowRemap::Identity, None, false);
         assert_eq!(solver.columns.color_offsets().len(), 2, "body-disjoint specs form one color");
         assert_eq!(solver.columns.group_start().len(), groups.len() + 1, "one group per spec");
@@ -2027,6 +2059,8 @@
         let (k_lo, k_hi) = ctx.cohorts_of(ctx.g_base, g_hi);
 
         // Scalar arm — a fresh deep copy of `cols` + its own body buffer.
+        let no_deltas = delta_scratch_from(&[]);
+        let step = pre_v2_step(&soft, &no_deltas);
         let cols_scalar = clone_columns(cols);
         let bodies_scalar = body_scratch_from(bodies);
         ColoredSoftStepSolver::solve_color(
@@ -2035,9 +2069,7 @@
             ctx,
             ctx.g_base,
             g_hi,
-            soft.bias_rate,
-            soft.mass_coeff,
-            soft.impulse_coeff,
+            &step,
             bias_active,
         );
 
@@ -2053,9 +2085,7 @@
                 bodies_simd.solve_view(),
                 k_lo,
                 k_hi,
-                soft.bias_rate,
-                soft.mass_coeff,
-                soft.impulse_coeff,
+                &step,
                 bias_active,
             );
         }
@@ -2375,6 +2405,142 @@
         )
     }
 
+    // ── V2 S1 (C4): the speculative kernels, scalar against AVX2 ─────────────
+
+    /// A random step movement: up to 25 mm per axis and a rotation of up to 0.2 rad about a
+    /// random axis (V2).
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn random_delta(rng: &mut SplitMix64) -> BodyDelta {
+        let axis = (rand_vel(rng) + Vec3::new(0.0, 1.0e-3, 0.0)).normalize();
+        let (s, c) = ((rng.f01() - 0.5) * 0.2).sin_cos();
+        BodyDelta {
+            dp: rand_vel(rng) * 0.0125,
+            dq: Quat::new(axis.x * s, axis.y * s, axis.z * s, c),
+        }
+    }
+
+    /// Solves the single colour of `cols` with the speculative scalar kernel and with the
+    /// speculative AVX2 kernel, `K3` given, each on a fresh clone of the pristine state, and
+    /// asserts the body and impulse bits match. Returns `(speculative, k3_only)`: the lane ranks
+    /// whose solved separation is positive, and those among them penetrating at gather (read by
+    /// the scalar rule, the oracle).
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn spec_differential<const K3: bool>(
+        cols: &CohortColumns,
+        bodies: &[BodyEffective],
+        deltas: &ScratchColumn<BodyDelta>,
+        soft: &SoftCoefficients,
+        inv_h: f32,
+        bias_active: bool,
+    ) -> (usize, usize) {
+        let step = SolveStep {
+            bias_rate: soft.bias_rate,
+            mass_coeff: soft.mass_coeff,
+            impulse_coeff: soft.impulse_coeff,
+            inv_h,
+            spec: true,
+            deltas: deltas.solve_view(),
+        };
+        let delta_rows = deltas.as_read_slice();
+        let (mut speculative, mut k3_only) = (0usize, 0usize);
+        for head in cols.heads() {
+            for l in 0..head.nlanes as usize {
+                let ia = head.body_a[l] as usize;
+                let da = delta_rows[ia];
+                let db = if head.is_sentinel(l) { BodyDelta::ZERO } else { delta_rows[head.body_b[l] as usize] };
+                for r in 0..head.width[l] as usize {
+                    let blk = &cols.blocks()[head.rank_base as usize + r];
+                    let s0 = blk.sep[l];
+                    let s = if K3 || s0 > 0.0 {
+                        current_separation(s0, head.normal(l), blk.ra(l), blk.rb(l), &da, &db)
+                    } else {
+                        s0
+                    };
+                    speculative += usize::from(s > 0.0);
+                    k3_only += usize::from(s > 0.0 && s0 <= 0.0);
+                }
+            }
+        }
+        let ctx = cols.color_ctx(0);
+        let g_hi = cols.color_group_start()[1] as usize;
+        let (k_lo, k_hi) = ctx.cohorts_of(ctx.g_base, g_hi);
+        let cols_scalar = clone_columns(cols);
+        let bodies_scalar = body_scratch_from(bodies);
+        ColoredSoftStepSolver::solve_color_k::<true, K3>(
+            cols_scalar.solve_view(),
+            bodies_scalar.solve_view(),
+            ctx,
+            ctx.g_base,
+            g_hi,
+            &step,
+            bias_active,
+        );
+        let cols_simd = clone_columns(cols);
+        let bodies_simd = body_scratch_from(bodies);
+        // SAFETY: the test target is `target_feature = "avx2"`-gated, so the host supports AVX2;
+        //   `[k_lo, k_hi)` are the single colour's body-disjoint cohorts, and `deltas` holds a row
+        //   for every body the cohorts name.
+        unsafe {
+            ColoredSoftStepSolver::solve_color_avx2_k::<true, K3>(
+                cols_simd.solve_view(),
+                bodies_simd.solve_view(),
+                k_lo,
+                k_hi,
+                &step,
+                bias_active,
+            );
+        }
+        let (b_scalar, i_scalar) = body_impulse_bits(bodies_scalar.as_read_slice(), &cols_scalar);
+        let (b_simd, i_simd) = body_impulse_bits(bodies_simd.as_read_slice(), &cols_simd);
+        assert_eq!(b_scalar, b_simd, "V2 S1: body bits (K3 {K3}, bias_active {bias_active})");
+        assert_eq!(i_scalar, i_simd, "V2 S1: impulse bits (K3 {K3}, bias_active {bias_active})");
+        (speculative, k3_only)
+    }
+
+    /// V2 S1: over the random cohort corpus with every separation redrawn in ±50 mm (speculative,
+    /// penetrating and sentinel lanes mixed, partial cohorts, statics) and a random step movement
+    /// per body, the speculative scalar kernel and the speculative AVX2 kernel agree bit for bit,
+    /// for both `K3` instances and both passes. Red under a reassociated current-separation sum
+    /// in the x8 (`dp_rel + ((rotB − rb) − (rotA − ra))`), the one-rounding-apart class the O7
+    /// bit claim excludes.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[test]
+    fn v2_s1_speculative_kernels_scalar_equals_avx2() {
+        let mut rng = SplitMix64(0x5bec_0da7_0000_0002);
+        let h = (1.0f32 / 60.0) / 4.0;
+        let soft = SoftCoefficients::new(
+            PhysicsConfig::default().contact_hertz,
+            PhysicsConfig::default().contact_damping,
+            h,
+        );
+        let inv_h = 1.0 / h;
+        let (mut speculative, mut k3_only) = (0usize, 0usize);
+        let cases = if cfg!(miri) { 2 } else { 200 };
+        for _ in 0..cases {
+            let (mut groups, bodies) = random_cohort_corpus(&mut rng, Vec3::new(0.0, 1.0, 0.0));
+            for g in &mut groups {
+                for p in &mut g.points {
+                    p.separation = (rng.f01() - 0.5) * 0.1;
+                }
+            }
+            let deltas: Vec<BodyDelta> = (0..bodies.len()).map(|_| random_delta(&mut rng)).collect();
+            let solver = build_cohort_solver(&groups, &bodies);
+            let delta_col = delta_scratch_from(&deltas);
+            for bias_active in [true, false] {
+                let (s, _) = spec_differential::<false>(&solver.columns, &bodies, &delta_col, &soft, inv_h, bias_active);
+                speculative += s;
+                let (_, k) = spec_differential::<true>(&solver.columns, &bodies, &delta_col, &soft, inv_h, bias_active);
+                k3_only += k;
+            }
+        }
+        eprintln!("V2 S1 non-vacuity: speculative lane ranks {speculative}, K3-only ones {k3_only}");
+        assert!(
+            speculative > 0 && k3_only > 0,
+            "V2 S1 anti-vacuity: the corpus must reach speculative lanes ({speculative}) and lanes only \
+             K3 solves as speculative ({k3_only})"
+        );
+    }
+
     // ── G4 (L11 C3): the {scalar, simd} warm-apply differential ──────────────
     //
     // D7 forks ONE function into two shapes: `warm_apply_scalar`, the group-major
@@ -2490,7 +2656,7 @@
         let (bodies, manifolds) = ragged_colored_scene(11);
         let graph = build_graph(&bodies, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&bodies, &[]);
+        solver.build_bodies(&bodies, &[], false);
         solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
         let mut rng = SplitMix64(0x11C3_5EED_A1B2_C3D4);
         seed_live_lanes(&mut solver, &mut rng);
@@ -4944,10 +5110,16 @@
         impl G1 {
             /// A drive over `bodies` on `arm`; `sleeping` selects the O8 entry.
             fn new(bodies: &[BodyState], arm: Arm, sleeping: bool) -> Self {
+                // The overlap-only rule (V2, critique W2a): the drive's narrowphase is the serial
+                // `ReuseStep::OFF` one, i.e. `d = 0` with no velocity term, and the pins were read
+                // under the pre-V2 rule, so the solver runs the same rule — never an overlap-only
+                // narrowphase beside a speculative solver.
                 let cfg = PhysicsConfig {
                     dt: 1.0 / 60.0,
                     simd_solve: arm.simd_solve,
                     sleeping,
+                    speculative_distance: 0.0,
+                    speculative_velocity_cap: 0.0,
                     ..PhysicsConfig::default()
                 };
                 let mut scratch = SolverScratch::with_capacity(bodies.len());
@@ -5693,7 +5865,7 @@
                 sleep
             });
             // The effective body rows the fill reads (the solve builds them before the columns).
-            solver.build_bodies(&frame.bodies, &[]);
+            solver.build_bodies(&frame.bodies, &[], false);
             let mut go = || {
                 solver.build_columns(
                     &frame.manifolds,

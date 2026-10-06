@@ -221,6 +221,19 @@ proptest! {
         let g = grid_pairs(&mut grid, &bodies);
         let a = all_pairs(&bodies);
         prop_assert_eq!(g, a, "size-class grid pairs must equal all-pairs under size disparity");
+        // V2 B2: the same scene with every bounding sphere inflated by 10 mm (half the owner's
+        // speculative distance, as the gather writes it).
+        let inflated: Vec<BodyState> = bodies
+            .into_iter()
+            .map(|mut b| {
+                b.bp_margin = 0.01;
+                b
+            })
+            .collect();
+        let mut grid = BroadphaseGrid::with_capacity(inflated.len());
+        let g = grid_pairs(&mut grid, &inflated);
+        let a = all_pairs(&inflated);
+        prop_assert_eq!(g, a, "size-class grid pairs must equal all-pairs with the speculative margin");
     }
 }
 

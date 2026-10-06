@@ -186,6 +186,10 @@ mod tests {
             parallel_narrowphase: false,
             contact_reuse: false,
             contact_reuse_distance: 0.0025,
+            // Off both of V2's values (0 before its C5, 0.02 after).
+            speculative_distance: 0.035,
+            // Off both of V2's values (0 before its value flip, 0.5 after).
+            speculative_velocity_cap: 0.125,
             sleeping: true,
             sleep_skip: SleepSkip::Off,
             sleep_threshold: 0.125,
@@ -232,6 +236,8 @@ mod tests {
             parallel_narrowphase,
             contact_reuse,
             contact_reuse_distance,
+            speculative_distance,
+            speculative_velocity_cap,
             sleeping,
             sleep_skip,
             sleep_threshold,
@@ -266,6 +272,16 @@ mod tests {
             contact_reuse_distance.to_bits(),
             b.contact_reuse_distance.to_bits(),
             "contact_reuse_distance"
+        );
+        assert_eq!(
+            speculative_distance.to_bits(),
+            b.speculative_distance.to_bits(),
+            "speculative_distance"
+        );
+        assert_eq!(
+            speculative_velocity_cap.to_bits(),
+            b.speculative_velocity_cap.to_bits(),
+            "speculative_velocity_cap"
         );
         assert_eq!(sleeping, b.sleeping, "sleeping");
         assert_eq!(sleep_skip, b.sleep_skip, "sleep_skip");
@@ -306,6 +322,8 @@ mod tests {
             parallel_narrowphase,
             contact_reuse,
             contact_reuse_distance,
+            speculative_distance,
+            speculative_velocity_cap,
             sleeping,
             sleep_skip,
             sleep_threshold,
@@ -341,6 +359,16 @@ mod tests {
             contact_reuse_distance.to_bits(),
             b.contact_reuse_distance.to_bits(),
             "{why} contact_reuse_distance"
+        );
+        assert_ne!(
+            speculative_distance.to_bits(),
+            b.speculative_distance.to_bits(),
+            "{why} speculative_distance"
+        );
+        assert_ne!(
+            speculative_velocity_cap.to_bits(),
+            b.speculative_velocity_cap.to_bits(),
+            "{why} speculative_velocity_cap"
         );
         assert_ne!(sleeping, b.sleeping, "{why} sleeping");
         assert_ne!(sleep_skip, b.sleep_skip, "{why} sleep_skip");

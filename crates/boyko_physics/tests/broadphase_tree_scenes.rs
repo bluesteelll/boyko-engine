@@ -28,7 +28,7 @@
 //! derived from the constants: [`BAND_BASE_ROWS`] (the threshold − 4; three-layer rest piles plus
 //! loose floor boxes) and a script that spawns one box every [`BAND_PERIOD`] steps up to
 //! [`BAND_TOP_ROWS`] (`AUTO_TREE_HI` + 1) and despawns back, twice, so the row count crosses the
-//! threshold both ways, with sleeping off and on. At the provisional 128 / 136 that is 124 → 137
+//! threshold both ways, with sleeping off and on. At the measured 128 / 136 that is 124 → 137
 //! rows. On every step the oracle and the pose bytes of the AllPairs twin hold, and the path
 //! derived from the row count against `brute_max_rows()` is the path the step took — a tree-path
 //! step answers leaf-list leaves or holds sleepers, a brute step moves no counter and holds no
@@ -45,24 +45,13 @@
 //! (`AUTO_TREE_HI` up, `AUTO_TREE_LO` down). On every step the oracle and the twin's pose bytes
 //! hold; the kind Auto chose is the hysteresis of the row count and the previous side (Tree iff
 //! rows ≥ HI, or rows > LO with the band on); a Tree step runs the default `LeafList` kernel
-//! (ruling 4: the kd order is never auto-selected) and takes the tree path; an AllPairs step
+//! (Auto selects the kind, never the query kernel) and takes the tree path; an AllPairs step
 //! holds no sleeper and moves no tree counter (T6). Void unless both kinds ran, the band switched
 //! once each way per cycle, and (sleeping on) a Tree → AllPairs switch had a live sleeper set.
 //! Shown red at C4: the `clear_sleepers` guard before the kind arms deleted (the sleeping-on arm
 //! fails at the first such switch); `select_broadphase` writing `Grid` for the Tree (the kind
 //! assertion fails while the pose stays equal — every kind emits the same pairs, which is why the
 //! kind is asserted).
-//!
-//! # G-F3-8: the kd leaf order (`levers/broadphase/06-DESIGN-F3.md`)
-//!
-//! Every Tree rig above — J, R, S16, the churn arms, J-Son and R-S — runs again with the Tree's
-//! query kernel set to `QueryKernel::LeafListKd`, the active tree built in the kd median-split
-//! leaf order: the oracle and the AllPairs twin's pose bytes on every step, as on the default
-//! kernel, and the receipt `kd_order_builds` equal to the tree-path steps (0 on the default
-//! kernel's rigs). The kd order moves the query stream's segments, never `ContactPairs`, so the
-//! pose is the twin's. Shown red: with the rev scatter of the assembly walking the Q rows in slot
-//! order (an order-only leak: the pair set is kept), the kd rigs' oracle — which compares the
-//! pair lists in order — fails at the first step with a static member.
 //!
 //! # Scene size per profile
 //!
@@ -333,28 +322,10 @@ fn rig(scene: SceneKind, kind: BroadphaseKind) -> Rig {
 }
 
 fn rig_sleeping(scene: SceneKind, kind: BroadphaseKind, sleeping: bool) -> Rig {
-    rig_kernel(scene, kind, sleeping, QueryKernel::default())
-}
-
-/// [`rig_sleeping`] with the Tree's query kernel `kernel` (G-F3-8).
-fn rig_kernel(scene: SceneKind, kind: BroadphaseKind, sleeping: bool, kernel: QueryKernel) -> Rig {
     let mut world = EcsMaster::new();
     let boxes = spawn_scene(&mut world, scene);
     let physics = wire_sleeping(&mut world, kind, sleeping);
-    world.resource_mut::<BroadphaseTree>().set_query_kernel(kernel);
     Rig { world, physics, boxes }
-}
-
-/// G-F3-8's receipt on a Tree rig after `tree_steps` tree-path steps under `kernel`: the kd order
-/// ran on every one of them under `LeafListKd`, on none otherwise.
-fn assert_kd_receipt(label: &str, d: &TreeDiag, kernel: QueryKernel, tree_steps: u64) {
-    let want = if kernel == QueryKernel::LeafListKd { tree_steps } else { 0 };
-    assert_eq!(d.kd_order_builds, want, "{label} ({kernel:?}): kd builds over {tree_steps} tree-path steps");
-}
-
-/// The label of a rig of `scene` under `kernel`: the scene's name, suffixed on the kd kernel.
-fn kernel_label(scene: &str, kernel: QueryKernel) -> String {
-    if kernel == QueryKernel::LeafListKd { format!("{scene}-kd") } else { scene.to_owned() }
 }
 
 impl Rig {
@@ -446,11 +417,10 @@ fn report_witness(scene: &str, steps: usize, tree: Witness, all: Witness) {
     assert_eq!(tree, all, "{scene}: the running witnesses of the two worlds differ");
 }
 
-/// Runs `scene` on the Tree (query kernel `kernel`) and on AllPairs in lockstep for `steps`,
-/// asserting the oracle and the pose bytes on every step; returns the Tree rig for the structural
-/// assertions.
-fn lockstep(scene: SceneKind, steps: usize, kernel: QueryKernel) -> Rig {
-    let mut tree = rig_kernel(scene, BroadphaseKind::Tree, false, kernel);
+/// Runs `scene` on the Tree and on AllPairs in lockstep for `steps`, asserting the oracle and
+/// the pose bytes on every step; returns the Tree rig for the structural assertions.
+fn lockstep(scene: SceneKind, steps: usize) -> Rig {
+    let mut tree = rig(scene, BroadphaseKind::Tree);
     let mut all = rig(scene, BroadphaseKind::AllPairs);
     let (mut wt, mut wa) = (Witness::START, Witness::START);
     for step in 0..steps {
@@ -469,15 +439,13 @@ fn lockstep(scene: SceneKind, steps: usize, kernel: QueryKernel) -> Rig {
         wa.fold(&all);
     }
     assert!(tree.pairs() > 0, "{}: anti-vacuity: the scene has pairs", scene.name());
-    let label = kernel_label(scene.name(), kernel);
-    assert_kd_receipt(&label, &tree.diag(), kernel, steps as u64);
-    report_witness(&label, steps, wt, wa);
+    report_witness(scene.name(), steps, wt, wa);
     tree
 }
 
-/// The pyramid bounds of the G2 table, sleeping off, the Tree on query kernel `kernel`.
-fn assert_pyramid_bounds(scene: SceneKind, steps: usize, kernel: QueryKernel) {
-    let mut tree = rig_kernel(scene, BroadphaseKind::Tree, false, kernel);
+/// The pyramid bounds of the G2 table, sleeping off.
+fn assert_pyramid_bounds(scene: SceneKind, steps: usize) {
+    let mut tree = rig(scene, BroadphaseKind::Tree);
     let mut all = rig(scene, BroadphaseKind::AllPairs);
     let (mut wt, mut wa) = (Witness::START, Witness::START);
     for step in 0..steps {
@@ -503,19 +471,17 @@ fn assert_pyramid_bounds(scene: SceneKind, steps: usize, kernel: QueryKernel) {
     let rows = tree.world.resource::<SolverScratch>().bodies_len();
     assert_eq!(rows, tree.boxes.len() + 1, "{}: the floor and every box are rows", scene.name());
     assert!(tree.pairs() > tree.boxes.len(), "{}: anti-vacuity: more pairs than boxes", scene.name());
-    let label = kernel_label(scene.name(), kernel);
-    assert_kd_receipt(&label, &tree.diag(), kernel, steps as u64);
-    report_witness(&label, steps, wt, wa);
+    report_witness(scene.name(), steps, wt, wa);
 }
 
 #[test]
 fn g2_jolt_pyramid_matches_all_pairs_with_one_static_rebuild() {
-    assert_pyramid_bounds(SceneKind::Jolt, PYRAMID_STEPS, QueryKernel::default());
+    assert_pyramid_bounds(SceneKind::Jolt, PYRAMID_STEPS);
 }
 
 #[test]
 fn g2_rest_pyramid_matches_all_pairs_with_one_static_rebuild() {
-    assert_pyramid_bounds(SceneKind::Rest, PYRAMID_STEPS, QueryKernel::default());
+    assert_pyramid_bounds(SceneKind::Rest, PYRAMID_STEPS);
 }
 
 /// One sleeping-on row of G2 (L10 T7): its step count, its bound on A — the first step with
@@ -544,13 +510,12 @@ const R_S_ROW: SleepingRow = SleepingRow { steps: 700, a_max: 600, sleeper_rebui
 /// Steps of the toggle-off script after the run.
 const TOGGLE_OFF_STEPS: usize = 6;
 
-/// The sleeping-on rows of G2 (design C5 as L10 C3c builds it; L10 T7), the Tree on query kernel
-/// `kernel`: see the module docs.
-fn assert_sleeping_pyramid(scene: SceneKind, row: &SleepingRow, kernel: QueryKernel) {
+/// The sleeping-on rows of G2 (design C5 as L10 C3c builds it; L10 T7): see the module docs.
+fn assert_sleeping_pyramid(scene: SceneKind, row: &SleepingRow) {
     use boyko_physics::sleep_sets::SleepSets;
-    let mut tree = rig_kernel(scene, BroadphaseKind::Tree, true, kernel);
+    let mut tree = rig_sleeping(scene, BroadphaseKind::Tree, true);
     let mut all = rig_sleeping(scene, BroadphaseKind::AllPairs, true);
-    let label = kernel_label(&format!("{}-sleeping", scene.name()), kernel);
+    let label = format!("{}-sleeping", scene.name());
     let dynamic = tree.boxes.len() as u32;
     let (mut wt, mut wa) = (Witness::START, Witness::START);
     let mut first_all_held: Option<(usize, TreeDiag)> = None;
@@ -626,64 +591,26 @@ fn assert_sleeping_pyramid(scene: SceneKind, row: &SleepingRow, kernel: QueryKer
         (0, 0, 0),
         "{label}: with sleeping off, Δcandidates, Δsleeper rebuilds, Δevictions after the toggle step"
     );
-    assert_kd_receipt(&label, &d, kernel, (row.steps + TOGGLE_OFF_STEPS) as u64);
     report_witness(&label, row.steps + TOGGLE_OFF_STEPS, wt, wa);
 }
 
 #[test]
 fn g2_jolt_pyramid_sleeping_on_withholds_the_held_pile() {
-    assert_sleeping_pyramid(SceneKind::Jolt, &J_SON_ROW, QueryKernel::default());
+    assert_sleeping_pyramid(SceneKind::Jolt, &J_SON_ROW);
 }
 
 #[test]
 fn g2_rest_pyramid_sleeping_on_withholds_the_held_pile() {
-    assert_sleeping_pyramid(SceneKind::Rest, &R_S_ROW, QueryKernel::default());
+    assert_sleeping_pyramid(SceneKind::Rest, &R_S_ROW);
 }
 
 #[test]
 fn g2_tower_matches_all_pairs_and_pose_bytes() {
-    assert_tower(QueryKernel::default());
-}
-
-/// G2's tower row on query kernel `kernel`.
-fn assert_tower(kernel: QueryKernel) {
-    let tree = lockstep(SceneKind::S16, TOWER_STEPS, kernel);
+    let tree = lockstep(SceneKind::S16, TOWER_STEPS);
     let d = tree.diag();
     assert_eq!(d.static_rebuilds, 1);
     assert_eq!(d.members, 1);
     assert_eq!(d.evictions, 0);
-}
-
-// ── G-F3-8: every Tree rig on the kd leaf order (module docs) ────────────────
-
-#[test]
-fn g_f3_8_jolt_pyramid_kd_matches_all_pairs() {
-    assert_pyramid_bounds(SceneKind::Jolt, PYRAMID_STEPS, QueryKernel::LeafListKd);
-}
-
-#[test]
-fn g_f3_8_rest_pyramid_kd_matches_all_pairs() {
-    assert_pyramid_bounds(SceneKind::Rest, PYRAMID_STEPS, QueryKernel::LeafListKd);
-}
-
-#[test]
-fn g_f3_8_tower_kd_matches_all_pairs() {
-    assert_tower(QueryKernel::LeafListKd);
-}
-
-#[test]
-fn g_f3_8_jolt_pyramid_sleeping_on_kd_matches_all_pairs() {
-    assert_sleeping_pyramid(SceneKind::Jolt, &J_SON_ROW, QueryKernel::LeafListKd);
-}
-
-#[test]
-fn g_f3_8_rest_pyramid_sleeping_on_kd_matches_all_pairs() {
-    assert_sleeping_pyramid(SceneKind::Rest, &R_S_ROW, QueryKernel::LeafListKd);
-}
-
-#[test]
-fn g_f3_8_churn_arms_kd_match_all_pairs() {
-    assert_churn_arms(QueryKernel::LeafListKd);
 }
 
 // ── G-TH1: the brute threshold's band (module docs) ──────────────────────────
@@ -706,12 +633,12 @@ const BAND_PILES: usize = BAND_BASE_BOXES / BAND_PILE_BOXES;
 /// Loose base boxes resting on the floor clear of the piles and of each other: the remainder.
 const BAND_LOOSE: usize = BAND_BASE_BOXES % BAND_PILE_BOXES;
 /// Boxes the script spawns and despawns: `BAND_BASE_ROWS` → `BAND_TOP_ROWS` and back (124 → 137
-/// at the provisional 128 / 136), across `TREE_BRUTE_MAX_ROWS` ↔ `+ 1`.
+/// at the measured 128 / 136), across `TREE_BRUTE_MAX_ROWS` ↔ `+ 1`.
 const BAND_EXTRAS: usize = BAND_TOP_ROWS - BAND_BASE_ROWS;
 /// Loose boxes and extras per row of their floor strip, 5 apart.
 const BAND_STRIP: usize = 17;
 
-// The scene follows the constants, so a window-9 value needs no re-scene; these say it still
+// The scene follows the constants, so a re-derived value needs no re-scene; these say it still
 // crosses the threshold and fits its layout.
 const _: () = assert!(
     BAND_BASE_ROWS < TREE_BRUTE_MAX_ROWS as usize && (TREE_BRUTE_MAX_ROWS as usize) < BAND_TOP_ROWS,
@@ -1099,7 +1026,7 @@ struct Churn {
 }
 
 impl Churn {
-    fn new(kernel: QueryKernel) -> Self {
+    fn new() -> Self {
         let mut world = EcsMaster::new();
         let marked = world.create_archetype(&[
             RigidBody::component_id(),
@@ -1113,7 +1040,6 @@ impl Churn {
             Collider::component_id(),
         ]);
         let physics = wire(&mut world, BroadphaseKind::Tree);
-        world.resource_mut::<BroadphaseTree>().set_query_kernel(kernel);
         world.insert_resource(MarkerPlan::default());
         let mut ops = ScheduleBuilder::new(serial_pool());
         ops.add_system(apply_marker_plan);
@@ -1312,13 +1238,8 @@ impl Churn {
 /// dissolved by a row change — translated on every churn step, rebuilt on none.
 #[test]
 fn g2_churn_arms_translate_the_static_set_and_never_rebuild_it() {
-    assert_churn_arms(QueryKernel::default());
-}
-
-/// G2's churn arms, the Tree on query kernel `kernel`.
-fn assert_churn_arms(kernel: QueryKernel) {
     for arm in Arm::ALL {
-        let mut churn = Churn::new(kernel);
+        let mut churn = Churn::new();
         for _ in 0..CHURN_SETTLE {
             churn.physics.run(&mut churn.world);
         }
@@ -1358,7 +1279,6 @@ fn assert_churn_arms(kernel: QueryKernel) {
         assert_eq!(d.sleeper_rebuilds, 0);
         assert_eq!(d.hint_candidates, 0);
         assert_eq!(w_tree, w_oracle, "{}: the churn window's pair-stream witnesses differ", arm.name());
-        assert_kd_receipt(arm.name(), &d, kernel, CHURN_SETTLE as u64 + CHURN_STEPS);
         println!(
             "{}: translations {} patches {} evictions {} static_rebuilds {}; churn-window pair-stream hash Tree {:#018x} oracle {:#018x}",
             arm.name(),

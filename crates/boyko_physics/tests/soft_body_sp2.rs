@@ -286,6 +286,7 @@ fn sphere_state(position: Vec3, velocity: Vec3, radius: f32, inv_mass: f32) -> B
         simulated: inv_mass > 0.0,
         kinematic: false,
         is_sensor: false,
+        bp_margin: 0.0,
         shape: ColliderShape::Sphere { radius },
     }
 }

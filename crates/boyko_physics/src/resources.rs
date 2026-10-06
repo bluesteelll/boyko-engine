@@ -163,9 +163,11 @@ pub enum SleepSkip {
     /// A frozen, clean island is HELD: its pairs skip the narrowphase, the SDF stage, the
     /// colouring and the solve, and its contacts are kept for the views (DEFAULT). A held
     /// island is restored — collided again from what it kept — the step its inputs change
-    /// (`sleep_sets.rs`), and a change of `contact_reuse`, `contact_reuse_distance`, `dt`, the
-    /// effective warm start (the solver's setup flag AND [`PhysicsConfig::warm_start`], L10 D5b),
-    /// the SDF field or its kernel restores every held island.
+    /// (`sleep_sets.rs`), and a change of `contact_reuse`, `contact_reuse_distance`,
+    /// `speculative_distance`, `speculative_velocity_cap`, `dt`, the effective warm start (the
+    /// solver's setup flag AND
+    /// [`PhysicsConfig::warm_start`], L10 D5b), the SDF field or its kernel restores every held
+    /// island.
     #[default]
     Sets,
 }
@@ -411,8 +413,9 @@ pub struct PhysicsConfig {
     /// it just built, lemma L9-L1), and the serial loop and any partition of the parallel
     /// narrowphase produce the same bits for any worker count.
     ///
-    /// **Default ON** since L9 C4 (window 6's decision). `false` is the exact narrowphase:
-    /// the trajectories from before contact reuse, and the arm cross-window bridges run.
+    /// **Default ON** since L9 C4 (window 6's decision). `false` is the exact narrowphase: with
+    /// [`Self::speculative_distance`] and [`Self::speculative_velocity_cap`] both `0`, the
+    /// trajectories from before contact reuse, and the arm cross-window bridges run.
     /// Toggling it at runtime needs no epoch: off, the records are ignored and not written;
     /// on, the next full collision of a slow pair builds one.
     pub contact_reuse: bool,
@@ -424,6 +427,36 @@ pub struct PhysicsConfig {
     /// radius and by 5 % of the thinnest half-extent of either box, so small and thin boxes
     /// get a proportionally tighter bound. A change takes effect at the next check.
     pub contact_reuse_distance: f32,
+    /// V2's speculative contact distance `d`, in metres (default
+    /// [`DEFAULT_SPECULATIVE_DISTANCE`], 20 mm, the owner's value, 2026-09-30). **It changes
+    /// values**: a contact point is kept while its separation is at most `d` plus the
+    /// approach-velocity margin
+    /// ([`speculative_velocity_cap`](Self::speculative_velocity_cap)), on every pair type (box-box,
+    /// sphere-sphere, sphere-box, SDF), a body's broadphase bounding sphere is inflated by `d / 2`
+    /// (plus its own velocity term) so every such pair is a candidate, and the solvers solve a
+    /// point whose current separation is positive as a speculative contact (`bias = s / h`, no
+    /// push) — Box2D v3's and Jolt's rule. A pair with a sensor on either side uses the
+    /// overlap-only rule, so overlap reports stay exact.
+    ///
+    /// **`0`, with the velocity term off, is the overlap-only rule, bit for bit the engine before
+    /// V2**: the value every cross-window bridge runs. Must be finite and `>= 0`. A change takes
+    /// effect at the next broadphase, and restores every held island (L10's sleep epoch).
+    pub speculative_distance: f32,
+    /// V2's approach-velocity margin (rulings 2026-09-30, item 9): the cap, in metres, on the
+    /// velocity term a pair's speculative margin adds to
+    /// [`speculative_distance`](Self::speculative_distance) — `d_eff = d + min(cap, max(0, approach)
+    /// · dt)`, `approach` the rate at which the two bodies close the gap at the start of the step
+    /// (per contact point, linear and angular; per SAT axis, the bound no point exceeds). Default
+    /// [`DEFAULT_SPECULATIVE_VELOCITY_CAP`], 0.5 m, the owner-ruled value. **It changes
+    /// values**: a pair that closes more than `d` in one step becomes a contact on the step
+    /// before it touches, instead of landing on whichever corner arrives first (F0g: J-T holds at
+    /// every drop height of the gap sweep with it, and at under half of them without it). Each
+    /// body's broadphase radius grows by `min(cap, (|v| + |ω| R) · dt)` to match.
+    ///
+    /// **`0` switches the term off**; with [`speculative_distance`](Self::speculative_distance)
+    /// `= 0` as well, the overlap-only rule. Must be finite and `>= 0`. A change takes effect at
+    /// the next broadphase, and restores every held island (L10's sleep epoch).
+    pub speculative_velocity_cap: f32,
     /// Opt into the O8 per-island SLEEPING / deactivation (default `false`).
     ///
     /// Effective only on the colored-solve path (the
@@ -590,6 +623,30 @@ pub const DEFAULT_SLEEP_FRAMES: u16 = 60;
 /// creep bound.
 pub const DEFAULT_CONTACT_REUSE_DISTANCE: f32 = 0.001;
 
+/// The owner's speculative contact distance (V2b, 2026-09-30), in metres: 20 mm, Jolt's
+/// `mSpeculativeContactDistance` and Box2D v3.1's `B2_SPECULATIVE_DISTANCE`, four times the support
+/// unevenness measured on the J-T pile (F0). A NUMERICS-CHANGING value: see
+/// [`PhysicsConfig::speculative_distance`].
+pub const DEFAULT_SPECULATIVE_DISTANCE: f32 = 0.02;
+
+/// The owner-ruled cap on V2's approach-velocity margin (rulings 2026-09-30, item 9), in metres:
+/// half a metre, never reached on the J-T gap sweep F0g measured (a 2.0 m drop closes about
+/// 0.13 m per 1/60 s step). A NUMERICS-CHANGING value: see
+/// [`PhysicsConfig::speculative_velocity_cap`].
+pub const DEFAULT_SPECULATIVE_VELOCITY_CAP: f32 = 0.5;
+
+impl PhysicsConfig {
+    /// Whether V2's speculative contacts are on: a positive
+    /// [`speculative_distance`](Self::speculative_distance) or a positive
+    /// [`speculative_velocity_cap`](Self::speculative_velocity_cap). Off, every stage runs the
+    /// overlap-only rule, and both solvers their pre-V2 kernels.
+    #[inline]
+    #[must_use]
+    pub fn speculative_contacts(&self) -> bool {
+        self.speculative_distance > 0.0 || self.speculative_velocity_cap > 0.0
+    }
+}
+
 impl Default for PhysicsConfig {
     fn default() -> Self {
         Self {
@@ -666,6 +723,11 @@ impl Default for PhysicsConfig {
             // every trajectory the engine produced before contact reuse existed.
             contact_reuse: true,
             contact_reuse_distance: DEFAULT_CONTACT_REUSE_DISTANCE,
+            // V2 (owner V2a/V2b, 2026-09-30): speculative contacts are the contact rule. `0` for
+            // both is the overlap-only rule, the engine before V2 bit for bit.
+            speculative_distance: DEFAULT_SPECULATIVE_DISTANCE,
+            // V2 (rulings 2026-09-30, item 9): the approach-velocity margin.
+            speculative_velocity_cap: DEFAULT_SPECULATIVE_VELOCITY_CAP,
             // Default OFF so an un-opted colored world is BYTE-IDENTICAL to the O6/O7
             // colored solve (the campaign 0%-gate); sleeping is a pure opt-in.
             sleeping: false,
@@ -4642,6 +4704,15 @@ pub struct BodyState {
     /// to today (the 0%-gate). Placed with the trailing scalars (it does not
     /// disturb the leading hot fields).
     pub is_sensor: bool,
+    /// The margin this row's broadphase bounding sphere is inflated by (V2): half of
+    /// `PhysicsConfig::speculative_distance` plus the row's approach-velocity term,
+    /// `min(cap, (|v| + |ω| R) · dt)` (`PhysicsConfig::speculative_velocity_cap`, ruling 9),
+    /// written by [`physics_gather`](crate::systems::physics_gather) into every row it gathers,
+    /// so every pair a narrowphase site could keep is a candidate of every broadphase
+    /// ([`body_bounding_radius`](crate::systems::body_bounding_radius) adds it).
+    /// `0` is the exact bounding sphere; a row built by [`from_columns`](Self::from_columns)
+    /// carries `0`. Placed beside `shape`, the other field the radius reads.
+    pub bp_margin: f32,
     /// The collider shape, projected at gather so broad/narrowphase have the
     /// body's real geometry (P2 W2). The broadphase reads its bounding radius
     /// and the sphere-sphere narrowphase reads its sphere radius — neither phase
@@ -4708,6 +4779,7 @@ impl BodyState {
             simulated,
             kinematic,
             is_sensor,
+            bp_margin: 0.0,
             shape: collider.shape,
         }
     }

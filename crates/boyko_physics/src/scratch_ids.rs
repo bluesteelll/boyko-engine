@@ -56,7 +56,7 @@ use crate::resources::{BodyState, IslandInfo, IslandScratch};
 use crate::row_identity::{RowKey, SleepLatch};
 use crate::sleep_sets::RowCls;
 use crate::solver::contact::BodyEffective;
-use crate::solver::soft_step::{ManifoldConstraint, PointConstraint};
+use crate::solver::soft_step::{BodyDelta, ManifoldConstraint, PointConstraint};
 use crate::solver::colored::{CohortCold, CohortHead, ManifoldTag, RankBlock};
 use crate::solver::warm_records::{WarmRecord, WarmRun};
 use crate::solver::warm_start::WarmEntry;
@@ -1315,11 +1315,48 @@ pub(crate) fn register_held_store_layouts() {
 /// thing to re-run before moving this number again.
 const SCRATCH_REGION_MIN_ID: usize = MAX_COMPONENTS - 160;
 
-// The cold run's bottom is the region's lowest edge today (L10 C3b). The floor is asserted
-// against the LOWEST id rather than against whichever cohort happened to be last when this was
-// written — add a cohort below and move this assert with it.
+// ── V2's body-delta columns (the speculative current separation) ───────────────
+//
+// Each rigid solver's `deltas: ScratchColumn<BodyDelta>` is written by the position integrate
+// beside the `BodyState` snapshot and its body mirror, and read by the contact kernels beside the
+// body mirrors and the contact band: every loop that touches it also sweeps the SOLVER cohort. So
+// each id is the highest one below the region's lowest run whose stagger slot clears the whole
+// solver cohort — computed, so a cohort that moves re-derives it. The two columns belong to
+// different solvers (one per world) and are never swept together; they only need distinct ids.
+
+/// Synthetic id for the colored solver's `deltas` column (V2).
+pub(crate) const SCRATCH_ID_BODY_DELTA_COLORED: usize =
+    highest_id_clear_of(SCRATCH_ID_SLEEP_COLD_BOTTOM - 1, SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM);
+
+/// Synthetic id for the reference solver's `deltas` column (V2).
+pub(crate) const SCRATCH_ID_BODY_DELTA_SERIAL: usize =
+    highest_id_clear_of(SCRATCH_ID_BODY_DELTA_COLORED - 1, SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM);
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_BODY_DELTA_COLORED`].
+#[inline]
+pub(crate) fn body_delta_colored_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_BODY_DELTA_COLORED)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_BODY_DELTA_SERIAL`].
+#[inline]
+pub(crate) fn body_delta_serial_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_BODY_DELTA_SERIAL)
+}
+
 const _: () = assert!(
-    SCRATCH_ID_SLEEP_COLD_BOTTOM >= SCRATCH_REGION_MIN_ID
+    !shares_stagger_slot(SCRATCH_ID_BODY_DELTA_COLORED, SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM)
+        && !shares_stagger_slot(SCRATCH_ID_BODY_DELTA_SERIAL, SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM),
+    "a body-delta column is swept beside the solver cohort, and its slot is one of the cohort's"
+);
+
+// The body-delta ids are the region's lowest edge today (V2; the cold run's bottom was, at L10
+// C3b). The floor is asserted against the LOWEST id rather than against whichever cohort happened
+// to be last when this was written — add a cohort below and move this assert with it.
+const _: () = assert!(
+    SCRATCH_ID_BODY_DELTA_SERIAL >= SCRATCH_REGION_MIN_ID
+        && SCRATCH_ID_BODY_DELTA_SERIAL < SCRATCH_ID_BODY_DELTA_COLORED
+        && SCRATCH_ID_BODY_DELTA_COLORED < SCRATCH_ID_SLEEP_COLD_BOTTOM
         && SCRATCH_ID_SLEEP_COLD_BOTTOM < SCRATCH_ID_GRAPH_ISLAND_INFO
         && SCRATCH_ID_SLEEP_ROW_CLS > SCRATCH_ID_HELD_OF_ROW
         && SCRATCH_ID_SLEEP_ISLAND_SCRATCH < SCRATCH_ID_TREE_BOTTOM,
@@ -1404,6 +1441,8 @@ pub(crate) fn register_scratch_layouts() {
     register_row_identity_layouts();
     register_layout::<IslandScratch>(SCRATCH_ID_SLEEP_ISLAND_SCRATCH);
     register_layout::<BodyState>(SCRATCH_ID_BODIES_PREV);
+    register_layout::<BodyDelta>(SCRATCH_ID_BODY_DELTA_COLORED);
+    register_layout::<BodyDelta>(SCRATCH_ID_BODY_DELTA_SERIAL);
 }
 
 /// Registers the [`Layout`](std::alloc::Layout) of every contact column's element
@@ -1867,6 +1906,20 @@ mod tests {
             &ids,
             BROADPHASE_COHORT_WIDTH + NARROWPHASE_COLUMN_COUNT,
         );
+    }
+
+    /// V2: each body-delta column's slot is clear of every solver-cohort column it is swept
+    /// beside, over the ids actually handed out, and the two sit inside the region.
+    #[test]
+    fn the_body_delta_columns_clear_the_solver_cohort() {
+        for id in [SCRATCH_ID_BODY_DELTA_COLORED, SCRATCH_ID_BODY_DELTA_SERIAL] {
+            let id = std::hint::black_box(id);
+            let mut ids = solver_cohort_ids();
+            ids.push(id);
+            assert_cohort_slots_distinct("solver cohort + a body-delta column", &ids, SOLVER_COHORT_WIDTH + 1);
+            assert!(id >= SCRATCH_REGION_MIN_ID, "the body-delta id {id} is inside the scratch region");
+        }
+        assert_ne!(SCRATCH_ID_BODY_DELTA_COLORED, SCRATCH_ID_BODY_DELTA_SERIAL);
     }
 
     #[test]

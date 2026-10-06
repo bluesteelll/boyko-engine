@@ -399,6 +399,9 @@ struct Variant {
     reuse: Option<bool>,
     /// The tree's brute threshold (`Some(0)`: every step is a tree-path step).
     brute_max_rows: Option<u32>,
+    /// V2's overlap-only rule: `speculative_distance = 0` and `speculative_velocity_cap = 0`, the
+    /// contact rule from before V2 bit for bit; `false` keeps the default rule.
+    overlap_only: bool,
 }
 
 impl Variant {
@@ -413,6 +416,7 @@ impl Variant {
             simd_solve: None,
             reuse: None,
             brute_max_rows: None,
+            overlap_only: false,
         }
     }
 
@@ -429,6 +433,7 @@ impl Variant {
             simd_solve: Some(false),
             reuse: None,
             brute_max_rows: None,
+            overlap_only: false,
         }
     }
 
@@ -443,6 +448,7 @@ impl Variant {
             simd_solve: None,
             reuse: Some(reuse),
             brute_max_rows: None,
+            overlap_only: false,
         }
     }
 
@@ -465,6 +471,10 @@ impl Variant {
         }
         if let Some(v) = self.reuse {
             cfg.contact_reuse = v;
+        }
+        if self.overlap_only {
+            cfg.speculative_distance = 0.0;
+            cfg.speculative_velocity_cap = 0.0;
         }
     }
 }
@@ -1378,6 +1388,16 @@ fn towers() -> Vec<Spec> {
 
 /// The step by which the towers are held (they settle and freeze well before it).
 const HELD_BY: usize = 150;
+/// The first event step of the two arms whose four-cube tower X freezes late under V2's
+/// speculative contacts with contact reuse off ([`s3_cross_pairs_restored_x_then_y_then_both`],
+/// [`s3_move_in_copies_from_a_record_restored_on_its_step`]). Their towers rest exactly touching,
+/// so every stacked pair is a speculative contact. Measured (msvc release, `L10_ARM_TRACE`): the
+/// first step on which every dynamic row was held is 78 on the three reuse-on variants and 223
+/// on the Tree reuse-off one, in all three scenes; before V2 the cross-pairs scene read 90 and
+/// 137, so its reuse-off variant held 13 steps before [`HELD_BY`]. The events move later,
+/// every one by the same offset, to about twice 223, so the void guard has a held scene to act on
+/// (rulings 2026-09-30, item 10b: settle longer; the run-vs-run comparison is unchanged).
+const HELD_BY_LATE: usize = 450;
 /// An arm's step count.
 const ARM_STEPS: usize = 330;
 
@@ -1392,8 +1412,13 @@ fn first_held(label: &str, ev: &Evidence) -> usize {
 /// Asserts the arm's scene was held before its first event at [`HELD_BY`]: every dynamic row
 /// held on the step before it.
 fn assert_held_before_events(label: &str, ev: &Evidence) {
+    assert_held_before(label, ev, HELD_BY);
+}
+
+/// [`assert_held_before_events`] for an arm whose first event is at `held_by`.
+fn assert_held_before(label: &str, ev: &Evidence, held_by: usize) {
     let first = first_held(label, ev);
-    let k = HELD_BY - 1;
+    let k = held_by - 1;
     assert!(
         ev.stats[k].held_rows as usize == ev.dynamic_rows[k],
         "{label}: void: {} of {} dynamic rows held on the step before the events (first held at {first})",
@@ -1419,12 +1444,27 @@ fn arm_variants() -> [Variant; 4] {
 
 /// Runs an arm on every variant of [`arm_variants`], then `check`s each run's evidence.
 fn arm(label: &str, specs: &[Spec], steps: usize, script: &mut Script<'_>, check: &dyn Fn(&str, &Evidence)) {
+    arm_with(label, specs, steps, script, check, false);
+}
+
+/// [`arm`], every variant under V2's overlap-only rule when `overlap_only`
+/// ([`Variant::overlap_only`]).
+fn arm_with(
+    label: &str,
+    specs: &[Spec],
+    steps: usize,
+    script: &mut Script<'_>,
+    check: &dyn Fn(&str, &Evidence),
+    overlap_only: bool,
+) {
     for v in arm_variants() {
+        let v = Variant { overlap_only, ..v };
         let label = format!(
-            "{label} [{:?} reuse {:?} W{}]",
+            "{label} [{:?} reuse {:?} W{}{}]",
             v.kind.expect("an arm names its kind"),
             v.reuse,
-            v.workers
+            v.workers,
+            if overlap_only { " overlap-only" } else { "" }
         );
         let ev = lockstep(&label, Pipeline::Default, v, specs, steps, script);
         if std::env::var_os("L10_ARM_TRACE").is_some() {
@@ -1784,39 +1824,80 @@ fn small_pyramid(height: i32, ox: f32, oz: f32) -> Vec<Spec> {
 /// computes re-key them) and the table's live occupancy climbs past half its slots, which clears
 /// it on a Rows step; the mirror re-keys every held pair that re-keys after that clear, and no
 /// separated pair.
+///
+/// The arm runs V2's overlap-only rule ([`Variant::overlap_only`]). Its anti-vacuity needs a held
+/// reuse-record pair with no manifold — a pair whose record was built in contact and whose settle
+/// carried it just past the contact boundary — and under V2 an exactly touching pile's
+/// side-by-side pairs are within `d`, so every one of them keeps emitting (measured on the V2
+/// tree: 0 such pairs, where the overlap-only rule holds 15 on each reuse-on variant). A V2-native
+/// placement (the side-by-side neighbours `d` apart) measured 0 too: the pile freezes on its
+/// spawn poses and no pair crosses `d`. Rulings 2026-09-30, item 10b: else the overlap-only arm.
+/// The default rule runs the same scene in
+/// [`s3_load_clear_on_a_rows_step_mirrors_every_held_key_under_speculative_contacts`].
 #[test]
 fn s3_load_clear_on_a_rows_step_mirrors_every_held_key() {
     let mut specs = vec![Spec::floor()];
     specs.extend(small_pyramid(3, 0.0, 0.0));
-    arm(
+    arm_with(
         "S3 grow-clear",
         &specs,
         ARM_STEPS,
-        &mut |step, rig: &mut Rig| {
-            // Fifteen rows ahead per step, more than the pile's row span: every re-keyed held
-            // pair lands on a key no pair held one step ago, so the occupancy climbs.
-            if (HELD_BY..HELD_BY + 40).contains(&step) {
-                for i in 0..15 {
-                    let x = 30.0 + 2.0 * i as f32;
-                    let z = 30.0 + 2.0 * (step - HELD_BY) as f32;
-                    rig.spawn(&Spec::wall(Vec3::new(x, 5.0, z), Vec3::new(0.5, 0.5, 0.5)).at(Arch::Front));
-                }
-            }
-        },
+        &mut grow_clear_script,
         &|label, ev| {
-            assert_held_before_events(label, ev);
-            assert!(ev.rules.mirror_clears >= 1, "{label}: void: no mirror pass on a cleared table");
-            assert!(ev.rules.mirrored > 0, "{label}: void: no key mirrored");
-            let k = HELD_BY - 1;
-            assert!(ev.held_sep[k] > 0, "{label}: void: no separated pair held");
+            assert_grow_clear(label, ev);
             if label.contains("reuse Some(true)") {
-                assert!(ev.held_rec[k] > 0, "{label}: void: no reuse-record pair held");
                 // Design 06 §7's anti-vacuity: a held REC pair that emitted no manifold (a slow
                 // pair separated inside τ keeps its record without a contact).
                 assert!(ev.rules.rec_without_manifold > 0, "{label}: void: no REC-without-manifold pair held");
             }
         },
+        true,
     );
+}
+
+/// [`s3_load_clear_on_a_rows_step_mirrors_every_held_key`] under the default rule (V2's
+/// speculative contacts): the same load clear on a Rows step and the same mirror, every guard but
+/// the REC-without-manifold witness, which an exactly touching pile cannot supply under V2 (every
+/// side-by-side pair is within `d`); its count is printed.
+#[test]
+fn s3_load_clear_on_a_rows_step_mirrors_every_held_key_under_speculative_contacts() {
+    let mut specs = vec![Spec::floor()];
+    specs.extend(small_pyramid(3, 0.0, 0.0));
+    arm(
+        "S3 grow-clear (default rule)",
+        &specs,
+        ARM_STEPS,
+        &mut grow_clear_script,
+        &|label, ev| {
+            assert_grow_clear(label, ev);
+            println!("{label}: {} REC-without-manifold pair(s) held", ev.rules.rec_without_manifold);
+        },
+    );
+}
+
+/// The grow-clear arms' script: fifteen rows ahead per step, more than the pile's row span, so
+/// every re-keyed held pair lands on a key no pair held one step ago and the occupancy climbs.
+fn grow_clear_script(step: usize, rig: &mut Rig) {
+    if (HELD_BY..HELD_BY + 40).contains(&step) {
+        for i in 0..15 {
+            let x = 30.0 + 2.0 * i as f32;
+            let z = 30.0 + 2.0 * (step - HELD_BY) as f32;
+            rig.spawn(&Spec::wall(Vec3::new(x, 5.0, z), Vec3::new(0.5, 0.5, 0.5)).at(Arch::Front));
+        }
+    }
+}
+
+/// The grow-clear arms' shared guards: held before the spawns, a mirror pass on a cleared table,
+/// keys mirrored, separated pairs held, and (reuse on) reuse-record pairs held.
+fn assert_grow_clear(label: &str, ev: &Evidence) {
+    assert_held_before_events(label, ev);
+    assert!(ev.rules.mirror_clears >= 1, "{label}: void: no mirror pass on a cleared table");
+    assert!(ev.rules.mirrored > 0, "{label}: void: no key mirrored");
+    let k = HELD_BY - 1;
+    assert!(ev.held_sep[k] > 0, "{label}: void: no separated pair held");
+    if label.contains("reuse Some(true)") {
+        assert!(ev.held_rec[k] > 0, "{label}: void: no reuse-record pair held");
+    }
 }
 
 /// Design 04 D6, review O7: the logical manifold view interleaves the stream and the held store
@@ -1885,20 +1966,20 @@ fn s3_cross_pairs_restored_x_then_y_then_both() {
     arm(
         "S3 cross pairs",
         &specs,
-        ARM_STEPS + 180,
+        ARM_STEPS + 180 + (HELD_BY_LATE - HELD_BY),
         &mut |step, rig: &mut Rig| {
-            if step == HELD_BY {
+            if step == HELD_BY_LATE {
                 rig.body_mut(4).position.x += 1.0e-4;
             }
-            if step == HELD_BY + 100 {
+            if step == HELD_BY_LATE + 100 {
                 rig.spawn(&Spec::ball(Vec3::new(4.0, 0.3, 0.0), 0.3).moving(Vec3::new(-3.0, 0.0, 0.0)));
             }
-            if step == HELD_BY + 330 {
+            if step == HELD_BY_LATE + 330 {
                 rig.body_mut(1).position.x -= 1.0e-4;
             }
         },
         &|label, ev| {
-            assert_held_before_events(label, ev);
+            assert_held_before(label, ev, HELD_BY_LATE);
             assert!(ev.rules.cross_copies > 0, "{label}: void: no cross pair was copied");
             assert!(ev.rules.restore_idx_hits > 0, "{label}: void: no restored pair found its kept state");
             assert!(ev.rules.d2_scan >= 1, "{label}: void: the ball restored nothing");
@@ -1956,22 +2037,22 @@ fn s3_move_in_copies_from_a_record_restored_on_its_step() {
         arm(
             &format!("S3 move-in from a restored record ({name})"),
             &specs,
-            ARM_STEPS,
+            ARM_STEPS + (HELD_BY_LATE - HELD_BY),
             &mut |step, rig: &mut Rig| {
-                if step == HELD_BY {
+                if step == HELD_BY_LATE {
                     rig.body_mut(4).position.x -= 1.0e-4;
                 }
-                if step == HELD_BY + 1 {
+                if step == HELD_BY_LATE + 1 {
                     rig.despawn(despawned);
                 }
             },
             &|label, ev| {
-                assert_held_before_events(label, ev);
+                assert_held_before(label, ev, HELD_BY_LATE);
                 // X, Y and the far cube: Y is ONE record, so its member run is the one the
                 // despawn unsorts.
-                let before = ev.stats[HELD_BY - 1];
+                let before = ev.stats[HELD_BY_LATE - 1];
                 assert_eq!(before.held_islands, 3, "{label}: void: Y is not one held island: {before:?}");
-                let k = HELD_BY + 1;
+                let k = HELD_BY_LATE + 1;
                 assert!(
                     ev.stats[k].moved_in >= 1 && ev.stats[k].restored >= 1,
                     "{label}: void: step {k} did not both restore Y and move X in: {:?}",
@@ -3037,6 +3118,8 @@ fn da9_rows(shape: Shape) -> Vec<Row> {
         parallel_narrowphase: _,
         contact_reuse: _,
         contact_reuse_distance: _,
+        speculative_distance: _,
+        speculative_velocity_cap: _,
         sleeping: _,
         sleep_skip: _,
         sleep_threshold: _,
@@ -3086,6 +3169,16 @@ fn da9_rows(shape: Shape) -> Vec<Row> {
         Row { name: "parallel_narrowphase", write: |c| c.parallel_narrowphase = !c.parallel_narrowphase, class: U },
         Row { name: "contact_reuse", write: |c| c.contact_reuse = !c.contact_reuse, class: O },
         Row { name: "contact_reuse_distance", write: |c| c.contact_reuse_distance = 0.0, class: O },
+        // V2: relative, so it perturbs on both sides of the lane's flip of the default (0 -> 0.02).
+        Row { name: "speculative_distance", write: |c| c.speculative_distance += 0.01, class: O },
+        // V2: a toggle (on to off, or off to the owner's cap), so it perturbs on both sides of the
+        // lane's flip of the default (0 -> 0.5); a relative write past the default would not bind
+        // (the cap is never reached in these scenes).
+        Row {
+            name: "speculative_velocity_cap",
+            write: |c| c.speculative_velocity_cap = if c.speculative_velocity_cap > 0.0 { 0.0 } else { 0.5 },
+            class: O,
+        },
         Row { name: "sleeping", write: |c| c.sleeping = !c.sleeping, class: O },
         // Off ≡ Sets (L10's invariant), and inert with sleeping off.
         Row { name: "sleep_skip", write: |c| c.sleep_skip = SleepSkip::Off, class: U },
@@ -3310,6 +3403,35 @@ fn s3_mid_step_reuse_toggle_lands_next_step() {
 #[test]
 fn s3_mid_step_reuse_distance_lands_next_step() {
     mid_step_reuse_write("LB4 tau", |c| c.contact_reuse_distance = 0.0);
+}
+
+/// LB6 (V2): `speculative_distance` raised by 1 cm Early while two cubes resting 5 mm further
+/// apart than the default distance are held, on the Tree and the Grid at W 1 and 8. The next step
+/// flushes on the epoch and `Off` finds the pair within the new distance — a manifold that was not
+/// there. Red before the sleep epoch carried `speculative_distance`: `Sets` kept the held islands,
+/// and with them the pair `Off` now collides. The gap follows the default (5 mm while it was 0,
+/// 25 mm at 20 mm), so the raise crosses it on either side of V2's value change.
+#[test]
+fn s3_mid_step_speculative_distance_lands_next_step() {
+    let gap = PhysicsConfig::default().speculative_distance + 0.005;
+    let specs = vec![
+        Spec::floor(),
+        Spec::cube(Vec3::new(0.0, 0.5, 0.0), 0.5),
+        Spec::cube(Vec3::new(1.0 + gap, 0.5, 0.0), 0.5),
+    ];
+    for variant in [BroadphaseKind::Tree, BroadphaseKind::Grid].into_iter().flat_map(|k| [1, 8].map(|w| Variant::cell(k, true, w))) {
+        let label = format!("LB6 speculative_distance [{:?} W{}]", variant.kind, variant.workers);
+        let mut script = |step: usize, rig: &mut Rig| {
+            if step == HELD_BY {
+                queue_cfg(rig, Place::Early, |c| c.speculative_distance += 0.01);
+            }
+        };
+        let ev = lockstep(&label, Pipeline::Default, variant, &specs, HELD_BY + 11, &mut script);
+        let k = HELD_BY;
+        assert_eq!(ev.stats[k].held_rows, 2, "{label}: void: the two cubes were not held at the write's step");
+        assert_eq!(ev.stats[k + 1].flushes, 1, "{label}: void: the next step did not flush: {:?}", ev.stats[k + 1]);
+        assert_ne!(ev.off_manifolds[k + 1], ev.off_manifolds[k - 1], "{label}: void: Off's manifolds did not change");
+    }
 }
 
 /// LB5's written step: long enough that L9's `is_fast` classes the held towers' box pairs as fast
@@ -3685,6 +3807,7 @@ fn direct_drive_scene() -> Vec<BodyState> {
         simulated: true,
         kinematic: false,
         is_sensor: false,
+        bp_margin: 0.0,
         shape: ColliderShape::Sphere { radius: 0.5 },
     };
     let mut bodies: Vec<BodyState> = (0..6).map(|i| sphere(2.0 * i as f32)).collect();

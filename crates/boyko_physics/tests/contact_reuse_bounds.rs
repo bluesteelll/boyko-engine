@@ -41,6 +41,17 @@
 //! largest excess is 0.06 mm (pose 24, 0.12 mrad past flat, on a reused step) and the sliding
 //! arm's largest overhang 0.6 mm (three 0.2 mm steps after a record).
 //!
+//! **Under V2's speculative contacts** (`PhysicsConfig::speculative_distance`, 20 mm by default
+//! since V2) a face record keeps every incident corner within `d` of the reference face, not only
+//! the penetrating ones, so the tipping cube's record holds all four bottom corners on every pose
+//! and the unseen corner the tipping arm's witnesses look for never exists: its premise is a
+//! property of the overlap-only rule. The tipping arm therefore runs the overlap-only rule
+//! (`speculative_distance = 0` and `speculative_velocity_cap = 0`, the engine before V2, bit for
+//! bit) against its old premise, and a V2 twin runs the same poses under V2's own rule and
+//! asserts what that rule promises instead: the bound, every penetrating corner held on every
+//! reused step, and a held point that only the speculative margin keeps (rulings 2026-09-30, item
+//! 10b). The sliding arm needs no corner the record misses, so it runs the default.
+//!
 //! Both arms step two bodies for well under a second, so the test runs in every profile.
 
 #![cfg(not(miri))]
@@ -58,7 +69,10 @@ use boyko_threadpool::ThreadPoolBuilder;
 use boyko_physics::components::{Collider, ColliderShape, RigidBody, RigidBodyMass, Simulated};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_systems;
-use boyko_physics::resources::{Manifolds, PairClasses, PhysicsConfig};
+use boyko_physics::resources::{
+    DEFAULT_SPECULATIVE_DISTANCE, DEFAULT_SPECULATIVE_VELOCITY_CAP, Manifolds, PairClasses,
+    PhysicsConfig,
+};
 use boyko_physics::solver::DefaultRigidSolver;
 use boyko_physics::{ContactPoint, Manifold};
 
@@ -108,6 +122,19 @@ fn about(axis: Vec3, angle: f32) -> Quat {
     Quat::new(axis.x * s, axis.y * s, axis.z * s, c).normalize()
 }
 
+/// The contact rule an arm runs (V2, rulings 2026-09-30, item 10b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rule {
+    /// The configuration's default, untouched.
+    Default,
+    /// The overlap-only rule: `speculative_distance = 0` and `speculative_velocity_cap = 0`, the
+    /// contact rule from before V2, bit for bit.
+    OverlapOnly,
+    /// V2's rule at the owner's values, set explicitly: [`DEFAULT_SPECULATIVE_DISTANCE`] and
+    /// [`DEFAULT_SPECULATIVE_VELOCITY_CAP`].
+    Speculative,
+}
+
 /// The scene of one arm: a static box, a dynamic cube, and the default pipeline stepping them.
 struct Scene {
     world: EcsMaster,
@@ -119,9 +146,9 @@ struct Scene {
 
 impl Scene {
     /// Builds the default pipeline over a static box of `support_half` extents centred at
-    /// `support_centre` and a dynamic cube, and turns gravity off. Asserts that the pipeline
-    /// has contact reuse on by default.
-    fn new(support_centre: Vec3, support_half: Vec3) -> Self {
+    /// `support_centre` and a dynamic cube, turns gravity off and sets the contact `rule`.
+    /// Asserts that the pipeline has contact reuse on by default.
+    fn new(support_centre: Vec3, support_half: Vec3, rule: Rule) -> Self {
         let mut world = EcsMaster::new();
         let archetype = world.create_archetype(&[
             RigidBody::component_id(),
@@ -147,6 +174,17 @@ impl Scene {
              has it off"
         );
         cfg.gravity = Vec3::ZERO;
+        match rule {
+            Rule::Default => {}
+            Rule::OverlapOnly => {
+                cfg.speculative_distance = 0.0;
+                cfg.speculative_velocity_cap = 0.0;
+            }
+            Rule::Speculative => {
+                cfg.speculative_distance = DEFAULT_SPECULATIVE_DISTANCE;
+                cfg.speculative_velocity_cap = DEFAULT_SPECULATIVE_VELOCITY_CAP;
+            }
+        }
         let tau = f64::from(cfg.contact_reuse_distance);
         let halves = [support_half.x, support_half.y, support_half.z, CUBE_HALF];
         let h_min = halves.into_iter().fold(f32::INFINITY, f32::min);
@@ -253,11 +291,12 @@ fn cube_corners(centre: [f64; 3], angle: f64) -> [[f64; 3]; 8] {
     })
 }
 
+/// The tipping arm under the overlap-only rule, against its premise (an unseen corner exists).
 #[test]
 fn a_slowly_tipping_cube_s_unseen_corner_penetrates_at_most_two_tau_eff() {
     // The slab's top face is y = 0; it is larger than the cube in every direction, so the cube's
     // corners all lie over it.
-    let mut scene = Scene::new(Vec3::new(0.0, -0.5, 0.0), Vec3::new(2.0, 0.5, 2.0));
+    let mut scene = Scene::new(Vec3::new(0.0, -0.5, 0.0), Vec3::new(2.0, 0.5, 2.0), Rule::OverlapOnly);
     let tau_eff = scene.tau_eff;
     assert!(
         (tau_eff - 1.0e-3).abs() < 1.0e-9,
@@ -346,10 +385,103 @@ fn a_slowly_tipping_cube_s_unseen_corner_penetrates_at_most_two_tau_eff() {
     );
 }
 
+/// The tipping arm's V2 twin: the same poses under V2's rule. The record keeps every bottom
+/// corner within `d`, so no penetrating corner goes unheld on any reused step, and the bound
+/// still holds. Its witnesses: the pair both reuses and rebuilds its record; some reused step has
+/// a penetrating corner (so "every penetrating corner held" is not vacuous); and some reused step
+/// holds a point with a positive separation — a corner only the speculative margin keeps, the
+/// overlap-only rule's unseen corner.
+#[test]
+fn a_slowly_tipping_cube_s_corners_are_all_held_under_speculative_contacts() {
+    let mut scene = Scene::new(Vec3::new(0.0, -0.5, 0.0), Vec3::new(2.0, 0.5, 2.0), Rule::Speculative);
+    let tau_eff = scene.tau_eff;
+    assert!(
+        (tau_eff - 1.0e-3).abs() < 1.0e-9,
+        "construction: the tipping cube's τ_eff is the default τ, got {tau_eff}"
+    );
+    let centre = Vec3::new(0.0, CUBE_HALF - TIP_FLAT_DEPTH, 0.0);
+    let centre64 = [0.0, f64::from(centre.y), 0.0];
+    let z = Vec3::new(0.0, 0.0, 1.0);
+
+    let (mut hits, mut rebuilds) = (0usize, 0usize);
+    let (mut penetrating_hits, mut speculative_held) = (0usize, 0usize);
+    let mut worst = (f64::NEG_INFINITY, 0usize);
+    for k in 0..TIP_STEPS {
+        let angle = TIP_FROM - TIP_STEP * k as f32;
+        let (classes, m) = scene.step(centre, about(z, angle));
+        let hit = classes.reused == 1;
+        hits += usize::from(hit);
+        rebuilds += usize::from(classes.records_built == 1);
+        let m = m.unwrap_or_else(|| {
+            panic!("construction: the tipping cube rests on the slab at step {k} ({classes:?})")
+        });
+
+        let corners = cube_corners(centre64, f64::from(angle));
+        let depths = corners.map(|p| -p[1]);
+        let exact = depths.into_iter().fold(0.0f64, f64::max);
+        let excess = exact - deepest(Some(&m));
+        if excess > worst.0 {
+            worst = (excess, k);
+        }
+        assert!(
+            excess <= 2.0 * tau_eff + SLACK,
+            "V2, step {k} (angle {angle} rad, {}): the deepest exact corner penetrates {exact:e} m, \
+             {excess:e} m past the manifold's deepest point, beyond 2·τ_eff {:e} m + {SLACK:e} \
+             ({classes:?}, {m:?})",
+            if hit { "reused" } else { "full collision" },
+            2.0 * tau_eff
+        );
+        if hit {
+            let points = &m.points[..usize::from(m.count)];
+            let held = |p: &[f64; 3]| {
+                points.iter().any(|q| {
+                    let (lower, _) = lower_upper(&m, q);
+                    let (dx, dz) = (f64::from(lower.x) - p[0], f64::from(lower.z) - p[2]);
+                    (dx * dx + dz * dz).sqrt() < 0.01
+                })
+            };
+            let unheld: Vec<usize> =
+                (0..8).filter(|&i| depths[i] > 0.0 && !held(&corners[i])).collect();
+            assert!(
+                unheld.is_empty(),
+                "V2, step {k} (angle {angle} rad, reused): penetrating corner(s) {unheld:?} have no \
+                 emitted point — a speculative record keeps every bottom corner within d \
+                 ({classes:?}, {m:?})"
+            );
+            penetrating_hits += usize::from(depths.iter().any(|&d| d > 0.0));
+            speculative_held += usize::from(points.iter().any(|q| q.separation > 0.0));
+        }
+    }
+    println!(
+        "G-L9b-7 tipping, V2: {TIP_STEPS} steps, {hits} reused, {rebuilds} records built, \
+         {penetrating_hits} reused steps with a penetrating corner (every one held), \
+         {speculative_held} reused steps holding a point with separation > 0; worst excess {:e} m \
+         at step {} (bound {:e} m)",
+        worst.0,
+        worst.1,
+        2.0 * tau_eff + SLACK
+    );
+    assert!(
+        hits > 0 && rebuilds > 1,
+        "vacuous: the tipping pair must both reuse its record and rebuild it ({hits} reused, \
+         {rebuilds} records built)"
+    );
+    assert!(
+        penetrating_hits > 0,
+        "vacuous: no reused step had a penetrating corner, so \"every penetrating corner held\" \
+         checked nothing"
+    );
+    assert!(
+        speculative_held > 0,
+        "vacuous: no reused step held a point with a positive separation, so the speculative \
+         margin held no corner the overlap-only rule would drop"
+    );
+}
+
 #[test]
 fn a_slowly_sliding_cube_s_contact_overhangs_its_faces_by_at_most_tau_eff() {
     let support_centre = Vec3::new(0.0, -SUPPORT_HALF.y, 0.0);
-    let mut scene = Scene::new(support_centre, SUPPORT_HALF);
+    let mut scene = Scene::new(support_centre, SUPPORT_HALF, Rule::Default);
     let tau_eff = scene.tau_eff;
     assert!(
         (tau_eff - 1.0e-3).abs() < 1.0e-9,
