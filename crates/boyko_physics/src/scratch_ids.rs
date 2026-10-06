@@ -42,6 +42,7 @@ use boyko_ecs::ecs::constants::{
     POOL_MAX_ROWS, POOL_MIN_ROWS, POOL_STAGGER_LINES, POOL_TARGET_DATA_BYTES,
 };
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
+use boyko_threadpool::{RegionLine, SchedItem, StageEntry};
 use boyko_utils::bit_mask::bit_set_256::BitSet256;
 
 use crate::broadphase_tree::RowRec;
@@ -1350,11 +1351,75 @@ const _: () = assert!(
     "a body-delta column is swept beside the solver cohort, and its slot is one of the cohort's"
 );
 
-// The body-delta ids are the region's lowest edge today (V2; the cold run's bottom was, at L10
-// C3b). The floor is asserted against the LOWEST id rather than against whichever cohort happened
+// ── SR's frame and table columns (phase B, `levers/scaling/02-SR-DESIGN.md` §1.1) ──────────────
+//
+// The colored solver keeps its solve region's frame (the sync, done, receipt and claim lines) and
+// table (the entries, the schedule, the block cuts and `link_hints`' scratch) in eight
+// `ScratchColumn`s. Four ids were free between the body-delta ids and the region's floor, so the
+// columns share one id per element type: `ScratchColumn::new` checks only the registered layout's
+// size and alignment, the registry keys a slot on its `(slot, TypeId)` and re-registration is
+// idempotent, and boyko_render's mesh draw puts six `u32` columns on one id the same way. Columns
+// that share an id share a stagger slot, which costs nothing here: a frame line is indexed by an
+// entry, a block or a participant, never swept row by row beside another column of its id. Each id
+// clears the solver cohort's slots, since a region block sweeps the solver's columns.
+
+/// Synthetic id of the solve region's four `RegionLine` columns (sync, done, receipts, claims).
+pub(crate) const SCRATCH_ID_REGION_LINE: usize =
+    highest_id_clear_of(SCRATCH_ID_BODY_DELTA_SERIAL - 1, SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM);
+
+/// Synthetic id of the solve region's `StageEntry` column (the stage table).
+pub(crate) const SCRATCH_ID_REGION_ENTRY: usize =
+    highest_id_clear_of(SCRATCH_ID_REGION_LINE - 1, SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM);
+
+/// Synthetic id of the solve region's `SchedItem` column (the schedule).
+pub(crate) const SCRATCH_ID_REGION_SCHED: usize =
+    highest_id_clear_of(SCRATCH_ID_REGION_ENTRY - 1, SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM);
+
+/// Synthetic id of the solve region's two `u32` columns (the block cuts, `link_hints`' scratch).
+pub(crate) const SCRATCH_ID_REGION_U32: usize =
+    highest_id_clear_of(SCRATCH_ID_REGION_SCHED - 1, SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM);
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_REGION_LINE`].
+#[inline]
+pub(crate) fn region_line_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_REGION_LINE)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_REGION_ENTRY`].
+#[inline]
+pub(crate) fn region_entry_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_REGION_ENTRY)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_REGION_SCHED`].
+#[inline]
+pub(crate) fn region_sched_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_REGION_SCHED)
+}
+
+/// The [`ComponentId`] wrapper for [`SCRATCH_ID_REGION_U32`].
+#[inline]
+pub(crate) fn region_u32_id() -> ComponentId {
+    ComponentId::new(SCRATCH_ID_REGION_U32)
+}
+
+const _: () = assert!(
+    !shares_stagger_slot(SCRATCH_ID_REGION_LINE, SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM)
+        && !shares_stagger_slot(SCRATCH_ID_REGION_ENTRY, SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM)
+        && !shares_stagger_slot(SCRATCH_ID_REGION_SCHED, SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM)
+        && !shares_stagger_slot(SCRATCH_ID_REGION_U32, SOLVER_COHORT_TOP, SOLVER_COHORT_BOTTOM),
+    "a region column is read beside the solver cohort, and its slot is one of the cohort's"
+);
+
+// The region's ids are the scratch region's lowest edge since SR phase B (the body-delta ids were,
+// at V2). The floor is asserted against the LOWEST id rather than against whichever cohort happened
 // to be last when this was written — add a cohort below and move this assert with it.
 const _: () = assert!(
-    SCRATCH_ID_BODY_DELTA_SERIAL >= SCRATCH_REGION_MIN_ID
+    SCRATCH_ID_REGION_U32 >= SCRATCH_REGION_MIN_ID
+        && SCRATCH_ID_REGION_U32 < SCRATCH_ID_REGION_SCHED
+        && SCRATCH_ID_REGION_SCHED < SCRATCH_ID_REGION_ENTRY
+        && SCRATCH_ID_REGION_ENTRY < SCRATCH_ID_REGION_LINE
+        && SCRATCH_ID_REGION_LINE < SCRATCH_ID_BODY_DELTA_SERIAL
         && SCRATCH_ID_BODY_DELTA_SERIAL < SCRATCH_ID_BODY_DELTA_COLORED
         && SCRATCH_ID_BODY_DELTA_COLORED < SCRATCH_ID_SLEEP_COLD_BOTTOM
         && SCRATCH_ID_SLEEP_COLD_BOTTOM < SCRATCH_ID_GRAPH_ISLAND_INFO
@@ -1443,6 +1508,10 @@ pub(crate) fn register_scratch_layouts() {
     register_layout::<BodyState>(SCRATCH_ID_BODIES_PREV);
     register_layout::<BodyDelta>(SCRATCH_ID_BODY_DELTA_COLORED);
     register_layout::<BodyDelta>(SCRATCH_ID_BODY_DELTA_SERIAL);
+    register_layout::<RegionLine>(SCRATCH_ID_REGION_LINE);
+    register_layout::<StageEntry>(SCRATCH_ID_REGION_ENTRY);
+    register_layout::<SchedItem>(SCRATCH_ID_REGION_SCHED);
+    register_layout::<u32>(SCRATCH_ID_REGION_U32);
 }
 
 /// Registers the [`Layout`](std::alloc::Layout) of every contact column's element

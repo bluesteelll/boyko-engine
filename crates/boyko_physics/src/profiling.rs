@@ -131,6 +131,28 @@
 //! | [`PHYS_SETUP_CHUNKS`] | 1 per solving step | the tasks S4's setup scope spawned: 0 when P-c ran inline, else `2..=`[`SETUP_MAX_TASKS`] |
 //! | [`PHYS_SETUP_STAMPED`] | 1 when the setup scope dispatched | the tasks the setup wave's record stamped: every task it spawned, so [`PHYS_SETUP_CHUNKS`]'s value on that step |
 //!
+//! # The solve region's counters (SR phase B, `levers/scaling/02-SR-DESIGN.md` §2)
+//!
+//! Seven counters read the step's solve region, one sample each per solving step — the region's
+//! report (`boyko_threadpool::RegionReport`) on a step that opened one, zeros on a step that did
+//! not, so an armed run samples every counter (`profiling_bit_identity` requires it):
+//!
+//! | Counter | Value per sample |
+//! |---|---|
+//! | [`PHYS_REGION_OPENS`] | 1 when the step's substeps ran as one region, else 0 |
+//! | [`PHYS_REGION_PUBLISHED`] | the region's items published to the helpers (an entry of two blocks or more) |
+//! | [`PHYS_REGION_INLINE`] | its items run on the orchestrator alone (a one-block entry: a narrow colour, a short body range) |
+//! | [`PHYS_REGION_HELPER_BLOCKS`] | blocks the helpers (participants other than the solve's calling thread) ran |
+//! | [`PHYS_REGION_BLOCKS_MAX`] | the most blocks of one published item |
+//! | [`PHYS_REGION_STALLS`] | waits longer than `boyko_threadpool::REGION_STALL_NS`, every participant's (a helper's recruitment wait excluded) |
+//! | [`PHYS_REGION_MAX_WAIT`] | the longest such wait of any participant, in ns |
+//!
+//! On a region step the stage spans keep their counts — participant 0 opens them from the
+//! region's per-item hooks, around the first entry of each kind per substep (gravity, integrate),
+//! from a substep's first warm-start item to its last ([`PHYS_WARM_APPLY`]), around each pass
+//! ([`PHYS_PASS_BIASED`], [`PHYS_PASS_RELAX`]) and each colour item of a pass (the two colour
+//! spans) — and no colour wave opens: [`PHYS_COLOR_SCOPES`] and the colour waves' readings are 0.
+//!
 //! A dispatched solve wave is a colour whose `pool.scope` opened — a wide colour of a pass when
 //! the step's parallel gate holds (`parallel_solve`, a pool of at least two workers, the widest
 //! colour at least [`WIDE_COLOR_MIN_SLOTS`]) — or S4's setup scope, which opens under the same
@@ -339,12 +361,22 @@ declare_zone!(PHYS_NP_ROUTE_WORKER, name = "phys_np_route_worker", scope = ROOT_
 declare_zone!(PHYS_SETUP_CHUNKS, name = "phys_setup_chunks", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 declare_zone!(PHYS_SETUP_STAMPED, name = "phys_setup_stamped", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
 
+// ── The solve region's counters (SR phase B) ──────────────────────────────────
+
+declare_zone!(PHYS_REGION_OPENS, name = "phys_region_opens", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_REGION_PUBLISHED, name = "phys_region_published", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_REGION_INLINE, name = "phys_region_inline", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_REGION_HELPER_BLOCKS, name = "phys_region_helper_blocks", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_REGION_BLOCKS_MAX, name = "phys_region_blocks_max", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_REGION_STALLS, name = "phys_region_stalls", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+declare_zone!(PHYS_REGION_MAX_WAIT, name = "phys_region_max_wait", scope = ROOT_SCOPE, tier = ZoneTier::Deep);
+
 /// Span zones this crate declares: the length of [`SPAN_ZONES`], so a reader's expectation
 /// table is typed by it and a zone without an expectation does not compile.
 pub const SPAN_ZONE_COUNT: usize = 26;
 
 /// Counter zones this crate declares: the length of [`COUNTER_ZONES`].
-pub const COUNTER_ZONE_COUNT: usize = 49;
+pub const COUNTER_ZONE_COUNT: usize = 56;
 
 /// Every span zone this crate declares, in the order of the table in the module docs.
 ///
@@ -431,6 +463,13 @@ pub static COUNTER_ZONES: [&ZoneHandle; COUNTER_ZONE_COUNT] = [
     &PHYS_NP_ROUTE_WORKER,
     &PHYS_SETUP_CHUNKS,
     &PHYS_SETUP_STAMPED,
+    &PHYS_REGION_OPENS,
+    &PHYS_REGION_PUBLISHED,
+    &PHYS_REGION_INLINE,
+    &PHYS_REGION_HELPER_BLOCKS,
+    &PHYS_REGION_BLOCKS_MAX,
+    &PHYS_REGION_STALLS,
+    &PHYS_REGION_MAX_WAIT,
 ];
 
 /// S4's point floor per setup task: the solver's own constant, re-exported so a reader recomputes
@@ -498,7 +537,7 @@ pub static CANARY_ZONES: [&ZoneHandle; 5] =
     [&PHYS_SOLVE_BUILD, &PHYS_SB_BODIES, &PHYS_SB_PA, &PHYS_SB_PB, &PHYS_SB_PC];
 
 /// Whether this build compiles the physics zones at all. Every zone is `Deep`, so one `const`
-/// answers for all seventy-five; `false` under a profile whose tier ceiling is below `Deep`, where
+/// answers for all eighty-two; `false` under a profile whose tier ceiling is below `Deep`, where
 /// every site folds to nothing and an armed profiler records none of them.
 pub const ZONES_COMPILED: bool = (PHYS_SOLVE_BUILD::TIER as u8) <= (GLOBAL_TIER as u8);
 

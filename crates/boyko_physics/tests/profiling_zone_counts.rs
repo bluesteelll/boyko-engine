@@ -32,6 +32,8 @@
 //! | `phys_np_wave_join` / `phys_np_route_worker` (W8S review) | 1 each when the narrowphase dispatched; join ≤ its tail, route 0 or 1 |
 //! | `phys_setup_chunks` (S4) | 1, S4's setup task count recomputed from the cohorts (0 inline); a dispatched setup adds one wave to the wave sums and the route counters |
 //! | `phys_setup_stamped` (S4, review round 2 O1) | 1 when the setup dispatched (every step here), the same task count: the tasks the setup wave's record stamped |
+//! | `phys_region_opens` / `_published` / `_inline` / `_blocks_max` (SR) | 1 each: 0 off the solve region; on an SR step 1 / the published items / the inline items / the widest published item, from [`predict_region`], this test's replica of the region's table builder |
+//! | `phys_region_helper_blocks` / `_stalls` / `_max_wait` (SR) | 1 each (scheduling and timing, not checked) |
 //! | every system of the schedule (its `SystemSpan`) | 1 |
 //!
 //! The W8S dispatch counters are recomputed from the same graph and manifolds: a colour
@@ -50,6 +52,12 @@
 //! next [`STEPS_BRUTE`] step keeps the Tree but raises `brute_max_rows` above the row count (the
 //! brute loop), and the last [`STEPS_ALLPAIRS`] step switches the broadphase to `AllPairs`; on
 //! both every tree zone and counter must read zero.
+//!
+//! The last [`STEPS_SR`] steps turn the solver's solve region on
+//! (`ColoredSoftStepSolver::set_region`, SR phase B, off by default until its flip): the step's
+//! substeps run as one region, every span above keeps its count (participant 0 opens them from the
+//! region's hooks), no colour wave opens (`phys_color_scopes` and `phys_color_tasks` read 0, the
+//! setup wave alone is a solve scope), and the region's counters equal the replica.
 //!
 //! The tree counters are pinned to the scene's structure, not read back from the tree's own
 //! `diag()`: the floor is the scene's one static, so it is pending at step 1 and admitted at
@@ -125,7 +133,9 @@ use boyko_physics::profiling::{
     PHYS_NP_MANIFOLDS, PHYS_NP_PAIRS, PHYS_NP_POINTS, PHYS_NP_REUSED, PHYS_NP_SEP_HITS,
     PHYS_NP_ROUTE_WORKER, PHYS_NP_WAVE_INFLIGHT, PHYS_NP_WAVE_JOIN, PHYS_NP_WAVE_LANES,
     PHYS_NP_WAVE_OVERFLOW, PHYS_NP_WAVE_RAMP, PHYS_NP_WAVE_TAIL, PHYS_PASS_BIASED,
-    PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_ROUTE_EXTERNAL, PHYS_ROUTE_WORKER, PHYS_S6_GRAPH_HIT,
+    PHYS_PASS_RELAX, PHYS_REGION_BLOCKS_MAX, PHYS_REGION_HELPER_BLOCKS, PHYS_REGION_INLINE,
+    PHYS_REGION_MAX_WAIT, PHYS_REGION_OPENS, PHYS_REGION_PUBLISHED, PHYS_REGION_STALLS,
+    PHYS_RESTITUTION, PHYS_ROUTE_EXTERNAL, PHYS_ROUTE_WORKER, PHYS_S6_GRAPH_HIT,
     PHYS_S6_PB_HIT, PHYS_SB_BODIES, PHYS_SB_PA, PHYS_SB_PB, PHYS_SB_PC, PHYS_SETUP_CHUNKS,
     PHYS_SETUP_STAMPED,
     PHYS_SLEEP_BEGIN, PHYS_SLEEP_CLASSIFY, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD,
@@ -142,6 +152,8 @@ use boyko_physics::resources::{
     BroadphaseKind, ConstraintGraph, ContactPairs, IslandSleep, Manifolds, PhysicsConfig,
     SolverScratch,
 };
+use boyko_physics::solver::ColoredSoftStepSolver;
+use boyko_physics::solver::colored::RegionGrain;
 
 use harness::{Scene, WORKERS, run_single_test};
 
@@ -157,8 +169,11 @@ const STEPS_ON: usize = 2;
 const STEPS_BRUTE: usize = 1;
 /// One last step on the `AllPairs` broadphase: the tree zones and counters read zero.
 const STEPS_ALLPAIRS: usize = 1;
+/// SR: steps with the solver's solve region on, after the `AllPairs` step (still `AllPairs`, still
+/// sleeping on).
+const STEPS_SR: usize = 2;
 /// Every step.
-const STEPS: usize = STEPS_OFF + STEPS_ON + STEPS_BRUTE + STEPS_ALLPAIRS;
+const STEPS: usize = STEPS_OFF + STEPS_ON + STEPS_BRUTE + STEPS_ALLPAIRS + STEPS_SR;
 
 fn main() {
     run_single_test(TEST_NAME, physics_zones_count_exactly);
@@ -248,6 +263,100 @@ fn expected_color_tasks(groups: &[u32], lanes: usize, simd_solve: bool) -> u64 {
         lo = hi;
     }
     tasks
+}
+
+/// SR: what the replica predicts for one step's region.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Predicted {
+    published: u64,
+    inline: u64,
+    max_blocks: u64,
+}
+
+/// SR: the colour cut's walk over groups holding `groups` points each, at most `n_target` blocks,
+/// snapped to cohorts under `simd`.
+fn colour_blocks(groups: &[u32], n_target: usize, simd: bool) -> usize {
+    let n = groups.len();
+    let total: usize = groups.iter().map(|&g| g as usize).sum();
+    let target = total.div_ceil(n_target).max(1);
+    let step = if simd { COLOR_COHORT } else { 1 };
+    let mut start = vec![0usize];
+    for &g in groups {
+        start.push(start.last().copied().unwrap_or(0) + g as usize);
+    }
+    let (mut lo, mut blocks) = (0usize, 0usize);
+    while lo < n {
+        let mut hi = (lo + step).min(n);
+        while hi < n && start[hi] - start[lo] < target {
+            hi = (hi + step).min(n);
+        }
+        blocks += 1;
+        lo = hi;
+    }
+    blocks
+}
+
+/// SR: the cohort cut's walk over cohorts holding `cohorts` points each, at most `n_target`.
+fn cohort_blocks(cohorts: &[u32], n_target: usize) -> usize {
+    if cohorts.is_empty() {
+        return 0;
+    }
+    let total: usize = cohorts.iter().map(|&p| p as usize).sum();
+    let target = total.div_ceil(n_target).max(1);
+    let (mut n, mut lo, mut acc) = (0usize, 0usize, 0usize);
+    for (k, &p) in cohorts.iter().enumerate() {
+        acc += p as usize;
+        if acc >= target && n + 1 < n_target {
+            n += 1;
+            lo = k + 1;
+            acc = 0;
+        }
+    }
+    if lo < cohorts.len() {
+        n += 1;
+    }
+    n
+}
+
+/// SR: this test's replica of the region's table builder — from the graph, the manifolds, the
+/// rows and `p` participants under `grain` — the step's published and inline items and its widest
+/// published one, for `substeps` substeps of one biased and `relax` relax passes.
+fn predict_region(scene: &Scene, p: usize, grain: RegionGrain, substeps: u64, relax: u64) -> Predicted {
+    let graph = scene.world.resource::<ConstraintGraph>();
+    let manifolds = scene.world.resource::<Manifolds>().solver_manifolds();
+    let simd = scene.world.resource::<PhysicsConfig>().simd_solve;
+    let rows = scene.world.resource::<SolverScratch>().bodies_len();
+    let mut out = Predicted::default();
+    let mut item = |blocks: usize, times: u64| {
+        if blocks >= 2 {
+            out.published += times;
+            out.max_blocks = out.max_blocks.max(blocks as u64);
+        } else {
+            out.inline += times;
+        }
+    };
+    let unit = (grain.body_rows as usize).div_ceil(8) * 8;
+    let n = (grain.body_bpp as usize * p).min(rows.div_ceil(unit)).max(1);
+    let body = rows.div_ceil(rows.div_ceil(n).div_ceil(8) * 8);
+    item(body, 2 * substeps);
+    for c in 0..graph.n_colors() {
+        let groups: Vec<u32> =
+            graph.color(c).iter().map(|&mi| u32::from(manifolds[mi as usize].count)).filter(|&n| n != 0).collect();
+        let points: usize = groups.iter().map(|&g| g as usize).sum();
+        let cohorts: Vec<u32> = groups.chunks(COLOR_COHORT).map(|c| c.iter().sum()).collect();
+        let sweep = if groups.is_empty() {
+            0
+        } else if points >= grain.wide_floor as usize {
+            let n_target = (grain.max_bpp as usize * p).min(points / grain.colour_min_points as usize).clamp(1, groups.len());
+            colour_blocks(&groups, n_target, simd)
+        } else {
+            1
+        };
+        let warm = if sweep <= 1 { sweep } else { cohort_blocks(&cohorts, sweep.min(cohorts.len())) };
+        item(warm, substeps);
+        item(sweep, substeps * (1 + relax));
+    }
+    out
 }
 
 /// Recomputes this step's color classes and narrowphase output from the graph and manifold
@@ -378,6 +487,11 @@ fn physics_zones_count_exactly() {
         }
         if step >= STEPS_OFF + STEPS_ON + STEPS_BRUTE {
             scene.set_broadphase(BroadphaseKind::AllPairs);
+        }
+        // SR: the last steps run the solve region.
+        let region = step >= STEPS - STEPS_SR;
+        if step == STEPS - STEPS_SR {
+            scene.world.resource_mut::<ColoredSoftStepSolver>().set_region(true);
         }
         {
             let cfg = scene.world.resource::<PhysicsConfig>().broadphase;
@@ -528,8 +642,15 @@ fn physics_zones_count_exactly() {
 
         // W8S: every wide colour of every sweep dispatches (parallel_solve on, four workers, a
         // wide colour on every step); the in-flight and lane readings lie in [1, W + 1].
-        let waves = shape.wide_colors * sweeps;
-        let tasks = shape.wide_tasks * sweeps;
+        // SR: a region step opens no colour wave.
+        let waves = if region { 0 } else { shape.wide_colors * sweeps };
+        let tasks = if region { 0 } else { shape.wide_tasks * sweeps };
+        let pred = if region {
+            predict_region(&scene, WORKERS, RegionGrain::DEFAULT, substeps, relax)
+        } else {
+            Predicted::default()
+        };
+        assert!(!region || pred.published > 0, "step {step}: an SR step must publish an item: {pred:?}");
         let threads = WORKERS as u64 + 1;
         // S4: the setup dispatches under the colours' own gate (it holds on every step here).
         assert!(
@@ -594,6 +715,13 @@ fn physics_zones_count_exactly() {
             (&PHYS_SETUP_CHUNKS, 1, Some(shape.setup_tasks)),
             // Review round 2, O1: the setup wave's record stamped every task it spawned.
             (&PHYS_SETUP_STAMPED, 1, Some(shape.setup_tasks)),
+            (&PHYS_REGION_OPENS, 1, Some(u64::from(region))),
+            (&PHYS_REGION_PUBLISHED, 1, Some(pred.published)),
+            (&PHYS_REGION_INLINE, 1, Some(pred.inline)),
+            (&PHYS_REGION_HELPER_BLOCKS, 1, None),
+            (&PHYS_REGION_BLOCKS_MAX, 1, Some(pred.max_blocks)),
+            (&PHYS_REGION_STALLS, 1, None),
+            (&PHYS_REGION_MAX_WAIT, 1, None),
         ];
         let mut totals = [0u64; COUNTER_ZONE_COUNT];
         // Every mismatch of the step, reported together (module docs).

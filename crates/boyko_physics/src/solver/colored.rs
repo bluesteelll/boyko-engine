@@ -92,9 +92,12 @@ use std::slice;
 
 use boyko_diag::profiling_abi::{ZoneGuard, ZoneHandle};
 use boyko_diag::{zone, zone_enabled};
-use boyko_ecs::ecs::core::component::scratch::{ScratchColumn, ScratchSolveView};
+use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn, ScratchSolveView};
 use boyko_macros::Resource as ResourceDerive;
-use boyko_threadpool::try_with_active_pool;
+use boyko_threadpool::{
+    REGION_MAX_BLOCKS_PER_PARTICIPANT, RegionFrame, RegionLine, RegionLines, RegionReport,
+    RegionStages, SchedItem, StageEntry, V2Policy, claim_lines, link_hints, try_with_active_pool,
+};
 
 use super::contact::{
     BodyEffective, effective_inv_mass, effective_mass, is_dynamic_row, tangent_basis,
@@ -122,7 +125,9 @@ use crate::profiling::{
     PHYS_HIST_COLORS_GE256, PHYS_HIST_COLORS_LT32, PHYS_HIST_COLORS_LT64, PHYS_HIST_COLORS_LT128,
     PHYS_HIST_COLORS_LT256, PHYS_HIST_SLOTS_GE256, PHYS_HIST_SLOTS_LT32, PHYS_HIST_SLOTS_LT64,
     PHYS_HIST_SLOTS_LT128, PHYS_HIST_SLOTS_LT256, PHYS_INTEGRATE, PHYS_PASS_BIASED,
-    PHYS_PASS_RELAX, PHYS_RESTITUTION, PHYS_S6_GRAPH_HIT, PHYS_S6_PB_HIT, PHYS_SB_BODIES,
+    PHYS_PASS_RELAX, PHYS_REGION_BLOCKS_MAX, PHYS_REGION_HELPER_BLOCKS, PHYS_REGION_INLINE,
+    PHYS_REGION_MAX_WAIT, PHYS_REGION_OPENS, PHYS_REGION_PUBLISHED, PHYS_REGION_STALLS,
+    PHYS_RESTITUTION, PHYS_S6_GRAPH_HIT, PHYS_S6_PB_HIT, PHYS_SB_BODIES,
     PHYS_SB_PA, PHYS_SB_PB, PHYS_SB_PC, PHYS_SLEEP_BEGIN, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE,
     PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY,
     PHYS_SETUP_CHUNKS, PHYS_SETUP_STAMPED, PHYS_WRITE_BACK, WaveReading, WaveStamps, WaveTally,
@@ -134,7 +139,8 @@ use crate::resources::{
 use crate::row_identity::{RemapCursor, RowIdentity, RowRemap, WarmSeedStats};
 use crate::scratch_ids::{
     body_delta_colored_id, body_eff_colored_id, colored_frozen_rows_id, contact_column_id,
-    register_scratch_layouts, scratch_reserve_rows, warm_table_id,
+    region_entry_id, region_line_id, region_sched_id, region_u32_id, register_scratch_layouts,
+    scratch_reserve_rows, warm_table_id,
 };
 use crate::sleep_sets::{HeldSolve, RowCls, SleepSets};
 
@@ -975,14 +981,17 @@ struct SolveStep<'a> {
 /// # Safety contract (caller)
 /// `i < deltas.len()` — a gathered body row on a `spec` step, whose delta column the build
 /// resized to the gathered row count — and no writer of the column during the sweep (the tracked
-/// integrate runs between sweeps, on one thread).
+/// integrate runs between sweeps: on one thread serially, as the Integrate stage's row blocks in
+/// the solve region, which never share an item with a sweep).
 #[inline]
 fn delta_copy(deltas: ScratchSolveView<'_, BodyDelta>, i: usize) -> BodyDelta {
     debug_assert!(i < deltas.len(), "invariant: a speculative lane's body row has a delta");
     // SAFETY: `i < deltas.len()` (the contract, debug-asserted): `row_ptr(i)` is the live `i`-th
     //   element on the column's address-stable base. The column is written only by the tracked
-    //   integrate, single-threaded and between sweeps, so this read aliases no write, whichever
-    //   worker makes it. `BodyDelta: Copy`, so the read is a byte copy with no drop glue.
+    //   integrate — serially between sweeps, or by the solve region's Integrate stage, whose blocks
+    //   write disjoint rows and never run while a sweep runs (the region's item barrier) — so this
+    //   read aliases no write, whichever worker makes it. `BodyDelta: Copy`, so the read is a byte
+    //   copy with no drop glue.
     unsafe { *deltas.row_ptr(i) }
 }
 
@@ -1913,6 +1922,23 @@ pub struct ColoredSoftStepSolver {
     canary: ZoneCanary,
     /// S4: steps whose P-c ran in the setup scope ([`setup_dispatches`](Self::setup_dispatches)).
     setup_dispatches: u64,
+    /// SR: the solve region's grain ([`set_region_grain`](Self::set_region_grain)).
+    grain: RegionGrain,
+    /// SR, until the flip: whether a step whose parallel gate holds runs its substeps as one
+    /// region ([`set_region`](Self::set_region)). Off by default.
+    region_switch: bool,
+    /// SR: the region's frame and table columns.
+    region: RegionColumns,
+    /// SR: steps whose substeps ran as one region ([`region_dispatches`](Self::region_dispatches)).
+    region_dispatches: u64,
+    /// SR: the last region's report ([`last_region_report`](Self::last_region_report)).
+    region_last: RegionReport,
+    /// SR, Miri: the per-kind helper blocks and widest entries of the regions so far.
+    #[cfg(miri)]
+    region_tally: [RegionKindCount; SK_COUNT],
+    /// SR, test builds under Miri: how the region is started.
+    #[cfg(all(test, miri))]
+    pub(crate) region_route: RegionRoute,
     /// S4, test builds: the setup's forced shape.
     #[cfg(test)]
     pub(crate) setup_mode: SetupMode,
@@ -1967,6 +1993,15 @@ impl ColoredSoftStepSolver {
             s6: S6Witness::default(),
             canary: ZoneCanary::default(),
             setup_dispatches: 0,
+            grain: RegionGrain::DEFAULT,
+            region_switch: false,
+            region: RegionColumns::new(),
+            region_dispatches: 0,
+            region_last: RegionReport::default(),
+            #[cfg(miri)]
+            region_tally: [RegionKindCount::default(); SK_COUNT],
+            #[cfg(all(test, miri))]
+            region_route: RegionRoute::Pool,
             #[cfg(test)]
             setup_mode: SetupMode::Auto,
             #[cfg(test)]
@@ -2038,6 +2073,52 @@ impl ColoredSoftStepSolver {
     #[inline]
     pub fn setup_dispatches(&self) -> u64 {
         self.setup_dispatches
+    }
+
+    /// SR, until the flip: turns the solve region on or off. On, a step whose parallel gate holds
+    /// (`parallel_solve`, a pool of two workers or more, a colour at least the grain's wide floor)
+    /// runs its substeps as ONE region on the pool instead of a `pool.scope` per wide colour of
+    /// every pass. Value-neutral: the same kernels on the same partitions' bits.
+    #[doc(hidden)]
+    pub fn set_region(&mut self, on: bool) {
+        self.region_switch = on;
+    }
+
+    /// SR: sets the solve region's grain (`levers/scaling/02-SR-DESIGN.md` §2). Value-neutral: a
+    /// grain changes only where the work runs. Returns `false` and changes nothing for a grain
+    /// whose terms are out of range ([`RegionGrain::is_valid`]).
+    #[doc(hidden)]
+    pub fn set_region_grain(&mut self, grain: RegionGrain) -> bool {
+        if !grain.is_valid() {
+            return false;
+        }
+        self.grain = grain;
+        true
+    }
+
+    /// SR: the steps whose substeps ran as one region (one `pool.scope` per such step), since
+    /// construction — the `setup_dispatches` pattern.
+    #[inline]
+    pub fn region_dispatches(&self) -> u64 {
+        self.region_dispatches
+    }
+
+    /// SR: the last region's report — its published and inline items, the blocks its helpers ran,
+    /// its widest published item (the stall census reads 0 unless the profiler was armed). The
+    /// default report before the first region. Read by the region's counter gates without arming
+    /// the profiler (critique W3).
+    #[doc(hidden)]
+    #[inline]
+    pub fn last_region_report(&self) -> RegionReport {
+        self.region_last
+    }
+
+    /// SR, Miri: per stage kind, the blocks the helpers ran and the widest entry, over every region
+    /// so far — the Miri legs' per-kind guard (critique W2). Natively it does not exist.
+    #[cfg(miri)]
+    #[doc(hidden)]
+    pub fn region_kind_tally(&self) -> [RegionKindCount; SK_COUNT] {
+        self.region_tally
     }
 
     /// W8S: the in-zone canary's busy-waits since [`set_zone_canary`](Self::set_zone_canary) —
@@ -2376,6 +2457,9 @@ impl ColoredSoftStepSolver {
             counters,
             canary,
             setup_dispatches,
+            grain,
+            #[cfg(all(test, miri))]
+            region_route,
             ..
         } = self;
         debug_assert!(
@@ -2451,9 +2535,14 @@ impl ColoredSoftStepSolver {
         // setup ranges. The cuts read only the heads' widths (P-b's), so they are taken before
         // the source search, whose shape (fused or not) follows from the gate.
         let lanes = try_with_active_pool(|pool| pool.num_threads()).unwrap_or(0);
-        let p2 = parallel_solve
-            && lanes >= 2
-            && cols.widest_color_slots() >= MIN_PARALLEL_SLOTS_PER_COLOR;
+        // SR, test builds under Miri: the Stacked Borrows route runs the region on std threads,
+        // with no pool to count.
+        #[cfg(all(test, miri))]
+        let lanes = match *region_route {
+            RegionRoute::Threads(n) => n as usize,
+            RegionRoute::Pool => lanes,
+        };
+        let p2 = parallel_solve && lanes >= 2 && cols.widest_color_slots() >= grain.wide_floor;
         let n_cohorts = cols.heads.len();
         let tasks = if p2 { setup_chunk_count(lanes, points as usize, n_cohorts) } else { 0 };
         #[cfg(test)]
@@ -3013,9 +3102,11 @@ impl ColoredSoftStepSolver {
     ///
     /// The flag is [`PhysicsConfig::simd_solve`] — the same one that forks the
     /// sweep kernel, so a step never mixes the two shapes, and the `simd_solve`
-    /// arms of every G1 scene gate this fork. Both paths are SERIAL (C3): the apply
-    /// runs on the calling thread with no worker live, before the first sweep's
-    /// dispatch.
+    /// arms of every G1 scene gate this fork. On the serial step the apply runs on the
+    /// calling thread with no worker live; in the solve region (SR) each colour's cohorts are
+    /// one entry whose blocks apply disjoint cohort ranges at once — within a colour the dynamic
+    /// bodies are disjoint (O4), so each body's adds keep their order, and the colours' entries
+    /// run in colour order.
     #[inline]
     fn warm_start_apply(
         cols: &CohortColumns,
@@ -3032,8 +3123,11 @@ impl ColoredSoftStepSolver {
                 //   host cannot reach this branch — the `cfg` excludes it). `cols` is the
                 //   cohort table `build_columns` filled this step, so every head's
                 //   `rank_base + depth` is in bounds and every head and block is live and
-                //   64 B-aligned; no worker is live here, so this thread alone reads and
-                //   writes the body rows the apply touches.
+                //   64 B-aligned. No other thread writes the dynamic body rows of cohorts
+                //   `[k_lo, k_hi)` while this runs: serially no worker is live, and in the solve
+                //   region the item's other blocks hold other cohorts of the same colour, whose
+                //   dynamic bodies are disjoint from these (O4); the static rows they share are
+                //   only read (the movability guard).
                 unsafe { Self::warm_apply_avx2(cols, bodies_eff, k_lo, k_hi) };
                 return;
             }
@@ -3152,8 +3246,10 @@ impl ColoredSoftStepSolver {
     /// The caller must guarantee AVX2 (the `cfg` + `target_feature` gate), that
     /// `cols` is a fully built cohort table — every head's `rank_base + depth`
     /// within `blocks`, every head and block live and 64 B-aligned — and that no
-    /// other thread reads or writes the body rows of `bodies_eff` while this runs
-    /// (C3 is serial: the apply owns them). It walks cohorts `[k_lo, k_hi)`
+    /// other thread writes the dynamic body rows of cohorts `[k_lo, k_hi)` while this runs
+    /// (serially the apply owns every row; in the solve region no other block of the item writes
+    /// these rows: its cohorts are another range of the same colour, body-disjoint by O4, and the
+    /// static rows the lanes share are only read). It walks cohorts `[k_lo, k_hi)`
     /// (`k_hi <= n_heads`, else the slice panics).
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
     #[target_feature(enable = "avx2")]
@@ -5328,8 +5424,32 @@ impl ColoredSoftStepSolver {
         // Gated red-first by `one_worker_parallel_solve_takes_the_inline_path`.
         let parallel = !fast && p2;
 
-        // L10 C3a: the fast path runs no substep.
-        let passes = if fast { 0 } else { substeps };
+        // SR (phase B): with the switch on, a step whose parallel gate holds runs its substeps as
+        // ONE region (`solve_region`) instead of the loop below; `None` runs the loop.
+        let region_report = if parallel && self.region_switch {
+            self.solve_region(
+                scratch,
+                &RegionStep {
+                    bias_rate: soft.bias_rate,
+                    mass_coeff: soft.mass_coeff,
+                    impulse_coeff: soft.impulse_coeff,
+                    inv_h,
+                    spec,
+                    gravity,
+                    h,
+                    simd: use_simd,
+                    simd_solve: use_simd_solve,
+                    substeps,
+                    biased: 1,
+                    relax: config.relax_iterations,
+                },
+            )
+        } else {
+            None
+        };
+
+        // L10 C3a: the fast path runs no substep; a region step ran them in its region.
+        let passes = if fast || region_report.is_some() { 0 } else { substeps };
         for _ in 0..passes {
             // (1) Gravity integrate DYNAMIC bodies (shared O1 kernel). Single-
             // threaded — the BodyEffective build view's mut slice (no parallel
@@ -5439,6 +5559,9 @@ impl ColoredSoftStepSolver {
 
         if zone_enabled!(PHYS_COLOR_SCOPES) {
             tally.push();
+            // SR: one sample of each region counter per solving step (the same armed condition:
+            // every physics zone is `Deep` on the root scope).
+            push_region_counters(region_report);
         }
 
         // Post-loop restitution (ONCE, velocity-only, bias-free); not on the fast path, which
@@ -5521,6 +5644,757 @@ impl ColoredSoftStepSolver {
             let _z = zone!(PHYS_SLEEP_END);
             sleep.end_step(scratch.bodies(), graph, config.sleep_threshold, config.sleep_frames);
         }
+    }
+}
+
+// ── SR phase B: the solve region (`levers/scaling/02-SR-DESIGN.md` §2) ─────────────────────────
+
+/// SR: the solve region's grain — every term that decides how many blocks an entry of the
+/// region's table gets (critique r1 W1: every term is a knob, so a test can force a multi-block
+/// entry of every kind on a small scene).
+///
+/// Value-neutral: within a colour the manifold-groups touch disjoint dynamic bodies, the body
+/// stages are row-local, and a cohort partition of a colour's warm start keeps every body's adds
+/// in order, so a grain changes only WHERE work runs, never a bit. [`RegionGrain::DEFAULT`]
+/// reproduces the cuts the per-colour scopes made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionGrain {
+    /// A colour of at least this many contact points is cut into blocks; a narrower one runs as
+    /// one block on the region's orchestrator, in colour order (KD8). The step's parallel gate
+    /// (P2) reads it too: a step whose widest colour is under it opens no region.
+    pub wide_floor: u32,
+    /// The fewest points a colour block carries (the colour cut's work floor).
+    pub colour_min_points: u32,
+    /// The most blocks per participant of a colour entry, `1..=8` (the colour cut's lanes
+    /// factor).
+    pub max_bpp: u32,
+    /// The most blocks per participant of a body entry (gravity, integrate), `1..=8`.
+    pub body_bpp: u32,
+    /// The fewest rows a body block carries, rounded up to whole 8-row groups.
+    pub body_rows: u32,
+    /// The fewest laid-out points a Fill or Store block carries (S4's setup floor).
+    pub fill_points: u32,
+}
+
+impl RegionGrain {
+    /// The per-colour scopes' cuts: the inline floor, the colour cut's work floor and lanes
+    /// factor, one body block per participant of at least 32 rows, S4's setup floor.
+    pub const DEFAULT: Self = Self {
+        wide_floor: MIN_PARALLEL_SLOTS_PER_COLOR,
+        colour_min_points: MIN_SLOTS_PER_CHUNK as u32,
+        max_bpp: CHUNKS_PER_WORKER as u32,
+        body_bpp: 1,
+        body_rows: 32,
+        fill_points: SETUP_MIN_POINTS_PER_CHUNK as u32,
+    };
+
+    /// Whether every term is in range: every floor at least 1, and both per-participant factors
+    /// in `1..=`[`REGION_MAX_BLOCKS_PER_PARTICIPANT`] (the region asserts `n_blocks ≤ 8 · P` at
+    /// publish).
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        self.wide_floor >= 1
+            && self.colour_min_points >= 1
+            && self.max_bpp >= 1
+            && self.max_bpp <= REGION_MAX_BLOCKS_PER_PARTICIPANT
+            && self.body_bpp >= 1
+            && self.body_bpp <= REGION_MAX_BLOCKS_PER_PARTICIPANT
+            && self.body_rows >= 1
+            && self.fill_points >= 1
+    }
+}
+
+impl Default for RegionGrain {
+    #[inline]
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// SR, Miri: one stage kind's share of the regions run so far — the blocks the helpers ran
+/// (participants other than 0) and the most blocks one entry of the kind had. The per-kind guard
+/// of the Miri legs (critique W2) reads it; natively it does not exist.
+#[cfg(miri)]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RegionKindCount {
+    /// The stage kind's name.
+    pub kind: &'static str,
+    /// Blocks of the kind the helpers ran.
+    pub helper_blocks: u64,
+    /// The most blocks one entry of the kind had.
+    pub max_blocks: u32,
+}
+
+/// SR, test builds under Miri: how the region is started (the cut's §2.6). `Threads(n)` runs it
+/// on `n` scoped std threads through `boyko_threadpool::region_on_threads` and needs no pool: the
+/// Stacked Borrows leg, which cannot run the pool (phase A's finding).
+#[cfg(all(test, miri))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RegionRoute {
+    /// The ambient pool, as production runs it.
+    #[default]
+    Pool,
+    /// This many scoped std threads.
+    Threads(u32),
+}
+
+/// SR: the solve region's frame and table, in the solver Resource's own columns (Principle 0;
+/// `02-SR-DESIGN.md` §1.1). The four line groups are four separate columns, never one merged
+/// one. Every column is grown serially before a region and never shrunk (phase A's carried W3
+/// obligation): a done line therefore never shrinks below its high-water mark and back, and the
+/// hint scratch is sized at its high-water mark.
+struct RegionColumns {
+    /// The sync line (publish, poison): one line.
+    sync: ScratchColumn<RegionLine>,
+    /// One done line per entry.
+    done: ScratchColumn<RegionLine>,
+    /// One receipt line per participant.
+    receipts: ScratchColumn<RegionLine>,
+    /// One claim line per block of every published entry (`V2Policy`).
+    claims: ScratchColumn<RegionLine>,
+    /// The stage table.
+    entries: ScratchColumn<StageEntry>,
+    /// The schedule.
+    schedule: ScratchColumn<SchedItem>,
+    /// Every entry's block boundaries: block `b` of an entry spans `cuts[first_cut + b] ..
+    /// cuts[first_cut + b + 1]` (rows, cohorts or groups, by kind).
+    cuts: ScratchColumn<u32>,
+    /// `link_hints`' scratch: one slot per entry.
+    hints: ScratchColumn<u32>,
+    /// The claim column's epoch counter (ruling 17 A3): created with the column, never reset, so it
+    /// is at or above every epoch the claim lines hold.
+    epoch: u64,
+}
+
+impl RegionColumns {
+    /// Empty columns on the region's ids, the layouts registered first.
+    fn new() -> Self {
+        register_scratch_layouts();
+        let rows = |stride: usize| scratch_reserve_rows(stride);
+        Self {
+            sync: ScratchColumn::new(region_line_id(), rows(size_of::<RegionLine>())),
+            done: ScratchColumn::new(region_line_id(), rows(size_of::<RegionLine>())),
+            receipts: ScratchColumn::new(region_line_id(), rows(size_of::<RegionLine>())),
+            claims: ScratchColumn::new(region_line_id(), rows(size_of::<RegionLine>())),
+            entries: ScratchColumn::new(region_entry_id(), rows(size_of::<StageEntry>())),
+            schedule: ScratchColumn::new(region_sched_id(), rows(size_of::<SchedItem>())),
+            cuts: ScratchColumn::new(region_u32_id(), rows(size_of::<u32>())),
+            hints: ScratchColumn::new(region_u32_id(), rows(size_of::<u32>())),
+            epoch: 0,
+        }
+    }
+}
+
+/// Grows `col` to at least `n` elements of `zero`, never shrinking it.
+#[inline]
+fn grow_to<T: Copy + 'static>(col: &mut ScratchColumn<T>, n: usize, zero: T) {
+    if col.len() < n {
+        col.build_view().resize(n, zero);
+    }
+}
+
+/// SR: what a step's region takes from `solve_colored_inner`, besides the solver's own columns.
+#[derive(Clone, Copy)]
+struct RegionStep {
+    /// The soft coefficients' bias rate.
+    bias_rate: f32,
+    /// The soft coefficients' mass scale.
+    mass_coeff: f32,
+    /// The soft coefficients' impulse decay.
+    impulse_coeff: f32,
+    /// `1 / h`.
+    inv_h: f32,
+    /// V2's speculative branch runs.
+    spec: bool,
+    /// `PhysicsConfig::gravity`.
+    gravity: Vec3,
+    /// The substep.
+    h: f32,
+    /// `PhysicsConfig::simd`: the gravity and inertia kernels' shape.
+    simd: bool,
+    /// `PhysicsConfig::simd_solve`: the warm apply's and the sweeps' shape, and the colour cut's
+    /// cohort snapping.
+    simd_solve: bool,
+    /// Substeps.
+    substeps: u32,
+    /// Biased passes per substep.
+    biased: u32,
+    /// Relax passes per substep.
+    relax: u32,
+}
+
+/// SR: one built table's sizes.
+#[derive(Clone, Copy, Debug)]
+struct RegionTable {
+    /// Entries.
+    entries: usize,
+    /// Schedule items.
+    items: usize,
+    /// Claim lines.
+    claims: usize,
+}
+
+/// SR: gravity on a row range.
+const SK_GRAVITY: u8 = 0;
+/// SR: one colour's warm start, on a cohort range.
+const SK_WARM: u8 = 1;
+/// SR: one colour's biased sweep, on a group range.
+const SK_BIASED: u8 = 2;
+/// SR: integrate and the inertia refresh, on a row range.
+const SK_INTEGRATE: u8 = 3;
+/// SR: one colour's relax sweep, on a group range.
+const SK_RELAX: u8 = 4;
+/// SR, Miri: the stage kinds the per-kind tally counts.
+#[cfg(miri)]
+const SK_COUNT: usize = 5;
+/// SR: each kind's name, by kind.
+#[cfg(miri)]
+const SK_NAMES: [&str; SK_COUNT] = ["gravity", "warm", "biased", "integrate", "relax"];
+
+/// SR: the gravity entry's index (the table's fixed entries come first).
+const E_GRAVITY: u16 = 0;
+/// SR: the integrate entry's index.
+const E_INTEGRATE: u16 = 1;
+/// SR: the first colour entry's index; colour `c`'s warm, biased and relax entries follow.
+const E_COLOURS: usize = 2;
+
+/// SR: a step's stage table, built serially before its region — counted loops over the colours
+/// and the passes, so IB's presets change only `substeps`, `biased` and `relax` (ruling 15).
+///
+/// The entries: gravity and integrate (one row cut both use), then per colour its warm start
+/// (a cohort cut), its biased sweep and its relax sweep (one group cut both use). The schedule,
+/// per substep: gravity, every colour's warm start in colour order, `biased` passes of every
+/// colour's biased sweep, integrate, `relax` passes of every colour's relax sweep — the serial
+/// loop's order. An entry is reused across its passes, one item each.
+struct TableBuilder<'v, 'c> {
+    entries: ScratchBuildView<'v, StageEntry>,
+    cuts: ScratchBuildView<'c, u32>,
+    claims: u32,
+    p: u32,
+}
+
+impl TableBuilder<'_, '_> {
+    /// Pushes an entry of `n_blocks` blocks whose cuts start at `first_cut`, its claim lines after
+    /// the previous entries'.
+    fn entry(&mut self, kind: u8, color: usize, n_blocks: usize, first_cut: usize) {
+        let n = u16::try_from(n_blocks).expect("invariant: an entry's blocks fit a u16 (at most 8 per participant)");
+        let color = u16::try_from(color).expect("invariant: the region path admits only colour indices a u16 names");
+        let first_cut = u32::try_from(first_cut).expect("invariant: the cut column holds fewer than 2^32 boundaries");
+        self.entries.push(StageEntry::new(kind, color, n, self.claims, first_cut));
+        self.claims += claim_lines::<V2Policy>(n, self.p);
+    }
+
+    /// Cuts rows `[0, rows)` into whole 8-row groups — `min(body_bpp · P, ⌈rows / body_rows⌉)`
+    /// blocks of at least `body_rows` rows rounded up to 8 — and returns the block count.
+    fn body_cuts(&mut self, rows: usize, grain: RegionGrain) -> usize {
+        let unit = (grain.body_rows as usize).div_ceil(COHORT) * COHORT;
+        let n = (grain.body_bpp as usize * self.p as usize).min(rows.div_ceil(unit)).max(1);
+        let per = rows.div_ceil(n).div_ceil(COHORT) * COHORT;
+        let mut lo = 0usize;
+        self.cuts.push(0);
+        let mut blocks = 0usize;
+        while lo < rows {
+            lo = (lo + per).min(rows);
+            self.cuts.push(lo as u32);
+            blocks += 1;
+        }
+        blocks
+    }
+
+    /// Cuts a colour's groups `[g_lo, g_hi)` into at most `n_target` blocks by point quota (the
+    /// per-colour scopes' walk), each a whole number of groups and, under `simd`, a whole number
+    /// of cohorts from the colour's first group. Returns the block count.
+    fn colour_cuts(&mut self, group_start: &[u32], g_lo: usize, g_hi: usize, n_target: usize, simd: bool) -> usize {
+        let total = (group_start[g_hi] - group_start[g_lo]) as usize;
+        let target = total.div_ceil(n_target).max(1);
+        let step = if simd { COHORT } else { 1 };
+        self.cuts.push(g_lo as u32);
+        let (mut lo, mut blocks) = (g_lo, 0usize);
+        while lo < g_hi {
+            let start = group_start[lo] as usize;
+            let mut hi = (lo + step).min(g_hi);
+            while hi < g_hi && (group_start[hi] as usize) - start < target {
+                hi = (hi + step).min(g_hi);
+            }
+            self.cuts.push(hi as u32);
+            blocks += 1;
+            lo = hi;
+        }
+        blocks
+    }
+
+    /// Cuts cohorts `[k_lo, k_hi)` into at most `n_target` ranges by point quota (S4's setup cut's
+    /// walk). Returns the range count.
+    fn cohort_cuts(&mut self, heads: &[CohortHead], k_lo: usize, k_hi: usize, n_target: usize) -> usize {
+        let points = |h: &CohortHead| h.width[..h.nlanes as usize].iter().map(|&w| usize::from(w)).sum::<usize>();
+        let total: usize = heads[k_lo..k_hi].iter().map(points).sum();
+        let target = total.div_ceil(n_target).max(1);
+        self.cuts.push(k_lo as u32);
+        let (mut n, mut lo, mut acc) = (0usize, k_lo, 0usize);
+        for (k, h) in heads.iter().enumerate().take(k_hi).skip(k_lo) {
+            acc += points(h);
+            if acc >= target && n + 1 < n_target {
+                self.cuts.push((k + 1) as u32);
+                n += 1;
+                lo = k + 1;
+                acc = 0;
+            }
+        }
+        if lo < k_hi {
+            self.cuts.push(k_hi as u32);
+            n += 1;
+        }
+        n
+    }
+}
+
+/// SR: one step's region work, block by block (`02-SR-DESIGN.md` §2.4) — `Copy` views and the
+/// read-only table, never a reference over a column a stage writes.
+///
+/// # The W5 rule
+///
+/// `solve_region` takes no `&[BodyState]` / `&[BodyEffective]` and this struct holds none: a
+/// shared reference that spanned the region would be protected for the whole call, and the
+/// gravity and integrate blocks' row writes would violate its protector under Stacked and Tree
+/// Borrows whether or not it was read again. Every body slice a block needs is formed inside the
+/// block from a raw view, over the block's own rows, and dies at the block's end.
+struct SolveStages<'a> {
+    /// The stage table (read-only while the region is open).
+    entries: &'a [StageEntry],
+    /// The schedule (the hooks read it).
+    schedule: &'a [SchedItem],
+    /// Every entry's block boundaries.
+    cuts: &'a [u32],
+    /// The cohort tables: the warm kernels read their heads and blocks through it, and the
+    /// colour CSRs place a colour; no stage writes the struct's own bytes.
+    cols: &'a CohortColumns,
+    /// The sweeps' raw cohort view.
+    view: CohortSolveView<'a>,
+    /// The body rows.
+    bodies: ScratchSolveView<'a, BodyEffective>,
+    /// The gather snapshot (`SolverScratch::bodies`).
+    snapshot: ScratchSolveView<'a, BodyState>,
+    /// The step's solve parameters, the delta view among them.
+    step: SolveStep<'a>,
+    /// `PhysicsConfig::gravity`.
+    gravity: Vec3,
+    /// The substep.
+    h: f32,
+    /// The gravity and inertia kernels' shape.
+    simd: bool,
+    /// The warm apply's and the sweeps' shape.
+    simd_solve: bool,
+    /// The last colour's index (the hooks close a pass's span after it).
+    last_colour: u16,
+    /// Participant 0's span slots (the hooks only; see [`RegionHooks`]).
+    hooks: *mut RegionHooks,
+    /// Miri: blocks the helpers ran, per kind.
+    #[cfg(miri)]
+    tally: &'a [core::sync::atomic::AtomicU64; SK_COUNT],
+}
+
+// SAFETY: every participant calls `run_block` through a shared `&SolveStages`. What a block
+//   writes is its own for the item (`RegionStages::run_block`'s contract), by kind:
+//   * gravity / integrate: rows `[lo, hi)` of the body, snapshot and delta columns, and the cuts
+//     partition `[0, n_rows)`;
+//   * a warm start: the dynamic body rows of cohorts `[lo, hi)` of one colour, and the cuts
+//     partition the colour's cohorts, whose dynamic bodies are pairwise disjoint (O4); the static
+//     rows the colour's lanes share are only read (the movability guard);
+//   * a sweep: the impulse lanes of groups `[lo, hi)` of one colour and their dynamic bodies' rows,
+//     disjoint the same way (the per-colour scopes' argument, `solve_color_parallel`).
+//   No block writes the table, the cuts, the cohort heads, the CSRs or the struct `cols` names, and
+//   two items never overlap (the region's barrier), so a block reads nothing another block of its
+//   item writes. The bases are address-stable `ScratchColumn` reservations taken after the step's
+//   last grow and outlive the region. `hooks` is dereferenced only by `item_begin` / `item_end`,
+//   which run on participant 0 alone. Under Miri the tally is atomics.
+unsafe impl Sync for SolveStages<'_> {}
+
+/// SR: participant 0's open spans during an armed region. The region calls the hooks on
+/// participant 0 only, so the slots need no synchronisation; they live on `solve_region`'s frame.
+/// `ZoneGuard` closes its span on drop, so a slot set to `None` closes it.
+#[derive(Default)]
+struct RegionHooks {
+    /// A substep's warm-start span or a pass's span.
+    outer: Option<ZoneGuard>,
+    /// A gravity, integrate or colour span.
+    inner: Option<ZoneGuard>,
+}
+
+impl SolveStages<'_> {
+    /// Gravity on rows `[lo, hi)`.
+    #[inline]
+    fn gravity_rows(&self, lo: usize, hi: usize) {
+        let n = hi - lo;
+        // SAFETY: `lo < hi <= n_rows` (the row cut) and both columns hold `n_rows` rows
+        //   (`build_bodies` filled the body column from the snapshot), so both ranges are live
+        //   rows on the columns' address-stable bases. Rows `[lo, hi)` are this block's alone for
+        //   the item (the cut partitions the rows; no other stage runs in the item), so the
+        //   exclusive slice aliases no access, and both slices die before the block returns.
+        let (eff, snap) = unsafe {
+            (
+                slice::from_raw_parts_mut(self.bodies.row_ptr(lo), n),
+                slice::from_raw_parts(self.snapshot.row_ptr(lo), n),
+            )
+        };
+        simd::apply_gravity(eff, snap, self.gravity, self.h, self.simd);
+    }
+
+    /// The position integrate (tracked on a speculative step) and the inertia refresh on rows
+    /// `[lo, hi)`.
+    #[inline]
+    fn integrate_rows(&self, lo: usize, hi: usize) {
+        let n = hi - lo;
+        // SAFETY: as `gravity_rows`: rows `[lo, hi)` are live on all three columns (the delta
+        //   column holds every row on a speculative step, `build_bodies`) and this block's alone;
+        //   the body rows are read through the shared slice, which dies before the exclusive one
+        //   below is formed.
+        let snap = unsafe { slice::from_raw_parts_mut(self.snapshot.row_ptr(lo), n) };
+        {
+            // SAFETY: see above.
+            let eff = unsafe { slice::from_raw_parts(self.bodies.row_ptr(lo), n) };
+            if self.step.spec {
+                // SAFETY: see above.
+                let deltas = unsafe { slice::from_raw_parts_mut(self.step.deltas.row_ptr(lo), n) };
+                simd::position_integrate_tracked(eff, snap, deltas, self.h);
+            } else {
+                simd::position_integrate(eff, snap, self.h, false);
+            }
+        }
+        // SAFETY: see above.
+        let eff = unsafe { slice::from_raw_parts_mut(self.bodies.row_ptr(lo), n) };
+        simd::refresh_inertia(eff, snap, self.simd);
+    }
+
+    /// Colour `c`'s place in the group and cohort tables.
+    #[inline]
+    fn colour_ctx(&self, c: usize) -> ColorCtx {
+        ColorCtx {
+            g_base: self.cols.color_group_start()[c] as usize,
+            k_base: self.cols.color_cohort_start()[c] as usize,
+        }
+    }
+
+    /// Colour `c`'s span, classed by the inline floor's own predicate (the serial sweep's rule).
+    fn colour_zone(&self, c: usize) -> Option<ZoneGuard> {
+        let offsets = self.cols.color_offsets();
+        if offsets[c + 1] - offsets[c] < MIN_PARALLEL_SLOTS_PER_COLOR {
+            zone!(PHYS_COLOR_NARROW)
+        } else {
+            zone!(PHYS_COLOR_WIDE)
+        }
+    }
+
+    /// The entry item `item` executes.
+    #[inline]
+    fn item_entry(&self, item: u32) -> StageEntry {
+        self.entries[usize::from(self.schedule[item as usize].entry)]
+    }
+}
+
+impl RegionStages for SolveStages<'_> {
+    // Out of line: one copy serves both `ARMED` monomorphs' orchestrator and helper loops, which
+    // the kernels' bodies would otherwise bloat (I-cache).
+    #[inline(never)]
+    fn run_block(&self, entry: u32, block: u32, participant: u32) {
+        let e = self.entries[entry as usize];
+        let at = e.first_cut as usize + block as usize;
+        let (lo, hi) = (self.cuts[at] as usize, self.cuts[at + 1] as usize);
+        #[cfg(miri)]
+        if participant != 0 {
+            self.tally[usize::from(e.kind)].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+        #[cfg(not(miri))]
+        let _ = participant;
+        match e.kind {
+            SK_GRAVITY => self.gravity_rows(lo, hi),
+            SK_WARM => ColoredSoftStepSolver::warm_start_apply(self.cols, self.bodies, self.simd_solve, lo, hi),
+            SK_BIASED | SK_RELAX => ColoredSoftStepSolver::solve_color_dispatch(
+                self.view,
+                self.bodies,
+                self.colour_ctx(usize::from(e.color)),
+                lo,
+                hi,
+                &self.step,
+                e.kind == SK_BIASED,
+                self.simd_solve,
+            ),
+            SK_INTEGRATE => self.integrate_rows(lo, hi),
+            kind => unknown_stage(kind),
+        }
+    }
+
+    fn item_begin(&self, item: u32) {
+        let e = self.item_entry(item);
+        // SAFETY: the hooks run on participant 0 only (`RegionStages`' contract), so this is the
+        //   one access to the slots, which `solve_region` keeps alive for the whole region.
+        let hooks = unsafe { &mut *self.hooks };
+        let first = e.color == 0;
+        match e.kind {
+            SK_GRAVITY => hooks.inner = zone!(PHYS_GRAVITY),
+            SK_WARM if first => hooks.outer = zone!(PHYS_WARM_APPLY),
+            SK_BIASED | SK_RELAX => {
+                if first {
+                    hooks.outer = if e.kind == SK_BIASED { zone!(PHYS_PASS_BIASED) } else { zone!(PHYS_PASS_RELAX) };
+                }
+                hooks.inner = self.colour_zone(usize::from(e.color));
+            }
+            SK_INTEGRATE => hooks.inner = zone!(PHYS_INTEGRATE),
+            _ => {}
+        }
+    }
+
+    fn item_end(&self, item: u32) {
+        let e = self.item_entry(item);
+        // SAFETY: as `item_begin`.
+        let hooks = unsafe { &mut *self.hooks };
+        hooks.inner = None;
+        if matches!(e.kind, SK_WARM | SK_BIASED | SK_RELAX) && e.color == self.last_colour {
+            hooks.outer = None;
+        }
+    }
+}
+
+/// A table entry of a kind no stage runs: a table-build bug.
+#[cold]
+#[inline(never)]
+fn unknown_stage(kind: u8) -> ! {
+    panic!("invariant: the region's table names only the solver's stage kinds (got {kind})")
+}
+
+/// SR: the step's `PHYS_REGION_*` counters, once per solving step — the region's report, or
+/// zeros on a step that opened none (B-F3: `profiling_bit_identity` needs a sample of every counter
+/// in its armed run).
+#[cold]
+#[inline(never)]
+fn push_region_counters(report: Option<RegionReport>) {
+    let r = report.unwrap_or_default();
+    counter!(PHYS_REGION_OPENS, u64::from(report.is_some()));
+    counter!(PHYS_REGION_PUBLISHED, u64::from(r.published));
+    counter!(PHYS_REGION_INLINE, u64::from(r.inline));
+    counter!(PHYS_REGION_HELPER_BLOCKS, r.helper_blocks);
+    counter!(PHYS_REGION_BLOCKS_MAX, u64::from(r.max_blocks));
+    counter!(PHYS_REGION_STALLS, r.stalls);
+    counter!(PHYS_REGION_MAX_WAIT, r.max_wait_ns);
+}
+
+impl ColoredSoftStepSolver {
+    /// SR: builds this step's stage table into the region columns and sizes the frame lines for
+    /// `p` participants. Serial, before the region.
+    fn build_region_table(&mut self, p: u32, k: &RegionStep) -> RegionTable {
+        let Self { columns: cols, region: rc, grain, bodies, .. } = self;
+        let grain = *grain;
+        let color_offsets = cols.color_offsets();
+        let color_group_start = cols.color_group_start();
+        let color_cohort_start = cols.color_cohort_start();
+        let group_start = cols.group_start();
+        let heads = cols.heads();
+        let n_colors = color_offsets.len().saturating_sub(1);
+        let rows = bodies.len();
+
+        let mut t = TableBuilder { entries: rc.entries.build_view(), cuts: rc.cuts.build_view(), claims: 0, p };
+        t.entries.clear();
+        t.cuts.clear();
+        let n_body = t.body_cuts(rows, grain);
+        t.entry(SK_GRAVITY, 0, n_body, 0);
+        t.entry(SK_INTEGRATE, 0, n_body, 0);
+        for c in 0..n_colors {
+            let (g_lo, g_hi) = (color_group_start[c] as usize, color_group_start[c + 1] as usize);
+            let (k_lo, k_hi) = (color_cohort_start[c] as usize, color_cohort_start[c + 1] as usize);
+            let groups = g_hi - g_lo;
+            let points = color_offsets[c + 1] - color_offsets[c];
+            let sweep_first = t.cuts.len();
+            let n_sweep = if groups == 0 {
+                0
+            } else {
+                let n_target = if points >= grain.wide_floor {
+                    (grain.max_bpp as usize * p as usize)
+                        .min((points / grain.colour_min_points) as usize)
+                        .clamp(1, groups)
+                } else {
+                    1
+                };
+                t.colour_cuts(group_start, g_lo, g_hi, n_target, k.simd_solve)
+            };
+            let warm_first = t.cuts.len();
+            let n_warm = if n_sweep == 0 { 0 } else { t.cohort_cuts(heads, k_lo, k_hi, n_sweep.min(k_hi - k_lo)) };
+            t.entry(SK_WARM, c, n_warm, warm_first);
+            t.entry(SK_BIASED, c, n_sweep, sweep_first);
+            t.entry(SK_RELAX, c, n_sweep, sweep_first);
+        }
+        let entries = t.entries.len();
+        let claims = t.claims as usize;
+        drop(t);
+
+        // The schedule: the serial loop's order, every pass of an entry one item.
+        let colour = |c: usize, kind: usize| u16::try_from(E_COLOURS + 3 * c + kind).expect("invariant: entry indices fit a u16");
+        let mut schedule = rc.schedule.build_view();
+        schedule.clear();
+        for _ in 0..k.substeps {
+            schedule.push(SchedItem::new(E_GRAVITY, None));
+            for c in 0..n_colors {
+                schedule.push(SchedItem::new(colour(c, 0), None));
+            }
+            for _ in 0..k.biased {
+                for c in 0..n_colors {
+                    schedule.push(SchedItem::new(colour(c, 1), None));
+                }
+            }
+            schedule.push(SchedItem::new(E_INTEGRATE, None));
+            for _ in 0..k.relax {
+                for c in 0..n_colors {
+                    schedule.push(SchedItem::new(colour(c, 2), None));
+                }
+            }
+        }
+        grow_to(&mut rc.hints, entries, 0);
+        {
+            let mut hints = rc.hints.build_view();
+            link_hints(schedule.as_mut_slice(), &mut hints.as_mut_slice()[..entries]);
+        }
+        let items = schedule.len();
+        drop(schedule);
+
+        // The frame lines, grown to this table and `p` (never shrunk).
+        grow_to(&mut rc.sync, 1, RegionLine::ZERO);
+        grow_to(&mut rc.done, entries, RegionLine::ZERO);
+        grow_to(&mut rc.receipts, p as usize, RegionLine::ZERO);
+        grow_to(&mut rc.claims, claims, RegionLine::ZERO);
+        RegionTable { entries, items, claims }
+    }
+
+    /// SR: one step's substeps as ONE region (`02-SR-DESIGN.md` §2): the table is built serially,
+    /// then gravity, every colour's warm start, the biased and relax sweeps and integrate + the
+    /// inertia refresh run as its stages on the ambient pool's workers. Returns the region's
+    /// report, or `None` when the step's colours outnumber the table's `u16` entry index — the
+    /// caller then runs the serial loop, which solves the same bits.
+    ///
+    /// Out of line on purpose: the one-worker step's instruction stream (`solve_colored_inner`)
+    /// stays the serial loop's, with one predicate and a call it never takes. Takes no body slice
+    /// (the W5 rule, [`SolveStages`]).
+    #[inline(never)]
+    fn solve_region(&mut self, scratch: &SolverScratch, k: &RegionStep) -> Option<RegionReport> {
+        let n_colors = self.columns.color_offsets().len().saturating_sub(1);
+        if E_COLOURS + 3 * n_colors > usize::from(u16::MAX) + 1 {
+            return None;
+        }
+        #[cfg(all(test, miri))]
+        let route = self.region_route;
+        #[cfg(all(test, miri))]
+        let p = match route {
+            RegionRoute::Pool => try_with_active_pool(|pool| pool.num_threads()),
+            RegionRoute::Threads(n) => Some(n as usize),
+        };
+        #[cfg(not(all(test, miri)))]
+        let p = try_with_active_pool(|pool| pool.num_threads());
+        let p = u32::try_from(p.expect("invariant: the region path runs only where P2 saw a pool of two workers or more"))
+            .expect("invariant: a pool's workers fit a u32");
+        let table = self.build_region_table(p, k);
+
+        let armed = zone_enabled!(PHYS_REGION_OPENS);
+        let Self {
+            bodies,
+            deltas,
+            columns,
+            region: rc,
+            region_dispatches,
+            region_last,
+            #[cfg(miri)]
+            region_tally,
+            ..
+        } = self;
+        let columns: &CohortColumns = columns;
+        #[cfg(miri)]
+        let tally: [core::sync::atomic::AtomicU64; SK_COUNT] = Default::default();
+        let mut hooks = RegionHooks::default();
+        let RegionColumns { sync, done, receipts, claims, entries, schedule, cuts, epoch, .. } = rc;
+        let entries = &entries.as_read_slice()[..table.entries];
+        let schedule = &schedule.as_read_slice()[..table.items];
+        let stages = SolveStages {
+            entries,
+            schedule,
+            cuts: cuts.as_read_slice(),
+            cols: columns,
+            view: columns.solve_view(),
+            bodies: bodies.solve_view(),
+            snapshot: scratch.bodies.solve_view(),
+            step: SolveStep {
+                bias_rate: k.bias_rate,
+                mass_coeff: k.mass_coeff,
+                impulse_coeff: k.impulse_coeff,
+                inv_h: k.inv_h,
+                spec: k.spec,
+                deltas: deltas.solve_view(),
+            },
+            gravity: k.gravity,
+            h: k.h,
+            simd: k.simd,
+            simd_solve: k.simd_solve,
+            last_colour: u16::try_from(n_colors.saturating_sub(1)).expect("invariant: checked above"),
+            hooks: &raw mut hooks,
+            #[cfg(miri)]
+            tally: &tally,
+        };
+        let mut sync = sync.build_view();
+        let mut done = done.build_view();
+        let mut receipts = receipts.build_view();
+        let mut claims = claims.build_view();
+        let lines = RegionLines {
+            sync: &mut sync.as_mut_slice()[0],
+            done: &mut done.as_mut_slice()[..table.entries],
+            receipts: &mut receipts.as_mut_slice()[..p as usize],
+            claims: &mut claims.as_mut_slice()[..table.claims],
+        };
+        // SAFETY (ruling 17 A3, the three clauses of `RegionFrame::new`'s contract):
+        //   * exclusively owned: the four line groups are this Resource's own `ScratchColumn`s
+        //     (`region.sync`, `.done`, `.receipts`, `.claims`), borrowed `&mut` here; no other frame
+        //     or owner is ever handed them, and `region.epoch` is the counter created with them;
+        //   * sized for the schedule: `build_region_table` grew them to this table — a done line per
+        //     entry, a receipt per participant, and `claim_lines::<V2Policy>` lines per published
+        //     entry from its `first_claim` — and the region below runs `V2Policy` with `p`
+        //     participants;
+        //   * the counter is the claim column's own: `region.epoch` starts at 0 with the column
+        //     zeroed, is never reset, and every region advances it past every epoch it writes, so
+        //     it is at or above every epoch the claim lines hold.
+        let frame = unsafe { RegionFrame::new(lines, entries, schedule, epoch, p) };
+        #[cfg(all(test, miri))]
+        let report = match route {
+            RegionRoute::Threads(_) => Some(if armed {
+                boyko_threadpool::region_on_threads::<_, V2Policy, true>(frame, &stages)
+            } else {
+                boyko_threadpool::region_on_threads::<_, V2Policy, false>(frame, &stages)
+            }),
+            RegionRoute::Pool => Self::region_on_pool(frame, &stages, armed),
+        };
+        #[cfg(not(all(test, miri)))]
+        let report = Self::region_on_pool(frame, &stages, armed);
+        let report = report.expect("invariant: the pool P2 saw is still the ambient one");
+        *region_dispatches += 1;
+        *region_last = report;
+        #[cfg(miri)]
+        {
+            for (kind, count) in region_tally.iter_mut().enumerate() {
+                count.kind = SK_NAMES[kind];
+                count.helper_blocks += tally[kind].load(core::sync::atomic::Ordering::Relaxed);
+            }
+            for e in entries {
+                let count = &mut region_tally[usize::from(e.kind)];
+                count.max_blocks = count.max_blocks.max(u32::from(e.n_blocks));
+            }
+        }
+        Some(report)
+    }
+
+    /// SR: runs `frame` on the ambient pool, armed or not. `None` without a pool.
+    #[inline]
+    fn region_on_pool(frame: RegionFrame<'_>, stages: &SolveStages<'_>, armed: bool) -> Option<RegionReport> {
+        try_with_active_pool(move |pool| {
+            if armed {
+                pool.region::<_, V2Policy, true>(frame, stages)
+            } else {
+                pool.region::<_, V2Policy, false>(frame, stages)
+            }
+        })
     }
 }
 

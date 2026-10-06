@@ -944,6 +944,20 @@
         parallel_solve: bool,
         workers: usize,
     ) -> (Vec<u32>, u64) {
+        let (bits, setups, _) = run_dense_in_pool_region(n, steps, parallel_solve, workers, None);
+        (bits, setups)
+    }
+
+    /// [`run_dense_in_pool_counted`] with the solve region (SR) on under `region`'s grain, or off
+    /// (`None`); also returns the steps whose substeps ran as one region.
+    #[cfg(not(miri))]
+    fn run_dense_in_pool_region(
+        n: usize,
+        steps: usize,
+        parallel_solve: bool,
+        workers: usize,
+        region: Option<RegionGrain>,
+    ) -> (Vec<u32>, u64, u64) {
         use boyko_threadpool::ThreadPoolBuilder;
 
         let cfg = PhysicsConfig {
@@ -952,6 +966,10 @@
             ..PhysicsConfig::default()
         };
         let mut solver = ColoredSoftStepSolver::default();
+        if let Some(grain) = region {
+            solver.set_region(true);
+            assert!(solver.set_region_grain(grain), "construction: a valid grain");
+        }
         let mut scratch = SolverScratch::with_capacity(n + 1);
         scratch.set_bodies(&dense_collision_scene(n));
         scratch.touched.reset(scratch.bodies().len());
@@ -965,7 +983,7 @@
                 solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
             }
         });
-        (snapshot_bits(&scratch), solver.setup_dispatches())
+        (snapshot_bits(&scratch), solver.setup_dispatches(), solver.region_dispatches())
     }
 
     /// One G3 run: the layout and record bytes after the last step, and the padding
@@ -1345,6 +1363,8 @@
         // parallel setup to dispatch at 2 / 4 / 8 workers, and at one worker it never does; the
         // count is summed over the cases so a run that never covered the setup cannot pass.
         let setups = std::cell::Cell::new(0u64);
+        // SR (the cut's C2): the same scenes with the solve region on, at 2 / 4 / 8 workers.
+        let regions = std::cell::Cell::new(0u64);
         proptest!(ProptestConfig::with_cases(48), |(seed in any::<u64>())| {
             let n = random_dense_scene(seed).len() - 1; // dyn count (last row = floor)
             let single = run_dense_in_pool(n, 8, false, 1);
@@ -1358,12 +1378,203 @@
             prop_assert_eq!(&p1, &p2, "parallel: 1 vs 2 workers bit-identical (seed {})", seed);
             prop_assert_eq!(&p1, &p4, "parallel: 1 vs 4 workers bit-identical (seed {})", seed);
             prop_assert_eq!(&p1, &p8, "parallel: 1 vs 8 workers bit-identical (seed {})", seed);
+            for workers in [2, 4, 8] {
+                let (r, _, g) = run_dense_in_pool_region(n, 8, true, workers, Some(RegionGrain::DEFAULT));
+                regions.set(regions.get() + g);
+                prop_assert_eq!(&p1, &r, "region: 1 vs {} workers bit-identical (seed {})", workers, seed);
+            }
         });
         assert!(
             setups.get() > 0,
             "anti-vacuity: no case dispatched S4's parallel setup, so the {{1, N}} bits never \
              covered it"
         );
+        assert!(
+            regions.get() > 0,
+            "anti-vacuity: no case opened a solve region, so the {{1, N}} bits never covered it"
+        );
+    }
+
+    /// SR: every grain term at its floor, so every colour of two groups or more, every body range
+    /// of two 8-row groups or more and every colour of two cohorts or more is cut into blocks.
+    #[cfg(not(miri))]
+    const SR_LOWERED: RegionGrain =
+        RegionGrain { wide_floor: 1, colour_min_points: 1, max_bpp: 6, body_bpp: 8, body_rows: 8, fill_points: 1 };
+
+    /// SR: one of three random pile shapes from `seed`, its manifolds fixed for the run: a dense
+    /// line (a few colours), a hub (one body in every manifold: 64 colours or more of one group
+    /// each) or disjoint pairs on a floor (ONE colour).
+    #[cfg(not(miri))]
+    fn sr_random_pile(seed: u64) -> (Vec<BodyState>, Vec<Manifold>, &'static str) {
+        let mut rng = Lcg(seed ^ 0x5B00_0006_C2C2_A11E);
+        match rng.range(0, 3) {
+            0 => {
+                let bodies = dense_collision_scene(rng.range(4, 90) as usize);
+                let manifolds = dense_collision_manifolds(&bodies);
+                (bodies, manifolds, "line")
+            }
+            1 => {
+                // A hub with `k` spokes: every spoke's manifold shares the hub, so each is its own
+                // colour; the spokes also rest on the floor.
+                let k = rng.range(64, 80);
+                let mut bodies = vec![dyn_sphere(Vec3::ZERO, 1.0, 0.5, 0.0)];
+                for s in 0..k {
+                    let angle = s as f32 * 0.09;
+                    bodies.push(dyn_sphere(Vec3::new(1.9 * angle.cos(), 0.5, 1.9 * angle.sin()), 1.0, 0.5, 0.0));
+                }
+                bodies.push(static_body(Vec3::new(0.0, -1.0, 0.0)));
+                let floor = k + 1;
+                let mut manifolds = Vec::new();
+                for s in 1..=k {
+                    let p = bodies[s as usize].position;
+                    manifolds.push(manifold(0, s, p * p.length().recip(), -0.1, p * 0.5));
+                    manifolds.push(manifold(s, floor, Vec3::new(0.0, -1.0, 0.0), -0.05, p));
+                }
+                manifolds.sort_by_key(|m| (m.body_a.0, m.body_b.0));
+                (bodies, manifolds, "hub")
+            }
+            _ => {
+                let n = rng.range(2, 60);
+                let mut bodies: Vec<BodyState> =
+                    (0..n).map(|i| dyn_sphere(Vec3::new(i as f32 * 3.0, 0.9, 0.0), 1.0, 0.5, 0.0)).collect();
+                bodies.push(static_body(Vec3::new(0.0, -1.0, 0.0)));
+                let manifolds = (0..n)
+                    .map(|i| {
+                        box_manifold(i, n, Vec3::new(0.0, -1.0, 0.0), -0.1, Vec3::new(i as f32 * 3.0, 0.0, 0.0), 1 + (i % 4) as u8)
+                    })
+                    .collect();
+                (bodies, manifolds, "pairs")
+            }
+        }
+    }
+
+    /// SR: the pile's bits after `steps` steps, serially (`workers == 0`) or through the solve
+    /// region under `grain` on a `workers`-wide pool; also the regions opened.
+    #[cfg(not(miri))]
+    fn sr_run_pile(
+        bodies: &[BodyState],
+        manifolds: &[Manifold],
+        steps: usize,
+        workers: usize,
+        grain: RegionGrain,
+        simd_solve: bool,
+    ) -> (Vec<u32>, u64) {
+        use boyko_threadpool::ThreadPoolBuilder;
+
+        let graph = build_graph(bodies, manifolds);
+        let cfg = PhysicsConfig { dt: 1.0 / 60.0, parallel_solve: workers > 0, simd_solve, ..PhysicsConfig::default() };
+        let mut solver = ColoredSoftStepSolver::default();
+        solver.set_region(true);
+        assert!(solver.set_region_grain(grain), "construction: a valid grain");
+        let mut scratch = SolverScratch::with_capacity(bodies.len());
+        scratch.set_bodies(bodies);
+        let mut run = |scratch: &mut SolverScratch| {
+            for _ in 0..steps {
+                scratch.touched.reset(scratch.bodies().len());
+                solver.solve_colored(&cfg, manifolds, &graph, scratch);
+            }
+        };
+        if workers == 0 {
+            run(&mut scratch);
+        } else {
+            ThreadPoolBuilder::new().num_threads(workers).build().install(|_| run(&mut scratch));
+        }
+        (snapshot_bits(&scratch), solver.region_dispatches())
+    }
+
+    /// SR (the cut's C2): with every grain term lowered, the region's multi-block colour, warm-start
+    /// and body entries solve the serial bits on random piles — lines, hubs of 64 colours or more,
+    /// one-colour pairs — at 2, 3, 4 and 8 workers, `simd_solve` on and off. Each shape must be
+    /// drawn and every region must open.
+    #[test]
+    #[cfg(not(miri))]
+    fn region_lowered_grain_bit_identical_on_random_piles() {
+        // Which shapes were drawn: one bit each (line, hub, pairs).
+        let shapes = std::cell::Cell::new(0u8);
+        proptest!(ProptestConfig::with_cases(24), |(seed in any::<u64>())| {
+            let (bodies, manifolds, shape) = sr_random_pile(seed);
+            shapes.set(shapes.get() | match shape { "line" => 1, "hub" => 2, _ => 4 });
+            for simd_solve in [true, false] {
+                let (serial, _) = sr_run_pile(&bodies, &manifolds, 3, 0, SR_LOWERED, simd_solve);
+                for workers in [2, 3, 4, 8] {
+                    let (got, regions) = sr_run_pile(&bodies, &manifolds, 3, workers, SR_LOWERED, simd_solve);
+                    prop_assert_eq!(regions, 3, "{} seed {}: a region per step at W{}", shape, seed, workers);
+                    prop_assert_eq!(&got, &serial, "{} seed {} simd {}: W{} vs serial", shape, seed, simd_solve, workers);
+                }
+            }
+        });
+        assert_eq!(shapes.get(), 7, "anti-vacuity: every pile shape was drawn (bits {:03b})", shapes.get());
+    }
+
+    /// SR (the cut's §2.6, Q3): the Stacked Borrows leg of the region's physics stages, on the
+    /// pool-free route (`RegionRoute::Threads`, `boyko_threadpool::region_on_threads`; the pool's
+    /// deque transport is not Stacked-Borrows clean). Twenty spheres on a floor, four carrying a
+    /// sphere, every grain term lowered and every restitution 0: the region's stages run on two
+    /// std threads, and the bits equal the serial solve's. The per-kind guard (critique W2) reads
+    /// first: a kind whose helpers ran no block, or whose entries were one block, would make the
+    /// leg vacuous for it. Run under both models:
+    ///
+    /// ```text
+    /// MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-ignore-leaks" cargo +nightly-x86_64-pc-windows-msvc \
+    ///   miri test -p boyko-physics --lib sr_region_ -- --test-threads=1
+    /// ```
+    /// and with `-Zmiri-tree-borrows` prepended.
+    #[test]
+    #[cfg(miri)]
+    fn sr_region_sb_route_runs_every_kind_on_both_threads() {
+        let mut bodies = Vec::new();
+        for i in 0..16u32 {
+            let mut b = dyn_sphere(Vec3::new(i as f32 * 3.0, 0.6, 0.0), 1.0, 0.5, 0.0);
+            b.linear_velocity = Vec3::new(0.0, -0.5, 0.1);
+            bodies.push(b);
+        }
+        for i in 0..4u32 {
+            let mut b = dyn_sphere(Vec3::new(i as f32 * 3.0, 2.4, 0.0), 1.0, 0.5, 0.0);
+            b.linear_velocity = Vec3::new(0.1, -0.5, 0.0);
+            bodies.push(b);
+        }
+        bodies.push(static_body(Vec3::new(0.0, -1.0, 0.0)));
+        let mut manifolds = Vec::new();
+        for i in 0..16u32 {
+            manifolds.push(box_manifold(i, 20, Vec3::new(0.0, -1.0, 0.0), -0.2, Vec3::new(i as f32 * 3.0, 0.0, 0.0), 1 + (i % 2) as u8));
+        }
+        for i in 0..4u32 {
+            manifolds.push(box_manifold(i, 16 + i, Vec3::new(0.0, 1.0, 0.0), -0.1, Vec3::new(i as f32 * 3.0, 1.5, 0.0), 2));
+        }
+        manifolds.sort_by_key(|m| (m.body_a.0, m.body_b.0));
+        let graph = build_graph(&bodies, &manifolds);
+        let lowered =
+            RegionGrain { wide_floor: 1, colour_min_points: 1, max_bpp: 6, body_bpp: 8, body_rows: 8, fill_points: 1 };
+        let run = |route: Option<RegionRoute>| {
+            let cfg = PhysicsConfig { dt: 1.0 / 60.0, parallel_solve: route.is_some(), simd_solve: false, ..PhysicsConfig::default() };
+            let mut solver = ColoredSoftStepSolver::default();
+            solver.set_region(true);
+            assert!(solver.set_region_grain(lowered));
+            if let Some(route) = route {
+                solver.region_route = route;
+            }
+            let mut scratch = SolverScratch::with_capacity(bodies.len());
+            scratch.set_bodies(&bodies);
+            for _ in 0..2 {
+                scratch.touched.reset(scratch.bodies().len());
+                solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+            }
+            (snapshot_bits(&scratch), solver)
+        };
+        let (serial, _) = run(None);
+        let (region, solver) = run(Some(RegionRoute::Threads(2)));
+        assert_eq!(solver.region_dispatches(), 2, "a region per step (the premise)");
+        let tally = solver.region_kind_tally();
+        for name in ["gravity", "warm", "biased", "integrate", "relax"] {
+            let k = tally.iter().find(|k| k.kind == name).expect("the tally names every kind it ran");
+            assert!(
+                k.max_blocks >= 2 && k.helper_blocks > 0,
+                "the per-kind guard: `{name}` had at most {} blocks and the helper ran {} of them",
+                k.max_blocks,
+                k.helper_blocks
+            );
+        }
+        assert_eq!(region, serial, "the region's bits are the serial solve's");
     }
 
     /// Gate 5 (extended to the PARALLEL multi-worker path over random scenes): every

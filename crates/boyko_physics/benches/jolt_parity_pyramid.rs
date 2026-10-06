@@ -32,6 +32,7 @@
 //! | `jolt` | 1240 + floor | 0.5 | 0.2 | Jolt's `PyramidScene.h`, index for index |
 //! | `rest` | 1240 + floor | 0 | 0.5 | `benches/sleeping_pipeline.rs`'s `pyramid_sleeping_off` pile: the same pyramid exactly touching, the A7-R1/R2 scene |
 //! | `s16` | 16 + floor | 0 | 0.5 | a single tower of 16 of the same boxes: the small-scene regression guard |
+//! | `pairs` | 400 + floor | 0 | 0.5 | a 20 × 20 grid of the same boxes resting on the floor 4 m apart: 400 box-floor manifolds that share no dynamic body, ONE colour of 1,600 slots (SR's one-wide-colour arm, ruling 8 Q7) |
 //!
 //! Transcribed from Jolt v5.3.0 (`PerformanceTest/PyramidScene.h`, `PerformanceTest.cpp`): a
 //! static floor box of half-extents (50, 1, 50) at (0, −1, 0); boxes of half-extent 1 with no
@@ -245,7 +246,7 @@
 //! # Flags
 //!
 //! ```text
-//! --scene jolt|rest|s16        required; without it the binary runs its self-check (below)
+//! --scene jolt|rest|s16|pairs  required; without it the binary runs its self-check (below)
 //! --workers W                  pool size (default 1)
 //! --steps N                    steps from spawn (default 500)
 //! --window A..B                the summary's window, A <= B <= N (default 0..N)
@@ -286,6 +287,15 @@
 //! --bp-kernel rowwalk|leaflist
 //!                              select the tree query kernel (with --broadphase tree); unset, the
 //!                              tree's default
+//! --sr on|off                  SR phase B, until its flip: the solver's solve region switch
+//!                              (`ColoredSoftStepSolver::set_region`, colored solver only). On, a
+//!                              step whose parallel gate holds runs its substeps as one region and
+//!                              the armed structure checks expect the region's shape: no colour
+//!                              wave, `phys_region_opens` 1 and the replica's published / inline /
+//!                              widest counts. Off (default), every `phys_region_*` counter reads 0
+//! --sr-floor N                 the region grain's wide floor (also the parallel gate's), >= 1
+//! --sr-bpp N                   its blocks per participant of a colour entry, 1..=8
+//! --sr-min-points N            its fewest points per colour block, >= 1
 //! --csv PATH                   the per-step CSV
 //! --pose-out PATH              write the final pose bytes (every dynamic body's full state)
 //! --expect-pose PATH           compare the final pose bytes with a file; exit 4 if they differ
@@ -458,11 +468,23 @@ use boyko_physics::resources::{
 };
 use boyko_physics::sleep_sets::SleepSets;
 use boyko_physics::solver::{ColoredSoftStepSolver, SoftStepSolver};
+// SR phase B: the solve region's counters and grain.
+use boyko_physics::profiling::{
+    PHYS_REGION_BLOCKS_MAX, PHYS_REGION_HELPER_BLOCKS, PHYS_REGION_INLINE, PHYS_REGION_MAX_WAIT,
+    PHYS_REGION_OPENS, PHYS_REGION_PUBLISHED, PHYS_REGION_STALLS,
+};
+use boyko_physics::solver::colored::RegionGrain;
 
 // ── Scene constants (Jolt `PyramidScene.h`, transcribed) ─────────────────────
 
 /// `cBoxSize`: the pitch between neighbouring boxes in a layer.
 const BOX_SIZE: f32 = 2.0;
+/// SR's `pairs` scene: boxes per side of its grid.
+const PAIRS_SIDE: usize = 20;
+/// The `pairs` scene's dynamic bodies.
+const PAIRS_BODIES: usize = PAIRS_SIDE * PAIRS_SIDE;
+/// The `pairs` grid's pitch: two box sizes, so no two boxes touch.
+const PAIRS_PITCH: f32 = 2.0 * BOX_SIZE;
 /// `cHalfBoxSize`: every box's half-extent on every axis.
 const HALF_BOX: f32 = 0.5 * BOX_SIZE;
 /// `cBoxSeparation`: the `jolt` scene's default layer gap.
@@ -529,6 +551,8 @@ enum SceneKind {
     Rest,
     /// A 16-box tower.
     S16,
+    /// SR: a grid of boxes resting on the floor, one colour wide (ruling 8 Q7).
+    Pairs,
 }
 
 impl SceneKind {
@@ -537,6 +561,7 @@ impl SceneKind {
             "jolt" => Some(Self::Jolt),
             "rest" => Some(Self::Rest),
             "s16" => Some(Self::S16),
+            "pairs" => Some(Self::Pairs),
             _ => None,
         }
     }
@@ -546,20 +571,21 @@ impl SceneKind {
             Self::Jolt => "jolt",
             Self::Rest => "rest",
             Self::S16 => "s16",
+            Self::Pairs => "pairs",
         }
     }
 
     fn default_gap(self) -> f32 {
         match self {
             Self::Jolt => JOLT_SEPARATION,
-            Self::Rest | Self::S16 => 0.0,
+            Self::Rest | Self::S16 | Self::Pairs => 0.0,
         }
     }
 
     fn friction(self) -> f32 {
         match self {
             Self::Jolt => JOLT_FRICTION,
-            Self::Rest | Self::S16 => REST_FRICTION,
+            Self::Rest | Self::S16 | Self::Pairs => REST_FRICTION,
         }
     }
 
@@ -567,6 +593,7 @@ impl SceneKind {
         match self {
             Self::Jolt | Self::Rest => PYRAMID_BODIES,
             Self::S16 => TOWER_BODIES,
+            Self::Pairs => PAIRS_BODIES,
         }
     }
 }
@@ -645,6 +672,10 @@ struct Args {
     canary_zone_ns: Option<u64>,
     /// `--bp-kernel`: the tree query kernel; `None` leaves the tree's default.
     bp_kernel: Option<QueryKernel>,
+    /// SR: `--sr on|off`, the solve region switch.
+    sr: bool,
+    /// SR: the region grain the `--sr-*` flags set (the default grain otherwise).
+    sr_grain: RegionGrain,
     csv: Option<PathBuf>,
     pose_out: Option<PathBuf>,
     expect_pose: Option<PathBuf>,
@@ -666,14 +697,15 @@ enum Mode {
 fn usage_error(msg: &str) -> ExitCode {
     eprintln!("jolt_parity_pyramid: {msg}");
     eprintln!(
-        "usage: jolt_parity_pyramid --scene jolt|rest|s16 [--workers W] [--steps N] [--window A..B] \
+        "usage: jolt_parity_pyramid --scene jolt|rest|s16|pairs [--workers W] [--steps N] [--window A..B] \
          [--gap G] [--solver colored|reference] [--cfg a|as|b|default] [--parallel-solve] \
          [--parallel-np on|off] [--contact-reuse on|off] [--reuse-distance D] \
          [--speculative-distance D] [--speculative-velocity-cap C] \
          [--broadphase allpairs|tree|grid] [--sleeping [on|off]] [--sleep-skip off|sets] \
          [--threshold T] \
          [--frozen-by K] [--arm-profiler] [--canary-frac F --canary-ref-ns T] \
-         [--canary-zone Z --canary-ns N] [--bp-kernel rowwalk|leaflist] [--csv PATH] \
+         [--canary-zone Z --canary-ns N] [--bp-kernel rowwalk|leaflist] [--sr on|off] \
+         [--sr-floor N] [--sr-bpp N] [--sr-min-points N] [--csv PATH] \
          [--pose-out PATH] [--expect-pose PATH] [--label TEXT]"
     );
     ExitCode::from(EXIT_USAGE)
@@ -722,6 +754,8 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     let mut canary_zone = None;
     let mut canary_zone_ns = None;
     let mut bp_kernel = None;
+    let mut sr = false;
+    let mut sr_grain = RegionGrain::DEFAULT;
     let mut csv = None;
     let mut pose_out = None;
     let mut expect_pose = None;
@@ -822,6 +856,16 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
             "--canary-zone" => canary_zone = Some(it.next().ok_or("--canary-zone needs a zone name")?),
             "--canary-ns" => canary_zone_ns = Some(parse_num::<u64>("--canary-ns", it.next())?),
             "--bp-kernel" => bp_kernel = Some(parse_bp_kernel(it.next())?),
+            "--sr" => {
+                sr = match it.next().as_deref() {
+                    Some("on") => true,
+                    Some("off") => false,
+                    other => return Err(format!("--sr: expected on|off, got {other:?}")),
+                }
+            }
+            "--sr-floor" => sr_grain.wide_floor = parse_num("--sr-floor", it.next())?,
+            "--sr-bpp" => sr_grain.max_bpp = parse_num("--sr-bpp", it.next())?,
+            "--sr-min-points" => sr_grain.colour_min_points = parse_num("--sr-min-points", it.next())?,
             "--csv" => csv = Some(PathBuf::from(it.next().ok_or("--csv needs a path")?)),
             "--pose-out" => pose_out = Some(PathBuf::from(it.next().ok_or("--pose-out needs a path")?)),
             "--expect-pose" => {
@@ -858,6 +902,8 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
         canary_zone,
         canary_zone_ns,
         bp_kernel,
+        sr,
+        sr_grain,
         csv,
         pose_out,
         expect_pose,
@@ -1009,6 +1055,15 @@ fn validate(a: &Args) -> Result<(), String> {
             boyko_diag::profile::PROFILE_NAME
         ));
     }
+    if !a.sr_grain.is_valid() {
+        return Err(format!(
+            "--sr-floor / --sr-min-points must be >= 1 and --sr-bpp in 1..=8: {:?}",
+            a.sr_grain
+        ));
+    }
+    if (a.sr || a.sr_grain != RegionGrain::DEFAULT) && a.solver != SolverKind::Colored {
+        return Err("--sr and the --sr-* grain flags set the colored solver's solve region".into());
+    }
     if let Some(p) = &a.expect_pose
         && !p.is_file()
     {
@@ -1108,6 +1163,19 @@ fn spawn_scene(world: &mut EcsMaster, scene: SceneKind, gap: f32) -> Vec<Entity>
             for i in 0..TOWER_BODIES {
                 let position = Vec3::new(0.0, 1.0 + (BOX_SIZE + gap) * i as f32, 0.0);
                 boxes.push(spawn_box(world, position, friction, true));
+            }
+        }
+        SceneKind::Pairs => {
+            let origin = -0.5 * PAIRS_PITCH * (PAIRS_SIDE - 1) as f32;
+            for i in 0..PAIRS_SIDE {
+                for k in 0..PAIRS_SIDE {
+                    let position = Vec3::new(
+                        origin + PAIRS_PITCH * i as f32,
+                        1.0 + gap,
+                        origin + PAIRS_PITCH * k as f32,
+                    );
+                    boxes.push(spawn_box(world, position, friction, true));
+                }
             }
         }
     }
@@ -1331,6 +1399,14 @@ struct Shape {
     hist_slots: [u64; HIST_BINS],
     /// S4: the setup tasks the step's gate spawns, by [`expected_setup_tasks`] (0 inline).
     setup_tasks: u64,
+    /// SR: the widest colour's slots (the parallel gate compares it with the grain's floor).
+    widest: u64,
+    /// SR: the region's published items, by [`expected_region`] (meaningful on a region step).
+    region_published: u64,
+    /// SR: its inline items.
+    region_inline: u64,
+    /// SR: its widest published item.
+    region_blocks_max: u64,
 }
 
 /// Whether the step took the colored solve's no-awake fast path (L10 C3a), derived from public
@@ -1352,6 +1428,7 @@ fn step_shape(
     bp_prev: &mut TreeDiag,
     lanes: usize,
     simd_solve: bool,
+    st: Structure,
 ) -> Shape {
     // The stream the graph colours: `ConstraintGraph::color` indexes it (L10 C2a).
     let manifolds = world.resource::<Manifolds>().solver_manifolds();
@@ -1390,6 +1467,8 @@ fn step_shape(
     let mut groups: Vec<u32> = Vec::new();
     // S4: every cohort's points, in the layout's order (a colour's groups, eight at a time).
     let mut cohorts: Vec<u32> = Vec::new();
+    // SR: each colour's laid-out groups, for the region replica.
+    let mut colours: Vec<Vec<u32>> = Vec::with_capacity(graph.n_colors() as usize);
     for c in 0..graph.n_colors() {
         groups.clear();
         groups.extend(
@@ -1413,6 +1492,8 @@ fn step_shape(
         );
         let slots: u32 = groups.iter().sum();
         cohorts.extend(groups.chunks(COLOR_COHORT).map(|c| c.iter().sum::<u32>()));
+        shape.widest = shape.widest.max(u64::from(slots));
+        colours.push(groups.clone());
         if slots >= WIDE_COLOR_MIN_SLOTS {
             shape.wide_colors += 1;
             shape.wide_slots += u64::from(slots);
@@ -1429,7 +1510,87 @@ fn step_shape(
     // S4's gate is the colour dispatch's P2 predicate (the caller's `parallel`) AND two tasks;
     // here the task count, which the check scales by P2.
     shape.setup_tasks = expected_setup_tasks(&cohorts, lanes);
+    let rows = shape.rows as usize;
+    (shape.region_published, shape.region_inline, shape.region_blocks_max) =
+        expected_region(&colours, rows, lanes, st.grain, simd_solve, st.substeps, st.relax);
     shape
+}
+
+/// SR: this runner's replica of the solve region's table builder (`solver/colored.rs`,
+/// `build_region_table`) — `(published, inline, widest published)` items for a step whose colours'
+/// laid-out groups hold `colours` points each, on `rows` rows and `p` participants, one biased and
+/// `relax` relax passes per substep — so a region whose counters disagree voids the row.
+fn expected_region(
+    colours: &[Vec<u32>],
+    rows: usize,
+    p: usize,
+    grain: RegionGrain,
+    simd: bool,
+    substeps: u64,
+    relax: u64,
+) -> (u64, u64, u64) {
+    let (mut published, mut inline, mut widest) = (0u64, 0u64, 0u64);
+    let mut item = |blocks: usize, times: u64| {
+        if blocks >= 2 {
+            published += times;
+            widest = widest.max(blocks as u64);
+        } else {
+            inline += times;
+        }
+    };
+    let unit = (grain.body_rows as usize).div_ceil(8) * 8;
+    let n = (grain.body_bpp as usize * p).min(rows.div_ceil(unit)).max(1);
+    item(rows.div_ceil(rows.div_ceil(n).div_ceil(8) * 8), 2 * substeps);
+    for groups in colours {
+        let points: usize = groups.iter().map(|&g| g as usize).sum();
+        let sweep = if groups.is_empty() {
+            0
+        } else if points >= grain.wide_floor as usize {
+            let n_target = (grain.max_bpp as usize * p)
+                .min(points / grain.colour_min_points as usize)
+                .clamp(1, groups.len());
+            // The colour cut's walk at `n_target` blocks (`expected_color_tasks`' loop).
+            let target = points.div_ceil(n_target).max(1);
+            let step = if simd { COLOR_COHORT } else { 1 };
+            let mut start = vec![0usize];
+            for &g in groups {
+                start.push(start.last().copied().unwrap_or(0) + g as usize);
+            }
+            let (mut lo, mut blocks) = (0usize, 0usize);
+            while lo < groups.len() {
+                let mut hi = (lo + step).min(groups.len());
+                while hi < groups.len() && start[hi] - start[lo] < target {
+                    hi = (hi + step).min(groups.len());
+                }
+                blocks += 1;
+                lo = hi;
+            }
+            blocks
+        } else {
+            1
+        };
+        let warm = if sweep <= 1 {
+            sweep
+        } else {
+            // The cohort cut's walk at `min(sweep, cohorts)` ranges (S4's setup cut).
+            let cohorts: Vec<usize> = groups.chunks(COLOR_COHORT).map(|c| c.iter().map(|&g| g as usize).sum()).collect();
+            let n_target = sweep.min(cohorts.len());
+            let target = points.div_ceil(n_target).max(1);
+            let (mut n, mut lo, mut acc) = (0usize, 0usize, 0usize);
+            for (k, &pts) in cohorts.iter().enumerate() {
+                acc += pts;
+                if acc >= target && n + 1 < n_target {
+                    n += 1;
+                    lo = k + 1;
+                    acc = 0;
+                }
+            }
+            n + usize::from(lo < cohorts.len())
+        };
+        item(warm, substeps);
+        item(sweep, substeps * (1 + relax));
+    }
+    (published, inline, widest)
 }
 
 /// The tasks S4's setup scope spawns for a step whose cohorts hold `cohorts` points each, in the
@@ -1530,6 +1691,10 @@ struct Structure {
     sets: bool,
     /// `PhysicsConfig::parallel_solve`: with W ≥ 2 and a wide colour, the solve dispatches.
     parallel_solve: bool,
+    /// SR: `--sr on` on the colored solver: a step whose parallel gate holds runs one region.
+    sr: bool,
+    /// SR: the region grain (its wide floor is the parallel gate's).
+    grain: RegionGrain,
 }
 
 /// What a counter's per-step total must be (the W8S rows): its value times the samples,
@@ -1577,6 +1742,8 @@ fn check_step(
         contact_reuse,
         sets,
         parallel_solve,
+        sr,
+        grain,
     } = st;
     let n_sys = zones.systems.len();
     for (k, (name, _)) in zones.systems.iter().enumerate() {
@@ -1656,9 +1823,13 @@ fn check_step(
     }
     // W8S: the dispatched colour waves, recomputed — the solve's parallel gate (the flag, a pool
     // of two, a wide colour, not the fast path) times every wide colour of every sweep.
-    let parallel = parallel_solve && lanes >= 2 && shape.wide_colors > 0;
-    let waves = c * run * u64::from(parallel) * shape.wide_colors * sweeps;
-    let tasks = c * run * u64::from(parallel) * shape.wide_tasks * sweeps;
+    // The P2 predicate reads the region grain's floor (the colour floor at the default grain).
+    let parallel = parallel_solve && lanes >= 2 && shape.widest >= u64::from(grain.wide_floor);
+    // SR: under `--sr on` a step whose gate holds (and that is not the fast path) runs one region
+    // and no colour wave.
+    let region = c * run * u64::from(sr && parallel);
+    let waves = c * run * u64::from(parallel) * (1 - region) * shape.wide_colors * sweeps;
+    let tasks = c * run * u64::from(parallel) * (1 - region) * shape.wide_tasks * sweeps;
     // S4: the setup wave, under the same P2 predicate (the fast path lays nothing out, so it never
     // reaches it).
     let setup_tasks = c * u64::from(parallel) * shape.setup_tasks;
@@ -1718,6 +1889,13 @@ fn check_step(
         (&PHYS_NP_ROUTE_WORKER, np, Want::Within(0, 1)),
         (&PHYS_SETUP_CHUNKS, c, Want::Exact(setup_tasks)),
         (&PHYS_SETUP_STAMPED, u64::from(setup_tasks >= 2), Want::Exact(setup_tasks)),
+        (&PHYS_REGION_OPENS, c, Want::Exact(region)),
+        (&PHYS_REGION_PUBLISHED, c, Want::Exact(region * shape.region_published)),
+        (&PHYS_REGION_INLINE, c, Want::Exact(region * shape.region_inline)),
+        (&PHYS_REGION_HELPER_BLOCKS, c, if region == 1 { Want::Any } else { Want::Exact(0) }),
+        (&PHYS_REGION_BLOCKS_MAX, c, Want::Exact(region * shape.region_blocks_max)),
+        (&PHYS_REGION_STALLS, c, if region == 1 { Want::Any } else { Want::Exact(0) }),
+        (&PHYS_REGION_MAX_WAIT, c, if region == 1 { Want::Any } else { Want::Exact(0) }),
     ];
     for &(handle, want_n, want) in &expected_counters {
         let k = base + counter_index(handle);
@@ -1815,6 +1993,18 @@ struct W8sSums {
     np_route_worker: u64,
     setup_steps: u64,
     setup_tasks: u64,
+    /// SR: steps whose substeps ran as one region.
+    region_opens: u64,
+    /// SR: region steps on which no helper ran a block.
+    region_zero_helper_steps: u64,
+    /// SR: the regions' helper blocks, published and inline items, stalls.
+    region_helper_blocks: u64,
+    region_published: u64,
+    region_inline: u64,
+    region_stalls: u64,
+    /// SR: the widest published item and the longest wait (ns) of any region.
+    region_blocks_max: u64,
+    region_max_wait_ns: u64,
 }
 
 impl W8sSums {
@@ -1860,6 +2050,15 @@ impl W8sSums {
         self.np_overflow += v(&PHYS_NP_WAVE_OVERFLOW);
         self.setup_steps += u64::from(v(&PHYS_SETUP_CHUNKS) > 0);
         self.setup_tasks += v(&PHYS_SETUP_CHUNKS);
+        let opened = v(&PHYS_REGION_OPENS);
+        self.region_opens += opened;
+        self.region_zero_helper_steps += u64::from(opened > 0 && v(&PHYS_REGION_HELPER_BLOCKS) == 0);
+        self.region_helper_blocks += v(&PHYS_REGION_HELPER_BLOCKS);
+        self.region_published += v(&PHYS_REGION_PUBLISHED);
+        self.region_inline += v(&PHYS_REGION_INLINE);
+        self.region_stalls += v(&PHYS_REGION_STALLS);
+        self.region_blocks_max = self.region_blocks_max.max(v(&PHYS_REGION_BLOCKS_MAX));
+        self.region_max_wait_ns = self.region_max_wait_ns.max(v(&PHYS_REGION_MAX_WAIT));
     }
 
     /// The summary's `w8s` object: sums, and per-wave means (the ramp and tail in ns).
@@ -1878,7 +2077,10 @@ impl W8sSums {
              \"ramp_ns_mean_helped\":{},\"first_waves\":{},\"first_ramp_ns_mean\":{},\
              \"first_tail_ns_mean\":{},\"pass_waves\":{},\"pass_ramp_ns_mean\":{},\
              \"np_join_ns_mean\":{},\"np_imbalance_ns_mean\":{},\"np_route_worker\":{},\
-             \"setup_steps\":{},\"setup_tasks\":{}}}",
+             \"setup_steps\":{},\"setup_tasks\":{},\"region_opens\":{},\
+             \"region_steps_with_zero_helper_blocks\":{},\"region_helper_blocks\":{},\
+             \"region_published\":{},\"region_inline\":{},\"region_stalls\":{},\
+             \"region_blocks_max\":{},\"region_max_wait_ns\":{}}}",
             window.0,
             window.1,
             self.steps,
@@ -1915,6 +2117,14 @@ impl W8sSums {
             self.np_route_worker,
             self.setup_steps,
             self.setup_tasks,
+            self.region_opens,
+            self.region_zero_helper_steps,
+            self.region_helper_blocks,
+            self.region_published,
+            self.region_inline,
+            self.region_stalls,
+            self.region_blocks_max,
+            self.region_max_wait_ns,
         )
     }
 }
@@ -2082,6 +2292,8 @@ fn self_check() -> ExitCode {
         canary_zone: None,
         canary_zone_ns: None,
         bp_kernel: None,
+        sr: false,
+        sr_grain: RegionGrain::DEFAULT,
         csv: None,
         pose_out: None,
         expect_pose: None,
@@ -2125,6 +2337,12 @@ fn run(args: &Args) -> ExitCode {
     // `--bp-kernel`: the tree is inserted at plugin setup, so it is here before step 0.
     if let Some(kernel) = args.bp_kernel {
         rig.world.resource_mut::<BroadphaseTree>().set_query_kernel(kernel);
+    }
+    // SR: the solve region's switch and grain (validated: the colored solver).
+    if colored {
+        let solver = rig.world.resource_mut::<ColoredSoftStepSolver>();
+        solver.set_region(args.sr);
+        assert!(solver.set_region_grain(args.sr_grain), "invariant: validate() admitted the grain");
     }
     let (substeps, relax, sleeping, sleep_skip, parallel_np, contact_reuse, parallel_solve, simd_solve, config_json) = {
         let cfg = rig.world.resource::<PhysicsConfig>();
@@ -2197,6 +2415,8 @@ fn run(args: &Args) -> ExitCode {
         contact_reuse,
         sets: colored && sleeping && sleep_skip == SleepSkip::Sets,
         parallel_solve,
+        sr: colored && args.sr,
+        grain: args.sr_grain,
     };
     let mut bp_prev = rig.world.resource::<BroadphaseTree>().diag();
     let n_cols = zones.as_ref().map_or(0, ZoneTable::len);
@@ -2299,7 +2519,8 @@ fn run(args: &Args) -> ExitCode {
                 before[k] = (acc.count, acc.total);
                 deltas.push((counts[k], values[k]));
             }
-            let shape = step_shape(&rig.world, colored, sleeping, &mut bp_prev, args.workers, simd_solve);
+            let shape =
+                step_shape(&rig.world, colored, sleeping, &mut bp_prev, args.workers, simd_solve, structure);
             let fast = fast_path(&shape, colored, sleeping);
             fast_steps_derived += u64::from(fast);
             let mut verdict = check_step(zones, &counts, &values, &shape, structure);
@@ -2605,6 +2826,19 @@ fn run(args: &Args) -> ExitCode {
             "profile: void steps {void_steps}, waves {waves_total}, solve on dispatcher {solve_on_dispatcher_steps} of {} steps",
             armed_rows.len()
         );
+        println!(
+            "region (SR, window): opens {} of {} steps, steps with zero helper blocks {}, helper \
+             blocks {}, published {}, inline {}, stalls {}, blocks max {}, max wait {} ns",
+            w8s.region_opens,
+            w8s.steps,
+            w8s.region_zero_helper_steps,
+            w8s.region_helper_blocks,
+            w8s.region_published,
+            w8s.region_inline,
+            w8s.region_stalls,
+            w8s.region_blocks_max,
+            w8s.region_max_wait_ns,
+        );
     }
     if let Some(engine) = fast_steps_engine {
         println!(
@@ -2643,7 +2877,7 @@ fn run(args: &Args) -> ExitCode {
         "{{\"runner\":{},\"label\":{},\"args\":[{}],\"profile_name\":{},\"zones_compiled\":{},\
          \"system_zones_compiled\":{},\"debug_assertions\":{},\"target_env\":{},\
          \"scene\":{},\"gap\":{},\"friction\":{},\"bodies\":{},\"workers\":{},\"solver\":{},\
-         \"cfg\":{},\"config\":{config_json},\"armed\":{armed},\"canary_ns\":{},\
+         \"cfg\":{},\"config\":{config_json},\"sr\":{},\"sr_grain\":{},\"armed\":{armed},\"canary_ns\":{},\
          \"steps\":{},\"window\":[{},{}],\"window_mean_ns\":{},\"window_steps_per_s\":{},\
          \"pose_hash\":\"{pose_hash:#018x}\",\"pose_bytes\":{},\"expect_pose\":{},\
          \"final_manifolds\":{},\"final_pairs\":{},\"final_top_y\":{},\
@@ -2679,6 +2913,8 @@ fn run(args: &Args) -> ExitCode {
             CfgKind::B => "b",
             CfgKind::Default => "default",
         }),
+        args.sr,
+        json_str(&format!("{:?}", args.sr_grain)),
         canary_ns.map_or_else(|| "null".to_owned(), |n| n.to_string()),
         args.steps,
         window.0,
