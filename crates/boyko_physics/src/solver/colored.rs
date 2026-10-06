@@ -1661,7 +1661,9 @@ pub(crate) enum SetupMode {
     /// Shape F's fused search on the calling thread, one range.
     SerialFused,
     /// This task count (capped by the cohorts and [`SETUP_MAX_TASKS`]) on the ambient pool, the
-    /// P2 gate and the point floor waived; a step whose cut makes two ranges or more dispatches.
+    /// P2 gate and the point floor waived: with the solve region on, a Fill entry of this many
+    /// blocks in a forced region (SR, KD5); off, the setup scope's tasks. A step whose cut makes
+    /// two ranges or more dispatches.
     Pool(usize),
     /// The same tasks on scoped std threads.
     Threads(usize),
@@ -1784,12 +1786,92 @@ impl<'a> FillCtx<'a> {
 
 /// What the build reports to the solve (S4): L10's restore counts, the P2 predicate the solve's
 /// colour dispatch reuses, and the setup wave's W8S reading when it dispatched armed (added to
-/// the step's tally by the caller, like a colour wave's).
+/// the step's tally by the caller, like a colour wave's). On a step whose substeps run as one
+/// region (SR), `fill` is the plan of the fill the region runs as its stage 0, and the restore
+/// counts are the serial sources' alone (the ranges' are added after the region).
 struct BuildOut {
     restore_searches: u32,
     restore_hits: u32,
     p2: bool,
     setup_wave: Option<WaveReading>,
+    fill: Option<FillPlan>,
+}
+
+/// SR (phase B): the fill a region runs as its stage 0 (KD5) — what `build_columns` decided before
+/// it returned early: S4's cohort ranges (one inline range under two), whether the ranges search
+/// their own lanes' runs (shape F), what the serial sources counted, and the warm statistics' inputs
+/// the shared tail ([`fill_tail`]) reduces with the ranges' reports after the region.
+#[derive(Clone, Copy)]
+struct FillPlan {
+    cuts: [(u32, u32); SETUP_MAX_TASKS],
+    n_ranges: usize,
+    fused: bool,
+    plan_counts: PlanCounts,
+    tail: FillTail,
+}
+
+/// S4 / SR: the step's warm statistics, less the point hits the fill counts.
+#[derive(Clone, Copy, Debug)]
+struct FillTail {
+    seeded: u32,
+    translated: u32,
+    points: u32,
+    frozen_points: u32,
+}
+
+/// S4 / SR: the fill's tail, one routine for the serial fill, the setup scope and the region's
+/// stage 0 — the ranges' reports in range order (integer sums, exact under any partition), the
+/// setup counters, and the step's [`WarmSeedStats`]. Returns the plan counts with the ranges'
+/// searches added.
+#[inline]
+fn fill_tail(
+    outs: &[RangeOut],
+    mut plan_counts: PlanCounts,
+    tail: FillTail,
+    counters: &mut SetupCounters,
+    warm_stats: &mut WarmSeedStats,
+    remap_resets: u64,
+) -> PlanCounts {
+    // A range that did not run (the fill fell back inline) left its slot at the default, which adds
+    // nothing.
+    let mut point_hits = 0u32;
+    for out in outs {
+        point_hits += out.hits;
+        plan_counts.backward_searches += out.counts.backward_searches;
+        plan_counts.restore_searches += out.counts.restore_searches;
+        plan_counts.restore_hits += out.counts.restore_hits;
+        counters.merge(&out.setup);
+    }
+    counters.plan(plan_counts);
+    *warm_stats = WarmSeedStats {
+        manifolds: tail.seeded,
+        translated: tail.translated,
+        points: tail.points,
+        point_hits,
+        carry_points: tail.frozen_points,
+        // Counted by the store, which runs the carry after the solve.
+        carry_hits: 0,
+        remap_resets,
+    };
+    plan_counts
+}
+
+/// SR: the fill's task count on a region step — S4's terms with the region grain's lanes factor and
+/// point floor: `min(max_bpp · lanes, points / fill_points, cohorts, SETUP_MAX_TASKS)`. At the default
+/// grain it is [`setup_chunk_count`]'s.
+#[inline]
+fn region_fill_tasks(lanes: usize, points: usize, n_cohorts: usize, grain: RegionGrain) -> usize {
+    (grain.max_bpp as usize * lanes)
+        .min(points / grain.fill_points as usize)
+        .min(n_cohorts)
+        .min(SETUP_MAX_TASKS)
+}
+
+/// SR: whether a step of `n_colors` colours fits the region's table — its entries are named by a
+/// `u16` (`StageEntry`, `SchedItem`). A step past it runs the serial loop, which solves the same bits.
+#[inline]
+const fn region_fits(n_colors: usize) -> bool {
+    E_COLOURS + 3 * n_colors <= u16::MAX as usize + 1
 }
 
 /// S4: cuts `heads` into at most `tasks` consecutive cohort ranges by point quota — `points /
@@ -2458,6 +2540,7 @@ impl ColoredSoftStepSolver {
             canary,
             setup_dispatches,
             grain,
+            region_switch,
             #[cfg(all(test, miri))]
             region_route,
             ..
@@ -2544,7 +2627,18 @@ impl ColoredSoftStepSolver {
         };
         let p2 = parallel_solve && lanes >= 2 && cols.widest_color_slots() >= grain.wide_floor;
         let n_cohorts = cols.heads.len();
+        // SR (phase B): with the switch on, a step whose gate holds runs its substeps as one region
+        // and its fill as the region's stage 0 (KD5): this build stops after the serial sources
+        // and hands the fill's plan over. Test builds force it with `SetupMode::Pool` (G4-A's
+        // region modes), as they force the setup scope.
+        #[cfg(test)]
+        let forced = matches!(setup_mode, SetupMode::Pool(_));
+        #[cfg(not(test))]
+        let forced = false;
+        let region = *region_switch && (p2 || forced) && n_cohorts > 0 && region_fits(graph.n_colors() as usize);
         let tasks = if p2 { setup_chunk_count(lanes, points as usize, n_cohorts) } else { 0 };
+        // The region's fill takes the region grain's terms (its default is S4's).
+        let tasks = if region { region_fill_tasks(lanes, points as usize, n_cohorts, *grain) } else { tasks };
         #[cfg(test)]
         let tasks = match setup_mode {
             SetupMode::Auto | SetupMode::SerialFused => tasks,
@@ -2575,14 +2669,16 @@ impl ColoredSoftStepSolver {
             && !matches!(remap, RowRemap::Reset)
             && read.strict();
 
-        // P-c (D4, S4): the sources, then the fill.
-        let mut pc_zone = zone!(PHYS_SB_PC);
+        // P-c (D4, S4): the sources, then the fill. On a region step the fill's span opens in the
+        // region (its stage 0's hook), so the serial sources sit outside `PHYS_SB_PC` (critique O7:
+        // one span per step).
+        let mut pc_zone = if region { None } else { zone!(PHYS_SB_PC) };
         canary.at(&PHYS_SB_PC, pc_zone.is_some());
         // The sources: this step's ordinals to the write side, and the warm run of every manifold
         // — or, fused, of every manifold not laid out — to `plan`, from the read side, or (L10,
         // design 06 A3) from the restore source when the read side misses, which marks the tag
         // `SRC_RESTORE`. The tags are cells so the two callbacks can share them.
-        let mut plan_counts = {
+        let plan_counts = {
             let mut tags_view = cols.tags.build_view();
             let tags = Cell::from_mut(tags_view.as_mut_slice()).as_slice_of_cells();
             let mut plan_view = cols.plan.build_view();
@@ -2618,6 +2714,22 @@ impl ColoredSoftStepSolver {
                 )
             }
         };
+        let translated = match remap {
+            _ if !*warm_effective => 0,
+            RowRemap::Identity => seeded,
+            RowRemap::Rows(_) => carried,
+            RowRemap::Reset => 0,
+        };
+        let tail = FillTail { seeded, translated, points, frozen_points };
+        if region {
+            return BuildOut {
+                restore_searches: 0,
+                restore_hits: 0,
+                p2,
+                setup_wave: None,
+                fill: Some(FillPlan { cuts, n_ranges, fused, plan_counts, tail }),
+            };
+        }
         let index: &WarmIndex = warm_index;
         let lookup = WarmLookup { read, index };
         let restore_lookup = restore.map(|read| WarmLookup { read, index });
@@ -2665,35 +2777,9 @@ impl ColoredSoftStepSolver {
         let spawned = if dispatched { n_ranges } else { 0 };
         *setup_dispatches += u64::from(dispatched);
         counter!(PHYS_SETUP_CHUNKS, spawned as u64);
-        // The ranges' reports, in range order (integer sums). A range that did not run (the fill
-        // fell back inline) left its slot at the default, which adds nothing.
-        let mut point_hits = 0u32;
-        for out in &outs[..n_ranges] {
-            point_hits += out.hits;
-            plan_counts.backward_searches += out.counts.backward_searches;
-            plan_counts.restore_searches += out.counts.restore_searches;
-            plan_counts.restore_hits += out.counts.restore_hits;
-            counters.merge(&out.setup);
-        }
-        counters.plan(plan_counts);
+        let plan_counts =
+            fill_tail(&outs[..n_ranges], plan_counts, tail, counters, warm_stats, warm_cursor.resets());
         drop(pc_zone);
-
-        let translated = match remap {
-            _ if !*warm_effective => 0,
-            RowRemap::Identity => seeded,
-            RowRemap::Rows(_) => carried,
-            RowRemap::Reset => 0,
-        };
-        *warm_stats = WarmSeedStats {
-            manifolds: seeded,
-            translated,
-            points,
-            point_hits,
-            carry_points: frozen_points,
-            // Counted by the store, which runs the carry after the solve.
-            carry_hits: 0,
-            remap_resets: warm_cursor.resets(),
-        };
 
         debug_assert_eq!(
             cols.group_start().len() as u32,
@@ -2710,6 +2796,7 @@ impl ColoredSoftStepSolver {
             restore_hits: plan_counts.restore_hits,
             p2,
             setup_wave,
+            fill: None,
         }
     }
 
@@ -5269,7 +5356,7 @@ impl ColoredSoftStepSolver {
         // below, the colour waves' in the passes) and pushed once after the substep loop.
         let mut tally = WaveTally::default();
 
-        let (p2, setup_wave) = {
+        let (p2, setup_wave, fill, warm_remap) = {
             let build_zone = zone!(PHYS_SOLVE_BUILD);
             self.canary.at(&PHYS_SOLVE_BUILD, build_zone.is_some());
             let cls: &[RowCls] = held.as_ref().map_or(&[], |h| h.cls);
@@ -5306,16 +5393,17 @@ impl ColoredSoftStepSolver {
                 h.rules.restore_rec_searches += u64::from(built.restore_searches);
                 h.rules.restore_rec_hits += u64::from(built.restore_hits);
             }
-            (built.p2, built.setup_wave)
+            (built.p2, built.setup_wave, built.fill, warm_remap)
         };
         // W8S (armed only): the setup wave's reading, a solve wave that is not a colour's.
         if let Some(reading) = setup_wave {
             tally.add(&reading, None);
         }
         // L11 C0: the setup digest is taken here, over the seeds the sweeps have not
-        // yet touched; the step's warm stats are folded in after the store.
+        // yet touched; the step's warm stats are folded in after the store. A region step fills
+        // in its region and takes the digest there, right after its fill (SR).
         #[cfg(test)]
-        {
+        if fill.is_none() {
             self.step_digest = self.columns.setup_digest();
         }
         // Profiling: this step's slot totals by color class, the denominators of the
@@ -5423,29 +5511,48 @@ impl ColoredSoftStepSolver {
         // No pool attached ⇒ `None` ⇒ inline, as the per-color probe already did.
         // Gated red-first by `one_worker_parallel_solve_takes_the_inline_path`.
         let parallel = !fast && p2;
+        debug_assert!(
+            fill.is_none() || !fast,
+            "invariant: a region step laid out a cohort (`build_columns` admits none without), so it is never the fast path"
+        );
 
-        // SR (phase B): with the switch on, a step whose parallel gate holds runs its substeps as
-        // ONE region (`solve_region`) instead of the loop below; `None` runs the loop.
-        let region_report = if parallel && self.region_switch {
-            self.solve_region(
-                scratch,
-                &RegionStep {
-                    bias_rate: soft.bias_rate,
-                    mass_coeff: soft.mass_coeff,
-                    impulse_coeff: soft.impulse_coeff,
-                    inv_h,
-                    spec,
-                    gravity,
-                    h,
-                    simd: use_simd,
-                    simd_solve: use_simd_solve,
-                    substeps,
-                    biased: 1,
-                    relax: config.relax_iterations,
-                },
-            )
-        } else {
-            None
+        // SR (phase B): a step whose build handed its fill over (the switch on and the parallel
+        // gate holding) runs the fill and its substeps as ONE region (`solve_region`) instead of
+        // the loop below.
+        let region_report = match &fill {
+            Some(fill) => {
+                let (report, counts) = self.solve_region(
+                    scratch,
+                    &RegionStep {
+                        bias_rate: soft.bias_rate,
+                        mass_coeff: soft.mass_coeff,
+                        impulse_coeff: soft.impulse_coeff,
+                        inv_h,
+                        spec,
+                        gravity,
+                        h,
+                        simd: use_simd,
+                        simd_solve: use_simd_solve,
+                        substeps,
+                        biased: 1,
+                        relax: config.relax_iterations,
+                    },
+                    fill,
+                    RegionSources {
+                        manifolds,
+                        restore: held.as_ref().and_then(|h| h.restore),
+                        remap: warm_remap,
+                    },
+                );
+                // L10's restore counts (critique O6): the ranges' searches exist only after the
+                // region's END.
+                if let Some(h) = held.as_mut() {
+                    h.rules.restore_rec_searches += u64::from(counts.restore_searches);
+                    h.rules.restore_rec_hits += u64::from(counts.restore_hits);
+                }
+                Some(report)
+            }
+            None => None,
         };
 
         // L10 C3a: the fast path runs no substep; a region step ran them in its region.
@@ -5845,19 +5952,31 @@ const SK_BIASED: u8 = 2;
 const SK_INTEGRATE: u8 = 3;
 /// SR: one colour's relax sweep, on a group range.
 const SK_RELAX: u8 = 4;
+/// SR: the fill (P-c, the region's stage 0, KD5), on a cohort range.
+const SK_FILL: u8 = 5;
+/// SR, test builds: the setup digest, one inline block right after the fill (`step_digest`'s
+/// "seeds before the first sweep").
+#[cfg(test)]
+const SK_DIGEST: u8 = 6;
 /// SR, Miri: the stage kinds the per-kind tally counts.
 #[cfg(miri)]
-const SK_COUNT: usize = 5;
+const SK_COUNT: usize = 7;
 /// SR: each kind's name, by kind.
 #[cfg(miri)]
-const SK_NAMES: [&str; SK_COUNT] = ["gravity", "warm", "biased", "integrate", "relax"];
+const SK_NAMES: [&str; SK_COUNT] = ["gravity", "warm", "biased", "integrate", "relax", "fill", "digest"];
 
 /// SR: the gravity entry's index (the table's fixed entries come first).
 const E_GRAVITY: u16 = 0;
 /// SR: the integrate entry's index.
 const E_INTEGRATE: u16 = 1;
-/// SR: the first colour entry's index; colour `c`'s warm, biased and relax entries follow.
-const E_COLOURS: usize = 2;
+/// SR: the fill entry's index.
+const E_FILL: u16 = 2;
+/// SR, test builds: the digest entry's index.
+#[cfg(test)]
+const E_DIGEST: u16 = 3;
+/// SR: the first colour entry's index; colour `c`'s warm, biased and relax entries follow (the
+/// digest's entry sits before them in test builds).
+const E_COLOURS: usize = if cfg!(test) { 4 } else { 3 };
 
 /// SR: a step's stage table, built serially before its region — counted loops over the colours
 /// and the passes, so IB's presets change only `substeps`, `biased` and `relax` (ruling 15).
@@ -5987,11 +6106,52 @@ struct SolveStages<'a> {
     simd_solve: bool,
     /// The last colour's index (the hooks close a pass's span after it).
     last_colour: u16,
+    /// The fill's inputs (stage 0).
+    fill: FillParts<'a>,
     /// Participant 0's span slots (the hooks only; see [`RegionHooks`]).
     hooks: *mut RegionHooks,
     /// Miri: blocks the helpers ran, per kind.
     #[cfg(miri)]
     tally: &'a [core::sync::atomic::AtomicU64; SK_COUNT],
+}
+
+/// SR: what a Fill block needs besides the body rows — a [`FillCtx`]'s raw parts and shared views,
+/// less the two body slices, which each Fill block forms itself (the W5 rule). The raw bases are
+/// the tables' write-capable bases, taken after the step's last grow.
+#[derive(Clone, Copy)]
+struct FillParts<'a> {
+    heads: *mut CohortHead,
+    cold: *mut CohortCold,
+    blocks: *mut RankBlock,
+    vn0: *mut [f32; COHORT],
+    plan: *mut WarmRun,
+    tags: *mut ManifoldTag,
+    /// The write side's records, `None` with warm start off.
+    recs_w: Option<*mut WarmRecord>,
+    n_heads: usize,
+    n_blocks: usize,
+    manifolds: &'a [Manifold],
+    /// The read side's lookup.
+    lookup: WarmLookup<'a>,
+    /// L10's restore source's lookup, on a step that has one.
+    restore: Option<WarmLookup<'a>>,
+    /// How the warm store's cursor classifies this gather.
+    remap: RowRemap<'a>,
+    /// Shape F: the ranges search their own lanes' runs.
+    fused: bool,
+    /// One [`RangeOut`] slot per Fill block (`SETUP_MAX_TASKS` of them, on `solve_region`'s frame).
+    outs: *mut RangeOut,
+    /// Test builds: the setup digest's slot (on `solve_region`'s frame).
+    #[cfg(test)]
+    digest: *mut u64,
+}
+
+/// SR: the step's inputs the fill reads, from `solve_colored_inner`.
+#[derive(Clone, Copy)]
+struct RegionSources<'a> {
+    manifolds: &'a [Manifold],
+    restore: Option<&'a WarmRecords>,
+    remap: RowRemap<'a>,
 }
 
 // SAFETY: every participant calls `run_block` through a shared `&SolveStages`. What a block
@@ -6002,23 +6162,31 @@ struct SolveStages<'a> {
 //     partition the colour's cohorts, whose dynamic bodies are pairwise disjoint (O4); the static
 //     rows the colour's lanes share are only read (the movability guard);
 //   * a sweep: the impulse lanes of groups `[lo, hi)` of one colour and their dynamic bodies' rows,
-//     disjoint the same way (the per-colour scopes' argument, `solve_color_parallel`).
-//   No block writes the table, the cuts, the cohort heads, the CSRs or the struct `cols` names, and
-//   two items never overlap (the region's barrier), so a block reads nothing another block of its
-//   item writes. The bases are address-stable `ScratchColumn` reservations taken after the step's
-//   last grow and outlive the region. `hooks` is dereferenced only by `item_begin` / `item_end`,
-//   which run on participant 0 alone. Under Miri the tally is atomics.
+//     disjoint the same way (the per-colour scopes' argument, `solve_color_parallel`);
+//   * a fill: cohorts `[lo, hi)`, their rank rows and their lanes' `plan` / `tags` / record entries,
+//     and its own `outs` slot; the cuts partition the cohorts, each cohort owns consecutive ranks
+//     and each laid-out manifold is one lane of one cohort (`fill_range`'s contract), and the body
+//     rows it reads are written by no block of its item;
+//   * the digest (test builds): its own slot, one inline block.
+//   No block writes the table, the cuts, the cohort heads outside the fill, the CSRs or the struct
+//   `cols` names, and two items never overlap (the region's barrier), so a block reads nothing
+//   another block of its item writes. The bases are address-stable `ScratchColumn` reservations
+//   taken after the step's last grow and outlive the region; the out slots live on
+//   `solve_region`'s frame, which outlives the region. `hooks` is dereferenced only by
+//   `item_begin` / `item_end`, which run on participant 0 alone. Under Miri the tally is atomics.
 unsafe impl Sync for SolveStages<'_> {}
 
-/// SR: participant 0's open spans during an armed region. The region calls the hooks on
-/// participant 0 only, so the slots need no synchronisation; they live on `solve_region`'s frame.
-/// `ZoneGuard` closes its span on drop, so a slot set to `None` closes it.
-#[derive(Default)]
+/// SR: participant 0's open spans during an armed region, and the in-zone canary its fill span
+/// carries. The region calls the hooks on participant 0 only, so the slots need no
+/// synchronisation; they live on `solve_region`'s frame. `ZoneGuard` closes its span on drop, so a
+/// slot set to `None` closes it.
 struct RegionHooks {
     /// A substep's warm-start span or a pass's span.
     outer: Option<ZoneGuard>,
-    /// A gravity, integrate or colour span.
+    /// A gravity, integrate, colour or fill span.
     inner: Option<ZoneGuard>,
+    /// The solver's in-zone canary (W8S): `PHYS_SB_PC`'s follows its span into the fill's hook.
+    canary: *mut ZoneCanary,
 }
 
 impl SolveStages<'_> {
@@ -6064,6 +6232,54 @@ impl SolveStages<'_> {
         // SAFETY: see above.
         let eff = unsafe { slice::from_raw_parts_mut(self.bodies.row_ptr(lo), n) };
         simd::refresh_inertia(eff, snap, self.simd);
+    }
+
+    /// The fill of cohorts `[lo, hi)` (P-c, stage 0): a block-local [`FillCtx`] over body slices
+    /// formed here from the raw views (the W5 rule), [`fill_range`](ColoredSoftStepSolver::fill_range),
+    /// and the range's report into Fill block `block`'s slot.
+    fn fill_block(&self, block: u32, lo: usize, hi: usize) {
+        let f = self.fill;
+        let n_rows = self.bodies.len();
+        debug_assert_eq!(n_rows, self.snapshot.len(), "invariant: one body row per gathered row");
+        // SAFETY: both columns hold `n_rows >= 1` live rows (a solving step has a dynamic body, and
+        //   `build_bodies` filled the body column from the snapshot); no block of the Fill item
+        //   writes either column (the fill reads the bodies only), and both slices die at this
+        //   block's end, before any later item's row writes — no shared reference to them spans
+        //   the region (the W5 rule).
+        let (bodies, bodies_eff) = unsafe {
+            (
+                slice::from_raw_parts(self.snapshot.row_ptr(0), n_rows),
+                slice::from_raw_parts(self.bodies.row_ptr(0), n_rows),
+            )
+        };
+        let ctx = FillCtx {
+            heads: f.heads,
+            cold: f.cold,
+            blocks: f.blocks,
+            vn0: f.vn0,
+            plan: f.plan,
+            tags: f.tags,
+            recs_w: f.recs_w,
+            n_heads: f.n_heads,
+            n_blocks: f.n_blocks,
+            manifolds: f.manifolds,
+            bodies,
+            bodies_eff,
+            lookup: f.lookup,
+            restore: f.restore,
+            remap: f.remap,
+            fused: f.fused,
+            outs: f.outs,
+        };
+        // SAFETY: `fill_range`'s contract — the Fill entry's cuts are S4's setup cut (consecutive
+        //   cohort ranges covering `[0, n_heads)`), so cohorts `[lo, hi)`, their rank rows and their
+        //   lanes' `plan` / `tags` / record entries are this block's alone for the item, and the
+        //   bases were taken after the step's last grow.
+        let out = unsafe { ColoredSoftStepSolver::fill_range(&ctx, lo, hi) };
+        debug_assert!((block as usize) < SETUP_MAX_TASKS, "invariant: a Fill block has a slot");
+        // SAFETY: slot `block` is this block's alone (one slot per Fill block, at most
+        //   `SETUP_MAX_TASKS`), on `solve_region`'s frame, and is read only after the region's END.
+        unsafe { ptr::write(f.outs.add(block as usize), out) };
     }
 
     /// Colour `c`'s place in the group and cohort tables.
@@ -6120,6 +6336,14 @@ impl RegionStages for SolveStages<'_> {
                 self.simd_solve,
             ),
             SK_INTEGRATE => self.integrate_rows(lo, hi),
+            SK_FILL => self.fill_block(block, lo, hi),
+            #[cfg(test)]
+            SK_DIGEST => {
+                // SAFETY: the digest's slot is written by this one inline block, on
+                //   `solve_region`'s frame, and read after the region's END; the tables it hashes
+                //   are written by no block of its item.
+                unsafe { ptr::write(self.fill.digest, self.cols.setup_digest()) };
+            }
             kind => unknown_stage(kind),
         }
     }
@@ -6131,6 +6355,12 @@ impl RegionStages for SolveStages<'_> {
         let hooks = unsafe { &mut *self.hooks };
         let first = e.color == 0;
         match e.kind {
+            SK_FILL => {
+                hooks.inner = zone!(PHYS_SB_PC);
+                // SAFETY: `canary` is the solver's own, borrowed `&mut` by `solve_region` for the
+                //   region and reached by participant 0's hooks alone.
+                unsafe { (*hooks.canary).at(&PHYS_SB_PC, hooks.inner.is_some()) };
+            }
             SK_GRAVITY => hooks.inner = zone!(PHYS_GRAVITY),
             SK_WARM if first => hooks.outer = zone!(PHYS_WARM_APPLY),
             SK_BIASED | SK_RELAX => {
@@ -6180,8 +6410,9 @@ fn push_region_counters(report: Option<RegionReport>) {
 
 impl ColoredSoftStepSolver {
     /// SR: builds this step's stage table into the region columns and sizes the frame lines for
-    /// `p` participants. Serial, before the region.
-    fn build_region_table(&mut self, p: u32, k: &RegionStep) -> RegionTable {
+    /// `p` participants. Serial, before the region. `fill` is the fill's cohort ranges, which the
+    /// Fill entry takes as its blocks.
+    fn build_region_table(&mut self, p: u32, k: &RegionStep, fill: &FillPlan) -> RegionTable {
         let Self { columns: cols, region: rc, grain, bodies, .. } = self;
         let grain = *grain;
         let color_offsets = cols.color_offsets();
@@ -6198,6 +6429,28 @@ impl ColoredSoftStepSolver {
         let n_body = t.body_cuts(rows, grain);
         t.entry(SK_GRAVITY, 0, n_body, 0);
         t.entry(SK_INTEGRATE, 0, n_body, 0);
+        // The fill: S4's ranges, consecutive from cohort 0 (one range covering every cohort under
+        // two, which runs inline).
+        debug_assert!(
+            fill.n_ranges >= 1
+                && fill.cuts[0].0 == 0
+                && fill.cuts[fill.n_ranges - 1].1 as usize == heads.len()
+                && fill.cuts[..fill.n_ranges].windows(2).all(|w| w[0].1 == w[1].0),
+            "invariant: the fill's ranges are consecutive and cover every cohort"
+        );
+        let fill_first = t.cuts.len();
+        t.cuts.push(fill.cuts[0].0);
+        for &(_, hi) in &fill.cuts[..fill.n_ranges] {
+            t.cuts.push(hi);
+        }
+        t.entry(SK_FILL, 0, fill.n_ranges, fill_first);
+        #[cfg(test)]
+        {
+            let digest_first = t.cuts.len();
+            t.cuts.push(0);
+            t.cuts.push(1);
+            t.entry(SK_DIGEST, 0, 1, digest_first);
+        }
         for c in 0..n_colors {
             let (g_lo, g_hi) = (color_group_start[c] as usize, color_group_start[c + 1] as usize);
             let (k_lo, k_hi) = (color_cohort_start[c] as usize, color_cohort_start[c + 1] as usize);
@@ -6230,6 +6483,10 @@ impl ColoredSoftStepSolver {
         let colour = |c: usize, kind: usize| u16::try_from(E_COLOURS + 3 * c + kind).expect("invariant: entry indices fit a u16");
         let mut schedule = rc.schedule.build_view();
         schedule.clear();
+        // Stage 0: the fill, then (test builds) the digest of the seeds before the first sweep.
+        schedule.push(SchedItem::new(E_FILL, None));
+        #[cfg(test)]
+        schedule.push(SchedItem::new(E_DIGEST, None));
         for _ in 0..k.substeps {
             schedule.push(SchedItem::new(E_GRAVITY, None));
             for c in 0..n_colors {
@@ -6263,21 +6520,27 @@ impl ColoredSoftStepSolver {
         RegionTable { entries, items, claims }
     }
 
-    /// SR: one step's substeps as ONE region (`02-SR-DESIGN.md` §2): the table is built serially,
-    /// then gravity, every colour's warm start, the biased and relax sweeps and integrate + the
-    /// inertia refresh run as its stages on the ambient pool's workers. Returns the region's
-    /// report, or `None` when the step's colours outnumber the table's `u16` entry index — the
-    /// caller then runs the serial loop, which solves the same bits.
+    /// SR: one step's fill and substeps as ONE region (`02-SR-DESIGN.md` §2): the table is built
+    /// serially, then the fill (stage 0, KD5), gravity, every colour's warm start, the biased and
+    /// relax sweeps and integrate + the inertia refresh run as its stages on the ambient pool's
+    /// workers; after its END the fill's tail reduces the ranges' reports. `build_columns` decided the
+    /// region (its `FillPlan`), which it admits only for a colour count the table's `u16` indices
+    /// name. Returns the region's report and the plan counts with the ranges' searches added (L10's
+    /// restore counts among them).
     ///
     /// Out of line on purpose: the one-worker step's instruction stream (`solve_colored_inner`)
     /// stays the serial loop's, with one predicate and a call it never takes. Takes no body slice
     /// (the W5 rule, [`SolveStages`]).
     #[inline(never)]
-    fn solve_region(&mut self, scratch: &SolverScratch, k: &RegionStep) -> Option<RegionReport> {
+    fn solve_region(
+        &mut self,
+        scratch: &SolverScratch,
+        k: &RegionStep,
+        fill: &FillPlan,
+        src: RegionSources<'_>,
+    ) -> (RegionReport, PlanCounts) {
         let n_colors = self.columns.color_offsets().len().saturating_sub(1);
-        if E_COLOURS + 3 * n_colors > usize::from(u16::MAX) + 1 {
-            return None;
-        }
+        debug_assert!(region_fits(n_colors), "invariant: build_columns admits only a table a u16 names");
         #[cfg(all(test, miri))]
         let route = self.region_route;
         #[cfg(all(test, miri))]
@@ -6289,7 +6552,7 @@ impl ColoredSoftStepSolver {
         let p = try_with_active_pool(|pool| pool.num_threads());
         let p = u32::try_from(p.expect("invariant: the region path runs only where P2 saw a pool of two workers or more"))
             .expect("invariant: a pool's workers fit a u32");
-        let table = self.build_region_table(p, k);
+        let table = self.build_region_table(p, k, fill);
 
         let armed = zone_enabled!(PHYS_REGION_OPENS);
         let Self {
@@ -6299,6 +6562,16 @@ impl ColoredSoftStepSolver {
             region: rc,
             region_dispatches,
             region_last,
+            warm,
+            warm_cur,
+            warm_index,
+            warm_effective,
+            warm_cursor,
+            warm_stats,
+            counters,
+            canary,
+            #[cfg(test)]
+            step_digest,
             #[cfg(miri)]
             region_tally,
             ..
@@ -6306,7 +6579,33 @@ impl ColoredSoftStepSolver {
         let columns: &CohortColumns = columns;
         #[cfg(miri)]
         let tally: [core::sync::atomic::AtomicU64; SK_COUNT] = Default::default();
-        let mut hooks = RegionHooks::default();
+        let mut hooks = RegionHooks { outer: None, inner: None, canary: &raw mut *canary };
+        // The fill's inputs: the read side and the restore source are read, the write side's
+        // records written per lane manifold through their raw base (S4's `FillCtx`).
+        let (read, write) = Self::warm_sides(warm, *warm_cur);
+        let index: &WarmIndex = warm_index;
+        let mut outs = [RangeOut::default(); SETUP_MAX_TASKS];
+        #[cfg(test)]
+        let mut digest = 0u64;
+        let fill_parts = FillParts {
+            heads: columns.heads.solve_base(),
+            cold: columns.cold.solve_base(),
+            blocks: columns.blocks.solve_base(),
+            vn0: columns.rank_cold.solve_base(),
+            plan: columns.plan.solve_base(),
+            tags: columns.tags.solve_base(),
+            recs_w: if *warm_effective { Some(write.recs_base()) } else { None },
+            n_heads: columns.heads.len(),
+            n_blocks: columns.blocks.len(),
+            manifolds: src.manifolds,
+            lookup: WarmLookup { read, index },
+            restore: src.restore.map(|read| WarmLookup { read, index }),
+            remap: src.remap,
+            fused: fill.fused,
+            outs: outs.as_mut_ptr(),
+            #[cfg(test)]
+            digest: &raw mut digest,
+        };
         let RegionColumns { sync, done, receipts, claims, entries, schedule, cuts, epoch, .. } = rc;
         let entries = &entries.as_read_slice()[..table.entries];
         let schedule = &schedule.as_read_slice()[..table.items];
@@ -6331,6 +6630,7 @@ impl ColoredSoftStepSolver {
             simd: k.simd,
             simd_solve: k.simd_solve,
             last_colour: u16::try_from(n_colors.saturating_sub(1)).expect("invariant: checked above"),
+            fill: fill_parts,
             hooks: &raw mut hooks,
             #[cfg(miri)]
             tally: &tally,
@@ -6371,6 +6671,21 @@ impl ColoredSoftStepSolver {
         let report = report.expect("invariant: the pool P2 saw is still the ambient one");
         *region_dispatches += 1;
         *region_last = report;
+        // The fill's tail, after END: the ranges' reports in range order (the serial fill's own
+        // routine), and S4's task counter — the Fill entry's blocks when it was published, 0 inline.
+        let plan_counts = fill_tail(
+            &outs[..fill.n_ranges],
+            fill.plan_counts,
+            fill.tail,
+            counters,
+            warm_stats,
+            warm_cursor.resets(),
+        );
+        counter!(PHYS_SETUP_CHUNKS, if fill.n_ranges >= 2 { fill.n_ranges as u64 } else { 0 });
+        #[cfg(test)]
+        {
+            *step_digest = digest;
+        }
         #[cfg(miri)]
         {
             for (kind, count) in region_tally.iter_mut().enumerate() {
@@ -6382,7 +6697,35 @@ impl ColoredSoftStepSolver {
                 count.max_blocks = count.max_blocks.max(u32::from(e.n_blocks));
             }
         }
-        Some(report)
+        (report, plan_counts)
+    }
+
+    /// SR, test builds: the fill alone as a region — `fill` (a `FillPlan` `build_columns` returned)
+    /// run through [`solve_region`](Self::solve_region) with zero substeps, so the schedule is the
+    /// Fill item (and the digest) on the ambient pool, then the fill's tail. G4-A's region modes
+    /// drive the stage-0 fill through this, the same `SolveStages` arm a solve runs.
+    #[cfg(test)]
+    fn fill_in_region(
+        &mut self,
+        scratch: &SolverScratch,
+        fill: &FillPlan,
+        src: RegionSources<'_>,
+    ) -> (RegionReport, PlanCounts) {
+        let none = RegionStep {
+            bias_rate: 0.0,
+            mass_coeff: 0.0,
+            impulse_coeff: 0.0,
+            inv_h: 0.0,
+            spec: false,
+            gravity: Vec3::ZERO,
+            h: 0.0,
+            simd: false,
+            simd_solve: false,
+            substeps: 0,
+            biased: 0,
+            relax: 0,
+        };
+        self.solve_region(scratch, &none, fill, src)
     }
 
     /// SR: runs `frame` on the ambient pool, armed or not. `None` without a pool.

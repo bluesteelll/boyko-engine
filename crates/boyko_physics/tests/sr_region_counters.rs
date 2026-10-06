@@ -17,8 +17,9 @@
 //!   `cargo test -p boyko-physics --test sr_region_counters helpers -- --test-threads=1`.
 //! * **The scope count** of a warmed region step at W4, under a thread-local counting
 //!   allocator: two allocations (the scope's shared frame and its first task chunk) per scope the
-//!   step opened — the region's one, plus S4's setup scope on a step whose setup dispatched
-//!   (`setup_dispatches`; the fill joins the region at SR's commit (7)) — on twelve warmed steps.
+//!   step opened — the region's one alone: since SR's commit (7) the fill is the region's stage 0
+//!   and S4's setup scope opens no more on a region step (`setup_dispatches` must not move) — on
+//!   twelve warmed steps.
 //!   Some steps add one allocation of the pool's own (its deque and epoch bookkeeping: the same
 //!   scene with the switch off reads 28 and 29 alternating), so a step may read one more, and the
 //!   fewest must read exactly two per scope: a per-step allocation in the region path lifts them all.
@@ -222,6 +223,8 @@ fn predict(
     let body = body_blocks(rows, grain, p);
     // Gravity and integrate, once per substep each.
     item(body, 2 * substeps);
+    // Every colour's cohorts, in the layout's order: the fill's ranges cut them.
+    let mut all_cohorts: Vec<u32> = Vec::new();
     for c in 0..graph.n_colors() {
         let groups: Vec<u32> =
             graph.color(c).iter().map(|&mi| u32::from(manifolds[mi as usize].count)).filter(|&n| n != 0).collect();
@@ -239,10 +242,17 @@ fn predict(
             1
         };
         let warm = if sweep <= 1 { sweep } else { cohort_blocks(&cohorts, sweep.min(cohorts.len())) };
+        all_cohorts.extend(&cohorts);
         // Per substep: the warm start, one biased sweep, `relax` relax sweeps.
         item(warm, substeps);
         item(sweep, substeps * (1 + relax));
     }
+    // The fill (stage 0, once): S4's task count with the region grain's terms, S4's cut; under two
+    // ranges it is one inline block.
+    let points: usize = all_cohorts.iter().map(|&p| p as usize).sum();
+    let tasks = (grain.max_bpp as usize * p).min(points / grain.fill_points as usize).min(all_cohorts.len()).min(32);
+    let fill = if tasks >= 2 { cohort_blocks(&all_cohorts, tasks).max(1) } else { 1 };
+    item(fill, 1);
     out
 }
 
@@ -368,6 +378,7 @@ fn a_warmed_region_step_allocates_two_per_scope_it_opened() {
     eprintln!("[SR C2] warmed region steps at W4 (allocs, regions, setup scopes): {steps:?}");
     for &(allocs, regions, setups) in &steps {
         assert_eq!(regions, 1, "non-vacuity: every warmed step opened its region");
+        assert_eq!(setups, 0, "the fill is the region's stage 0: no setup scope on a region step");
         let scopes = 2 * (regions + setups) as usize;
         // The pool's own deque and epoch bookkeeping adds one allocation on some steps, whatever
         // the solve does (measured on this scene with the switch off: 28 and 29 alternating).

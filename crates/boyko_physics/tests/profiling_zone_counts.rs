@@ -56,8 +56,10 @@
 //! The last [`STEPS_SR`] steps turn the solver's solve region on
 //! (`ColoredSoftStepSolver::set_region`, SR phase B, off by default until its flip): the step's
 //! substeps run as one region, every span above keeps its count (participant 0 opens them from the
-//! region's hooks), no colour wave opens (`phys_color_scopes` and `phys_color_tasks` read 0, the
-//! setup wave alone is a solve scope), and the region's counters equal the replica.
+//! region's hooks), no colour wave and no setup wave opens (`phys_color_scopes` and
+//! `phys_color_tasks` read 0, `phys_setup_stamped` samples nothing: the fill is the region's stage
+//! 0, its `phys_sb_pc` span opened by the fill's hook and `phys_setup_chunks` its blocks), and the
+//! region's counters equal the replica.
 //!
 //! The tree counters are pinned to the scene's structure, not read back from the tree's own
 //! `diag()`: the floor is the scene's one static, so it is pending at step 1 and admitted at
@@ -321,7 +323,7 @@ fn cohort_blocks(cohorts: &[u32], n_target: usize) -> usize {
 /// SR: this test's replica of the region's table builder — from the graph, the manifolds, the
 /// rows and `p` participants under `grain` — the step's published and inline items and its widest
 /// published one, for `substeps` substeps of one biased and `relax` relax passes.
-fn predict_region(scene: &Scene, p: usize, grain: RegionGrain, substeps: u64, relax: u64) -> Predicted {
+fn predict_region(scene: &Scene, p: usize, grain: RegionGrain, substeps: u64, relax: u64, fill: u64) -> Predicted {
     let graph = scene.world.resource::<ConstraintGraph>();
     let manifolds = scene.world.resource::<Manifolds>().solver_manifolds();
     let simd = scene.world.resource::<PhysicsConfig>().simd_solve;
@@ -339,6 +341,9 @@ fn predict_region(scene: &Scene, p: usize, grain: RegionGrain, substeps: u64, re
     let n = (grain.body_bpp as usize * p).min(rows.div_ceil(unit)).max(1);
     let body = rows.div_ceil(rows.div_ceil(n).div_ceil(8) * 8);
     item(body, 2 * substeps);
+    // The fill (stage 0, once): S4's ranges (the default grain's task count is S4's), one inline
+    // block under two.
+    item(fill.max(1) as usize, 1);
     for c in 0..graph.n_colors() {
         let groups: Vec<u32> =
             graph.color(c).iter().map(|&mi| u32::from(manifolds[mi as usize].count)).filter(|&n| n != 0).collect();
@@ -646,7 +651,7 @@ fn physics_zones_count_exactly() {
         let waves = if region { 0 } else { shape.wide_colors * sweeps };
         let tasks = if region { 0 } else { shape.wide_tasks * sweeps };
         let pred = if region {
-            predict_region(&scene, WORKERS, RegionGrain::DEFAULT, substeps, relax)
+            predict_region(&scene, WORKERS, RegionGrain::DEFAULT, substeps, relax, shape.setup_tasks)
         } else {
             Predicted::default()
         };
@@ -658,7 +663,8 @@ fn physics_zones_count_exactly() {
             "step {step}: the scene must dispatch S4's setup, or `phys_setup_chunks` is checked \
              against 0: {shape:?}"
         );
-        let solve_waves = waves + 1;
+        // The setup wave; a region step runs its fill as the region's stage 0 instead (SR C3).
+        let solve_waves = waves + u64::from(!region);
         // (samples per step, value): the ten step counters sample once per step; the three
         // tree counters once per tree-path step and never otherwise; the W8S rows as the table
         // in the module docs says. `None` is a value checked below, or a timing.
@@ -714,7 +720,7 @@ fn physics_zones_count_exactly() {
             (&PHYS_NP_ROUTE_WORKER, np, None),
             (&PHYS_SETUP_CHUNKS, 1, Some(shape.setup_tasks)),
             // Review round 2, O1: the setup wave's record stamped every task it spawned.
-            (&PHYS_SETUP_STAMPED, 1, Some(shape.setup_tasks)),
+            (&PHYS_SETUP_STAMPED, u64::from(!region), Some(shape.setup_tasks)),
             (&PHYS_REGION_OPENS, 1, Some(u64::from(region))),
             (&PHYS_REGION_PUBLISHED, 1, Some(pred.published)),
             (&PHYS_REGION_INLINE, 1, Some(pred.inline)),

@@ -1407,6 +1407,8 @@ struct Shape {
     region_inline: u64,
     /// SR: its widest published item.
     region_blocks_max: u64,
+    /// SR: its fill's blocks (stage 0: S4's cut with the region grain's terms), 0 under two.
+    region_fill: u64,
 }
 
 /// Whether the step took the colored solve's no-awake fast path (L10 C3a), derived from public
@@ -1511,15 +1513,16 @@ fn step_shape(
     // here the task count, which the check scales by P2.
     shape.setup_tasks = expected_setup_tasks(&cohorts, lanes);
     let rows = shape.rows as usize;
-    (shape.region_published, shape.region_inline, shape.region_blocks_max) =
+    (shape.region_published, shape.region_inline, shape.region_blocks_max, shape.region_fill) =
         expected_region(&colours, rows, lanes, st.grain, simd_solve, st.substeps, st.relax);
     shape
 }
 
 /// SR: this runner's replica of the solve region's table builder (`solver/colored.rs`,
-/// `build_region_table`) — `(published, inline, widest published)` items for a step whose colours'
-/// laid-out groups hold `colours` points each, on `rows` rows and `p` participants, one biased and
-/// `relax` relax passes per substep — so a region whose counters disagree voids the row.
+/// `build_region_table`) — `(published, inline, widest published)` items and the fill's blocks (0
+/// when it runs inline) for a step whose colours' laid-out groups hold `colours` points each, on
+/// `rows` rows and `p` participants, one biased and `relax` relax passes per substep — so a region
+/// whose counters disagree voids the row.
 fn expected_region(
     colours: &[Vec<u32>],
     rows: usize,
@@ -1528,7 +1531,7 @@ fn expected_region(
     simd: bool,
     substeps: u64,
     relax: u64,
-) -> (u64, u64, u64) {
+) -> (u64, u64, u64, u64) {
     let (mut published, mut inline, mut widest) = (0u64, 0u64, 0u64);
     let mut item = |blocks: usize, times: u64| {
         if blocks >= 2 {
@@ -1590,7 +1593,32 @@ fn expected_region(
         item(warm, substeps);
         item(sweep, substeps * (1 + relax));
     }
-    (published, inline, widest)
+    // The fill (stage 0, once): S4's task count with the region grain's terms over every colour's
+    // cohorts, S4's cut (`expected_setup_tasks`' walk); one inline block under two ranges.
+    let cohorts: Vec<u32> = colours.iter().flat_map(|g| g.chunks(COLOR_COHORT).map(|c| c.iter().sum::<u32>())).collect();
+    let points: usize = cohorts.iter().map(|&p| p as usize).sum();
+    let tasks = (grain.max_bpp as usize * p)
+        .min(points / grain.fill_points as usize)
+        .min(cohorts.len())
+        .min(SETUP_MAX_TASKS);
+    let fill = if tasks < 2 {
+        0
+    } else {
+        let target = points.div_ceil(tasks).max(1);
+        let (mut n, mut lo, mut acc) = (0usize, 0usize, 0usize);
+        for (k, &pts) in cohorts.iter().enumerate() {
+            acc += pts as usize;
+            if acc >= target && n + 1 < tasks {
+                n += 1;
+                lo = k + 1;
+                acc = 0;
+            }
+        }
+        let n = n + usize::from(lo < cohorts.len());
+        if n < 2 { 0 } else { n }
+    };
+    item(fill.max(1), 1);
+    (published, inline, widest, fill as u64)
 }
 
 /// The tasks S4's setup scope spawns for a step whose cohorts hold `cohorts` points each, in the
@@ -1831,9 +1859,11 @@ fn check_step(
     let waves = c * run * u64::from(parallel) * (1 - region) * shape.wide_colors * sweeps;
     let tasks = c * run * u64::from(parallel) * (1 - region) * shape.wide_tasks * sweeps;
     // S4: the setup wave, under the same P2 predicate (the fast path lays nothing out, so it never
-    // reaches it).
-    let setup_tasks = c * u64::from(parallel) * shape.setup_tasks;
-    let solve_waves = waves + u64::from(setup_tasks >= 2);
+    // reaches it). On a region step the fill is the region's stage 0: its blocks are the setup
+    // counter's value, and no setup wave opens (SR C3).
+    let setup_tasks = c * u64::from(parallel) * if region == 1 { shape.region_fill } else { shape.setup_tasks };
+    let setup_wave = u64::from(setup_tasks >= 2 && region == 0);
+    let solve_waves = waves + setup_wave;
     let threads = lanes as u64 + 1;
     let [h0, h1, h2, h3, h4] = shape.hist_colors;
     let [s0, s1, s2, s3, s4] = shape.hist_slots;
@@ -1888,7 +1918,7 @@ fn check_step(
         (&PHYS_NP_WAVE_JOIN, np, Want::Any),
         (&PHYS_NP_ROUTE_WORKER, np, Want::Within(0, 1)),
         (&PHYS_SETUP_CHUNKS, c, Want::Exact(setup_tasks)),
-        (&PHYS_SETUP_STAMPED, u64::from(setup_tasks >= 2), Want::Exact(setup_tasks)),
+        (&PHYS_SETUP_STAMPED, setup_wave, Want::Exact(setup_tasks)),
         (&PHYS_REGION_OPENS, c, Want::Exact(region)),
         (&PHYS_REGION_PUBLISHED, c, Want::Exact(region * shape.region_published)),
         (&PHYS_REGION_INLINE, c, Want::Exact(region * shape.region_inline)),

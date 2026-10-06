@@ -5,9 +5,10 @@
 //! so every step whose parallel gate holds — `parallel_solve`, a pool of two workers or more, a
 //! colour at least the grain's wide floor — runs its substeps as ONE region: gravity, the warm start
 //! per colour, the biased and relax sweeps per colour and integrate + inertia, each a stage of the
-//! region's table. The per-frame FNV-1a hash of every `RigidBody` bit must equal the one-worker
-//! run's (which never opens a region: one lane is the inline path) at W 2, 3, 4, 5, 8 and 16, on
-//! every arm:
+//! region's table. The per-frame FNV-1a hash of every `RigidBody` bit and of the step's
+//! `WarmSeedStats` (the fill's reduce, which a region step runs after its END: SR C3's warm-stats
+//! {1,N} comparison) must equal the one-worker run's (which never opens a region: one lane is the
+//! inline path) at W 2, 3, 4, 5, 8 and 16, on every arm:
 //!
 //! | arm | what it varies |
 //! |---|---|
@@ -16,7 +17,7 @@
 //! | `reuse_off` | contact reuse off |
 //! | `sleeping` | sleeping on (the freeze capture and restore run around the region) |
 //! | `d0` | V2's speculative contacts off (the d = 0 arm, the pre-V2 kernels) |
-//! | `bouncy` | restitution 0.5 on every box: the restitution pass has work after the region |
+//! | `bouncy` | restitution 0.5 on every box, and a row of `GRID` boxes dropped [`DROP`] onto the static floor beside the stacks: they strike at about 3.4 m/s, over the restitution threshold, so the restitution pass applies impulses after the region and reads the fill's `vn0` |
 //! | `grain` | every grain term lowered: every colour, gravity and integrate entry is multi-block |
 //!
 //! # Non-vacuity
@@ -29,6 +30,9 @@
 //! - The `grain` arm's regions published every kind it lowers: the last region's report shows at
 //!   least as many published items as the substeps' body and colour items need.
 //! - The scene moves: the final hash differs from the spawn state's.
+//! - The `bouncy` arm's restitution acts: some box rebounds upward faster than [`REBOUND`] on some
+//!   frame of the one-worker run, and the same drop at restitution 0 never does (the witness is the
+//!   restitution pass's, not the drop's).
 //!
 //! The switch is off by default until SR's flip; this file is the identity gate of the switch-on
 //! path. Spins real thread pools (intractable under Miri), so `cfg(not(miri))`.
@@ -65,6 +69,19 @@ const GRID: usize = 13;
 /// The solver's inline floor (`MIN_PARALLEL_SLOTS_PER_COLOR`, the grain's default wide floor).
 const WIDE_FLOOR: usize = 256;
 
+/// The `bouncy` arm's drop: a row of boxes beside the stacks starts this far above its rest on the
+/// static floor, so each strikes the floor at about `sqrt(2 g DROP)` ≈ 3.4 m/s, over the
+/// restitution threshold (1 m/s), within the run's frames. A resting pile never reaches the
+/// threshold, and then the restitution pass and the fill's `vn0` (read only there, D9) would be
+/// invisible to this gate. The strike is against a STATIC row on purpose: `vn0` is a relative
+/// velocity, and a box striking a dynamic box that gravity accelerates by the same `g·h` keeps it
+/// unchanged, which hid a fill scheduled after the first gravity stage (SR C3's red-first).
+const DROP: f32 = 0.6;
+
+/// The upward speed (m/s) only a restitution rebound off the floor reaches in the `bouncy` arm's
+/// drop (about 1.7 m/s at restitution 0.5); the same drop at restitution 0 stays near zero.
+const REBOUND: f32 = 0.5;
+
 /// The worker counts every arm is compared at, against W1.
 const WORKERS: [usize; 6] = [2, 3, 4, 5, 8, 16];
 
@@ -88,6 +105,8 @@ struct Arm {
     sleeping: bool,
     speculative: bool,
     restitution: f32,
+    /// How far above its rest each top box starts (m).
+    drop: f32,
     grain: RegionGrain,
 }
 
@@ -98,6 +117,7 @@ const DEFAULT_ARM: Arm = Arm {
     sleeping: false,
     speculative: true,
     restitution: 0.0,
+    drop: 0.0,
     grain: RegionGrain::DEFAULT,
 };
 
@@ -107,7 +127,7 @@ const ARMS: [Arm; 7] = [
     Arm { name: "reuse_off", contact_reuse: false, ..DEFAULT_ARM },
     Arm { name: "sleeping", sleeping: true, ..DEFAULT_ARM },
     Arm { name: "d0", speculative: false, ..DEFAULT_ARM },
-    Arm { name: "bouncy", restitution: 0.5, ..DEFAULT_ARM },
+    Arm { name: "bouncy", restitution: 0.5, drop: DROP, ..DEFAULT_ARM },
     Arm { name: "grain", grain: LOWERED, ..DEFAULT_ARM },
 ];
 
@@ -148,9 +168,10 @@ fn spawn_box(world: &mut EcsMaster, position: Vec3, half_extents: Vec3, inv_mass
 }
 
 /// A static floor and a `GRID × GRID` field of two-box stacks, each box overlapping what it rests
-/// on by 1 cm so every contact exists from the first frame; the top boxes start with a small
-/// sideways velocity offset by their place, so the stacks rock and the sweeps have work.
-fn spawn_scene(world: &mut EcsMaster, restitution: f32) {
+/// on by 1 cm so every contact exists from the first frame (the overlap pushes the stacks apart, so
+/// the sweeps have work); with `drop > 0` a row of `GRID` boxes beside the field starts that far
+/// above its rest and falls onto the floor.
+fn spawn_scene(world: &mut EcsMaster, restitution: f32, drop: f32) {
     spawn_box(world, Vec3::new(0.0, -0.5, 0.0), Vec3::new(40.0, 0.5, 40.0), 0.0, restitution);
     let half = Vec3::new(0.5, 0.5, 0.5);
     let origin = -0.75 * (GRID as f32 - 1.0);
@@ -160,6 +181,12 @@ fn spawn_scene(world: &mut EcsMaster, restitution: f32) {
             let z = origin + 1.5 * k as f32;
             spawn_box(world, Vec3::new(x, 0.49, z), half, 1.0, restitution);
             spawn_box(world, Vec3::new(x, 1.48, z), half, 1.0, restitution);
+        }
+    }
+    if drop > 0.0 {
+        let x = -origin + 3.0;
+        for k in 0..GRID {
+            spawn_box(world, Vec3::new(x, 0.5 + drop, origin + 1.5 * k as f32), half, 1.0, restitution);
         }
     }
 }
@@ -194,6 +221,28 @@ fn state_hash(world: &mut EcsMaster) -> u64 {
     hash
 }
 
+/// [`state_hash`] with the step's `WarmSeedStats` folded in: the frame's observation.
+fn frame_hash(world: &mut EcsMaster) -> u64 {
+    let mut hash = state_hash(world);
+    let s = world.resource::<DefaultRigidSolver>().warm_seed_stats();
+    let words = [
+        u64::from(s.manifolds),
+        u64::from(s.translated),
+        u64::from(s.points),
+        u64::from(s.point_hits),
+        u64::from(s.carry_points),
+        u64::from(s.carry_hits),
+        s.remap_resets,
+    ];
+    for w in words {
+        for byte in w.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
 /// The slot count of the widest colour of the last step.
 fn widest_color_slots(world: &EcsMaster) -> usize {
     let graph = world.resource::<ConstraintGraph>();
@@ -204,20 +253,30 @@ fn widest_color_slots(world: &EcsMaster) -> usize {
         .unwrap_or(0)
 }
 
+/// The fastest upward linear velocity of any body.
+fn max_upward_speed(world: &mut EcsMaster) -> f32 {
+    let q = world.query::<&RigidBody, ()>();
+    q.iter().map(|b| b.linear_velocity.y).fold(f32::NEG_INFINITY, f32::max)
+}
+
 /// What one run produced.
 struct Run {
     hashes: Vec<u64>,
     spawn_hash: u64,
+    /// The bodies' hash after the last frame (the "scene moved" witness compares it with the spawn).
+    last_state: u64,
     min_widest: usize,
     regions: u64,
     last_published: u32,
+    /// The fastest upward body velocity over every frame.
+    max_up: f32,
 }
 
 /// Runs the default world with `arm`'s configuration and the region switch on, on a
 /// `workers`-wide pool.
 fn run(arm: Arm, workers: usize) -> Run {
     let mut world = EcsMaster::new();
-    spawn_scene(&mut world, arm.restitution);
+    spawn_scene(&mut world, arm.restitution, arm.drop);
     let pool = ThreadPoolBuilder::new().num_threads(workers).build();
     let mut builder = ScheduleBuilder::new(Arc::clone(&pool));
     let keys = add_physics_systems::<DefaultRigidSolver>(&mut builder, &mut world);
@@ -244,18 +303,23 @@ fn run(arm: Arm, workers: usize) -> Run {
     let before = world.resource::<DefaultRigidSolver>().region_dispatches();
     let mut hashes = Vec::with_capacity(FRAMES);
     let mut min_widest = usize::MAX;
+    let mut max_up = f32::NEG_INFINITY;
     for _ in 0..FRAMES {
         schedule.run(&mut world);
-        hashes.push(state_hash(&mut world));
+        hashes.push(frame_hash(&mut world));
         min_widest = min_widest.min(widest_color_slots(&world));
+        max_up = max_up.max(max_upward_speed(&mut world));
     }
+    let last_state = state_hash(&mut world);
     let solver = world.resource::<DefaultRigidSolver>();
     Run {
         hashes,
         spawn_hash,
+        last_state,
         min_widest,
         regions: solver.region_dispatches() - before,
         last_published: solver.last_region_report().published,
+        max_up,
     }
 }
 
@@ -276,11 +340,25 @@ fn region_is_worker_count_invariant_on_every_arm() {
             reference.min_widest
         );
         assert_ne!(
-            reference.hashes.last().copied(),
-            Some(reference.spawn_hash),
+            reference.last_state, reference.spawn_hash,
             "{}: non-vacuity: the scene moved",
             arm.name
         );
+        if arm.restitution > 0.0 {
+            let control = run(Arm { name: "bouncy_control", restitution: 0.0, ..arm }, 1);
+            eprintln!(
+                "[SR] {}: fastest upward speed {} m/s, the same drop at restitution 0 {} m/s",
+                arm.name, reference.max_up, control.max_up
+            );
+            assert!(
+                reference.max_up > REBOUND && control.max_up < REBOUND,
+                "{}: non-vacuity: the restitution pass must act — a rebound faster than {REBOUND} m/s \
+                 (got {}), which the same drop at restitution 0 never reaches (got {})",
+                arm.name,
+                reference.max_up,
+                control.max_up
+            );
+        }
         for workers in WORKERS {
             let got = run(arm, workers);
             assert_eq!(
@@ -301,7 +379,7 @@ fn region_is_worker_count_invariant_on_every_arm() {
             for (frame, (a, b)) in reference.hashes.iter().zip(&got.hashes).enumerate() {
                 assert_eq!(
                     a, b,
-                    "{} at W{workers}: frame {frame}'s state hash differs from W1's",
+                    "{} at W{workers}: frame {frame}'s hash (bodies and warm statistics) differs from W1's",
                     arm.name
                 );
             }

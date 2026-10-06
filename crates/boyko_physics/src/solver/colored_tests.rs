@@ -1565,7 +1565,7 @@
         let (region, solver) = run(Some(RegionRoute::Threads(2)));
         assert_eq!(solver.region_dispatches(), 2, "a region per step (the premise)");
         let tally = solver.region_kind_tally();
-        for name in ["gravity", "warm", "biased", "integrate", "relax"] {
+        for name in ["gravity", "warm", "biased", "integrate", "relax", "fill"] {
             let k = tally.iter().find(|k| k.kind == name).expect("the tally names every kind it ran");
             assert!(
                 k.max_blocks >= 2 && k.helper_blocks > 0,
@@ -6072,6 +6072,10 @@
             Pool { workers: usize, tasks: usize },
             /// `tasks` ranges on scoped std threads.
             Threads(usize),
+            /// SR (C3): `tasks` ranges as the solve region's stage 0 on a pool of `workers` — the
+            /// region switch on, `build_columns` hands its fill over, and the fill alone runs as a
+            /// region (`fill_in_region`).
+            Region { workers: usize, tasks: usize },
         }
 
         /// Everything a build writes, byte for byte, and what it counted.
@@ -6124,9 +6128,10 @@
             solver.setup_mode = match mode {
                 Mode::Parent => SetupMode::Auto,
                 Mode::SerialFused => SetupMode::SerialFused,
-                Mode::Pool { tasks, .. } => SetupMode::Pool(tasks),
+                Mode::Pool { tasks, .. } | Mode::Region { tasks, .. } => SetupMode::Pool(tasks),
                 Mode::Threads(t) => SetupMode::Threads(t),
             };
+            solver.set_region(matches!(mode, Mode::Region { .. }));
             let graph = build_graph(&frame.bodies, &frame.manifolds);
             let n_rows = frame.bodies.len();
             let sleep = (!frame.frozen_rows.is_empty()).then(|| {
@@ -6140,8 +6145,13 @@
             });
             // The effective body rows the fill reads (the solve builds them before the columns).
             solver.build_bodies(&frame.bodies, &[], false);
+            // SR: the region's fill reads the gather snapshot through its column (the W5 rule).
+            let mut scratch = SolverScratch::with_capacity(frame.bodies.len());
+            scratch.set_bodies(&frame.bodies);
+            // Whether a region published the fill (SR's region modes).
+            let mut region_published = 0u64;
             let mut go = || {
-                solver.build_columns(
+                let mut out = solver.build_columns(
                     &frame.manifolds,
                     &graph,
                     &frame.bodies,
@@ -6149,22 +6159,35 @@
                     frame.remap.remap(),
                     restore.as_ref(),
                     true,
-                )
+                );
+                if let Some(fill) = out.fill {
+                    let src = RegionSources { manifolds: &frame.manifolds, restore: restore.as_ref(), remap: frame.remap.remap() };
+                    let (report, counts) = solver.fill_in_region(&scratch, &fill, src);
+                    region_published = u64::from(report.published);
+                    (out.restore_searches, out.restore_hits) = (counts.restore_searches, counts.restore_hits);
+                }
+                out
             };
             let out = match mode {
-                Mode::Pool { workers, .. } => {
+                Mode::Pool { workers, .. } | Mode::Region { workers, .. } => {
                     let pool = boyko_threadpool::ThreadPoolBuilder::new().num_threads(workers).build();
                     pool.install(|_| go())
                 }
                 _ => go(),
             };
+            assert!(
+                !matches!(mode, Mode::Region { .. }) || out.fill.is_some() || solver.columns.heads().is_empty(),
+                "SR: a region mode must hand its fill over (a layout with a cohort; a frame that lays \
+                 nothing out fills nothing)"
+            );
             let cols = &solver.columns;
             // Which range filled each laid-out manifold: the cuts `build_columns` took, rebuilt
             // from the final heads (the widths it cut by are the layout's).
             let mut owner = vec![None; frame.manifolds.len()];
             let mut restore_ranges = 0;
-            if let Mode::Pool { tasks, .. } | Mode::Threads(tasks) = mode
-                && solver.setup_dispatches() > 0
+            let dispatched = solver.setup_dispatches() + region_published;
+            if let Mode::Pool { tasks, .. } | Mode::Threads(tasks) | Mode::Region { tasks, .. } = mode
+                && dispatched > 0
             {
                 let points: usize = cols.heads().iter().map(|h| h.width.iter().map(|&w| usize::from(w)).sum::<usize>()).sum();
                 let mut cuts = [(0u32, 0u32); SETUP_MAX_TASKS];
@@ -6195,7 +6218,7 @@
                     restore: (out.restore_searches, out.restore_hits),
                 },
                 backward: c.backward_searches,
-                dispatched: solver.setup_dispatches(),
+                dispatched,
                 owner,
                 restore_ranges,
             }
@@ -6219,6 +6242,8 @@
             /// fell in two ranges or more.
             fused_restore_split: u64,
             adjacent_split: u64,
+            /// SR: region-mode builds whose Fill item was published (two ranges or more).
+            region_dispatched: u64,
         }
 
         /// Builds `frame` in every mode of `modes` and requires each equal to the parent path.
@@ -6233,6 +6258,7 @@
                 );
                 if run.dispatched > 0 {
                     tally.dispatched += 1;
+                    tally.region_dispatched += u64::from(matches!(mode, Mode::Region { .. }));
                     let fused = frame.warm && frame.read.2 && !matches!(frame.remap, RemapSpec::Reset);
                     tally.fused_descents += u64::from(fused && run.backward > 0);
                     tally.non_strict_dispatched += u64::from(!frame.read.2);
@@ -6260,6 +6286,10 @@
                 Mode::Pool { workers: 2, tasks: 2 },
                 Mode::Pool { workers: 4, tasks: 5 },
                 Mode::Pool { workers: 8, tasks: 16 },
+                // SR (C3): the same ranges as the solve region's stage 0.
+                Mode::Region { workers: 2, tasks: 2 },
+                Mode::Region { workers: 4, tasks: 5 },
+                Mode::Region { workers: 8, tasks: 16 },
             ];
             let acc = std::cell::Cell::new(Tally::default());
             proptest!(ProptestConfig::with_cases(96), |(seed in any::<u64>())| {
@@ -6272,6 +6302,7 @@
             let t = &tally;
             for (name, n) in [
                 ("dispatched builds", t.dispatched),
+                ("region-mode builds that published the fill", t.region_dispatched),
                 ("fused builds whose ranges searched below a cursor (a descent)", t.fused_descents),
                 ("frames with a restore hit", t.restore_hits),
                 ("shape F builds whose restore hits fell in two ranges", t.fused_restore_split),
