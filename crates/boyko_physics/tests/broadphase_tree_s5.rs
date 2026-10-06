@@ -7,6 +7,10 @@
 //!   dynamic boxes, 43 active leaf nodes) through the real schedule with the switch on are bit
 //!   identical, frame by frame, at W 1/2/3/4/5/8/16 and to the switch-off W1 run, and the query
 //!   dispatched on every frame after the first at W ≥ 2 and on none at W1.
+//! * [`s5_tail_stays_a_rounding_error`]: the same stacks with the switch on at W 2/4/8/16 — the
+//!   serial tail answers at most 1 % of the leaf nodes the dispatched frames queried, so the
+//!   per-row budget covers the density the chunks meet (a degenerate budget is value-neutral and
+//!   invisible to every pose gate).
 //! * [`s5_one_worker_allocates_nothing`]: the W1 path's census proof (the G-L4-1 twin) — a warmed
 //!   tree step with the switch on allocates nothing and dispatches nothing on a one-worker pool,
 //!   while the same step on four workers dispatches and allocates its scope.
@@ -242,6 +246,51 @@ fn s5_default_world_is_worker_count_invariant() {
          switch-off W1 run:\n  {}",
         diverged.join("\n  ")
     );
+}
+
+/// The bound [`s5_tail_stays_a_rounding_error`] holds the tail to: at most 1 % of the leaf nodes
+/// the dispatched frames queried.
+const TAIL_PERCENT_MAX: u64 = 1;
+
+/// S5's tail stays a rounding error of the dispatched work (triage r1 G2): G3's stacks through the
+/// real schedule with the switch on, at W 2/4/8/16 for [`FRAMES`] frames — every frame after the
+/// first dispatches, and the calling thread answers at most [`TAIL_PERCENT_MAX`] % of the leaf
+/// nodes the dispatched frames queried in the serial tail after the join. A per-row budget too
+/// small for the density the chunks meet is value-neutral (the tail answers with the serial
+/// rules), so no pose or pair gate sees it: S5 would run as a serial query plus a scope.
+#[test]
+fn s5_tail_stays_a_rounding_error() {
+    let read = |tree: &BroadphaseTree| {
+        let d = tree.diag();
+        (tree.query_dispatches(), tree.query_tail_leaves(), d.leaf_list_leaves + d.fallback_leaves)
+    };
+    for workers in [2usize, 4, 8, 16] {
+        let (mut world, mut schedule) = default_world(workers, GRID);
+        world.resource_mut::<PhysicsConfig>().parallel_tree_query = true;
+        let (mut dispatched, mut tail, mut leaves) = (0u64, 0u64, 0u64);
+        for _ in 0..FRAMES {
+            let (d0, t0, l0) = read(world.resource::<BroadphaseTree>());
+            schedule.run(&mut world);
+            let (d1, t1, l1) = read(world.resource::<BroadphaseTree>());
+            if d1 > d0 {
+                dispatched += d1 - d0;
+                tail += t1 - t0;
+                leaves += l1 - l0;
+            }
+        }
+        println!("S5 tail W{workers}: {tail} of {leaves} leaf nodes over {dispatched} dispatched frames");
+        assert_eq!(
+            dispatched,
+            FRAMES as u64 - 1,
+            "non-vacuity: W{workers}: S5 dispatched on {dispatched} of {FRAMES} frames, want every frame after the first"
+        );
+        assert!(
+            tail * 100 <= TAIL_PERCENT_MAX * leaves,
+            "S5: W{workers}: the calling thread answered {tail} of the {leaves} leaf nodes the dispatched frames \
+             queried in the serial tail, over {TAIL_PERCENT_MAX} %: the per-row budget no longer covers the density \
+             the chunks meet"
+        );
+    }
 }
 
 /// G3's stacks as gathered rows, for the direct-drive tree.

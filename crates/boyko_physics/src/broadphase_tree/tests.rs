@@ -18,14 +18,14 @@
 //!   the kept-count pin, the cut's gate in the default test command (W2); the small-segment
 //!   network (F2) against `sort_unstable` on every length it takes.
 //!
-//! * **S5** (the parallel tree query, `parallel.rs`) — `s5_*`: the chunk count and the region
-//!   layout's closed forms; the inline threshold under the production rules, 31 leaf nodes
-//!   inline and 32 dispatched, in literals; G1's single-step worlds and churn scripts, the
-//!   hinted sleeper set, a forced overflow (the tail), a lowered cap (the fallback in the
-//!   tail), the first step without history and one lane, each on a serial twin and an S5 tree
-//!   inside a pool, equal on the stream, the withheld list, every row's segment, `TreeDiag` and
-//!   `LeafListCounts`; a helper's panic reaching the caller under a watchdog; and the Miri
-//!   subset (`s5_miri_small_world`).
+//! * **S5** (the parallel tree query, `parallel.rs`) — `s5_*`: the chunk count's, the region
+//!   layout's and the per-row budget's closed forms; the inline threshold under the production
+//!   rules, 31 leaf nodes inline and 32 dispatched, in literals; G1's single-step worlds and
+//!   churn scripts, the hinted sleeper set, a forced overflow (the tail), a lowered cap (the
+//!   fallback in the tail), the first step without history and one lane, each on a serial twin
+//!   and an S5 tree inside a pool, equal on the stream, the withheld list, every row's segment,
+//!   `TreeDiag` and `LeafListCounts`; a helper's panic reaching the caller under a watchdog; and
+//!   the Miri subset (`s5_miri_small_world`).
 //!
 //! Every test is device-free and heap-light; under Miri the property tests shrink to 16 cases
 //! at n ≤ 24 and the kernel is the scalar arm.
@@ -2463,12 +2463,18 @@ fn apply_churn(sim: &mut Sim, op: ChurnOp) {
 #[test]
 fn s5_chunk_count_follows_the_dispatch_conditions() {
     use super::parallel::{
-        S5_CHUNKS_PER_LANE, S5_MAX_CHUNKS, S5_MIN_LEAVES, S5_MIN_LEAVES_PER_CHUNK, s5_chunk_count,
+        S5_CHUNKS_PER_LANE, S5_MAX_CHUNKS, S5_MIN_LEAVES, S5_MIN_LEAVES_PER_CHUNK, S5_MIN_ROW_ENTRIES,
+        S5_ROW_SLACK, s5_chunk_count,
     };
     assert_eq!(
         (S5_MIN_LEAVES, S5_MIN_LEAVES_PER_CHUNK, S5_CHUNKS_PER_LANE, S5_MAX_CHUNKS),
         (32, 4, 4, 256),
         "the S5 dispatch constants: this table and `s5_inline_threshold_is_thirty_two_leaf_nodes` are for these"
+    );
+    assert_eq!(
+        (S5_ROW_SLACK, S5_MIN_ROW_ENTRIES),
+        ((3, 2), 8),
+        "the S5 budget constants: `s5_row_budget_follows_the_formula` is for these"
     );
     for leaves in [0, 1, 8, 155, 10_000] {
         assert_eq!(s5_chunk_count(leaves, 0), 0, "no lane");
@@ -2484,6 +2490,22 @@ fn s5_chunk_count_follows_the_dispatch_conditions() {
     assert_eq!(s5_chunk_count(155, 16), 38, "J at W16: grain-bound");
     assert_eq!(s5_chunk_count(10_000, 64), 256, "the cap");
     assert_eq!(super::parallel::chunk_count(3, 2, 1), 3, "a lowered grain");
+}
+
+/// The per-row budget's closed form, `max(8, ⌈3E / 2R⌉)` over the last tree-path step's stream
+/// entries `E` and queried rows `R` (triage r1 G2). A degenerate budget is value-neutral — the
+/// tail answers what the regions cannot hold with the serial rules — so no pair or pose gate can
+/// see it; these rows and the world gate's tail bound (`tests/broadphase_tree_s5.rs`) can.
+#[test]
+fn s5_row_budget_follows_the_formula() {
+    use super::parallel::row_budget;
+    assert_eq!(row_budget(9_570, 1_240), 12, "J's snapshot, 9,570 entries over 155 full leaf nodes: ⌈28,710 / 2,480⌉");
+    assert_eq!(row_budget(16, 2), 12, "an exact quotient: 48 / 4");
+    assert_eq!(row_budget(17, 2), 13, "rounded up: ⌈51 / 4⌉");
+    assert_eq!(row_budget(11, 2), 9, "⌈33 / 4⌉: one above the floor");
+    assert_eq!(row_budget(10, 2), 8, "⌈30 / 4⌉: at the floor");
+    assert_eq!(row_budget(100, 1_240), 8, "a sparse step, ⌈300 / 2,480⌉ = 1: raised to the floor");
+    assert_eq!(row_budget(0, 7), 8, "an empty stream: the floor");
 }
 
 /// The inline threshold under the production rules (no hook; triage r1 G1): a world of 31 active
