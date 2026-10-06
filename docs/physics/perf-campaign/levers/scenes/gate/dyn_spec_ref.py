@@ -206,7 +206,7 @@ def main():
     for p in programs:
         text = dump(p).encode('ascii')
         if a.print:
-            sys.stdout.write(text.decode('ascii'))
+            sys.stdout.buffer.write(text)  # bytes: a text-mode stdout would write CRLF on Windows
             continue
         if a.write:
             with open('%s/%s.dump' % (a.write, p), 'wb') as f:

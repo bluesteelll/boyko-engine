@@ -1,0 +1,8 @@
+# The dynamic scenes' artifacts are pinned by hash, so git must never convert them on checkout:
+# pose fixtures are binary, and the canonical dumps and the copied Rapier sources keep LF bytes.
+*.pose binary
+*.dump -text
+rapier/*.txt -text
+# The gate scripts run under bash and python on Windows: LF in every checkout.
+gate/*.sh text eol=lf
+gate/*.py text eol=lf
