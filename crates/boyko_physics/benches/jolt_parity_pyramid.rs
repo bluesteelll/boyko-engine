@@ -384,7 +384,8 @@
 //!
 //! # Build (Jolt)
 //!
-//! `benches/jolt_parity/pyramid_scene.patch` applies to Jolt v5.3.0 and v5.6.0 alike. It:
+//! `benches/jolt_parity/pyramid_scene.patch` applies to Jolt v5.3.0 and v5.6.0 alike (its v2 hunks
+//! are checked on v5.6.0 only: the comparison is against Jolt 5.6). It:
 //!
 //! * sets `mLinearDamping = mAngularDamping = 0` in `PyramidScene.h` (H3);
 //! * adds `-no_pair_cache`: `PhysicsSettings::mUseBodyPairContactCache = false` (H10);
@@ -394,7 +395,20 @@
 //! * adds `-receipt` (untimed; H8): a counting `ContactListener` writes
 //!   `receipt_<quality>_th<N>.csv` with, per frame, the manifolds and points it reported (added +
 //!   persisted, cache hits included), the active body count and the top box's y;
-//! * prints one `boyko-parity-patch` line naming the options in force.
+//! * prints one `boyko-parity-patch` line naming the options in force;
+//! * v2 (lane DYN-SCENES, module docs "Dynamic scenes"): adds `-dyn=kick|shoot|slide` on Pyramid
+//!   (`BoykoDynPyramidScene` in `PyramidScene.h`: J-T's `StartTest` unchanged, then the arena and
+//!   the gravity; the programs are an independent C++ derivation of `dyn_spec.rs`), whose events
+//!   `ApplyEvents` applies at the top of the step loop, BEFORE `clock_start` (Jolt's own
+//!   `UpdateTest` hook runs inside its timed pair, so it is not used); `-sanity`
+//!   (`sanity_<tag>.csv`, the shared bar's CSV, and `statics_<tag>.csv`, the static-pair receipts:
+//!   Jolt's broadphase predicate recomputed per active-static pair and the contact listener's
+//!   manifolds with a static endpoint), `-scene_dump=`, `-pose_out=` and `-spawn_pose_out=` (this
+//!   runner's pose format). With any of them a second line `boyko-parity-dyn v1: program=…` and a
+//!   `boyko-parity-dyn receipts:` line are printed; the v1 line is byte-identical. Jolt ignores an
+//!   option it does not know, so a row must also require the v2 line (an old exe given `-dyn=` runs
+//!   J-T). `Update`'s `EPhysicsUpdateError` is kept (one return-value store in the timed pair) and
+//!   counted.
 //!
 //! ```text
 //! # WinLibs MinGW-w64 (g++, POSIX threads, UCRT) first on PATH: its bin directory holds
@@ -413,6 +427,14 @@
 //! # patch and recipe into build-v5.6.0-dist. It needed no extra option on this host; its new
 //! # compute options (JPH_USE_DX12 / _VK / _MTL / _CPU_COMPUTE) stay at their default ON and the
 //! # driver's manifest records them (plan open question 2: recorded, never patched away).
+//! # Patch v2 (the dynamic scenes): its own worktree and build directory, so window 9b's exe
+//! # (build-v5.6.0-dist, sha256 918fd2b7…) and its source tree stay as they were (ruling 22 Q5):
+//! #   git -C D:/tmp/jolt/JoltPhysics worktree add --detach D:/tmp/jolt/wt-v5.6.0-dyn e77f175
+//! #   git -C D:/tmp/jolt/wt-v5.6.0-dyn apply <repo>/crates/boyko_physics/benches/jolt_parity/pyramid_scene.patch
+//! #   the same configure into D:/tmp/jolt/build-v5.6.0-dyn-dist with the WinLibs cmake.exe and
+//! #   -DCMAKE_C_COMPILER / -DCMAKE_CXX_COMPILER / -DCMAKE_MAKE_PROGRAM set to its gcc, c++ and
+//! #   mingw32-make (its CMakeCache equals build-v5.6.0-dist's option for option), the same build
+//! #   command and the same three DLLs. Window 9c runs every Jolt row on this exe.
 //! ```
 //!
 //! The compiler installation is the one the 2026-09-10 binary's `CMakeCache.txt` names (g++ 16.1.0
