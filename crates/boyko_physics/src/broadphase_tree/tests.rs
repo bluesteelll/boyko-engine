@@ -18,12 +18,23 @@
 //!   the kept-count pin, the cut's gate in the default test command (W2); the small-segment
 //!   network (F2) against `sort_unstable` on every length it takes.
 //!
+//! * **S5** (the parallel tree query, `parallel.rs`) — `s5_*`: the chunk count and the region
+//!   layout's closed forms; G1's single-step worlds and churn scripts, the hinted sleeper set,
+//!   a forced overflow (the tail), a lowered cap (the fallback in the tail), the first step
+//!   without history and one lane, each on a serial twin and an S5 tree inside a pool, equal
+//!   on the stream, the withheld list, every row's segment, `TreeDiag` and `LeafListCounts`;
+//!   a helper's panic reaching the caller under a watchdog; and the Miri subset
+//!   (`s5_miri_small_world`).
+//!
 //! Every test is device-free and heap-light; under Miri the property tests shrink to 16 cases
 //! at n ≤ 24 and the kernel is the scalar arm.
+
+use std::sync::Arc;
 
 use proptest::prelude::*;
 
 use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
+use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use crate::components::ColliderShape;
 use crate::math::Vec3;
@@ -2243,5 +2254,499 @@ proptest! {
             );
             assert_sleeper_invariants(&sim, &hint);
         }
+    }
+}
+
+// ── S5: the parallel tree query (`parallel.rs`) ─────────────────────────────────────────────
+
+/// Forces S5 on a small world: the switch on, the inline threshold at one leaf node and the grain
+/// at one, so a world of two or more active leaf nodes cuts at least two chunks at two lanes.
+fn force_s5(tree: &mut BroadphaseTree) {
+    tree.set_parallel_query(true);
+    tree.s5_hooks.min_leaves = 1;
+    tree.s5_hooks.grain = 1;
+}
+
+/// The worker-count-invariant bytes of the last tree-path step's query (`parallel.rs`, "Why the
+/// output is the serial pass's"): per row `(nrev, nfwd)` and its segment's contents. `seg` is the
+/// layout's, so it is not compared.
+fn segments(tree: &BroadphaseTree, n: usize) -> Vec<(u32, u32, Vec<u32>)> {
+    let aux = tree.aux.as_read_slice();
+    tree.rec[usize::from(tree.cur)]
+        .as_read_slice()
+        .iter()
+        .take(n)
+        .map(|r| {
+            let (seg, len) = (r.seg as usize, (r.nrev + r.nfwd) as usize);
+            (r.nrev, r.nfwd, aux[seg..seg + len].to_vec())
+        })
+        .collect()
+}
+
+/// The S5 tree's last step equals the serial twin's on the comparison set: the stream and the
+/// withheld list, every row's segment, `TreeDiag` and `LeafListCounts`.
+fn assert_s5_equals_serial(par: &Sim, serial: &Sim, what: &str) {
+    let n = serial.bodies.len();
+    assert_eq!(par.out.pairs_stream(), serial.out.pairs_stream(), "{what}: S5's stream is the serial pass's");
+    assert_eq!(par.out.withheld(), serial.out.withheld(), "{what}: S5's withheld list is the serial pass's");
+    assert_eq!(segments(&par.tree, n), segments(&serial.tree, n), "{what}: S5's segments are the serial pass's");
+    assert_eq!(par.tree.diag(), serial.tree.diag(), "{what}: S5's TreeDiag is the serial pass's");
+    assert_eq!(par.tree.ll_counts, serial.tree.ll_counts, "{what}: S5's LeafListCounts are the serial pass's");
+}
+
+/// The S5 receipt the scripts check on every step: whether this step should have dispatched, from
+/// the step's own active tree and the history the step started with (`parallel.rs`, "When a step
+/// dispatches"; the reserve term never binds at these sizes).
+fn s5_expected(tree: &BroadphaseTree, had_history: bool, tree_path: bool, workers: usize) -> bool {
+    let leaves = tree.active.leaf_nodes().len();
+    let min_leaves = super::parallel::S5_MIN_LEAVES.min(tree.s5_hooks.min_leaves);
+    let grain = super::parallel::S5_MIN_LEAVES_PER_CHUNK.min(tree.s5_hooks.grain);
+    tree_path
+        && tree.parallel_query()
+        && tree.query_kernel() == QueryKernel::LeafList
+        && had_history
+        && leaves >= min_leaves
+        && super::parallel::chunk_count(leaves, workers, grain) >= 2
+}
+
+/// S5's serial twin: the same rows stepped by a serial tree and by an S5 tree inside a pool of
+/// `workers` workers (or, pool-free, by the calling thread alone as if it had `workers` lanes);
+/// every step compares the two (`assert_s5_equals_serial`), checks the serial tree against the
+/// oracle and the S5 tree's dispatch against [`s5_expected`].
+struct S5Twin {
+    serial: Sim,
+    par: Sim,
+    /// `None`: the pool-free wave (`TestHooks::pool_free_lanes`).
+    pool: Option<Arc<ThreadPool>>,
+    workers: usize,
+    /// Steps the S5 tree dispatched.
+    dispatched: u64,
+}
+
+impl S5Twin {
+    fn new(bodies: Vec<BodyState>, workers: usize) -> Self {
+        let pool = ThreadPoolBuilder::new().num_threads(workers).build();
+        Self::of(Sim::new(bodies.clone()), Sim::new(bodies), workers, Some(pool))
+    }
+
+    /// No pool: the S5 tree dispatches as if it had `lanes` lanes, and the calling thread runs
+    /// every chunk (the Miri subset's stacked-borrows leg).
+    fn pool_free(bodies: Vec<BodyState>, lanes: usize) -> Self {
+        let mut twin = Self::of(Sim::new(bodies.clone()), Sim::new(bodies), lanes, None);
+        twin.par.tree.s5_hooks.pool_free_lanes = Some(lanes);
+        twin
+    }
+
+    fn of(serial: Sim, mut par: Sim, workers: usize, pool: Option<Arc<ThreadPool>>) -> Self {
+        force_s5(&mut par.tree);
+        Self { serial, par, pool, workers, dispatched: 0 }
+    }
+
+    /// Applies `edit` to both sims.
+    fn edit(&mut self, edit: impl Fn(&mut Sim)) {
+        edit(&mut self.serial);
+        edit(&mut self.par);
+    }
+
+    /// One step of both — a gather first when `gather`, the hint when given — compared. Returns
+    /// whether the S5 tree dispatched.
+    fn step_with(&mut self, gather: bool, hint: Option<&BitHint>) -> bool {
+        if gather {
+            self.serial.gather();
+            self.par.gather();
+        }
+        let n = self.serial.bodies.len();
+        let tree_path = n > self.serial.tree.brute_max_rows() as usize;
+        let had_history = self.par.tree.hist_rows > 0;
+        let before = self.par.tree.query_dispatches();
+        {
+            let Sim { tree, rows, out, bodies, .. } = &mut self.serial;
+            match hint {
+                Some(h) => tree.step_hinted(bodies, rows, out, h),
+                None => tree.step(bodies, rows, out),
+            }
+        }
+        {
+            let Sim { tree, rows, out, bodies, .. } = &mut self.par;
+            let mut step = || match hint {
+                Some(h) => tree.step_hinted(bodies, rows, out, h),
+                None => tree.step(bodies, rows, out),
+            };
+            match &self.pool {
+                Some(pool) => pool.install(|_| step()),
+                None => step(),
+            }
+        }
+        let dispatched = self.par.tree.query_dispatches() - before;
+        let expected = s5_expected(&self.par.tree, had_history, tree_path, self.workers);
+        assert_eq!(dispatched, u64::from(expected), "S5's dispatch receipt (n = {n}, W = {})", self.workers);
+        assert_s5_equals_serial(&self.par, &self.serial, &format!("n = {n}, W = {}", self.workers));
+        self.serial.check_oracle();
+        self.dispatched += dispatched;
+        dispatched == 1
+    }
+
+    fn step(&mut self) -> bool {
+        self.step_with(true, None)
+    }
+
+    /// The spread hook's witness of the last dispatch: at least two participants, and every one of
+    /// them ran a chunk (critique W3 (a)).
+    fn assert_spread(&self) {
+        let h = &self.par.tree.s5_hooks;
+        let ran = &h.last_ran[..h.last_participants];
+        assert!(h.last_participants >= 2, "S5 spread: {} participants", h.last_participants);
+        assert!(ran.iter().all(|&r| r >= 1), "S5 spread: every participant ran a chunk: {ran:?}");
+    }
+}
+
+/// One churn edit (`ChurnOp`) on `sim`, as `g1_random_churn_scripts_equal_all_pairs` applies it.
+#[cfg(not(miri))]
+fn apply_churn(sim: &mut Sim, op: ChurnOp) {
+    let n = sim.bodies.len();
+    match op {
+        ChurnOp::Hold => {}
+        ChurnOp::Spawn { at, is_static } => {
+            let at = at % (n + 1);
+            let inv_mass = if is_static { 0.0 } else { 1.0 };
+            let x = -30.0 + 2.0 * (at % 30) as f32;
+            sim.spawn_at(at, boxed([x, 0.49, 2.0 * (at / 30) as f32 + 14.0], [0.5; 3], inv_mass));
+        }
+        ChurnOp::DespawnSwap(row) => {
+            if n > 2 {
+                sim.despawn_swap(row % n);
+            }
+        }
+        ChurnOp::Migrate { from, to } => sim.migrate(from % n, to % n),
+        ChurnOp::Teleport(row) => sim.bodies[row % n].position.x += 3.0,
+        ChurnOp::Reshape(row) => {
+            let b = &mut sim.bodies[row % n];
+            b.shape = match b.shape {
+                ColliderShape::Box { half_extents } => {
+                    ColliderShape::Box { half_extents: half_extents + Vec3::new(0.25, 0.0, 0.0) }
+                }
+                ColliderShape::Sphere { radius } => ColliderShape::Sphere { radius: radius + 0.25 },
+            };
+        }
+        ChurnOp::ClassFlip(row) => {
+            let b = &mut sim.bodies[row % n];
+            b.inv_mass = if b.inv_mass == 0.0 { 1.0 } else { 0.0 };
+        }
+        ChurnOp::MissGather => sim.gather(),
+        ChurnOp::Brute => sim.tree.set_brute_max_rows(1 << 20),
+    }
+}
+
+/// The chunk count's table: the lanes term, the grain bound, the lane bound, the cap and the
+/// two-chunk floor (the narrowphase's `chunk_count` twin).
+#[test]
+fn s5_chunk_count_follows_the_dispatch_conditions() {
+    use super::parallel::{S5_CHUNKS_PER_LANE, S5_MAX_CHUNKS, S5_MIN_LEAVES_PER_CHUNK, s5_chunk_count};
+    assert_eq!((S5_MIN_LEAVES_PER_CHUNK, S5_CHUNKS_PER_LANE, S5_MAX_CHUNKS), (4, 4, 256), "the table below is for these");
+    for leaves in [0, 1, 8, 155, 10_000] {
+        assert_eq!(s5_chunk_count(leaves, 0), 0, "no lane");
+        assert_eq!(s5_chunk_count(leaves, 1), 0, "one lane runs the serial pass at any size");
+    }
+    assert_eq!(s5_chunk_count(7, 2), 0, "one chunk of grain: fewer than two chunks");
+    assert_eq!(s5_chunk_count(8, 2), 2, "two chunks of grain");
+    assert_eq!(s5_chunk_count(155, 2), 8, "lane-bound at W2");
+    assert_eq!(s5_chunk_count(155, 3), 12);
+    assert_eq!(s5_chunk_count(155, 4), 16);
+    assert_eq!(s5_chunk_count(155, 5), 20);
+    assert_eq!(s5_chunk_count(155, 8), 32, "J at W8");
+    assert_eq!(s5_chunk_count(155, 16), 38, "J at W16: grain-bound");
+    assert_eq!(s5_chunk_count(10_000, 64), 256, "the cap");
+    assert_eq!(super::parallel::chunk_count(3, 2, 1), 3, "a lowered grain");
+}
+
+#[cfg(not(miri))]
+const S5_LAYOUT_CASES: u32 = 512;
+#[cfg(miri)]
+const S5_LAYOUT_CASES: u32 = 8;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: S5_LAYOUT_CASES,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    /// The closed-form layout: the chunks' leaf ranges partition `[0, L)` in order, and their
+    /// regions tile `[0, total)` in order, each at least `LANES` long and holding its rows' budget.
+    #[test]
+    fn s5_regions_are_disjoint_ordered_and_fit(
+        leaves in 2usize..3000,
+        chunks_raw in 2usize..=256,
+        budget in 1usize..64,
+        partial in 0usize..8,
+    ) {
+        use super::parallel::Layout;
+        let chunks = chunks_raw.min(leaves);
+        let slots = leaves * LANES - partial;
+        let layout = Layout { chunks, leaves, slots, budget };
+        let (mut leaf_end, mut region_end, mut rows) = (0usize, 0usize, 0usize);
+        for c in 0..chunks {
+            let (lo, hi) = layout.leaf_range(c);
+            prop_assert_eq!(lo, leaf_end, "chunk {}'s leaves follow the previous chunk's", c);
+            prop_assert!(lo < hi, "chunk {} owns a leaf node", c);
+            let (start, len) = layout.region(c);
+            prop_assert_eq!(start, region_end, "chunk {}'s region follows the previous one", c);
+            prop_assert!(len >= LANES, "chunk {}'s region holds one emit", c);
+            let chunk_rows = (hi * LANES).min(slots) - lo * LANES;
+            prop_assert_eq!(len, chunk_rows * budget + LANES, "chunk {}'s region is its rows' budget plus one emit", c);
+            rows += chunk_rows;
+            leaf_end = hi;
+            region_end = start + len;
+        }
+        prop_assert_eq!(leaf_end, leaves, "the ranges cover every leaf node");
+        prop_assert_eq!(rows, slots, "the regions budget every Q row once");
+        prop_assert_eq!(region_end, layout.total(), "the regions tile [0, total)");
+    }
+}
+
+#[cfg(not(miri))]
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: G1_CASES,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    /// G1's single-step worlds, three steps under direct drive, on a serial tree and an S5 tree at
+    /// a drawn worker count: equal on the comparison set and to all-pairs on every step, and the
+    /// S5 tree dispatched exactly where the receipt says (every step after the first with two or
+    /// more active leaf nodes).
+    #[test]
+    fn s5_g1_single_step_worlds_equal_the_serial_pass(
+        specs in prop::collection::vec(spec(), 1..G1_MAX_N),
+        sign in 0u8..3u8,
+        workers in prop::sample::select(vec![2usize, 3, 4, 5, 8]),
+    ) {
+        let mut twin = S5Twin::new(world(&specs, sign), workers);
+        for _ in 0..3 {
+            twin.step_with(false, None);
+        }
+    }
+
+    /// G1's churn scripts over a real `RowIdentity` on a serial tree and an S5 tree: equal on every
+    /// step, through spawns, despawns, migrations, teleports, reshapes, class flips, missed gathers
+    /// and brute steps (each of which leaves the S5 tree's history as the serial pass's).
+    #[test]
+    fn s5_g1_churn_scripts_equal_the_serial_twin(
+        ops in prop::collection::vec(churn_op(), 4..24),
+        dynamics in 12usize..48,
+        workers in prop::sample::select(vec![2usize, 3, 4, 5, 8]),
+    ) {
+        let mut twin = S5Twin::new(scene(dynamics), workers);
+        for op in ops {
+            twin.edit(|sim| apply_churn(sim, op));
+            twin.step();
+            twin.edit(|sim| sim.tree.set_brute_max_rows(0));
+        }
+    }
+}
+
+/// Floor, then a 6 × 8 grid of touching boxes; the hint freezes every other box, so the sleeper
+/// set holds 24 boxes over several leaf nodes while 24 stay queried.
+#[cfg(not(miri))]
+#[test]
+fn s5_sleeper_set_hinted_equals_the_serial_twin() {
+    let mut bodies = vec![boxed([0.0, -1.0, 0.0], [20.0, 1.0, 20.0], 0.0)];
+    for k in 0..48 {
+        bodies.push(boxed([(k % 6) as f32, 0.5, (k / 6) as f32], [0.5, 0.5, 0.5], 1.0));
+    }
+    let hint = BitHint {
+        frozen: (0..bodies.len()).map(|r| r > 0 && r % 2 == 0).collect(),
+        anchor: vec![true; bodies.len()],
+    };
+    let mut twin = S5Twin::new(bodies, 4);
+    let mut withheld_steps = 0;
+    for _ in 0..6 {
+        twin.step_with(true, Some(&hint));
+        withheld_steps += usize::from(!twin.par.out.withheld().is_empty() && twin.par.tree.sleepers.levels() > 1);
+    }
+    assert!(twin.par.tree.sleeper_members() >= 24, "anti-vacuity: the frozen boxes are in Z");
+    assert!(withheld_steps >= 3, "anti-vacuity: S5 ran with a multi-leaf sleeper tree and withheld pairs");
+    assert!(twin.dispatched >= 3, "anti-vacuity: S5 dispatched on the hinted steps ({})", twin.dispatched);
+}
+
+/// A per-row budget of one entry over a 10 × 12 grid of touching boxes (each row has several
+/// partners): a leaf node's segments pass its chunk's region on every dispatched step, so the
+/// chunks stop there and the tail answers the rest after the join — and the bytes, `TreeDiag`
+/// and `LeafListCounts` are still the serial pass's.
+#[cfg(not(miri))]
+#[test]
+fn s5_forced_overflow_runs_the_tail() {
+    let mut bodies = vec![boxed([0.0, -1.0, 0.0], [40.0, 1.0, 40.0], 0.0)];
+    for k in 0..120 {
+        bodies.push(boxed([(k % 10) as f32, 0.5, (k / 10) as f32], [0.5, 0.5, 0.5], 1.0));
+    }
+    let mut twin = S5Twin::new(bodies, 4);
+    twin.par.tree.s5_hooks.budget = Some(1);
+    twin.par.tree.s5_hooks.spread = true;
+    for step in 0..5 {
+        let tail_before = twin.par.tree.query_tail_leaves();
+        if twin.step() {
+            assert!(
+                twin.par.tree.query_tail_leaves() > tail_before,
+                "step {step}: a dispatched step with a one-entry budget ran no tail"
+            );
+            twin.assert_spread();
+        }
+    }
+    assert_eq!(twin.dispatched, 4, "anti-vacuity: S5 dispatched on every step after the first");
+}
+
+/// A lowered collection cap: every leaf node's collection passes it, so each chunk stops at its
+/// first leaf node, and the tail answers them through the per-row walk — the serial pass's
+/// fallback count, and its bytes.
+#[cfg(not(miri))]
+#[test]
+fn s5_fallback_leaf_stops_the_chunk() {
+    // gll5's cluster: 40 spheres of radius 2 in a 1.8-wide cube, five leaf nodes, every pair touching.
+    let bodies: Vec<BodyState> = (0..40)
+        .map(|k| {
+            let p = [(k % 3) as f32 * 0.9, (k / 3 % 3) as f32 * 0.9, (k / 9) as f32 * 0.45];
+            sphere(p, 2.0, 1.0, false)
+        })
+        .collect();
+    let mut twin = S5Twin::new(bodies, 4);
+    twin.edit(|sim| sim.tree.set_leaf_list_cap(4));
+    for _ in 0..3 {
+        twin.step_with(false, None);
+    }
+    let d = twin.par.tree.diag();
+    assert_eq!((d.fallback_leaves, d.leaf_list_leaves), (15, 0), "every leaf node fell back on every step: {d:?}");
+    assert_eq!(twin.dispatched, 2, "S5 dispatched after the first step");
+    assert_eq!(twin.par.tree.query_tail_leaves(), 10, "the tail answered every leaf node of both dispatched steps");
+}
+
+/// The first tree-path step after construction has no history and runs the serial pass; the
+/// next one dispatches.
+#[cfg(not(miri))]
+#[test]
+fn s5_first_step_without_history_is_serial() {
+    let mut twin = S5Twin::new(scene(64), 4);
+    assert!(!twin.step(), "step 1: no history, no dispatch");
+    assert!(twin.par.tree.hist_rows > 0, "step 1 recorded the history");
+    assert!(twin.step(), "step 2: the history cuts the regions, S5 dispatches");
+}
+
+/// One lane: with S5 forced on a one-worker pool the step runs the serial pass and opens no scope
+/// — the stream, every record (`seg` included) and the rest of the stream column equal the
+/// switch-off tree's byte for byte (G-LL1-level identity).
+#[cfg(not(miri))]
+#[test]
+fn s5_one_lane_runs_the_serial_pass() {
+    let mut twin = S5Twin::new(scene(120), 1);
+    for _ in 0..4 {
+        twin.step();
+        assert_eq!(
+            twin.par.tree.aux.as_read_slice(),
+            twin.serial.tree.aux.as_read_slice(),
+            "one lane: the stream column is the serial pass's byte for byte"
+        );
+        let recs = |t: &BroadphaseTree| -> Vec<(u32, u32, u32)> {
+            t.rec[usize::from(t.cur)].as_read_slice().iter().map(|r| (r.seg, r.nrev, r.nfwd)).collect()
+        };
+        assert_eq!(recs(&twin.par.tree), recs(&twin.serial.tree), "one lane: the records, seg included");
+    }
+    assert_eq!(twin.par.tree.query_dispatches(), 0, "one lane never dispatches");
+}
+
+/// The Miri subset (both borrow models; `cargo miri test ... broadphase_tree::tests::s5_miri`):
+/// a 76-row world at W 2 and 3 with the spread hook, so every participant runs a chunk and the
+/// region slices, the record writes, the shared trees and the count slots are used from at least
+/// two threads at once; one step with the budget at one entry (the tail: on step 2 the floor is
+/// still queried, and its segment holds every box), one plain step after the statics' admission,
+/// and one with a lowered cap (the fallback walk in the tail). Native too, so it is never
+/// `running 0 tests`.
+#[test]
+fn s5_miri_small_world() {
+    for workers in [2usize, 3] {
+        let mut twin = S5Twin::new(scene(72), workers);
+        twin.par.tree.s5_hooks.spread = true;
+        assert!(!twin.step(), "W{workers} step 1: no history");
+        twin.par.tree.s5_hooks.budget = Some(1);
+        assert!(twin.step(), "W{workers} step 2 dispatches");
+        twin.assert_spread();
+        assert!(twin.par.tree.query_tail_leaves() > 0, "W{workers}: the floor's leaf overflowed into the tail");
+        twin.par.tree.s5_hooks.budget = None;
+        assert!(twin.step(), "W{workers} step 3 dispatches");
+        twin.assert_spread();
+        twin.edit(|sim| sim.tree.set_leaf_list_cap(1));
+        let fallbacks_before = twin.par.tree.diag().fallback_leaves;
+        assert!(twin.step(), "W{workers} step 4 dispatches");
+        assert!(twin.par.tree.diag().fallback_leaves > fallbacks_before, "W{workers}: a leaf node fell back in the tail");
+        twin.assert_spread();
+    }
+}
+
+/// The Miri subset's pool-free half — its stacked-borrows leg, which the pooled half cannot take
+/// (the pool's worker loop trips a pre-existing crossbeam-epoch retag under stacked borrows): no
+/// pool exists, and the calling thread runs every chunk of a two-lane cut through the production
+/// chunk kernel — the region slices, the record writes and the shared trees — then the tail, on
+/// the same four steps as [`s5_miri_small_world`]. Native too.
+#[test]
+fn s5_miri_pool_free_wave() {
+    let mut twin = S5Twin::pool_free(scene(72), 2);
+    assert!(!twin.step(), "step 1: no history");
+    twin.par.tree.s5_hooks.budget = Some(1);
+    assert!(twin.step(), "step 2 dispatches");
+    assert!(twin.par.tree.query_tail_leaves() > 0, "the floor's leaf overflowed into the tail");
+    let h = twin.par.tree.s5_hooks;
+    assert_eq!(h.last_participants, 1, "pool-free: the calling thread is the only participant");
+    assert!(h.last_ran[0] >= 2, "anti-vacuity: the calling thread ran every chunk of a multi-chunk cut ({})", h.last_ran[0]);
+    twin.par.tree.s5_hooks.budget = None;
+    assert!(twin.step(), "step 3 dispatches");
+    twin.edit(|sim| sim.tree.set_leaf_list_cap(1));
+    let fallbacks_before = twin.par.tree.diag().fallback_leaves;
+    assert!(twin.step(), "step 4 dispatches");
+    assert!(twin.par.tree.diag().fallback_leaves > fallbacks_before, "a leaf node fell back in the tail");
+}
+
+/// The critique's C1: a helper that panics mid-chunk must reach the step's caller as a panic,
+/// never as an endless wait. The step runs on a thread of its own under a 60 s watchdog; the
+/// spread hook makes every participant run a chunk, and the panic hook panics in each chunk a
+/// helper runs.
+#[cfg(not(miri))]
+#[test]
+fn s5_helper_panic_propagates_to_the_step() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (tx, rx) = mpsc::channel();
+    let runner = std::thread::spawn(move || {
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let pool = ThreadPoolBuilder::new().num_threads(3).build();
+            let mut sim = Sim::new(scene(72));
+            force_s5(&mut sim.tree);
+            sim.tree.s5_hooks.spread = true;
+            pool.install(|_| {
+                sim.tree.step(&sim.bodies, &sim.rows, &mut sim.out);
+                assert_eq!(sim.tree.query_dispatches(), 0, "step 1 has no history");
+                sim.tree.s5_hooks.panic_in_helper = true;
+                sim.tree.step(&sim.bodies, &sim.rows, &mut sim.out);
+            });
+        }));
+        let message = outcome.err().map(|p| {
+            p.downcast_ref::<&str>()
+                .map(|s| (*s).to_owned())
+                .or_else(|| p.downcast_ref::<String>().cloned())
+                .unwrap_or_default()
+        });
+        let _ = tx.send(message);
+    });
+    match rx.recv_timeout(Duration::from_secs(60)) {
+        Ok(Some(message)) => {
+            assert!(message.contains("S5 test hook"), "the step panicked with another payload: {message:?}");
+            runner.join().expect("invariant: the runner thread caught the step's panic");
+        }
+        Ok(None) => panic!("S5: the step returned normally over a helper's panic"),
+        Err(_) => panic!(
+            "S5: the step did not return within 60 s after a helper's chunk panicked: the caller's \
+             wait spins on a completion count the panic never advanced"
+        ),
     }
 }
