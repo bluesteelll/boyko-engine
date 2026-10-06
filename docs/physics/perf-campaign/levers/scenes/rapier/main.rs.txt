@@ -1,0 +1,1791 @@
+//! rapier-parity: Rapier 0.36 on boyko's J-T pyramid, the second parity comparator after Jolt 5.6.
+//!
+//! **This is the `dyn/` copy** (boyko lane DYN-SCENES): the frozen harness `../src/main.rs` (FROZEN-9b
+//! §1, sha256 `a9269981…`) plus the dynamic parity scenes, built into its own exes
+//! (`dyn/bin/rapier-parity-dyn-<arm>.exe`) so that no frozen file, exe or pin moves. Every J-T row
+//! runs here as on the frozen exes (gate 2 of the lane replays all 70 frozen rows at W1 and W8
+//! against their fixtures); the additions:
+//!
+//! * `--dyn kick|shoot|slide`: a dynamic program on J-T (`src/spec.rs`, a byte copy of boyko's
+//!   `benches/jolt_parity_pyramid/dyn_spec.rs`; the glue is `src/dyn_scenes.rs`). Events are
+//!   applied between steps, before the step's `Instant::now()`; `--steps` defaults to the program's
+//!   length. Projectiles carry the row's gyroscopic setting and cannot sleep, like every J-T box.
+//! * `--sanity PATH`: the shared sanity CSV (scored by boyko's `scenes/gate/dyn_sanity.py`) and the
+//!   static-pair receipts in the summary's `dyn` object. `--scene-dump PATH`: the canonical scene
+//!   dump, read back from the sets. Both structural: never in a timed row.
+//! * Scene identity (g1) expects the program's statics (1 for J-T, 6 for S-SHOOT / S-SLIDE), and the
+//!   `--receipt` sleep gate expects every body of the step awake (1240 for J-T, up to 1300 for
+//!   S-SHOOT): the J-T form of both is unchanged (critique W5).
+//! * The SUMMARY gains `source_fnv1a64.spec_rs` / `dyn_scenes_rs` and, only for a dynamic run, a
+//!   `dyn` object; `RUNNER_ID` is the frozen one, so a J-T row's SUMMARY equals the frozen exe's but
+//!   for the source hashes, the exe and the timing keys. The exe's sha256 names it.
+//!
+//! An EXTERNAL benchmark comparator (not a boyko workspace member, its own `Cargo.lock`), shaped
+//! after boyko's fixed-window runner `crates/boyko_physics/benches/jolt_parity_pyramid.rs`: one
+//! world per process, stepped `--steps` times from t = 0 with no warm-up, one `Instant` pair
+//! around each `PhysicsPipeline::step` and nothing else inside it. Everything else the runner reads
+//! (receipts, pose, pool size) happens after the pair closes.
+//!
+//! # The scene (J-T)
+//!
+//! Jolt 5.6 `PerformanceTest/PyramidScene.h` and boyko's `spawn_scene` (`--scene jolt`), index for
+//! index: a fixed floor cuboid of half-extents (50, 1, 50) at (0, −1, 0); 15 layers `i`, and for
+//! `j, k` in `[i/2, 15 − (i+1)/2)` a cuboid of half-extent 1 (no convex radius, no contact skin) at
+//! `(−15 + 2j + odd, 1 + 2.5 i, −15 + 2k + odd)`, `odd = 1` on odd layers: 1240 dynamic bodies in
+//! boyko's spawn order. Identity rotation, zero velocity, zero damping (boyko has none; Jolt's is
+//! removed by the parity patch), density 1 (Rapier's default: m = 8, the inverse mass 0.125 and
+//! inverse inertia 0.1875 boyko's runner writes), friction 0.2 and restitution 0 on every collider.
+//! Gravity (0, −9.81, 0), dt = 1/60, one step per frame, sleeping off (`can_sleep(false)` on every
+//! box), CCD off (`max_ccd_substeps = 0`, which disables Rapier's automatic fixed-collider CCD too).
+//!
+//! Friction combine: every collider is `CoefficientCombineRule::Max`, boyko's rule, so the effective
+//! coefficient is max(0.2, 0.2) = 0.2. Jolt's √(0.2·0.2) and Rapier's default Average (0.2+0.2)/2
+//! give 0.2 as well; the summary carries the combined value Rapier computes and, under `--receipt`,
+//! the min/max `friction` of the final step's solver manifolds.
+//!
+//! # Configurations (`--cfg`)
+//!
+//! * `rapier-default`: `IntegrationParameters::default()` plus the scene invariants (dt, CCD off);
+//!   body defaults kept, gyroscopic forces included. Rows per step = 8·Np + 12·Nm.
+//! * `matched`: the closest match to boyko's solver: 4 substeps × (1 biased pass + 2 relax passes),
+//!   friction in the biased pass, Coulomb friction (2 rows per point), 30 Hz / ζ 10 softness on
+//!   every contact (the fixed floor too; Rapier's default stiffens it to 60 Hz), bias cap 4 m/s,
+//!   speculative distance 0.02 (Jolt's, and boyko's V2), contact recycling at 1 mm (boyko's reuse
+//!   τ and Jolt's cache), gyroscopic forces off. Rows per step = 36·Np, boyko's formula.
+//!
+//! Rows are solver row-iterations per step, the equal-work unit of the Jolt dossier, from Rapier's
+//! own loop (`staged_island_solver/worker.rs`, `solve.rs:98`): `S·[P·(Np + fib·F) + Q·(Np + F)]`
+//! with `F = 3·Nm` (Simplified) or `2·Np` (Coulomb), warm start not counted.
+//!
+//! # Builds (the SIMD arm)
+//!
+//! Exactly one of three cargo features names the build, and `compile_error!` refuses any other
+//! combination. rapier3d 0.36 has no `simd4` feature: its SIMD is always on through `wide`, at 4
+//! lanes, and its `simd8` feature widens that to 8.
+//!
+//! * `simd8` (default): `rapier3d/simd8` (and `parry3d/simd8`), 8-lane AVX2. Built by
+//!   `cargo build --release --locked`.
+//! * `simd4`: a marker feature that enables nothing in rapier3d, so Rapier runs at its 4-lane
+//!   default. Built by `cargo build --release --locked --no-default-features --features simd4`.
+//! * `det`: `rapier3d/enhanced-determinism` (4 lanes, libm). Not timed: the bitwise-determinism
+//!   receipt only. It cannot be combined with `simd8` (rapier3d `lib.rs:19-21`).
+//!
+//! # Counters
+//!
+//! `PhysicsPipeline::new()` turns Rapier's statistics counters on, and with them on `init_and_solve`
+//! walks every solver manifold on every step (`staged_island_solver/init.rs:601-610`), serially,
+//! inside the timed pair. Our J-T runner does its counts after the pair closes. So the counters are
+//! OFF unless `--receipt` is given (`--counters on|off` overrides), and the state in force is read
+//! back from the pipeline and recorded as `config.counters_enabled`. Nothing in the dynamics reads
+//! the counters, so the final pose does not depend on them (g2t checks it). The `--receipt` twins
+//! keep them on: they are the recount gate.
+//!
+//! # Threads (`--workers W`, `--install`)
+//!
+//! A rayon pool of exactly W threads. `--install loop` (default): the whole step loop runs inside
+//! one `pool.install`, so the timed pair holds only `step`, and the loop thread is the solver's
+//! inline worker 0 — W threads through the parallel work, the calling thread blocked outside, as
+//! boyko's W workers and Jolt's `-t=W`. `--install step`: `pool.install` per step from the main
+//! thread and the pair around it — Rapier's own `configure_thread_pool` shape, which prices the
+//! injection. The receipt `rayon::current_num_threads()` is read inside the install, every step in
+//! loop mode (before and after the loop in step mode), and must equal W.
+//!
+//! # Flags
+//!
+//! ```text
+//! --cfg rapier-default|matched   (default rapier-default)
+//! --gap G                        layer gap in metres, layers at 1 + (2 + G) i (default 0.5 = J-T)
+//! --workers W                    rayon pool size (default 1)
+//! --steps N                      steps from spawn (default 500)
+//! --window A..B                  the summary's timing window, A < B <= N (default 0..N)
+//! --install loop|step            where pool.install sits (default loop)
+//! --receipt                      per-step counts (untimed) into the CSV and the summary
+//! --counters on|off              Rapier's statistics counters (default: on iff --receipt)
+//! --csv PATH                     per-step CSV: step, wall_ns, pool_threads [, receipt columns]
+//! --pose-out PATH                final pose bytes (boyko's --pose-out format)
+//! --spawn-pose-out PATH          the same format, written after spawn and before the first step
+//! --expect-pose PATH             compare the final pose bytes with a file; exit 4 if they differ
+//! --perturb B:AXIS[:DIR]         move box B's spawn coordinate AXIS (x|y|z) by one f32 ulp, DIR
+//!                                +1 (default) or -1: the F0 ensemble's BOYKO_F0_PERTURB, as a flag
+//! --label TEXT                   echoed into the summary
+//! ```
+//!
+//! # Knobs (rev 3): overrides applied on top of the `--cfg` base
+//!
+//! Every flag below overrides one field of the base configuration (`IntegrationParameters`, a body
+//! setting or a broad-phase setting) and nothing else. The full `IntegrationParameters` in force is
+//! recorded in the SUMMARY `config`, and the flags that were given are echoed in `config.knobs`. A
+//! run without any knob flag is byte-for-byte the rev-2 run of its `--cfg`.
+//!
+//! ```text
+//! --substeps N          num_solver_iterations (substeps per step, >= 1)
+//! --pgs N               num_internal_pgs_iterations (biased passes per substep, >= 1)
+//! --stab N              num_internal_stabilization_iterations (unbiased/relax passes per substep)
+//! --friction-in-bias on|off   friction_in_bias_pass (ignored by Rapier when --stab is 0)
+//! --friction-model simplified|coulomb
+//! --clustering on|off   contact_clustering (no effect on cuboid pairs: one manifold per pair)
+//! --prediction D        normalized_prediction_distance (speculative contact distance, m)
+//! --recycling on|off    contact_recycling: Rapier's analogue of boyko's `--contact-reuse`
+//! --recycle-distance D  normalized_contact_recycle_distance (m; used only with --recycling on)
+//! --warmstart C         warmstart_coefficient in [0, 1]
+//! --max-bias V          normalized_max_corrective_velocity (m/s)
+//! --contact-hz H --contact-zeta Z --static-hz H --static-zeta Z   contact / fixed-body softness
+//! --max-linvel V|off    normalized_max_linear_velocity ("off" = f32::MAX: no per-substep cap)
+//! --ccd-substeps N      max_ccd_substeps (0 = all CCD off, the scene invariant)
+//! --gyro on|off         per-body gyroscopic forces (Rapier's body default is on)
+//! --bvh-opt subtree|none        broad-phase BVH optimization strategy
+//! --bvh-adaptive on|off         broad-phase adaptive change-detection margin
+//! ```
+//!
+//! # Output
+//!
+//! * stdout: a few readable lines, then one line `SUMMARY {json}`.
+//! * Pose bytes: every dynamic body's position, linear velocity, rotation (x, y, z, w) and angular
+//!   velocity as 13 little-endian `f32`, in spawn order; the hash is FNV-1a 64 over them. Byte for
+//!   byte the format of boyko's runner, so `metrics.py` and the equal-work scripts read it unchanged.
+//! * Timing columns (`wall_ns`, `window_mean_ns`) exist and are NOT a verdict unless the run was
+//!   taken on a quiet machine.
+//! * The CSV always carries `pool_threads` (the rayon pool size read after each step, inside the
+//!   install, `--install loop`; 0 = not read, `--install step`), with or without `--receipt`.
+//! * Exit code: 0 ok; 2 bad flags or an unwritable file; 3 void (a receipt gate failed: scene
+//!   identity, pool size, the loop not on a pool worker, a sleeping body, a counter disagreeing
+//!   with the recount); 4 `--expect-pose` mismatch.
+
+use std::fmt::Write as _;
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::time::Instant;
+
+use rapier3d::prelude::*;
+use rapier3d::rayon;
+
+mod dyn_scenes;
+mod spec;
+
+use spec::Program;
+
+#[cfg(any(
+    all(feature = "simd8", feature = "simd4"),
+    all(feature = "simd8", feature = "det"),
+    all(feature = "simd4", feature = "det"),
+    not(any(feature = "simd8", feature = "simd4", feature = "det")),
+))]
+compile_error!("rapier-parity: enable exactly one arm feature: simd8 (default) | simd4 | det");
+
+// ── Scene constants (Jolt `PyramidScene.h` / boyko `jolt_parity_pyramid.rs`) ─────────────────────
+
+/// `cBoxSize`: the pitch between neighbouring boxes in a layer.
+const BOX_SIZE: f32 = 2.0;
+/// `cHalfBoxSize`: every box's half-extent on every axis.
+const HALF_BOX: f32 = 0.5 * BOX_SIZE;
+/// `cBoxSeparation`: the J-T layer gap, and the default of `--gap`.
+const BOX_SEPARATION: f32 = 0.5;
+/// `cPyramidHeight`: the number of layers.
+const PYRAMID_HEIGHT: i32 = 15;
+/// Dynamic bodies in the pyramid.
+const PYRAMID_BODIES: usize = 1240;
+/// The floor's half-extents (`BoxShape(Vec3(50, 1, 50))`).
+const FLOOR_HALF_EXTENTS: [f32; 3] = [50.0, 1.0, 50.0];
+/// The floor's centre.
+const FLOOR_CENTER: [f32; 3] = [0.0, -1.0, 0.0];
+/// Jolt's default friction, boyko's `JOLT_FRICTION`.
+const FRICTION: f32 = 0.2;
+/// Restitution on every collider.
+const RESTITUTION: f32 = 0.0;
+/// Rapier's default density: m = 8 for a cube of half-extent 1, boyko's unit-density box.
+const DENSITY: f32 = 1.0;
+/// Jolt's `cDeltaTime`, boyko's `DT`.
+const DT: f32 = 1.0 / 60.0;
+/// Gravity along y.
+const GRAVITY_Y: f32 = -9.81;
+/// boyko's `BOX_INV_MASS`.
+const OURS_BOX_INV_MASS: f32 = 0.125;
+/// boyko's `BOX_INV_INERTIA`.
+const OURS_BOX_INV_INERTIA: f32 = 0.1875;
+/// boyko's first spawned box (i = j = k = 0).
+const OURS_FIRST: [f32; 3] = [-15.0, 1.0, -15.0];
+/// boyko's last spawned box, the top box (i = 14, j = k = 7).
+const OURS_LAST: [f32; 3] = [-1.0, 36.0, -1.0];
+/// The spawned pile's AABB (box extents included): layer 0 spans x, z in [−16, 14], y from 0; the
+/// top box reaches y = 37.
+const SPAWN_AABB_MIN: [f32; 3] = [-16.0, 0.0, -16.0];
+/// See [`SPAWN_AABB_MIN`].
+const SPAWN_AABB_MAX: [f32; 3] = [14.0, 37.0, 14.0];
+
+/// The top box's spawn position at layer gap `gap`: boyko's expression for layer 14, j = k = 7. At
+/// the J-T gap it is the literal [`OURS_LAST`], so that default stays independently pinned.
+fn expected_last(gap: f32) -> [f32; 3] {
+    if gap == BOX_SEPARATION {
+        OURS_LAST
+    } else {
+        [-1.0, 1.0 + (BOX_SIZE + gap) * (PYRAMID_HEIGHT - 1) as f32, -1.0]
+    }
+}
+
+/// The spawned pile's AABB at layer gap `gap` (box extents included); the literal pair at the J-T gap.
+fn expected_aabb(gap: f32) -> ([f32; 3], [f32; 3]) {
+    if gap == BOX_SEPARATION {
+        (SPAWN_AABB_MIN, SPAWN_AABB_MAX)
+    } else {
+        (
+            SPAWN_AABB_MIN,
+            [
+                SPAWN_AABB_MAX[0],
+                expected_last(gap)[1] + HALF_BOX,
+                SPAWN_AABB_MAX[2],
+            ],
+        )
+    }
+}
+
+// ── Runner constants ──────────────────────────────────────────────────────────────────────────
+
+/// What the summary names the runner.
+const RUNNER_ID: &str = "rapier-parity J-T runner v3";
+/// The pinned Rapier version (`Cargo.toml` pins `=0.36.0`).
+const RAPIER_VERSION: &str = "0.36.0";
+/// The build's arm: the one cargo feature that is on.
+const ARM: &str = if cfg!(feature = "simd8") {
+    "simd8"
+} else if cfg!(feature = "simd4") {
+    "simd4"
+} else {
+    "det"
+};
+/// The SIMD lane count Rapier runs at in this build.
+const SIMD_LANES: u32 = if cfg!(feature = "simd8") { 8 } else { 4 };
+/// The sources this exe was built from, hashed into the SUMMARY (FNV-1a 64) so a run names its
+/// source. `build.sh` also records their sha256 next to the exes.
+const SOURCE_MAIN_RS: &[u8] = include_bytes!("main.rs");
+/// See [`SOURCE_MAIN_RS`].
+const SOURCE_CARGO_TOML: &[u8] = include_bytes!("../Cargo.toml");
+/// See [`SOURCE_MAIN_RS`].
+const SOURCE_CARGO_LOCK: &[u8] = include_bytes!("../Cargo.lock");
+/// See [`SOURCE_MAIN_RS`]: the dynamic scenes' spec (a byte copy of boyko's `dyn_spec.rs`).
+const SOURCE_SPEC_RS: &[u8] = include_bytes!("spec.rs");
+/// See [`SOURCE_MAIN_RS`]: the dynamic scenes' glue.
+const SOURCE_DYN_SCENES_RS: &[u8] = include_bytes!("dyn_scenes.rs");
+/// Exit code: bad flags or an unwritable file.
+const EXIT_USAGE: u8 = 2;
+/// Exit code: a receipt gate failed.
+const EXIT_VOID: u8 = 3;
+/// Exit code: `--expect-pose` found different pose bytes.
+const EXIT_POSE_MISMATCH: u8 = 4;
+/// Thirteen `f32`s per body: boyko's `POSE_BYTES_PER_BODY`.
+const POSE_BYTES_PER_BODY: usize = 13 * 4;
+/// FNV-1a 64 offset basis.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+/// FNV-1a 64 prime.
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+/// A manifold whose normal has |n.y| below this is lateral (box beside box), else vertical/floor.
+const LATERAL_NORMAL_Y: f32 = 0.5;
+
+// ── Command line ──────────────────────────────────────────────────────────────────────────────
+
+/// The solver configuration a run sets.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CfgKind {
+    /// `IntegrationParameters::default()` plus the scene invariants.
+    RapierDefault,
+    /// The closest match to boyko's solver.
+    Matched,
+}
+
+impl CfgKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::RapierDefault => "rapier-default",
+            Self::Matched => "matched",
+        }
+    }
+}
+
+/// Where `pool.install` sits.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum InstallMode {
+    /// One install around the whole step loop.
+    Loop,
+    /// One install per step.
+    Step,
+}
+
+impl InstallMode {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Loop => "loop",
+            Self::Step => "step",
+        }
+    }
+}
+
+/// A one-ulp move of one box's spawn coordinate (the F0 ensemble's `BOYKO_F0_PERTURB`).
+#[derive(Clone, Copy, Debug)]
+struct Perturb {
+    body: usize,
+    axis: usize,
+    dir: i32,
+}
+
+/// Overrides of single configuration fields, applied on top of the `--cfg` base. `None` leaves the
+/// base value alone.
+#[derive(Clone, Default)]
+struct Knobs {
+    substeps: Option<usize>,
+    pgs: Option<usize>,
+    stab: Option<usize>,
+    friction_in_bias: Option<bool>,
+    friction_model: Option<FrictionModel>,
+    clustering: Option<bool>,
+    prediction: Option<f32>,
+    recycling: Option<bool>,
+    recycle_distance: Option<f32>,
+    warmstart: Option<f32>,
+    max_bias: Option<f32>,
+    contact_hz: Option<f32>,
+    contact_zeta: Option<f32>,
+    static_hz: Option<f32>,
+    static_zeta: Option<f32>,
+    /// `Some(None)` = `--max-linvel off`.
+    max_linvel: Option<Option<f32>>,
+    ccd_substeps: Option<usize>,
+    gyro: Option<bool>,
+    bvh_opt: Option<BvhOptimizationStrategy>,
+    bvh_adaptive: Option<bool>,
+    /// The flags given, in command-line order, as `--flag=value`, echoed into `config.knobs`.
+    given: Vec<String>,
+}
+
+/// The parsed command line.
+struct Args {
+    cfg: CfgKind,
+    knobs: Knobs,
+    /// `--gap`: the layer gap, layers at `1 + (BOX_SIZE + gap) i`.
+    gap: f32,
+    workers: usize,
+    steps: usize,
+    window: (usize, usize),
+    install: InstallMode,
+    receipt: bool,
+    /// `--counters`; `None` = on iff `receipt`.
+    counters: Option<bool>,
+    csv: Option<PathBuf>,
+    pose_out: Option<PathBuf>,
+    spawn_pose_out: Option<PathBuf>,
+    expect_pose: Option<PathBuf>,
+    perturb: Option<Perturb>,
+    label: Option<String>,
+    /// `--dyn`: the dynamic program; `None` is J-T.
+    dyn_program: Option<Program>,
+    /// `--sanity PATH`.
+    sanity: Option<PathBuf>,
+    /// `--scene-dump PATH`.
+    scene_dump: Option<PathBuf>,
+    raw: Vec<String>,
+}
+
+impl Args {
+    /// Whether the run reads a dynamic program (`--dyn`, `--sanity` or `--scene-dump`).
+    fn dyn_any(&self) -> bool {
+        self.dyn_program.is_some() || self.sanity.is_some() || self.scene_dump.is_some()
+    }
+
+    /// Whether Rapier's statistics counters run: on for a receipt run (they are the recount gate),
+    /// off for a timed run, unless `--counters` says otherwise.
+    fn counters_enabled(&self) -> bool {
+        self.counters.unwrap_or(self.receipt)
+    }
+}
+
+const USAGE: &str = "usage: rapier-parity [--cfg rapier-default|matched] [--workers W] [--steps N] \
+    [--window A..B] [--install loop|step] [--receipt] [--counters on|off] [--csv PATH] \
+    [--pose-out PATH] [--spawn-pose-out PATH] [--expect-pose PATH] [--perturb B:x|y|z[:+1|-1]] [--label TEXT] \
+    [--dyn kick|shoot|slide] [--sanity PATH] [--scene-dump PATH]";
+
+fn parse_num<T: std::str::FromStr>(flag: &str, v: Option<String>) -> Result<T, String> {
+    let v = v.ok_or_else(|| format!("{flag} needs a value"))?;
+    v.parse::<T>().map_err(|_| format!("{flag}: cannot parse {v:?}"))
+}
+
+fn parse_onoff(flag: &str, v: Option<String>) -> Result<bool, String> {
+    match v.as_deref() {
+        Some("on") => Ok(true),
+        Some("off") => Ok(false),
+        other => Err(format!("{flag}: expected on|off, got {other:?}")),
+    }
+}
+
+/// A finite `f32` that is `>= 0`.
+fn parse_nonneg(flag: &str, v: Option<String>) -> Result<f32, String> {
+    let x: f32 = parse_num(flag, v)?;
+    if x.is_finite() && x >= 0.0 {
+        Ok(x)
+    } else {
+        Err(format!("{flag} {x} must be finite and >= 0"))
+    }
+}
+
+/// Parses the knob flag `flag` into `k`; `Ok(false)` when `flag` is not a knob.
+fn parse_knob(k: &mut Knobs, flag: &str, it: &mut impl Iterator<Item = String>) -> Result<bool, String> {
+    let raw = match flag {
+        "--substeps" | "--pgs" | "--stab" | "--friction-in-bias" | "--friction-model" | "--clustering"
+        | "--prediction" | "--recycling" | "--recycle-distance" | "--warmstart" | "--max-bias"
+        | "--contact-hz" | "--contact-zeta" | "--static-hz" | "--static-zeta" | "--max-linvel"
+        | "--ccd-substeps" | "--gyro" | "--bvh-opt" | "--bvh-adaptive" => it.next(),
+        _ => return Ok(false),
+    };
+    if let Some(v) = &raw {
+        k.given.push(format!("{flag}={v}"));
+    }
+    match flag {
+        "--substeps" => {
+            let n: usize = parse_num(flag, raw)?;
+            if n == 0 {
+                return Err("--substeps must be >= 1".to_owned());
+            }
+            k.substeps = Some(n);
+        }
+        "--pgs" => {
+            let n: usize = parse_num(flag, raw)?;
+            if n == 0 {
+                return Err(
+                    "--pgs must be >= 1 (a substep without a biased pass integrates nothing)".to_owned(),
+                );
+            }
+            k.pgs = Some(n);
+        }
+        "--stab" => k.stab = Some(parse_num(flag, raw)?),
+        "--friction-in-bias" => k.friction_in_bias = Some(parse_onoff(flag, raw)?),
+        "--friction-model" => {
+            k.friction_model = Some(match raw.as_deref() {
+                Some("simplified") => FrictionModel::Simplified,
+                Some("coulomb") => FrictionModel::Coulomb,
+                other => return Err(format!("{flag}: expected simplified|coulomb, got {other:?}")),
+            })
+        }
+        "--clustering" => k.clustering = Some(parse_onoff(flag, raw)?),
+        "--prediction" => k.prediction = Some(parse_nonneg(flag, raw)?),
+        "--recycling" => k.recycling = Some(parse_onoff(flag, raw)?),
+        "--recycle-distance" => k.recycle_distance = Some(parse_nonneg(flag, raw)?),
+        "--warmstart" => {
+            let c = parse_nonneg(flag, raw)?;
+            if c > 1.0 {
+                return Err(format!("{flag} {c} must be in [0, 1]"));
+            }
+            k.warmstart = Some(c);
+        }
+        "--max-bias" => k.max_bias = Some(parse_nonneg(flag, raw)?),
+        "--contact-hz" => k.contact_hz = Some(parse_nonneg(flag, raw)?),
+        "--contact-zeta" => k.contact_zeta = Some(parse_nonneg(flag, raw)?),
+        "--static-hz" => k.static_hz = Some(parse_nonneg(flag, raw)?),
+        "--static-zeta" => k.static_zeta = Some(parse_nonneg(flag, raw)?),
+        "--max-linvel" => {
+            k.max_linvel = Some(if raw.as_deref() == Some("off") {
+                None
+            } else {
+                Some(parse_nonneg(flag, raw)?)
+            })
+        }
+        "--ccd-substeps" => k.ccd_substeps = Some(parse_num(flag, raw)?),
+        "--gyro" => k.gyro = Some(parse_onoff(flag, raw)?),
+        "--bvh-opt" => {
+            k.bvh_opt = Some(match raw.as_deref() {
+                Some("subtree") => BvhOptimizationStrategy::SubtreeOptimizer,
+                Some("none") => BvhOptimizationStrategy::None,
+                other => return Err(format!("{flag}: expected subtree|none, got {other:?}")),
+            })
+        }
+        "--bvh-adaptive" => k.bvh_adaptive = Some(parse_onoff(flag, raw)?),
+        _ => unreachable!("invariant: every knob flag of the first match has an arm here"),
+    }
+    Ok(true)
+}
+
+fn parse_path(flag: &str, v: Option<String>) -> Result<PathBuf, String> {
+    v.map(PathBuf::from).ok_or_else(|| format!("{flag} needs a path"))
+}
+
+fn parse_perturb(v: Option<String>) -> Result<Perturb, String> {
+    let v = v.ok_or("--perturb needs B:AXIS[:DIR]")?;
+    let mut it = v.split(':');
+    let body = it
+        .next()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .ok_or_else(|| format!("--perturb {v:?}: bad box index"))?;
+    let axis = match it.next().map(str::trim) {
+        Some("x") => 0,
+        Some("y") => 1,
+        Some("z") => 2,
+        other => return Err(format!("--perturb {v:?}: bad axis {other:?}")),
+    };
+    let dir = match it.next().map(str::trim) {
+        None | Some("+1" | "1") => 1,
+        Some("-1") => -1,
+        Some(other) => return Err(format!("--perturb {v:?}: bad direction {other:?}")),
+    };
+    if it.next().is_some() {
+        return Err(format!("--perturb {v:?}: too many fields"));
+    }
+    if body >= PYRAMID_BODIES {
+        return Err(format!(
+            "--perturb {v:?}: box {body} out of range 0..{PYRAMID_BODIES}"
+        ));
+    }
+    Ok(Perturb { body, axis, dir })
+}
+
+fn parse_args() -> Result<Args, String> {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let mut it = raw.clone().into_iter();
+    let mut cfg = CfgKind::RapierDefault;
+    let mut knobs = Knobs::default();
+    let mut gap = BOX_SEPARATION;
+    let mut workers = 1usize;
+    let mut steps = None;
+    let mut window = None;
+    let mut install = InstallMode::Loop;
+    let mut receipt = false;
+    let mut counters = None;
+    let mut csv = None;
+    let mut pose_out = None;
+    let mut spawn_pose_out = None;
+    let mut expect_pose = None;
+    let mut perturb = None;
+    let mut label = None;
+    let mut dyn_program = None;
+    let mut sanity = None;
+    let mut scene_dump = None;
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--cfg" => {
+                cfg = match it.next().as_deref() {
+                    Some("rapier-default") => CfgKind::RapierDefault,
+                    Some("matched") => CfgKind::Matched,
+                    other => return Err(format!("--cfg: expected rapier-default|matched, got {other:?}")),
+                }
+            }
+            "--gap" => {
+                gap = parse_num("--gap", it.next())?;
+                if !gap.is_finite() || gap < 0.0 {
+                    return Err(format!("--gap {gap} must be finite and >= 0"));
+                }
+            }
+            "--workers" => workers = parse_num("--workers", it.next())?,
+            "--steps" => steps = Some(parse_num("--steps", it.next())?),
+            "--window" => {
+                let v = it.next().ok_or("--window needs A..B")?;
+                let (a, b) = v
+                    .split_once("..")
+                    .ok_or_else(|| format!("--window {v:?}: expected A..B"))?;
+                window = Some((
+                    parse_num::<usize>("--window", Some(a.to_owned()))?,
+                    parse_num::<usize>("--window", Some(b.to_owned()))?,
+                ));
+            }
+            "--install" => {
+                install = match it.next().as_deref() {
+                    Some("loop") => InstallMode::Loop,
+                    Some("step") => InstallMode::Step,
+                    other => return Err(format!("--install: expected loop|step, got {other:?}")),
+                }
+            }
+            "--receipt" => receipt = true,
+            "--counters" => {
+                counters = Some(match it.next().as_deref() {
+                    Some("on") => true,
+                    Some("off") => false,
+                    other => return Err(format!("--counters: expected on|off, got {other:?}")),
+                })
+            }
+            "--csv" => csv = Some(parse_path("--csv", it.next())?),
+            "--pose-out" => pose_out = Some(parse_path("--pose-out", it.next())?),
+            "--spawn-pose-out" => spawn_pose_out = Some(parse_path("--spawn-pose-out", it.next())?),
+            "--expect-pose" => expect_pose = Some(parse_path("--expect-pose", it.next())?),
+            "--perturb" => perturb = Some(parse_perturb(it.next())?),
+            "--label" => label = Some(it.next().ok_or("--label needs a value")?),
+            "--dyn" => {
+                let v = it.next().ok_or("--dyn needs a program")?;
+                dyn_program = Some(match Program::parse(&v) {
+                    Some(Program::None) | None => {
+                        return Err(format!("--dyn: expected kick|shoot|slide, got {v:?} (S-LAND is the J-T row itself)"));
+                    }
+                    Some(p) => p,
+                });
+            }
+            "--sanity" => sanity = Some(parse_path("--sanity", it.next())?),
+            "--scene-dump" => scene_dump = Some(parse_path("--scene-dump", it.next())?),
+            "-h" | "--help" => return Err(USAGE.to_owned()),
+            other => {
+                if !parse_knob(&mut knobs, other, &mut it)? {
+                    return Err(format!("unknown flag {other:?}\n{USAGE}"));
+                }
+            }
+        }
+    }
+    if workers == 0 {
+        return Err("--workers must be >= 1".to_owned());
+    }
+    let program = dyn_program.unwrap_or(Program::None);
+    let steps = steps.unwrap_or(program.steps());
+    if dyn_program.is_some() || sanity.is_some() || scene_dump.is_some() {
+        if gap != BOX_SEPARATION || perturb.is_some() {
+            return Err("--dyn, --sanity and --scene-dump run on the J-T scene: the gap 0.5, no --perturb".to_owned());
+        }
+        if steps > program.steps() || (scene_dump.is_some() && steps != program.steps()) {
+            return Err(format!(
+                "--steps {steps}: the {} program has {} steps, and --scene-dump writes a complete program",
+                program.name(),
+                program.steps()
+            ));
+        }
+    }
+    if steps == 0 {
+        return Err("--steps must be >= 1".to_owned());
+    }
+    let window = window.unwrap_or((0, steps));
+    if window.0 >= window.1 || window.1 > steps {
+        return Err(format!(
+            "--window {}..{} must satisfy A < B <= {steps}",
+            window.0, window.1
+        ));
+    }
+    Ok(Args {
+        cfg,
+        knobs,
+        gap,
+        workers,
+        steps,
+        window,
+        install,
+        receipt,
+        counters,
+        csv,
+        pose_out,
+        spawn_pose_out,
+        expect_pose,
+        perturb,
+        label,
+        dyn_program,
+        sanity,
+        scene_dump,
+        raw,
+    })
+}
+
+// ── Configuration ─────────────────────────────────────────────────────────────────────────────
+
+/// The integration parameters of a configuration. Both carry the scene invariants: dt = 1/60 and
+/// CCD off (`--ccd-substeps` may override the latter). `knobs` override single fields of the base.
+fn integration_parameters(cfg: CfgKind, knobs: &Knobs) -> IntegrationParameters {
+    let scene = IntegrationParameters {
+        dt: DT,
+        max_ccd_substeps: 0,
+        ..IntegrationParameters::default()
+    };
+    let mut p = match cfg {
+        CfgKind::RapierDefault => scene,
+        CfgKind::Matched => IntegrationParameters {
+            num_solver_iterations: 4,
+            num_internal_pgs_iterations: 1,
+            num_internal_stabilization_iterations: 2,
+            friction_in_bias_pass: true,
+            friction_model: FrictionModel::Coulomb,
+            // boyko's `contact_hertz` 30 / `contact_damping` 10, on the floor contacts as well.
+            contact_softness: SpringCoefficients::new(30.0, 10.0),
+            static_contact_softness: SpringCoefficients::new(30.0, 10.0),
+            normalized_max_corrective_velocity: 4.0,
+            normalized_prediction_distance: 0.02,
+            normalized_contact_recycle_distance: 0.001,
+            warmstart_coefficient: 1.0,
+            ..scene
+        },
+    };
+    if let Some(v) = knobs.substeps {
+        p.num_solver_iterations = v;
+    }
+    if let Some(v) = knobs.pgs {
+        p.num_internal_pgs_iterations = v;
+    }
+    if let Some(v) = knobs.stab {
+        p.num_internal_stabilization_iterations = v;
+    }
+    if let Some(v) = knobs.friction_in_bias {
+        p.friction_in_bias_pass = v;
+    }
+    if let Some(v) = knobs.friction_model {
+        p.friction_model = v;
+    }
+    if let Some(v) = knobs.clustering {
+        p.contact_clustering = v;
+    }
+    if let Some(v) = knobs.prediction {
+        p.normalized_prediction_distance = v;
+    }
+    if let Some(v) = knobs.recycling {
+        p.contact_recycling = v;
+    }
+    if let Some(v) = knobs.recycle_distance {
+        p.normalized_contact_recycle_distance = v;
+    }
+    if let Some(v) = knobs.warmstart {
+        p.warmstart_coefficient = v;
+    }
+    if let Some(v) = knobs.max_bias {
+        p.normalized_max_corrective_velocity = v;
+    }
+    if let Some(v) = knobs.contact_hz {
+        p.contact_softness.natural_frequency = v;
+    }
+    if let Some(v) = knobs.contact_zeta {
+        p.contact_softness.damping_ratio = v;
+    }
+    if let Some(v) = knobs.static_hz {
+        p.static_contact_softness.natural_frequency = v;
+    }
+    if let Some(v) = knobs.static_zeta {
+        p.static_contact_softness.damping_ratio = v;
+    }
+    if let Some(v) = knobs.max_linvel {
+        p.normalized_max_linear_velocity = v.unwrap_or(f32::MAX);
+    }
+    if let Some(v) = knobs.ccd_substeps {
+        p.max_ccd_substeps = v;
+    }
+    p
+}
+
+/// Whether a run keeps Rapier's per-body gyroscopic correction: the base configuration's choice
+/// (`rapier-default` keeps Rapier's body default, `matched` has none, like boyko), unless `--gyro`
+/// says otherwise.
+fn gyroscopic(cfg: CfgKind, knobs: &Knobs) -> bool {
+    knobs.gyro.unwrap_or(cfg == CfgKind::RapierDefault)
+}
+
+/// The broad-phase optimization strategy in force.
+fn bvh_strategy(knobs: &Knobs) -> BvhOptimizationStrategy {
+    knobs.bvh_opt.unwrap_or_default()
+}
+
+/// Whether the broad-phase uses its adaptive change-detection margin (Rapier's default: off).
+fn bvh_adaptive(knobs: &Knobs) -> bool {
+    knobs.bvh_adaptive.unwrap_or(false)
+}
+
+/// Solver row-iterations per step for `np` solver points in `nm` solver manifolds, by Rapier's own
+/// loop: `S` substeps, each `P` biased passes then `Q` unbiased ones; friction runs in the biased
+/// pass only when `friction_in_bias_pass` is set or there is no unbiased pass (`solve.rs:98`).
+fn solver_rows(p: &IntegrationParameters, np: u64, nm: u64) -> u64 {
+    let s = p.num_solver_iterations as u64;
+    let pgs = p.num_internal_pgs_iterations as u64;
+    let q = p.num_internal_stabilization_iterations as u64;
+    let f = match p.friction_model {
+        FrictionModel::Simplified => 3 * nm,
+        FrictionModel::Coulomb => 2 * np,
+    };
+    let fib = if p.friction_in_bias_pass || q == 0 { f } else { 0 };
+    s * (pgs * (np + fib) + q * (np + f))
+}
+
+// ── World ─────────────────────────────────────────────────────────────────────────────────────
+
+/// Every structure `PhysicsPipeline::step` takes, plus the spawn order.
+struct World {
+    pipeline: PhysicsPipeline,
+    params: IntegrationParameters,
+    gravity: Vector,
+    islands: IslandManager,
+    broad_phase: BroadPhaseBvh,
+    narrow_phase: NarrowPhase,
+    bodies: RigidBodySet,
+    colliders: ColliderSet,
+    impulse_joints: ImpulseJointSet,
+    multibody_joints: MultibodyJointSet,
+    soft_bodies: SoftBodySet,
+    ccd_solver: CCDSolver,
+    floor: RigidBodyHandle,
+    /// The dynamic bodies in spawn order; the last one is the top box (a dynamic scene's projectiles
+    /// are appended after it).
+    boxes: Vec<RigidBodyHandle>,
+    /// A dynamic scene's statics after the floor, in creation order.
+    statics: Vec<RigidBodyHandle>,
+}
+
+impl World {
+    fn step(&mut self) {
+        self.pipeline.step(
+            self.gravity,
+            &self.params,
+            &mut self.islands,
+            &mut self.broad_phase,
+            &mut self.narrow_phase,
+            &mut self.bodies,
+            &mut self.colliders,
+            &mut self.impulse_joints,
+            &mut self.multibody_joints,
+            &mut self.soft_bodies,
+            &mut self.ccd_solver,
+            &(),
+            &(),
+        );
+    }
+}
+
+/// The receipt of a `--perturb`: the coordinate before and after.
+#[derive(Clone, Copy, Debug)]
+struct PerturbReceipt {
+    spec: Perturb,
+    before: f32,
+    after: f32,
+}
+
+/// Moves `p[spec.axis]` by one ulp. Refuses a zero coordinate, as the F0 knob does (one ulp of 0
+/// is a subnormal, not a relative nudge).
+fn apply_perturb(spec: Perturb, p: &mut [f32; 3]) -> Result<PerturbReceipt, String> {
+    let before = p[spec.axis];
+    if before == 0.0 || !before.is_finite() {
+        return Err(format!(
+            "--perturb: refusing to perturb a zero or non-finite coordinate ({before})"
+        ));
+    }
+    let bits = before.to_bits();
+    let after = f32::from_bits(if spec.dir > 0 { bits + 1 } else { bits - 1 });
+    p[spec.axis] = after;
+    Ok(PerturbReceipt { spec, before, after })
+}
+
+/// A collider of the scene's material.
+fn material(builder: ColliderBuilder) -> ColliderBuilder {
+    builder
+        .friction(FRICTION)
+        .friction_combine_rule(CoefficientCombineRule::Max)
+        .restitution(RESTITUTION)
+        .density(DENSITY)
+}
+
+/// Spawns the floor and the pyramid in boyko's spawn order (Jolt's placement loop).
+fn spawn(
+    cfg: CfgKind,
+    knobs: &Knobs,
+    gap: f32,
+    perturb: Option<Perturb>,
+    counters_enabled: bool,
+) -> Result<(World, Option<PerturbReceipt>), String> {
+    let mut bodies = RigidBodySet::new();
+    let mut colliders = ColliderSet::new();
+    let floor = bodies.insert(RigidBodyBuilder::fixed().translation(Vector::from_array(FLOOR_CENTER)));
+    let [fx, fy, fz] = FLOOR_HALF_EXTENTS;
+    colliders.insert_with_parent(material(ColliderBuilder::cuboid(fx, fy, fz)), floor, &mut bodies);
+
+    let gyro = gyroscopic(cfg, knobs);
+    let mut boxes = Vec::with_capacity(PYRAMID_BODIES);
+    let mut receipt = None;
+    for i in 0..PYRAMID_HEIGHT {
+        let lo = i / 2;
+        let hi = PYRAMID_HEIGHT - (i + 1) / 2;
+        for j in lo..hi {
+            for k in lo..hi {
+                // boyko's expression, operand for operand, so the f32 bits are boyko's.
+                let odd = if i & 1 != 0 { HALF_BOX } else { 0.0 };
+                let mut p = [
+                    -(PYRAMID_HEIGHT as f32) + BOX_SIZE * j as f32 + odd,
+                    1.0 + (BOX_SIZE + gap) * i as f32,
+                    -(PYRAMID_HEIGHT as f32) + BOX_SIZE * k as f32 + odd,
+                ];
+                if let Some(spec) = perturb
+                    && spec.body == boxes.len()
+                {
+                    receipt = Some(apply_perturb(spec, &mut p)?);
+                }
+                let body = RigidBodyBuilder::dynamic()
+                    .translation(Vector::from_array(p))
+                    .can_sleep(false)
+                    .gyroscopic_forces_enabled(gyro);
+                let h = bodies.insert(body);
+                colliders.insert_with_parent(
+                    material(ColliderBuilder::cuboid(HALF_BOX, HALF_BOX, HALF_BOX)),
+                    h,
+                    &mut bodies,
+                );
+                boxes.push(h);
+            }
+        }
+    }
+    let mut pipeline = PhysicsPipeline::new();
+    // `PhysicsPipeline::new()` starts with the counters on; see the module docs, "Counters".
+    if !counters_enabled {
+        pipeline.counters.disable();
+    }
+    let mut broad_phase = BroadPhaseBvh::with_optimization_strategy(bvh_strategy(knobs));
+    broad_phase.adaptive_change_detection_margin = bvh_adaptive(knobs);
+    let world = World {
+        pipeline,
+        params: integration_parameters(cfg, knobs),
+        gravity: Vector::new(0.0, GRAVITY_Y, 0.0),
+        islands: IslandManager::new(),
+        broad_phase,
+        narrow_phase: NarrowPhase::new(),
+        bodies,
+        colliders,
+        impulse_joints: ImpulseJointSet::new(),
+        multibody_joints: MultibodyJointSet::new(),
+        soft_bodies: SoftBodySet::new(),
+        ccd_solver: CCDSolver::new(),
+        floor,
+        boxes,
+        statics: Vec::new(),
+    };
+    Ok((world, receipt))
+}
+
+// ── Scene identity (g1) ───────────────────────────────────────────────────────────────────────
+
+/// What the spawned world is, read back from Rapier's sets.
+struct Identity {
+    dynamic_bodies: usize,
+    fixed_bodies: usize,
+    colliders: usize,
+    first: [f32; 3],
+    last: [f32; 3],
+    aabb_min: [f32; 3],
+    aabb_max: [f32; 3],
+    inv_mass: f32,
+    inv_inertia: [f32; 3],
+    /// Every box has the first box's inverse mass and inertia, identity rotation and zero velocity.
+    uniform: bool,
+    spawn_hash: u64,
+}
+
+fn identity(w: &World) -> Identity {
+    let dynamic_bodies = w.bodies.iter().filter(|(_, b)| b.is_dynamic()).count();
+    let fixed_bodies = w.bodies.iter().filter(|(_, b)| b.is_fixed()).count();
+    let pos = |h: RigidBodyHandle| w.bodies[h].translation().to_array();
+    let first = w.boxes.first().map_or([f32::NAN; 3], |&h| pos(h));
+    let last = w.boxes.last().map_or([f32::NAN; 3], |&h| pos(h));
+    let mut aabb_min = [f32::INFINITY; 3];
+    let mut aabb_max = [f32::NEG_INFINITY; 3];
+    let mprops = |h: RigidBodyHandle| {
+        let m = &w.bodies[h].mass_properties().local_mprops;
+        (m.inv_mass, m.inv_principal_inertia.to_array())
+    };
+    let (inv_mass, inv_inertia) = w.boxes.first().map_or((f32::NAN, [f32::NAN; 3]), |&h| mprops(h));
+    let mut uniform = true;
+    for &h in &w.boxes {
+        let b = &w.bodies[h];
+        let p = pos(h);
+        for a in 0..3 {
+            aabb_min[a] = aabb_min[a].min(p[a] - HALF_BOX);
+            aabb_max[a] = aabb_max[a].max(p[a] + HALF_BOX);
+        }
+        let (m, i) = mprops(h);
+        uniform &= m.to_bits() == inv_mass.to_bits()
+            && i.map(f32::to_bits) == inv_inertia.map(f32::to_bits)
+            && b.rotation().to_array() == [0.0, 0.0, 0.0, 1.0]
+            && b.linvel().to_array() == [0.0; 3]
+            && b.angvel().to_array() == [0.0; 3];
+    }
+    Identity {
+        dynamic_bodies,
+        fixed_bodies,
+        colliders: w.colliders.len(),
+        first,
+        last,
+        aabb_min,
+        aabb_max,
+        inv_mass,
+        inv_inertia,
+        uniform,
+        spawn_hash: fnv1a64(&pose_bytes(w)),
+    }
+}
+
+/// The distance in ulps between two finite `f32`s of the same sign (0 when bit-equal).
+fn ulps(a: f32, b: f32) -> i64 {
+    i64::from(a.to_bits() as i32) - i64::from(b.to_bits() as i32)
+}
+
+// ── Receipts ──────────────────────────────────────────────────────────────────────────────────
+
+/// One step's counts, read after the step (untimed).
+#[derive(Clone, Copy, Default)]
+struct Counts {
+    /// Contact-graph edges: the broad-phase pairs the narrow phase tracks.
+    bp_pairs: u64,
+    /// Pairs with at least one (raw) contact manifold.
+    pairs_with_manifold: u64,
+    /// Pairs with at least one solver contact (`has_any_active_contact`).
+    pairs_active: u64,
+    /// Raw manifolds and their points, before the solver's filter.
+    raw_manifolds: u64,
+    raw_points: u64,
+    /// Solver manifolds with at least one solver contact (Nm) and their solver contacts (Np).
+    manifolds: u64,
+    points: u64,
+    /// Solver contacts with `dist > 0` (speculative), and manifolds whose every point is.
+    spec_points: u64,
+    spec_manifolds: u64,
+    /// Solver manifolds against the floor, and their points.
+    floor_manifolds: u64,
+    floor_points: u64,
+    /// Solver manifolds whose normal is lateral (|n.y| < 0.5).
+    lateral_manifolds: u64,
+    /// Rapier's own counters: `counters.cd.ncontact_pairs`, `counters.solver.nconstraints` and
+    /// `counters.solver.ncontacts`.
+    counter_pairs: u64,
+    counter_constraints: u64,
+    counter_contacts: u64,
+    /// Solver row-iterations ([`solver_rows`]).
+    rows: u64,
+    /// `IslandManager::num_active_bodies`.
+    awake: u64,
+    /// The top box's y.
+    top_y: f32,
+    /// Min/max effective friction over the solver manifolds.
+    friction_min: f32,
+    friction_max: f32,
+}
+
+fn count(w: &World) -> Counts {
+    let mut c = Counts {
+        friction_min: f32::INFINITY,
+        friction_max: f32::NEG_INFINITY,
+        ..Counts::default()
+    };
+    for pair in w.narrow_phase.contact_pairs() {
+        c.bp_pairs += 1;
+        let raw = pair.manifolds();
+        if !raw.is_empty() {
+            c.pairs_with_manifold += 1;
+        }
+        if pair.has_any_active_contact() {
+            c.pairs_active += 1;
+        }
+        for m in raw {
+            c.raw_manifolds += 1;
+            c.raw_points += m.points.len() as u64;
+        }
+        for m in pair.solver_manifolds() {
+            let sc = &m.data.solver_contacts;
+            if sc.is_empty() {
+                continue;
+            }
+            let n = sc.len() as u64;
+            c.manifolds += 1;
+            c.points += n;
+            let spec = sc.iter().filter(|p| p.dist > 0.0).count() as u64;
+            c.spec_points += spec;
+            if spec == n {
+                c.spec_manifolds += 1;
+            }
+            if m.data.rigid_body1 == Some(w.floor) || m.data.rigid_body2 == Some(w.floor) {
+                c.floor_manifolds += 1;
+                c.floor_points += n;
+            }
+            if m.data.normal.y.abs() < LATERAL_NORMAL_Y {
+                c.lateral_manifolds += 1;
+            }
+            c.friction_min = c.friction_min.min(m.data.friction);
+            c.friction_max = c.friction_max.max(m.data.friction);
+        }
+    }
+    let counters = &w.pipeline.counters;
+    c.counter_pairs = counters.cd.ncontact_pairs as u64;
+    c.counter_constraints = counters.solver.nconstraints as u64;
+    c.counter_contacts = counters.solver.ncontacts as u64;
+    c.rows = solver_rows(&w.params, c.points, c.manifolds);
+    c.awake = w.islands.num_active_bodies() as u64;
+    c.top_y = w.boxes.last().map_or(f32::NAN, |&h| w.bodies[h].translation().y);
+    c
+}
+
+/// One step's row.
+#[derive(Clone, Copy)]
+struct Row {
+    wall_ns: u64,
+    /// `rayon::current_num_threads()` read inside the install after the step (loop mode), else 0.
+    pool_threads: usize,
+    counts: Option<Counts>,
+    /// The dynamic bodies after the step (1240 on J-T): what the `--receipt` sleep gate expects awake.
+    bodies: usize,
+}
+
+/// Steps the world `args.steps` times through `step`, timing only the call. `pool_receipt` reads
+/// the rayon pool size after each step (loop mode, where the loop runs inside the install). The
+/// dynamic scenes' hook runs outside the pair: before it (the step's events) and after the readout.
+fn drive<F: FnMut(&mut World)>(
+    w: &mut World,
+    args: &Args,
+    pool_receipt: bool,
+    mut step: F,
+    dyn_run: &mut Option<dyn_scenes::DynRun>,
+) -> Vec<Row> {
+    let mut rows = Vec::with_capacity(args.steps);
+    for i in 0..args.steps {
+        if let Some(d) = dyn_run.as_mut() {
+            d.before_step(i, w);
+        }
+        let t0 = Instant::now();
+        step(w);
+        let wall = t0.elapsed();
+        // ── Untimed from here. ──
+        rows.push(Row {
+            wall_ns: u64::try_from(wall.as_nanos()).unwrap_or(u64::MAX),
+            pool_threads: if pool_receipt {
+                rayon::current_num_threads()
+            } else {
+                0
+            },
+            counts: args.receipt.then(|| count(w)),
+            bodies: w.boxes.len(),
+        });
+        if let Some(d) = dyn_run.as_mut() {
+            d.after_step(i, w);
+        }
+    }
+    rows
+}
+
+// ── Pose ──────────────────────────────────────────────────────────────────────────────────────
+
+/// FNV-1a 64 over `bytes`.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes
+        .iter()
+        .fold(FNV_OFFSET, |h, &b| (h ^ u64::from(b)).wrapping_mul(FNV_PRIME))
+}
+
+/// Every dynamic body's position, linear velocity, rotation (x, y, z, w) and angular velocity as
+/// little-endian `f32` bits, in spawn order: boyko's `pose_bytes`.
+fn pose_bytes(w: &World) -> Vec<u8> {
+    let mut out = Vec::with_capacity(w.boxes.len() * POSE_BYTES_PER_BODY);
+    for &h in &w.boxes {
+        let b = &w.bodies[h];
+        let [px, py, pz] = b.translation().to_array();
+        let [vx, vy, vz] = b.linvel().to_array();
+        let [qx, qy, qz, qw] = b.rotation().to_array();
+        let [ax, ay, az] = b.angvel().to_array();
+        for f in [px, py, pz, vx, vy, vz, qx, qy, qz, qw, ax, ay, az] {
+            out.extend_from_slice(&f.to_bits().to_le_bytes());
+        }
+    }
+    out
+}
+
+// ── Output helpers ────────────────────────────────────────────────────────────────────────────
+
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+pub(crate) fn json_f64(v: f64) -> String {
+    if v.is_finite() {
+        format!("{v}")
+    } else {
+        "null".to_owned()
+    }
+}
+
+fn json_f32(v: f32) -> String {
+    if v.is_finite() {
+        format!("{v}")
+    } else {
+        "null".to_owned()
+    }
+}
+
+fn json_v3(v: [f32; 3]) -> String {
+    format!("[{},{},{}]", json_f32(v[0]), json_f32(v[1]), json_f32(v[2]))
+}
+
+fn friction_model_name(m: FrictionModel) -> &'static str {
+    match m {
+        FrictionModel::Simplified => "Simplified",
+        FrictionModel::Coulomb => "Coulomb",
+    }
+}
+
+fn config_json(p: &IntegrationParameters, cfg: CfgKind, knobs: &Knobs, counters_enabled: bool) -> String {
+    format!(
+        "{{\"dt\":{},\"substep_dt\":{},\"num_solver_iterations\":{},\"num_internal_pgs_iterations\":{},\
+         \"num_internal_stabilization_iterations\":{},\"friction_model\":{},\"friction_in_bias_pass\":{},\
+         \"contact_softness_hz\":{},\"contact_softness_zeta\":{},\"static_contact_softness_hz\":{},\
+         \"static_contact_softness_zeta\":{},\"warmstart_coefficient\":{},\
+         \"normalized_max_corrective_velocity\":{},\"normalized_prediction_distance\":{},\
+         \"normalized_allowed_linear_error\":{},\"normalized_max_linear_velocity\":{},\
+         \"contact_clustering\":{},\"contact_recycling\":{},\"normalized_contact_recycle_distance\":{},\
+         \"warmstart_joints\":{},\"max_ccd_substeps\":{},\"length_unit\":{},\"gyroscopic\":{},\
+         \"can_sleep\":false,\"density\":{},\"restitution\":{},\"linear_damping\":0,\"angular_damping\":0,\
+         \"bvh_optimization\":{},\"bvh_adaptive_margin\":{},\"knobs\":[{}],\
+         \"counters_enabled\":{}}}",
+        json_f32(p.dt),
+        json_f32(p.dt / p.num_solver_iterations as f32),
+        p.num_solver_iterations,
+        p.num_internal_pgs_iterations,
+        p.num_internal_stabilization_iterations,
+        json_str(friction_model_name(p.friction_model)),
+        p.friction_in_bias_pass,
+        json_f32(p.contact_softness.natural_frequency),
+        json_f32(p.contact_softness.damping_ratio),
+        json_f32(p.static_contact_softness.natural_frequency),
+        json_f32(p.static_contact_softness.damping_ratio),
+        json_f32(p.warmstart_coefficient),
+        json_f32(p.normalized_max_corrective_velocity),
+        json_f32(p.normalized_prediction_distance),
+        json_f32(p.normalized_allowed_linear_error),
+        json_f32(p.normalized_max_linear_velocity),
+        p.contact_clustering,
+        p.contact_recycling,
+        json_f32(p.normalized_contact_recycle_distance),
+        p.warmstart_joints,
+        p.max_ccd_substeps,
+        json_f32(p.length_unit),
+        gyroscopic(cfg, knobs),
+        json_f32(DENSITY),
+        json_f32(RESTITUTION),
+        json_str(match bvh_strategy(knobs) {
+            BvhOptimizationStrategy::SubtreeOptimizer => "subtree",
+            BvhOptimizationStrategy::None => "none",
+        }),
+        bvh_adaptive(knobs),
+        knobs
+            .given
+            .iter()
+            .map(|k| json_str(k))
+            .collect::<Vec<_>>()
+            .join(","),
+        counters_enabled,
+    )
+}
+
+/// The counts as a JSON object; `div` averages a window sum (1 for a single step).
+fn counts_json(c: &Counts, div: f64) -> String {
+    let f = |v: u64| json_f64(v as f64 / div);
+    format!(
+        "{{\"bp_pairs\":{},\"pairs_with_manifold\":{},\"pairs_active\":{},\"raw_manifolds\":{},\
+         \"raw_points\":{},\"manifolds\":{},\"points\":{},\"spec_points\":{},\"spec_manifolds\":{},\
+         \"floor_manifolds\":{},\"floor_points\":{},\"lateral_manifolds\":{},\"counter_pairs\":{},\
+         \"counter_constraints\":{},\"counter_contacts\":{},\"rows\":{},\"awake\":{}}}",
+        f(c.bp_pairs),
+        f(c.pairs_with_manifold),
+        f(c.pairs_active),
+        f(c.raw_manifolds),
+        f(c.raw_points),
+        f(c.manifolds),
+        f(c.points),
+        f(c.spec_points),
+        f(c.spec_manifolds),
+        f(c.floor_manifolds),
+        f(c.floor_points),
+        f(c.lateral_manifolds),
+        f(c.counter_pairs),
+        f(c.counter_constraints),
+        f(c.counter_contacts),
+        f(c.rows),
+        f(c.awake),
+    )
+}
+
+fn csv_text(rows: &[Row], receipt: bool) -> String {
+    let mut s = String::with_capacity(rows.len() * if receipt { 160 } else { 28 } + 256);
+    s.push_str("step,wall_ns,pool_threads");
+    if receipt {
+        s.push_str(
+            ",bp_pairs,pairs_with_manifold,pairs_active,raw_manifolds,raw_points,manifolds,\
+             points,spec_points,spec_manifolds,floor_manifolds,floor_points,lateral_manifolds,\
+             counter_pairs,counter_constraints,counter_contacts,rows,awake,top_y",
+        );
+    }
+    s.push('\n');
+    for (i, r) in rows.iter().enumerate() {
+        let _ = write!(s, "{i},{},{}", r.wall_ns, r.pool_threads);
+        if let Some(c) = &r.counts {
+            let _ = write!(
+                s,
+                ",{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                c.bp_pairs,
+                c.pairs_with_manifold,
+                c.pairs_active,
+                c.raw_manifolds,
+                c.raw_points,
+                c.manifolds,
+                c.points,
+                c.spec_points,
+                c.spec_manifolds,
+                c.floor_manifolds,
+                c.floor_points,
+                c.lateral_manifolds,
+                c.counter_pairs,
+                c.counter_constraints,
+                c.counter_contacts,
+                c.rows,
+                c.awake,
+                c.top_y,
+            );
+        }
+        s.push('\n');
+    }
+    s
+}
+
+/// The placement receipt: in `--install loop` the step loop must run on a pool worker, or Rapier
+/// sizes its solver from a pool other than the W-thread one. `--install step` calls into the pool
+/// per step, so its loop is on the main thread by construction and has no such receipt.
+fn placement_void(install: InstallMode, loop_on_worker: bool) -> Option<String> {
+    (install == InstallMode::Loop && !loop_on_worker)
+        .then(|| "placement: the --install loop step loop ran outside the rayon pool".to_owned())
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────────────────────
+
+fn main() -> ExitCode {
+    let args = match parse_args() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("rapier-parity: {e}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    let pool = match rayon::ThreadPoolBuilder::new()
+        .num_threads(args.workers)
+        .thread_name(|i| format!("rapier-parity-{i}"))
+        .build()
+    {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "rapier-parity: building a {}-thread rayon pool: {e}",
+                args.workers
+            );
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    let (mut world, perturbed) = match spawn(
+        args.cfg,
+        &args.knobs,
+        args.gap,
+        args.perturb,
+        args.counters_enabled(),
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("rapier-parity: {e}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    if let Some(r) = perturbed {
+        eprintln!(
+            "F0_PERTURB box={} axis={} dir={} before={:e} (0x{:08x}) after={:e} (0x{:08x}) delta={:e}",
+            r.spec.body,
+            r.spec.axis,
+            r.spec.dir,
+            r.before,
+            r.before.to_bits(),
+            r.after,
+            r.after.to_bits(),
+            f64::from(r.after) - f64::from(r.before)
+        );
+    }
+
+    let mut exit = 0u8;
+    let mut voids: Vec<String> = Vec::new();
+
+    // The dynamic scene (module docs): its statics after the J-T boxes and its gravity, then the
+    // untimed readouts; nothing at all on a J-T row.
+    let program = args.dyn_program.unwrap_or(Program::None);
+    if args.dyn_program.is_some() {
+        dyn_scenes::configure_world(&mut world, program);
+    }
+    let mut dyn_run = args.dyn_any().then(|| {
+        dyn_scenes::DynRun::new(
+            &mut world,
+            program,
+            args.dyn_program.is_some(),
+            gyroscopic(args.cfg, &args.knobs),
+            args.steps,
+            args.sanity.is_some(),
+            args.scene_dump.is_some(),
+        )
+    });
+
+    // g1: scene identity, on the spawned world before any step.
+    let id = identity(&world);
+    let perturbed_body = perturbed.map(|r| r.spec.body);
+    let first_ok = perturbed_body == Some(0) || id.first == OURS_FIRST;
+    let want_last = expected_last(args.gap);
+    let (want_aabb_min, want_aabb_max) = expected_aabb(args.gap);
+    let last_ok = perturbed_body == Some(PYRAMID_BODIES - 1) || id.last == want_last;
+    let aabb_ok = perturbed.is_some() || (id.aabb_min == want_aabb_min && id.aabb_max == want_aabb_max);
+    let inv_mass_ulps = ulps(id.inv_mass, OURS_BOX_INV_MASS);
+    let inv_inertia_ulps = id.inv_inertia.map(|v| ulps(v, OURS_BOX_INV_INERTIA));
+    // The program's statics: the floor alone on J-T (critique W5: the J-T form is the frozen one).
+    let want_fixed = program.statics().len();
+    if id.dynamic_bodies != PYRAMID_BODIES || world.boxes.len() != PYRAMID_BODIES || id.fixed_bodies != want_fixed {
+        voids.push(format!(
+            "scene: {} dynamic / {} fixed bodies, {} boxes, want {PYRAMID_BODIES} / {want_fixed}",
+            id.dynamic_bodies,
+            id.fixed_bodies,
+            world.boxes.len()
+        ));
+    }
+    if !first_ok || !last_ok || !aabb_ok || !id.uniform {
+        voids.push(format!(
+            "scene: first {:?} last {:?} aabb {:?}..{:?} uniform {}",
+            id.first, id.last, id.aabb_min, id.aabb_max, id.uniform
+        ));
+    }
+    if let Some(path) = &args.spawn_pose_out
+        && let Err(e) = std::fs::write(path, pose_bytes(&world))
+    {
+        eprintln!("rapier-parity: writing {}: {e}", path.display());
+        exit = EXIT_USAGE;
+    }
+
+    // The run.
+    let (rows, install_threads, loop_on_worker) = match args.install {
+        InstallMode::Loop => pool.install(|| {
+            let n = rayon::current_num_threads();
+            let on_worker = rayon::current_thread_index().is_some();
+            let rows = drive(&mut world, &args, true, World::step, &mut dyn_run);
+            (rows, [n, rayon::current_num_threads()], on_worker)
+        }),
+        InstallMode::Step => {
+            let before = pool.install(rayon::current_num_threads);
+            let rows = drive(&mut world, &args, false, |w| pool.install(|| w.step()), &mut dyn_run);
+            (rows, [before, pool.install(rayon::current_num_threads)], false)
+        }
+    };
+    drop(pool);
+
+    // Receipt gates.
+    let per_step_threads = rows.iter().map(|r| r.pool_threads).filter(|&n| n != 0);
+    let pool_min = per_step_threads.clone().chain(install_threads).min().unwrap_or(0);
+    let pool_max = per_step_threads.chain(install_threads).max().unwrap_or(0);
+    if pool_min != args.workers || pool_max != args.workers {
+        voids.push(format!(
+            "threads: rayon pool read {pool_min}..{pool_max} threads, want {}",
+            args.workers
+        ));
+    }
+    voids.extend(placement_void(args.install, loop_on_worker));
+    let mut awake_min = u64::MAX;
+    let mut awake_max = 0u64;
+    // Steps whose awake count is not the step's body count (1240 on J-T): the sleep gate's form for
+    // every program (critique W5).
+    let mut asleep_steps = 0usize;
+    let mut pairs_mismatch = 0usize;
+    let mut constraints_mismatch = 0usize;
+    let mut contacts_mismatch = 0usize;
+    let mut win_sum = Counts::default();
+    for (i, c) in rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.counts.map(|c| (i, c)))
+    {
+        awake_min = awake_min.min(c.awake);
+        awake_max = awake_max.max(c.awake);
+        asleep_steps += usize::from(c.awake != rows[i].bodies as u64);
+        pairs_mismatch += usize::from(c.counter_pairs != c.bp_pairs);
+        constraints_mismatch += usize::from(c.counter_constraints != c.manifolds);
+        contacts_mismatch += usize::from(c.counter_contacts != c.points);
+        if (args.window.0..args.window.1).contains(&i) {
+            win_sum.bp_pairs += c.bp_pairs;
+            win_sum.pairs_with_manifold += c.pairs_with_manifold;
+            win_sum.pairs_active += c.pairs_active;
+            win_sum.raw_manifolds += c.raw_manifolds;
+            win_sum.raw_points += c.raw_points;
+            win_sum.manifolds += c.manifolds;
+            win_sum.points += c.points;
+            win_sum.spec_points += c.spec_points;
+            win_sum.spec_manifolds += c.spec_manifolds;
+            win_sum.floor_manifolds += c.floor_manifolds;
+            win_sum.floor_points += c.floor_points;
+            win_sum.lateral_manifolds += c.lateral_manifolds;
+            win_sum.counter_pairs += c.counter_pairs;
+            win_sum.counter_constraints += c.counter_constraints;
+            win_sum.counter_contacts += c.counter_contacts;
+            win_sum.rows += c.rows;
+            win_sum.awake += c.awake;
+        }
+    }
+    if args.receipt {
+        // J-T keeps the frozen test and message; a dynamic program wants every body of the step awake.
+        if args.dyn_program.is_none() {
+            if awake_min != PYRAMID_BODIES as u64 || awake_max != PYRAMID_BODIES as u64 {
+                voids.push(format!(
+                    "sleep: awake bodies {awake_min}..{awake_max}, want {PYRAMID_BODIES} every step"
+                ));
+            }
+        } else if asleep_steps > 0 {
+            voids.push(format!(
+                "sleep: {asleep_steps} steps with an awake count other than the step's bodies (awake {awake_min}..{awake_max})"
+            ));
+        }
+        if pairs_mismatch + constraints_mismatch + contacts_mismatch > 0 {
+            voids.push(format!(
+                "recount: steps where Rapier's counters disagree with the recount: pairs {pairs_mismatch}, \
+                 constraints {constraints_mismatch}, contacts {contacts_mismatch}"
+            ));
+        }
+    }
+    if let Some(why) = dyn_run.as_ref().and_then(dyn_scenes::DynRun::void_reason) {
+        voids.push(why);
+    }
+    if !voids.is_empty() {
+        exit = exit.max(EXIT_VOID);
+    }
+
+    // Pose.
+    let pose = pose_bytes(&world);
+    let pose_hash = fnv1a64(&pose);
+    if let Some(path) = &args.pose_out
+        && let Err(e) = std::fs::write(path, &pose)
+    {
+        eprintln!("rapier-parity: writing {}: {e}", path.display());
+        exit = exit.max(EXIT_USAGE);
+    }
+    let pose_verdict = match &args.expect_pose {
+        None => "none".to_owned(),
+        Some(path) => match std::fs::read(path) {
+            Err(e) => {
+                exit = exit.max(EXIT_USAGE);
+                format!("unreadable: {e}")
+            }
+            Ok(want) if want == pose => "match".to_owned(),
+            Ok(want) => {
+                exit = exit.max(EXIT_POSE_MISMATCH);
+                let first = want
+                    .chunks(POSE_BYTES_PER_BODY)
+                    .zip(pose.chunks(POSE_BYTES_PER_BODY))
+                    .position(|(a, b)| a != b);
+                format!(
+                    "mismatch: {} vs {} bytes, first differing body {first:?}",
+                    want.len(),
+                    pose.len()
+                )
+            }
+        },
+    };
+    if let Some(path) = &args.csv
+        && let Err(e) = std::fs::write(path, csv_text(&rows, args.receipt))
+    {
+        eprintln!("rapier-parity: writing {}: {e}", path.display());
+        exit = exit.max(EXIT_USAGE);
+    }
+    let dyn_json = match dyn_run.as_mut() {
+        None => String::new(),
+        Some(d) => match d.finish(&world, args.sanity.as_deref(), args.scene_dump.as_deref()) {
+            Ok(json) => json,
+            Err(e) => {
+                eprintln!("rapier-parity: {e}");
+                exit = exit.max(EXIT_USAGE);
+                ",\"dyn\":null".to_owned()
+            }
+        },
+    };
+
+    // Summary.
+    let win = &rows[args.window.0..args.window.1];
+    let win_ns: u64 = win.iter().map(|r| r.wall_ns).sum();
+    let win_mean = win_ns as f64 / win.len() as f64;
+    let steps_per_s = win.len() as f64 / (win_ns as f64 * 1e-9);
+    let last_counts = rows.last().and_then(|r| r.counts);
+    let final_top_y = world
+        .boxes
+        .last()
+        .map_or(f32::NAN, |&h| world.bodies[h].translation().y);
+    let combined = CoefficientCombineRule::combine(
+        FRICTION,
+        FRICTION,
+        CoefficientCombineRule::Max,
+        CoefficientCombineRule::Max,
+    );
+    let logical_cores = std::thread::available_parallelism().map_or(0, std::num::NonZeroUsize::get);
+
+    println!(
+        "rapier-parity: rapier3d {RAPIER_VERSION} arm {ARM} ({SIMD_LANES} lanes) avx2 {} counters {} | cfg {} gap {} knobs [{}] workers {} install {} steps {} window {}..{}",
+        cfg!(target_feature = "avx2"),
+        world.pipeline.counters.enabled(),
+        args.cfg.name(),
+        args.gap,
+        args.knobs.given.join(" "),
+        args.workers,
+        args.install.name(),
+        args.steps,
+        args.window.0,
+        args.window.1,
+    );
+    println!(
+        "scene: {} dynamic + {} fixed bodies, first {:?} last {:?}, aabb {:?}..{:?}, inv mass {} inv inertia {:?}, spawn hash {:#018x}",
+        id.dynamic_bodies,
+        id.fixed_bodies,
+        id.first,
+        id.last,
+        id.aabb_min,
+        id.aabb_max,
+        id.inv_mass,
+        id.inv_inertia,
+        id.spawn_hash
+    );
+    if let Some(c) = &last_counts {
+        println!(
+            "final step: bp pairs {} pairs w/ manifold {} manifolds {} points {} (spec {}) floor {} lateral {} \
+             constraints {} rows {} awake {} top_y {}",
+            c.bp_pairs,
+            c.pairs_with_manifold,
+            c.manifolds,
+            c.points,
+            c.spec_points,
+            c.floor_manifolds,
+            c.lateral_manifolds,
+            c.counter_constraints,
+            c.rows,
+            c.awake,
+            c.top_y
+        );
+    }
+    println!(
+        "pool threads {pool_min}..{pool_max} (want {}), pose_hash {pose_hash:#018x}, expect_pose {pose_verdict}",
+        args.workers
+    );
+    for v in &voids {
+        println!("VOID: {v}");
+    }
+
+    let n_win = (args.window.1 - args.window.0) as f64;
+    let mut s = String::with_capacity(4096);
+    let _ = write!(
+        s,
+        "{{\"runner\":{},\"label\":{},\"args\":[{}],\"engine\":\"rapier3d\",\"rapier_version\":{},\
+         \"arm\":\"{ARM}\",\"simd_lanes\":{SIMD_LANES},\
+         \"features\":{{\"parallel\":true,\"simd8\":{},\"simd4\":{},\"enhanced_determinism\":{}}},\
+         \"source_fnv1a64\":{{\"main_rs\":\"{:#018x}\",\"cargo_toml\":\"{:#018x}\",\"cargo_lock\":\"{:#018x}\",\
+         \"spec_rs\":\"{:#018x}\",\"dyn_scenes_rs\":\"{:#018x}\"}},\
+         \"target_features\":{{\"avx2\":{},\"fma\":{},\"bmi2\":{}}},\"debug_assertions\":{},\"target_env\":{},\
+         \"scene\":\"jolt\",\"gap\":{},\"friction\":{},\"friction_combine\":\"Max\",\"friction_combined\":{},\
+         \"bodies\":{},\"workers\":{},\"install\":{},\"cfg\":{},\"config\":{},\
+         \"rows_formula\":\"S*(P*(Np+fib*F)+Q*(Np+F)), F=3*Nm (Simplified) or 2*Np (Coulomb)\",\
+         \"scene_identity\":{{\"dynamic_bodies\":{},\"fixed_bodies\":{},\"colliders\":{},\"first\":{},\"last\":{},\
+         \"first_equals_ours\":{},\"last_equals_ours\":{},\"aabb_min\":{},\"aabb_max\":{},\"aabb_equals_expected\":{},\
+         \"uniform_boxes\":{},\"inv_mass\":{},\"inv_inertia\":{},\"inv_mass_ulps_vs_ours\":{},\
+         \"inv_inertia_ulps_vs_ours\":[{},{},{}],\"spawn_hash\":\"{:#018x}\"}},\
+         \"perturb\":{},\"steps\":{},\"window\":[{},{}],\"window_mean_ns\":{},\"window_steps_per_s\":{},\
+         \"timing_note\":\"structural run: timing columns are not a verdict unless the machine was quiet\",\
+         \"pose_hash\":\"{pose_hash:#018x}\",\"pose_bytes\":{},\"expect_pose\":{},\"final_top_y\":{},\
+         \"final\":{},\"window_mean\":{},\"final_friction\":{},\
+         \"receipt_gates\":{{\"awake_min\":{},\"awake_max\":{},\"pairs_mismatch_steps\":{pairs_mismatch},\
+         \"constraints_mismatch_steps\":{constraints_mismatch},\"contacts_mismatch_steps\":{contacts_mismatch}}},\
+         \"threads\":{{\"pool_threads_requested\":{},\"pool_threads_min\":{pool_min},\"pool_threads_max\":{pool_max},\
+         \"install_receipt\":[{},{}],\"loop_on_pool_worker\":{loop_on_worker},\"logical_cores\":{logical_cores}}},\
+         \"void\":{},\"voids\":[{}]{dyn_json}}}",
+        json_str(RUNNER_ID),
+        args.label.as_deref().map_or_else(|| "null".to_owned(), json_str),
+        args.raw.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","),
+        json_str(RAPIER_VERSION),
+        cfg!(feature = "simd8"),
+        cfg!(feature = "simd4"),
+        cfg!(feature = "det"),
+        fnv1a64(SOURCE_MAIN_RS),
+        fnv1a64(SOURCE_CARGO_TOML),
+        fnv1a64(SOURCE_CARGO_LOCK),
+        fnv1a64(SOURCE_SPEC_RS),
+        fnv1a64(SOURCE_DYN_SCENES_RS),
+        cfg!(target_feature = "avx2"),
+        cfg!(target_feature = "fma"),
+        cfg!(target_feature = "bmi2"),
+        cfg!(debug_assertions),
+        json_str(if cfg!(target_env = "msvc") {
+            "msvc"
+        } else if cfg!(target_env = "gnu") {
+            "gnu"
+        } else {
+            "other"
+        }),
+        json_f32(args.gap),
+        json_f32(FRICTION),
+        json_f32(combined),
+        world.boxes.len(),
+        args.workers,
+        json_str(args.install.name()),
+        json_str(args.cfg.name()),
+        config_json(&world.params, args.cfg, &args.knobs, world.pipeline.counters.enabled()),
+        id.dynamic_bodies,
+        id.fixed_bodies,
+        id.colliders,
+        json_v3(id.first),
+        json_v3(id.last),
+        id.first == OURS_FIRST,
+        id.last == want_last,
+        json_v3(id.aabb_min),
+        json_v3(id.aabb_max),
+        id.aabb_min == want_aabb_min && id.aabb_max == want_aabb_max,
+        id.uniform,
+        json_f32(id.inv_mass),
+        json_v3(id.inv_inertia),
+        inv_mass_ulps,
+        inv_inertia_ulps[0],
+        inv_inertia_ulps[1],
+        inv_inertia_ulps[2],
+        id.spawn_hash,
+        perturbed.map_or_else(
+            || "null".to_owned(),
+            |r| format!(
+                "{{\"box\":{},\"axis\":{},\"dir\":{},\"before_bits\":\"0x{:08x}\",\"after_bits\":\"0x{:08x}\"}}",
+                r.spec.body,
+                r.spec.axis,
+                r.spec.dir,
+                r.before.to_bits(),
+                r.after.to_bits()
+            )
+        ),
+        args.steps,
+        args.window.0,
+        args.window.1,
+        json_f64(win_mean),
+        json_f64(steps_per_s),
+        pose.len(),
+        json_str(&pose_verdict),
+        json_f32(final_top_y),
+        last_counts.map_or_else(|| "null".to_owned(), |c| counts_json(&c, 1.0)),
+        if args.receipt { counts_json(&win_sum, n_win) } else { "null".to_owned() },
+        last_counts.map_or_else(
+            || "null".to_owned(),
+            |c| format!("[{},{}]", json_f32(c.friction_min), json_f32(c.friction_max))
+        ),
+        if args.receipt { awake_min.to_string() } else { "null".to_owned() },
+        if args.receipt { awake_max.to_string() } else { "null".to_owned() },
+        args.workers,
+        install_threads[0],
+        install_threads[1],
+        !voids.is_empty(),
+        voids.iter().map(|v| json_str(v)).collect::<Vec<_>>().join(","),
+    );
+    println!("SUMMARY {s}");
+    ExitCode::from(exit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The red control of the placement void: `loop_on_pool_worker == false` is not reachable from
+    /// the command line (inside `pool.install` the loop is always on a worker), so the rule is
+    /// pinned here, both ways.
+    #[test]
+    fn placement_void_fires_only_for_a_loop_outside_the_pool() {
+        assert!(placement_void(InstallMode::Loop, false).is_some());
+        assert!(placement_void(InstallMode::Loop, true).is_none());
+        assert!(placement_void(InstallMode::Step, false).is_none());
+        assert!(placement_void(InstallMode::Step, true).is_none());
+    }
+}
