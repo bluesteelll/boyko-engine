@@ -22,10 +22,11 @@
 //!   layout's and the per-row budget's closed forms; the inline threshold under the production
 //!   rules, 31 leaf nodes inline and 32 dispatched, in literals; G1's single-step worlds and
 //!   churn scripts, the hinted sleeper set, a forced overflow (the tail), a lowered cap (the
-//!   fallback in the tail), the first step without history and one lane, each on a serial twin
-//!   and an S5 tree inside a pool, equal on the stream, the withheld list, every row's segment,
-//!   `TreeDiag` and `LeafListCounts`; a helper's panic reaching the caller under a watchdog; and
-//!   the Miri subset (`s5_miri_small_world`).
+//!   fallback in the tail), the first step without history, one lane and the RowWalk kernel
+//!   with the switch on (serial), each on a serial twin and an S5 tree inside a pool, equal on
+//!   the stream, the withheld list, every row's segment, `TreeDiag` and `LeafListCounts`; a
+//!   helper's panic reaching the caller under a watchdog; and the Miri subset
+//!   (`s5_miri_small_world`).
 //!
 //! Every test is device-free and heap-light; under Miri the property tests shrink to 16 cases
 //! at n ≤ 24 and the kernel is the scalar arm.
@@ -2732,6 +2733,27 @@ fn s5_one_lane_runs_the_serial_pass() {
         assert_eq!(recs(&twin.par.tree), recs(&twin.serial.tree), "one lane: the records, seg included");
     }
     assert_eq!(twin.par.tree.query_dispatches(), 0, "one lane never dispatches");
+}
+
+/// RowWalk stays serial (the cut, §0; triage r1 G3): S5 parallelises the leaf-list query only, so
+/// with the switch on, the production rules and a 64-leaf-node world at W8, the RowWalk kernel
+/// answers every Q row on the calling thread — no dispatch, no leaf-list leaf. The control: the
+/// same twin's next step under the leaf-list kernel dispatches, so only the kernel term held the
+/// RowWalk steps back.
+#[cfg(not(miri))]
+#[test]
+fn s5_rowwalk_kernel_stays_serial_with_the_switch_on() {
+    let mut twin = S5Twin::production(bare_boxes(512), 8);
+    twin.edit(|sim| sim.tree.set_query_kernel(QueryKernel::RowWalk));
+    for step in 1..=3 {
+        assert!(!twin.step(), "S5: RowWalk step {step} dispatched the leaf-list query on the pool");
+    }
+    let d = twin.par.tree.diag();
+    assert!(d.row_walk_leaves > 0, "anti-vacuity: the RowWalk kernel answered the Q rows ({d:?})");
+    assert_eq!(d.leaf_list_leaves, 0, "S5: a RowWalk step answered leaf nodes with the leaf-list query ({d:?})");
+    assert_eq!(twin.par.tree.query_dispatches(), 0, "S5: RowWalk stays serial with the switch on");
+    twin.edit(|sim| sim.tree.set_query_kernel(QueryKernel::LeafList));
+    assert!(twin.step(), "control: the same world, history and pool dispatch under the leaf-list kernel");
 }
 
 /// The Miri subset (both borrow models; `cargo miri test ... broadphase_tree::tests::s5_miri`):
