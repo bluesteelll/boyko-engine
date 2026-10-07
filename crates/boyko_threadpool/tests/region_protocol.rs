@@ -86,6 +86,14 @@ fn check_report(ran: &Ran, participants: u32, what: &str) {
         assert_eq!(rc.region, r.base, "{what}: participant {p}'s receipt tag");
         assert_eq!(rc.exit, Some(RegionExit::End), "{what}: participant {p}'s exit");
     }
+    // The identity on `RegionReport::advances`, in release too.
+    assert_eq!(r.advances, u64::from(r.published) + 1, "{what}: Σ advances == published + 1");
+    let advances: u64 = receipts.iter().map(|rc| rc.advances).sum();
+    assert_eq!(advances, r.advances, "{what}: Σ receipt advances == report.advances");
+    let helper_advances: u64 = receipts[1..].iter().map(|rc| rc.advances).sum();
+    assert_eq!(r.helper_advances, helper_advances, "{what}: helper_advances == Σ over participants 1..");
+    // Every policy in this file advances on participant 0, so a helper advance is a defect.
+    assert_eq!(r.helper_advances, 0, "{what}: helpers never advance under the orchestrator");
 }
 
 /// T1 + T2 + T3 for one policy and arming over the random-table matrix.

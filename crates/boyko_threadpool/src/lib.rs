@@ -126,9 +126,9 @@ pub use region::{RegionFrame, RegionLines};
 #[doc(hidden)]
 pub use region::region_on_threads;
 pub use region::{
-    Ladder, REGION_MAX_BLOCKS_PER_PARTICIPANT, REGION_STALL_NS, RegionExit, RegionLine,
+    Advance, Ladder, REGION_MAX_BLOCKS_PER_PARTICIPANT, REGION_STALL_NS, RegionExit, RegionLine,
     RegionPolicy, RegionReceipt, RegionReport, RegionStages, RegionWaitBound, SchedItem,
-    StageEntry, V2Policy, claim_lines, link_hints,
+    StageEntry, V2Policy, WithAdvance, claim_lines, link_hints,
 };
 
 /// Miri-only: how many times `ScopeShared::complete_task`'s release probe has

@@ -53,10 +53,13 @@
 //!
 //! ## Every knob is a compile-time policy
 //!
-//! [`RegionPolicy`] carries the waiter ladders, the test-only wait bound and the three protocol
-//! axes (R-a batched completion, R-b home claim lines, R-c TTAS) as associated consts, so every
+//! [`RegionPolicy`] carries the waiter ladders, the test-only wait bound, the three protocol
+//! axes (R-a batched completion, R-b home claim lines, R-c TTAS) and the advance axis
+//! ([`RegionPolicy::ADVANCE`], CR-F: who publishes the next item) as associated consts, so every
 //! branch on them folds after monomorphisation. The `ARMED` const parameter compiles the stall
 //! census and the per-item hooks in; the disarmed [`V2Policy`] monomorph reads no clock at all.
+//! [`WithAdvance`] replaces a policy's advance axis and copies every other const, so the claim
+//! encoding of `P` and `WithAdvance<P, _>` is the same by construction.
 
 use std::time::Instant;
 
@@ -98,9 +101,11 @@ const R_BLOCKS: usize = 1;
 const R_EXIT: usize = 2;
 const R_STALLS: usize = 3;
 const R_MAX_WAIT: usize = 4;
+/// The publishes this participant made (an epoch or the normal END; see [`RegionReport::advances`]).
+const R_ADVANCES: usize = 5;
 /// Words of a receipt line that carry data.
 #[cfg(loom)]
-const RECEIPT_WORDS: usize = 5;
+const RECEIPT_WORDS: usize = 6;
 
 // =========================================================================
 // The caller-owned frame types
@@ -117,7 +122,8 @@ const RECEIPT_WORDS: usize = 5;
 /// * **done line:** `w[0]` the completion count of one entry (reset to 0 just before each publish
 ///   of the entry; between items it holds the entry's last count);
 /// * **receipt line:** `w[0]` the region tag (`base`), `w[1]` blocks run, `w[2]` the
-///   [`RegionExit`], `w[3]` stalls, `w[4]` the longest wait in ns;
+///   [`RegionExit`], `w[3]` stalls, `w[4]` the longest wait in ns, `w[5]` the publishes this
+///   participant made ([`RegionReceipt::advances`]);
 /// * **claim line:** `w[0]` the epoch of the block's last claim; under
 ///   [`RegionPolicy::HOME_LINES`], `w[0..8]` hold one participant's home blocks of one entry.
 #[repr(C, align(64))]
@@ -289,6 +295,10 @@ pub trait RegionPolicy {
     const HOME_LINES: bool;
     /// R-c: load the claim word first and skip it without a CAS when it already holds `≥ g`.
     const TTAS: bool;
+    /// CR-F: who publishes the next item. Defaulted, so no policy that predates the axis changes;
+    /// a wrapper that forwards a policy's consts must forward this one too, or it silently runs
+    /// the orchestrator.
+    const ADVANCE: Advance = Advance::Orchestrator;
 }
 
 /// The shipped policy: the benched v2 protocol and waits, unbounded, every axis off.
@@ -302,6 +312,38 @@ impl RegionPolicy for V2Policy {
     const DONE_BATCHED: bool = false;
     const HOME_LINES: bool = false;
     const TTAS: bool = false;
+}
+
+/// Who publishes a region's next item (the advance axis, CR-F). Used only as a const of a
+/// [`RegionPolicy`], so every match on it folds away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Advance {
+    /// Participant 0 waits for each published item's exact count and publishes the next item
+    /// (the v2 protocol).
+    Orchestrator,
+    /// The participant whose completion add makes an item's count exact publishes the next
+    /// published item, or the END after the last one (Jolt 5.6 `LargeIslandSplitter`, Rapier 0.36
+    /// `staged_island_solver`). A boundary into an inline item stays participant 0's, and inline
+    /// items run on participant 0 only. Disarmed monomorphs with at least two participants only:
+    /// an `ARMED` region, and a region of one participant, run the orchestrator.
+    Finisher,
+}
+
+/// `P` with its advance axis replaced: [`Advance::Finisher`] when `FIN`, `P`'s own otherwise.
+///
+/// Every other const is `P`'s, so the claim encoding, [`claim_lines`] and every ladder of
+/// `WithAdvance<P, FIN>` are `P`'s by construction, and frames of `P` and `WithAdvance<P, _>` may
+/// alternate over one claim column.
+pub struct WithAdvance<P, const FIN: bool>(core::marker::PhantomData<P>);
+
+impl<P: RegionPolicy, const FIN: bool> RegionPolicy for WithAdvance<P, FIN> {
+    const HELPER_WAIT: Ladder = P::HELPER_WAIT;
+    const ORCH_WAIT: Ladder = P::ORCH_WAIT;
+    const BOUND_NS: u64 = P::BOUND_NS;
+    const DONE_BATCHED: bool = P::DONE_BATCHED;
+    const HOME_LINES: bool = P::HOME_LINES;
+    const TTAS: bool = P::TTAS;
+    const ADVANCE: Advance = if FIN { Advance::Finisher } else { P::ADVANCE };
 }
 
 /// The work of a region, block by block.
@@ -372,6 +414,9 @@ pub struct RegionReceipt {
     pub stalls: u64,
     /// Armed only: its longest wait, in ns.
     pub max_wait_ns: u64,
+    /// The publishes this participant made: epochs and the normal END, poisoned ENDs excluded
+    /// (the identity they sum to is stated on [`RegionReport::advances`]).
+    pub advances: u64,
 }
 
 impl RegionReceipt {
@@ -385,6 +430,7 @@ impl RegionReceipt {
             exit: RegionExit::from_word(line.w[R_EXIT]),
             stalls: line.w[R_STALLS],
             max_wait_ns: line.w[R_MAX_WAIT],
+            advances: line.w[R_ADVANCES],
         }
     }
 }
@@ -406,6 +452,19 @@ pub struct RegionReport {
     pub max_wait_ns: u64,
     /// The largest `n_blocks` of a published item (0 if none was published).
     pub max_blocks: u32,
+    /// Every publish of the region, summed over the participants' receipts
+    /// ([`RegionReceipt::advances`]): each published item's epoch once, plus the normal END once.
+    ///
+    /// **The identity** (CR-F, stated here and only cited elsewhere): on every region that
+    /// returns, `Σ_p receipt(p).advances == advances == published + 1`, the `+ 1` being the END.
+    /// A poisoned END is no schedule advance and is not counted, and a poisoned region never
+    /// returns a report. Debug builds assert it on every region; the region tests and the ω_b
+    /// bench assert it in release too.
+    pub advances: u64,
+    /// The part of [`advances`](Self::advances) the helpers (participants 1..) made: 0 whenever
+    /// participant 0 advances every item ([`Advance::Orchestrator`], an `ARMED` region, one
+    /// participant).
+    pub helper_advances: u64,
 }
 
 /// The panic payload of a waiter that passed [`RegionPolicy::BOUND_NS`].
@@ -586,6 +645,9 @@ impl<'f> RegionFrame<'f> {
     /// * **Sized for its schedule.** At least one done line per entry, one receipt line per
     ///   participant, and [`claim_lines`] claim lines for every published entry from its
     ///   `first_claim`, laid out for the policy and the participant count this frame runs with.
+    ///   The claim column's layout and encoding depend on [`RegionPolicy::HOME_LINES`] alone,
+    ///   never on [`RegionPolicy::ADVANCE`] (nor on the ladders, R-a or R-c), so a column laid
+    ///   out for `P` serves `WithAdvance<P, _>` too, and frames of the two may alternate over it.
     /// * **The counter is the claim column's own.** `epoch` only grows, and it is at or above every
     ///   epoch the claim lines hold. A fresh counter over fresh zero lines satisfies it; keep the
     ///   counter and the claim column together.
@@ -753,6 +815,8 @@ pub(crate) struct Participant<'a, W: RegionWords> {
     blocks: u64,
     stalls: u64,
     max_wait_ns: u64,
+    /// Publishes this participant made (the receipt's `R_ADVANCES` word).
+    advances: u64,
     bound: bool,
     armed: bool,
 }
@@ -761,7 +825,7 @@ impl<'a, W: RegionWords> Participant<'a, W> {
     /// Participant `index` of the region based at `base`, armed.
     #[inline]
     pub(crate) fn new(w: &'a W, base: u64, index: u32) -> Self {
-        Self { w, base, index, blocks: 0, stalls: 0, max_wait_ns: 0, bound: false, armed: true }
+        Self { w, base, index, blocks: 0, stalls: 0, max_wait_ns: 0, advances: 0, bound: false, armed: true }
     }
 
     /// The base of this participant's region.
@@ -781,6 +845,7 @@ impl<'a, W: RegionWords> Participant<'a, W> {
         self.w.receipt_word(p, R_EXIT).store(exit as u64, Ordering::Relaxed);
         self.w.receipt_word(p, R_STALLS).store(self.stalls, Ordering::Relaxed);
         self.w.receipt_word(p, R_MAX_WAIT).store(self.max_wait_ns, Ordering::Relaxed);
+        self.w.receipt_word(p, R_ADVANCES).store(self.advances, Ordering::Relaxed);
     }
 
     /// A normal exit: the receipt, then disarm.
@@ -1163,6 +1228,10 @@ pub(crate) fn run_orchestrator<W: RegionWords, S: RegionStages, P: RegionPolicy,
             stages.item_end(i as u32);
         }
     }
+    // Participant 0 made every publish of this region: each published item's epoch and the END
+    // below (the identity on `RegionReport::advances`). Set once, here, so the item loop carries
+    // no extra increment.
+    part.advances = u64::from(stats.published) + 1;
     part.exit(RegionExit::End);
     // Relaxed: no reader depends on an edge from this store (tester r3 N4). A helper that loads
     // END runs no block and reads nothing participant 0 wrote: it checks the tag, loads `poison`
@@ -1295,10 +1364,17 @@ fn report<W: RegionWords>(w: &W, base: u64, stats: OrchStats) -> RegionReport {
         debug_assert_eq!(word(R_EXIT), RegionExit::End as u64, "region: participant {p} did not read END");
         if p > 0 {
             r.helper_blocks += word(R_BLOCKS);
+            r.helper_advances += word(R_ADVANCES);
         }
+        r.advances += word(R_ADVANCES);
         r.stalls += word(R_STALLS);
         r.max_wait_ns = r.max_wait_ns.max(word(R_MAX_WAIT));
     }
+    debug_assert_eq!(
+        r.advances,
+        u64::from(r.published) + 1,
+        "region: Σ receipt advances is not published + 1 (the identity on RegionReport::advances)"
+    );
     r
 }
 
@@ -1495,6 +1571,7 @@ impl LoomRegionWords {
             exit: RegionExit::from_word(word(R_EXIT)),
             stalls: word(R_STALLS),
             max_wait_ns: word(R_MAX_WAIT),
+            advances: word(R_ADVANCES),
         }
     }
 
@@ -1568,7 +1645,59 @@ mod tests {
     //! CAS retry per first-claimed block, which no count-free gate can see. These live here because
     //! `hint_of` is private to the protocol core.
 
-    use super::{SchedItem, hint_of, link_hints};
+    use super::{
+        Advance, Ladder, RegionPolicy, SchedItem, V2Policy, WithAdvance, claim_lines, hint_of, link_hints,
+    };
+
+    /// A home-lines policy with every other axis and ladder off v2's, for (u1).
+    struct HomeLines;
+
+    impl RegionPolicy for HomeLines {
+        const HELPER_WAIT: Ladder = Ladder::BudgetThenYield { spin_ns: 2_000 };
+        const ORCH_WAIT: Ladder = Ladder::BudgetThenYield { spin_ns: 20_000 };
+        const BOUND_NS: u64 = 7;
+        const DONE_BATCHED: bool = true;
+        const HOME_LINES: bool = true;
+        const TTAS: bool = true;
+    }
+
+    /// `Y` is `X` on every claim and ladder const, and lays out every entry's claim lines as `X`
+    /// does at every block count up to 128 and every participant count up to 16.
+    fn same_claim_axes<X: RegionPolicy, Y: RegionPolicy>(what: &str) {
+        for p in 1..=16u32 {
+            for n in 0..=128u16 {
+                assert_eq!(claim_lines::<Y>(n, p), claim_lines::<X>(n, p), "{what}: claim_lines({n}, {p})");
+            }
+        }
+        assert_eq!(Y::HELPER_WAIT, X::HELPER_WAIT, "{what}: HELPER_WAIT");
+        assert_eq!(Y::ORCH_WAIT, X::ORCH_WAIT, "{what}: ORCH_WAIT");
+        assert_eq!(Y::BOUND_NS, X::BOUND_NS, "{what}: BOUND_NS");
+        assert_eq!(Y::DONE_BATCHED, X::DONE_BATCHED, "{what}: DONE_BATCHED");
+        assert_eq!(Y::HOME_LINES, X::HOME_LINES, "{what}: HOME_LINES");
+        assert_eq!(Y::TTAS, X::TTAS, "{what}: TTAS");
+    }
+
+    /// (u1) `WithAdvance<X, FIN>` copies every claim and ladder const of `X`, so a claim column
+    /// laid out for `X` is laid out for it too (`RegionFrame::new`'s Safety sentence on
+    /// alternating frames rests on this).
+    #[test]
+    fn with_advance_copies_every_claim_and_ladder_const() {
+        same_claim_axes::<V2Policy, WithAdvance<V2Policy, false>>("V2Policy, FIN = false");
+        same_claim_axes::<V2Policy, WithAdvance<V2Policy, true>>("V2Policy, FIN = true");
+        same_claim_axes::<HomeLines, WithAdvance<HomeLines, false>>("HomeLines, FIN = false");
+        same_claim_axes::<HomeLines, WithAdvance<HomeLines, true>>("HomeLines, FIN = true");
+    }
+
+    /// (u2) The advance axis: defaulted to the orchestrator, replaced by `WithAdvance` only when
+    /// `FIN`, and otherwise the wrapped policy's own.
+    #[test]
+    fn with_advance_sets_only_the_advance_axis() {
+        assert_eq!(V2Policy::ADVANCE, Advance::Orchestrator);
+        assert_eq!(<WithAdvance<V2Policy, false>>::ADVANCE, Advance::Orchestrator);
+        assert_eq!(<WithAdvance<V2Policy, true>>::ADVANCE, Advance::Finisher);
+        assert_eq!(<WithAdvance<WithAdvance<V2Policy, true>, false>>::ADVANCE, Advance::Finisher);
+        assert_eq!(<WithAdvance<HomeLines, true>>::ADVANCE, Advance::Finisher);
+    }
 
     /// `hint_of` is the epoch of the earlier item `prev_off − 1` when `1 ≤ prev_off ≤ i`, and 0 (no
     /// hint) otherwise; either way it is below the item's own epoch `base + 1 + i`.
