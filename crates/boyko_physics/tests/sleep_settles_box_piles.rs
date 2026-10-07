@@ -142,6 +142,45 @@
 //!
 //! A7-R1 itself, on the restored tree, then passed and printed the same D_max.
 //!
+//! ## FM C3's bands, pre-registered at FM C0 (2026-10-07)
+//!
+//! Lever FM (friction per manifold, `fm/design_r2.md`) changes values: its C3 flips the default
+//! and re-pins A7-R1 under A7-R1's rule. Before any FM code exists, this is what that commit is
+//! judged by (lever ruling L8 W5; FM design §8 C0). **The reference of every band is FM C3's
+//! PARENT** — the trunk commit C3 branches from, after its last trunk sync — never a value read
+//! at C0: a lever that lands in between (SL-1 moves the freeze step of a run that rose) must not be
+//! charged to FM, which is judged on its own move only.
+//!
+//! | reading | Confirm | Report | STOP |
+//! |---|---|---|---|
+//! | A7-R1's D_max, the contact-reuse-on and reuse-off arms (sleeping off; the `d = 0` arm is a bridge pin and must not move at all) | tip < 2 mm | 2 mm <= tip < 10 mm | tip >= 10 mm, or not finite |
+//! | A7-R2's and G8's freeze step (sleeping on) | `100·\|tip − parent\| <= 10·parent` | `<= 25·parent` | beyond |
+//!
+//! * **D_max is classified on the tip's own reading**, with the parent's printed beside it
+//!   (orchestrator Q1). Every D_max band in this file's lineage is absolute (S5's rung above, L9's
+//!   "confirms" band at [`A7_R1_D_MAX_BITS`]), its STOP line is A7-R1's own acceptance bound, and
+//!   A7-R1 runs with sleeping off, where SL cannot move the reference. One edge differs from
+//!   A7-R1's assert: [`CREEP_BOUND_M`] admits exactly 10 mm, and this band STOPs there.
+//! * **A non-finite pile is a STOP, reachably.** A7-R1's own reduction keeps a larger displacement
+//!   with `>`, which skips a NaN, so a pile gone non-finite reads D_max = 0 there and would
+//!   Confirm. C3 therefore classifies [`fm_c3_d_max_of`] over the same step-600 and step-3000
+//!   centres — A7-R1's maximum bit for bit on finite input, NaN once any centre is not finite —
+//!   and asserts its bits equal A7-R1's `D_max` when they are finite.
+//! * **The freeze steps are classified against the parent**, in integer arithmetic; a parent step
+//!   of 0 is an invariant panic. One extra latch attempt costs `sleep_frames` = 60 steps, more than
+//!   25 % of either step read at C0, so at those readings the band means "the same number of latch
+//!   attempts": one extra attempt is a STOP for both scenes. Recorded at C0, not changed.
+//! * **R-S**, the parity runner's resting-pile row, which L8 W5 also named: at C3 the orchestrator
+//!   applies the freeze-step rule to the runner's `first_frozen_step` on that row, parent against
+//!   tip (orchestrator Q3). No runner edit.
+//! * **C3's use.** The parent readings come from `git merge-base HEAD integ/unified` after C3's last
+//!   trunk sync; for A7-R1 they are exactly the pins C3 replaces. Confirm passes and prints; Report
+//!   passes, prints a `REPORT` line and is carried into FM C5's record; STOP fails with the
+//!   numbers, and its consequence is owner question O-5 (keep FM off rather than loosen a pin).
+//!   [`fm_c3_d_max_band`] and [`fm_c3_freeze_band`] return that verdict and the line to print;
+//!   `fm_c3_bands_classify_against_the_parent` pins the rule (provenance at
+//!   [`FM_C3_FREEZE_REPORT_PCT`]).
+//!
 //! # Legs
 //!
 //! * G1, G3, G4, G5 and G5-V2 (height-4 piles, 30 boxes) and G8 (height 6, 91 boxes) run in
@@ -151,7 +190,7 @@
 //!   1240 boxes) run ONLY in release, as part of the physics release run that `CLAUDE.md`
 //!   names as their leg: `cargo test --release -p boyko-physics --no-fail-fast` (this file
 //!   alone: `cargo test --release -p boyko-physics --test sleep_settles_box_piles`). There
-//!   this binary prints `running 15 tests` and `14 passed; 0 failed; 1 ignored` (the
+//!   this binary prints `running 16 tests` and `15 passed; 0 failed; 1 ignored` (the
 //!   generator). In a debug build they are ignored, and `-- --ignored` in a debug build is NOT
 //!   their leg. A7-R1 is the long one: ~73 s in release, ~80 s for the whole binary before
 //!   the SIMD on/off differential below was added (it runs A7-R1's scene twice more; its
@@ -164,7 +203,8 @@
 //!   A7-R1's D_max to be bit-identical: the O7 AVX2 cohort kernel is a pure speed path over
 //!   the scalar colored oracle, so no budget and no bound here may move with the flag.
 //! * A7-R0 is device-free and schedule-free. It runs in the ordinary run in both profiles,
-//!   and under Miri.
+//!   and under Miri. So does `fm_c3_bands_classify_against_the_parent`, FM C3's band rule,
+//!   which is pure arithmetic.
 //! * `flicker_redraw_distribution` is a `generator:`: it asserts nothing and prints the
 //!   numbers G2's and G7's budgets are sized from. Re-run it (release, `--ignored --exact`)
 //!   whenever a change re-draws pile trajectories, before touching a budget.
@@ -388,6 +428,27 @@ const A7_R1_D_MAX_BITS_REUSE_OFF: u32 = 0x3a0a_0e22;
 /// **Re-pin rule.** [`A7_R1_D_MAX_BITS`]'s, except that no V2 change may move it: the overlap-only
 /// rule (both values `0`, not the distance alone) is the contact rule from before V2, bit for bit.
 const A7_R1_D_MAX_BITS_D0: u32 = 0x3a2e_dc99;
+/// FM C3's D_max band (module header, "FM C3's bands"): a tip reading below this, in metres,
+/// Confirms. A literal of its own rather than one derived from [`CREEP_BOUND_M`]: a later change to
+/// A7-R1's acceptance bound must not move FM's pre-registered lines.
+const FM_C3_D_MAX_CONFIRM_BELOW_M: f32 = 0.002;
+/// FM C3's D_max band: a tip reading at or above this, in metres, or one that is not finite, is a
+/// STOP; between [`FM_C3_D_MAX_CONFIRM_BELOW_M`] and this it Reports.
+const FM_C3_D_MAX_STOP_AT_M: f32 = 0.01;
+/// FM C3's freeze-step band: `100·|tip − parent| <= FM_C3_FREEZE_CONFIRM_PCT·parent` Confirms. A
+/// percentage of the PARENT's step, never of the tip's.
+const FM_C3_FREEZE_CONFIRM_PCT: usize = 10;
+/// FM C3's freeze-step band: beyond Confirm, `100·|tip − parent| <= FM_C3_FREEZE_REPORT_PCT·parent`
+/// Reports; beyond that it is a STOP.
+///
+/// Provenance only, NEVER the reference (the reference is FM C3's parent, module header): on the
+/// trunk FM C0 branched from (`b46cf0ec`, msvc release, 2026-10-07, this file's own lines) A7-R1
+/// read D_max = 0.0007244835 m with contact reuse on, 0.0005266388 m with it off and
+/// 0.0006670445 m at `d = 0` (all three Confirm); A7-R2 froze at step 86 and G8 at step 61. Were
+/// those the parents, A7-R2 would Confirm on [78, 94] and Report on 65-77 and 95-107, and G8 would
+/// Confirm on [55, 67] and Report on 46-54 and 68-76, its lower side unreachable because no pile
+/// freezes before step 61.
+const FM_C3_FREEZE_REPORT_PCT: usize = 25;
 /// A7-R1's standing guard: the largest vertical drop any pile box may have taken by
 /// [`CREEP_FROM`]. Half a box edge — losing one layer costs a full [`BOX_SIZE`], while the
 /// vertical settle's penetration slop is millimetres per layer. Without it a pile that had
@@ -2084,6 +2145,142 @@ fn a_jolt_scale_box_pyramid_freezes() {
         );
         freeze_and_hold(&mut h, &pile, LONG_SETTLE_LIMIT, 60, "A7-R2", None);
     });
+}
+
+// ── FM C3's bands (pre-registered at FM C0) ──────────────────────────────────
+
+/// A verdict of FM C3's bands (module header, "FM C3's bands").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FmBand {
+    /// Pass, and print the line.
+    Confirm,
+    /// Pass, print a `REPORT` line, and carry it into FM C5's record.
+    Report,
+    /// Fail with the numbers: owner question O-5.
+    Stop,
+}
+
+/// Classifies an A7-R1 D_max at FM C3 on the TIP's own reading, and returns the line C3 prints,
+/// which carries the parent's reading beside it. `tip_m` must come from [`fm_c3_d_max_of`], so that
+/// a pile gone non-finite reaches the STOP arm.
+fn fm_c3_d_max_band(parent_m: f32, tip_m: f32) -> (FmBand, String) {
+    // Every comparison with a NaN is false, so this order sends a NaN to the last arm, STOP.
+    let band = if tip_m < FM_C3_D_MAX_CONFIRM_BELOW_M {
+        FmBand::Confirm
+    } else if tip_m < FM_C3_D_MAX_STOP_AT_M {
+        FmBand::Report
+    } else {
+        FmBand::Stop
+    };
+    let line = format!(
+        "FM C3 band, A7-R1 D_max: parent {parent_m} m, tip {tip_m} m: {band:?} (Confirm below \
+         {FM_C3_D_MAX_CONFIRM_BELOW_M} m, STOP at {FM_C3_D_MAX_STOP_AT_M} m or not finite; the \
+         tip is classified, the parent printed)"
+    );
+    (band, line)
+}
+
+/// Classifies a freeze step at FM C3 against its PARENT's: within [`FM_C3_FREEZE_CONFIRM_PCT`] % of
+/// the parent's step Confirms, within [`FM_C3_FREEZE_REPORT_PCT`] % Reports, beyond is a STOP.
+/// Integer arithmetic; returns the line C3 prints.
+fn fm_c3_freeze_band(parent: usize, tip: usize) -> (FmBand, String) {
+    assert!(
+        parent > 0,
+        "invariant: a freeze step is at least 1, so a parent of 0 is a harness defect"
+    );
+    let off = 100 * parent.abs_diff(tip);
+    let band = if off <= FM_C3_FREEZE_CONFIRM_PCT * parent {
+        FmBand::Confirm
+    } else if off <= FM_C3_FREEZE_REPORT_PCT * parent {
+        FmBand::Report
+    } else {
+        FmBand::Stop
+    };
+    let line = format!(
+        "FM C3 band, freeze step: parent {parent}, tip {tip}: {band:?} (Confirm within \
+         {FM_C3_FREEZE_CONFIRM_PCT} % of the parent, Report within {FM_C3_FREEZE_REPORT_PCT} %)"
+    );
+    (band, line)
+}
+
+/// The largest horizontal displacement of any pile box between two records in pile order: A7-R1's
+/// D_max, with a NaN kept. On finite input it is A7-R1's own reduction bit for bit (the same
+/// `(dx² + dz²).sqrt()` and the same maximum); once any displacement is NaN the result is NaN, which
+/// [`fm_c3_d_max_band`] classes STOP. FM C3 classifies this, not A7-R1's `D_max` (module header).
+fn fm_c3_d_max_of(from: &[(u32, Vec3)], to: &[(u32, Vec3)]) -> f32 {
+    assert_eq!(from.len(), to.len(), "harness: both records hold the same pile");
+    let mut worst = 0.0f32;
+    for (&(id, a), &(id_b, b)) in from.iter().zip(to) {
+        assert_eq!(id, id_b, "harness: both records follow the pile order");
+        let (dx, dz) = (b.x - a.x, b.z - a.z);
+        let d = (dx * dx + dz * dz).sqrt();
+        // `d > worst` alone skips a NaN; the first NaN must win and stay.
+        if d.is_nan() || d > worst {
+            worst = d;
+        }
+    }
+    worst
+}
+
+/// FM C3's band rule, pinned before its first use: the D_max edges classified on the tip whatever
+/// the parent, the freeze step against the parent (never the tip, never a C0 reading), and the
+/// non-finite STOP reachable through [`fm_c3_d_max_of`]. Pure arithmetic: it runs in both profiles
+/// and under Miri, like A7-R0.
+#[test]
+fn fm_c3_bands_classify_against_the_parent() {
+    use FmBand::{Confirm as C, Report as R, Stop as S};
+
+    for parent in [0.000_724_483_5_f32, 0.005] {
+        for (tip, want) in [
+            (0.001_999_9_f32, C),
+            (0.002, R),
+            (0.009_999_9, R),
+            (0.01, S),
+            (f32::NAN, S),
+            (f32::INFINITY, S),
+        ] {
+            let (got, line) = fm_c3_d_max_band(parent, tip);
+            assert_eq!(got, want, "D_max band, parent {parent} m, tip {tip} m: {line}");
+            assert!(line.contains(&format!("parent {parent} m")), "the parent is printed: {line}");
+        }
+    }
+
+    for (parent, tip, want) in [
+        (61, 61, C),
+        (61, 67, C),
+        (61, 68, R),
+        (61, 76, R),
+        (61, 77, S),
+        (61, 121, S),
+        (61, 55, C),
+        (86, 94, C),
+        (86, 95, R),
+        (86, 107, R),
+        (86, 108, S),
+        (200, 215, C),
+    ] {
+        let (got, line) = fm_c3_freeze_band(parent, tip);
+        assert_eq!(got, want, "freeze band, parent {parent}, tip {tip}: {line}");
+    }
+
+    // Exact in binary: displacements of 2^-10 m and 2^-11 m.
+    let at = |x: f32, z: f32| Vec3::new(x, 1.0, z);
+    let from = [(1, at(0.0, 0.0)), (2, at(2.0, 0.0)), (3, at(0.0, 2.0))];
+    let to = [(1, at(0.0, 0.000_976_562_5)), (2, at(2.000_488_3, 0.0)), (3, at(0.0, 2.0))];
+    let finite = fm_c3_d_max_of(&from, &to);
+    assert_eq!(finite.to_bits(), 0.000_976_562_5_f32.to_bits(), "finite D_max: {finite}");
+    assert_eq!(fm_c3_d_max_band(0.0007, finite).0, C, "a finite pile classifies by its maximum");
+    for (what, to) in [
+        ("one box NaN, before a finite larger one", [(1, at(f32::NAN, 0.0)), to[1], (3, at(0.0, 2.5))]),
+        ("one box NaN, after the maximum", [to[0], to[1], (3, at(f32::NAN, f32::NAN))]),
+        ("every box NaN", [(1, at(f32::NAN, 0.0)), (2, at(f32::NAN, 0.0)), (3, at(f32::NAN, 0.0))]),
+    ] {
+        let d_max = fm_c3_d_max_of(&from, &to);
+        assert!(d_max.is_nan(), "{what}: a non-finite pile must read NaN, not {d_max}");
+        assert_eq!(fm_c3_d_max_band(0.0007, d_max).0, S, "{what}: a non-finite pile is a STOP");
+    }
+    let infinite = [to[0], (2, at(f32::INFINITY, 0.0)), to[2]];
+    assert_eq!(fm_c3_d_max_band(0.0007, fm_c3_d_max_of(&from, &infinite)).0, S, "an infinite box");
 }
 
 /// What one scene run produced, for the SIMD on/off differential.
