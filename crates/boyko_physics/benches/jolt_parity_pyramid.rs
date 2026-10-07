@@ -233,6 +233,29 @@
 //! three leaf receipts (`leaf_list_leaves`, `fallback_leaves`, `row_walk_leaves`) in
 //! `broadphase_tree`; a line prints the kernel and the tree's `TreeDiag` with `{:?}`.
 //!
+//! # The parallel tree query (`--parallel-tree-query on|off`)
+//!
+//! Sets `PhysicsConfig::parallel_tree_query` (S5, `levers/scaling/01-DESIGN.md` §6.5) under every
+//! `--cfg`, after the rest: the same-binary A/B of the tree broadphase's query on the pool. Refused
+//! (exit 2) with `on` unless the row's configuration resolves to the tree under `Manual` selection,
+//! where the switch is read. Unset, the tree's default stands.
+//!
+//! **The receipt, per step (the cut's critique, W2).** After every step, untimed, the runner
+//! recomputes whether the structure allows S5 to dispatch — the switch, `--workers` ≥ 2, a
+//! tree-path step (the kind and the row count against `brute_max_rows`, as the armed check derives
+//! it), a history (the last earlier tree-path step queried a row: an active leaf node or a Wide
+//! row), at least `S5_MIN_LEAVES` active leaf nodes this step (the `TreeDiag` delta of
+//! `leaf_list_leaves + fallback_leaves`) and [`expected_s5_dispatch`]'s chunk count of at least
+//! two, from the exported `S5_*` constants — and compares it with the step's delta of
+//! `BroadphaseTree::query_dispatches`. A step that differs is void (exit 3): an `on` arm whose
+//! query never reached the pool where it could cannot pass as an A/B row, and neither can an `off`
+//! or W = 1 arm that dispatched. A step on which the structure allows no dispatch — every row
+//! withheld asleep, a brute step — voids nothing, so the rest pile's frozen `Sets` rows stay valid.
+//! The stream column's reserve term is not copied: no scene here comes near it. The summary
+//! carries `bp_query_dispatches` (counted and recomputed, over the run and the window) and
+//! `bp_query_tail_leaves` (the leaf nodes the calling thread answered after a dispatched step's
+//! join).
+//!
 //! # The W8S instrument (armed)
 //!
 //! `boyko_physics::profiling`'s module docs carry the whole table. Per armed step the runner
@@ -287,6 +310,8 @@
 //!                              (cfg-A/B at W > 1 and --cfg default have it on), refused at
 //!                              W = 1 (J-P1 is retired, see "Configurations")
 //! --parallel-np on|off         set parallel_narrowphase (L5), under any --cfg
+//! --parallel-tree-query on|off set parallel_tree_query (S5), under any --cfg; `on` needs the tree
+//!                              under Manual selection
 //! --contact-reuse on|off       set contact_reuse (L9b), under any --cfg; either value also reads
 //!                              the narrowphase's pair classes after every step (untimed) into the
 //!                              summary's `pair_classes`, as does any row whose config has
@@ -352,6 +377,9 @@
 //!   `max_accepted_excess`. The face bound changes a row's poses only when `phantom`,
 //!   `hint_capped` or (contact reuse on) `refresh_stale` is above zero, so a moved `--expect-pose`
 //!   row with all three at zero was not moved by it.
+//! * `bp_query_dispatches` / `bp_query_tail_leaves` (S5, every row): the tree's query
+//!   dispatches over the run and the window, counted and recomputed from the structure, and the
+//!   leaf nodes S5's tail answered (module docs, "The parallel tree query").
 //! * `dyn` (only with `--dyn`, `--sanity` or `--scene-dump`): the program, its counts (kicks,
 //!   launches, statics, bodies), the canonical and the read-back dump's FNV-1a 64, the final state's
 //!   receipts (non-finite bodies, lowest centre, top speed, escaped) and, with `--sanity`, the
@@ -359,9 +387,10 @@
 //!   verdict: the bar is the scorer's, one authority for every engine.
 //! * exit code: 0 ok; 2 bad flags; 3 void (anti-vacuity, frozen-by, disarmed ring traffic,
 //!   dropped samples, a reuse-on row that collided box pairs over steps [100, 500) and reused no
-//!   record there, or whose window collided none and whose whole run reused no record; a `--dyn`
-//!   row whose run reused no record; a dynamic scene's static that is not static, or a kick whose
-//!   read-back velocity is not `v + Δv`); 4 `--expect-pose` mismatch; 101 panic.
+//!   record there, or whose window collided none and whose whole run reused no record, an S5
+//!   dispatch count that differs from the structure's on any step; a `--dyn` row whose run reused
+//!   no record; a dynamic scene's static that is not static, or a kick whose read-back velocity is
+//!   not `v + Δv`); 4 `--expect-pose` mismatch; 101 panic.
 //!
 //! # Self-check (no `--scene`)
 //!
@@ -519,6 +548,9 @@ use boyko_physics::resources::{
     PairClasses, PhysicsConfig, SleepSkip, SolverScratch,
 };
 use boyko_physics::sleep_sets::SleepSets;
+use boyko_physics::broadphase_tree::{
+    S5_CHUNKS_PER_LANE, S5_MAX_CHUNKS, S5_MIN_LEAVES, S5_MIN_LEAVES_PER_CHUNK,
+};
 use boyko_physics::solver::{ColoredSoftStepSolver, SoftStepSolver};
 
 // The dynamic parity scenes (lane DYN-SCENES). `#[path]` from this crate root resolves next to it,
@@ -696,6 +728,8 @@ struct Args {
     cfg: CfgKind,
     parallel_solve: bool,
     parallel_np: Option<bool>,
+    /// `--parallel-tree-query on|off` (S5); `None` leaves the tree's default.
+    parallel_tree_query: Option<bool>,
     contact_reuse: Option<bool>,
     reuse_distance: Option<f32>,
     /// `--speculative-distance D` (V2); `None` leaves the tree's default.
@@ -753,7 +787,8 @@ fn usage_error(msg: &str) -> ExitCode {
     eprintln!(
         "usage: jolt_parity_pyramid --scene jolt|rest|s16 [--workers W] [--steps N] [--window A..B] \
          [--gap G] [--solver colored|reference] [--cfg a|as|b|default] [--parallel-solve] \
-         [--parallel-np on|off] [--contact-reuse on|off] [--reuse-distance D] \
+         [--parallel-np on|off] [--parallel-tree-query on|off] [--contact-reuse on|off] \
+         [--reuse-distance D] \
          [--speculative-distance D] [--speculative-velocity-cap C] \
          [--broadphase allpairs|tree|grid] [--sleeping [on|off]] [--sleep-skip off|sets] \
          [--threshold T] \
@@ -793,6 +828,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     let mut cfg = CfgKind::Default;
     let mut parallel_solve = false;
     let mut parallel_np = None;
+    let mut parallel_tree_query = None;
     let mut contact_reuse = None;
     let mut reuse_distance = None;
     let mut speculative_distance = None;
@@ -850,6 +886,15 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
                     Some("on") => Some(true),
                     Some("off") => Some(false),
                     other => return Err(format!("--parallel-np: expected on|off, got {other:?}")),
+                }
+            }
+            "--parallel-tree-query" => {
+                parallel_tree_query = match it.next().as_deref() {
+                    Some("on") => Some(true),
+                    Some("off") => Some(false),
+                    other => {
+                        return Err(format!("--parallel-tree-query: expected on|off, got {other:?}"));
+                    }
                 }
             }
             "--contact-reuse" => {
@@ -945,6 +990,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
         cfg,
         parallel_solve,
         parallel_np,
+        parallel_tree_query,
         contact_reuse,
         reuse_distance,
         speculative_distance,
@@ -1069,6 +1115,20 @@ fn validate(a: &Args) -> Result<(), String> {
             }
         }
         _ => return Err("--canary-frac and --canary-ref-ns go together".into()),
+    }
+    if a.parallel_tree_query == Some(true) {
+        // The configuration the row will run, resolved as `build` resolves it.
+        let mut cfg = PhysicsConfig::default();
+        configure(&mut cfg, a);
+        if cfg.broadphase != BroadphaseKind::Tree
+            || cfg.broadphase_select != BroadphaseSelectMode::Manual
+        {
+            return Err(format!(
+                "--parallel-tree-query on needs the tree broadphase under Manual selection; this \
+                 row resolves to {:?} / {:?}, so the switch would never be read",
+                cfg.broadphase, cfg.broadphase_select
+            ));
+        }
     }
     if let Some(kernel) = a.bp_kernel {
         // The configuration the row will run, resolved as `build` resolves it.
@@ -1318,6 +1378,9 @@ fn configure(cfg: &mut PhysicsConfig, args: &Args) {
     }
     if let Some(np) = args.parallel_np {
         cfg.parallel_narrowphase = np;
+    }
+    if let Some(on) = args.parallel_tree_query {
+        cfg.parallel_tree_query = on;
     }
     if let Some(reuse) = args.contact_reuse {
         cfg.contact_reuse = reuse;
@@ -1705,6 +1768,102 @@ fn expected_np_chunks(parallel_np: bool, pairs: u64, lanes: usize) -> u64 {
     let pairs = usize::try_from(pairs).unwrap_or(usize::MAX);
     let chunks = (lanes * NP_CHUNKS_PER_LANE).min(pairs / NP_MIN_PAIRS_PER_CHUNK).min(NP_MAX_CHUNKS);
     if chunks < 2 { 0 } else { chunks as u64 }
+}
+
+/// Whether S5 dispatches the tree query on a step: this runner's copy of `broadphase_tree`'s
+/// dispatch rule (`parallel.rs`, "When a step dispatches"), from the exported `S5_*` constants and
+/// public state, so the two derivations cannot agree by sharing an omission. It carries every term
+/// but the stream column's reserve: the switch, the `lanes < 2` term, the tree path, the history,
+/// the inline threshold, and the chunk count's lane bound, grain bound, cap and two-chunk floor.
+fn expected_s5_dispatch(on: bool, lanes: usize, tree_path: bool, history: bool, leaves: u64) -> bool {
+    if !on || lanes < 2 || !tree_path || !history {
+        return false;
+    }
+    let leaves = usize::try_from(leaves).unwrap_or(usize::MAX);
+    if leaves < S5_MIN_LEAVES {
+        return false;
+    }
+    let chunks = (lanes * S5_CHUNKS_PER_LANE).min(leaves / S5_MIN_LEAVES_PER_CHUNK).min(S5_MAX_CHUNKS);
+    chunks >= 2
+}
+
+/// S5's per-step receipt (module docs, "The parallel tree query"): the recomputed dispatch of each
+/// step against the tree's counter, and the totals the summary carries.
+struct S5Receipt {
+    /// The row's `parallel_tree_query`.
+    on: bool,
+    /// `--workers`.
+    lanes: usize,
+    /// The row runs the tree broadphase (Manual selection: the runner pins it).
+    tree: bool,
+    /// `BroadphaseTree::brute_max_rows()`.
+    brute_max_rows: u32,
+    /// The tree's counters after the previous step.
+    prev: TreeDiag,
+    prev_dispatches: u64,
+    prev_tail: u64,
+    /// The last earlier tree-path step queried a row: an active leaf node or a Wide row.
+    history: bool,
+    /// Counted dispatches over (the run, the window).
+    dispatches: (u64, u64),
+    /// Recomputed dispatches over (the run, the window).
+    expected: (u64, u64),
+    /// Tail leaf nodes over (the run, the window).
+    tail: (u64, u64),
+}
+
+impl S5Receipt {
+    fn new(tree: &BroadphaseTree, on: bool, lanes: usize, is_tree: bool, brute_max_rows: u32) -> Self {
+        Self {
+            on,
+            lanes,
+            tree: is_tree,
+            brute_max_rows,
+            prev: tree.diag(),
+            prev_dispatches: tree.query_dispatches(),
+            prev_tail: tree.query_tail_leaves(),
+            history: false,
+            dispatches: (0, 0),
+            expected: (0, 0),
+            tail: (0, 0),
+        }
+    }
+
+    /// Reads the step that just ran; `Err` names the mismatch.
+    fn step(&mut self, world: &EcsMaster, in_window: bool) -> Result<(), String> {
+        let tree = world.resource::<BroadphaseTree>();
+        let d = tree.diag();
+        let rows = world.resource::<SolverScratch>().bodies_len() as u64;
+        let tree_path = self.tree && rows > u64::from(self.brute_max_rows);
+        let leaves =
+            (d.leaf_list_leaves + d.fallback_leaves) - (self.prev.leaf_list_leaves + self.prev.fallback_leaves);
+        let wide = d.wide_rows - self.prev.wide_rows;
+        let history = self.history;
+        let expected = expected_s5_dispatch(self.on, self.lanes, tree_path, history, leaves);
+        let counted = tree.query_dispatches() - self.prev_dispatches;
+        let tail = tree.query_tail_leaves() - self.prev_tail;
+        if tree_path {
+            self.history = leaves > 0 || wide > 0;
+        }
+        self.prev = d;
+        self.prev_dispatches = tree.query_dispatches();
+        self.prev_tail = tree.query_tail_leaves();
+        let w = u64::from(in_window);
+        self.dispatches = (self.dispatches.0 + counted, self.dispatches.1 + w * counted);
+        self.expected = (self.expected.0 + u64::from(expected), self.expected.1 + w * u64::from(expected));
+        self.tail = (self.tail.0 + tail, self.tail.1 + w * tail);
+        if counted == u64::from(expected) {
+            Ok(())
+        } else {
+            Err(format!(
+                "S5: the tree dispatched its query {counted} times, the structure allows {} \
+                 (switch {}, W {}, tree path {tree_path}, history {history}, {leaves} active leaf nodes)",
+                u64::from(expected),
+                self.on,
+                self.lanes,
+            ))
+        }
+    }
 }
 
 /// Checks one armed step's per-zone sample counts and counter values against `shape`. Returns
@@ -2218,6 +2377,7 @@ fn self_check() -> ExitCode {
         cfg: CfgKind::A,
         parallel_solve: false,
         parallel_np: None,
+        parallel_tree_query: None,
         contact_reuse: None,
         reuse_distance: None,
         speculative_distance: None,
@@ -2280,14 +2440,15 @@ fn run(args: &Args) -> ExitCode {
     if let Some(kernel) = args.bp_kernel {
         rig.world.resource_mut::<BroadphaseTree>().set_query_kernel(kernel);
     }
-    let (substeps, relax, sleeping, sleep_skip, parallel_np, contact_reuse, parallel_solve, simd_solve, config_json) = {
+    let (substeps, relax, sleeping, sleep_skip, parallel_np, parallel_tree_query, contact_reuse, parallel_solve, simd_solve, config_json) = {
         let cfg = rig.world.resource::<PhysicsConfig>();
         let tree_brute_max_rows = rig.world.resource::<BroadphaseTree>().brute_max_rows();
         let json = format!(
             "{{\"substeps\":{},\"relax_iterations\":{},\"broadphase\":{},\"broadphase_select\":{},\
              \"tree_brute_max_rows\":{tree_brute_max_rows},\
              \"simd\":{},\"simd_solve\":{},\"parallel_solve\":{},\"parallel_broadphase\":{},\
-             \"parallel_narrowphase\":{},\"contact_reuse\":{},\"contact_reuse_distance\":{},\
+             \"parallel_narrowphase\":{},\"parallel_tree_query\":{},\"contact_reuse\":{},\
+             \"contact_reuse_distance\":{},\
              \"speculative_distance\":{},\"speculative_velocity_cap\":{},\
              \"sleeping\":{},\"sleep_skip\":{},\"sleep_threshold\":{},\"sleep_frames\":{},\
              \"colored\":{},\"contact_hertz\":{},\"contact_damping\":{}}}",
@@ -2300,6 +2461,7 @@ fn run(args: &Args) -> ExitCode {
             cfg.parallel_solve,
             cfg.parallel_broadphase,
             cfg.parallel_narrowphase,
+            cfg.parallel_tree_query,
             cfg.contact_reuse,
             json_f64(f64::from(cfg.contact_reuse_distance)),
             json_f64(f64::from(cfg.speculative_distance)),
@@ -2318,6 +2480,7 @@ fn run(args: &Args) -> ExitCode {
             cfg.sleeping,
             cfg.sleep_skip,
             cfg.parallel_narrowphase,
+            cfg.parallel_tree_query,
             cfg.contact_reuse,
             cfg.parallel_solve,
             cfg.simd_solve,
@@ -2353,6 +2516,14 @@ fn run(args: &Args) -> ExitCode {
         parallel_solve,
     };
     let mut bp_prev = rig.world.resource::<BroadphaseTree>().diag();
+    // S5's per-step receipt (module docs, "The parallel tree query"), every row, untimed.
+    let mut s5 = S5Receipt::new(
+        rig.world.resource::<BroadphaseTree>(),
+        parallel_tree_query,
+        args.workers,
+        broadphase == BroadphaseKind::Tree,
+        brute_max_rows,
+    );
     let n_cols = zones.as_ref().map_or(0, ZoneTable::len);
     let ids: Vec<u16> = zones.as_ref().map_or_else(Vec::new, |z| z.ids().collect());
     let tpn = if armed { boyko_diag::clock::ticks_per_ns() } else { 0.0 };
@@ -2441,6 +2612,10 @@ fn run(args: &Args) -> ExitCode {
             });
         }
         rows.push(StepRow { wall_ns: wall.as_nanos() as u64, manifolds, pairs, top_y, awake });
+        if let Err(why) = s5.step(&rig.world, (window.0..window.1).contains(&step)) {
+            void_steps += 1;
+            first_void.get_or_insert_with(|| format!("step {step}: {why}"));
+        }
         if let Some(d) = dyn_run.as_mut() {
             d.after_step(step, &rig);
         }
@@ -2826,6 +3001,12 @@ fn run(args: &Args) -> ExitCode {
             rig.world.resource::<BroadphaseTree>().query_kernel()
         );
     }
+    println!(
+        "S5 (--parallel-tree-query): switch {parallel_tree_query}, query dispatches {} over the run \
+         ({} recomputed), {} over the window ({} recomputed), tail leaf nodes {} over the run, {} \
+         over the window",
+        s5.dispatches.0, s5.expected.0, s5.dispatches.1, s5.expected.1, s5.tail.0, s5.tail.1
+    );
     if let Some(program) = args.dyn_program {
         println!(
             "dyn: program {} ({} statics, {} bodies at the end), sanity {}, scene dump {}",
@@ -2854,6 +3035,8 @@ fn run(args: &Args) -> ExitCode {
          \"disarmed_ring_traffic\":{},\"ticks_per_ns\":{},\"waves_total\":{waves_total},\
          \"first_frozen_step\":{},\"frozen_by\":{},\"awake_max_from_frozen_by\":{},\
          \"broadphase_tree\":{bp_json},\"bp_kernel_flag\":{},\"fallback_census\":{census_json},\
+         \"bp_query_dispatches\":{{\"run\":{},\"window\":{},\"expected_run\":{},\"expected_window\":{}}},\
+         \"bp_query_tail_leaves\":{{\"run\":{},\"window\":{}}},\
          \"pair_classes\":{classes_json},\"w8s\":{w8s_json},\
          \"canary_zone\":{},\"canary_zone_ns\":{},\"route_note\":{},\
          \"host\":{{\"logical_cores\":{logical_cores}}},\
@@ -2901,6 +3084,12 @@ fn run(args: &Args) -> ExitCode {
         args.frozen_by.map_or_else(|| "null".to_owned(), |k| k.to_string()),
         awake_after.map_or_else(|| "null".to_owned(), |k| k.to_string()),
         args.bp_kernel.map_or_else(|| "null".to_owned(), |k| json_str(&format!("{k:?}"))),
+        s5.dispatches.0,
+        s5.dispatches.1,
+        s5.expected.0,
+        s5.expected.1,
+        s5.tail.0,
+        s5.tail.1,
         args.canary_zone.as_deref().map_or_else(|| "null".to_owned(), json_str),
         args.canary_zone_ns.map_or_else(|| "null".to_owned(), |n| n.to_string()),
         json_str(ROUTE_NOTE),

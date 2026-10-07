@@ -1,7 +1,8 @@
 //! The tree broadphase ([`BroadphaseKind::Tree`]): AllPairs' exact pair set from a packed 8-wide
-//! BVH over the moving rows and a persistent static set, serial, with no heap allocation per
-//! step (`docs/physics/perf-campaign/levers/broadphase/04-DESIGN-REV2.md`, rulings W1 and W2 in
-//! `levers/00-RULINGS.md`).
+//! BVH over the moving rows and a persistent static set, serial but for the Q rows' query — which
+//! S5 runs on the pool at two lanes or more (`parallel.rs`) — and with no heap allocation per step
+//! but S5's one `pool.scope` (`docs/physics/perf-campaign/levers/broadphase/04-DESIGN-REV2.md`,
+//! rulings W1 and W2 in `levers/00-RULINGS.md`; S5: `levers/scaling/01-DESIGN.md` §6.5).
 //!
 //! # What it computes
 //!
@@ -84,7 +85,7 @@
 //! |---|---|
 //! | `phys_bp_verify` | the locator, the verify pass, maintenance (leaf scan, list pass, compaction, admission) — unconditionally, once per step; the cursor stamp follows the assembly, outside the zones |
 //! | `phys_bp_build` | the active tree over Q |
-//! | `phys_bp_query` | each Q row, in Morton order, against the active tree (`row > query`), the static tree and the sleeper tree, by the selected [`QueryKernel`](crate::broadphase_tree::QueryKernel); then each Wide row's loop. Every row's partners form one segment `[< row \| > row]` in one stream |
+//! | `phys_bp_query` | each Q row, in Morton order, against the active tree (`row > query`), the static tree and the sleeper tree, by the selected [`QueryKernel`](crate::broadphase_tree::QueryKernel) — with S5's switch on, the leaf-list query in chunks on the pool (`parallel.rs`); then each Wide row's loop. Every row's partners form one segment `[< row \| > row]` in one stream |
 //! | `phys_bp_assemble` | rev counts → bucket starts → a scatter over rows ascending → `resize(P)` → a per-row merge of its forward run, its `SS` run and its bucket (`SL` is not merged: T3) |
 //!
 //! The counters `phys_bp_queried` (`|Q| + |Wide|`), `phys_bp_members` (`|S| + |Z|`) and
@@ -124,7 +125,8 @@
 //! this figure, are the placement's proof). `SL` is the cohort's column too, owned by
 //! [`ContactPairs`] as its `withheld` list (T3). Function-local scratch is the traversal stack,
 //! the radix histogram and the leaf-list query's three candidate lists (`kernel::CandList`,
-//! about 4.4 KB each on the stack, never initialised as a whole). No `Vec`, no pool, no atomics.
+//! about 4.4 KB each on the stack, never initialised as a whole). No `Vec`. A step S5 dispatches
+//! (`parallel.rs`) opens one `pool.scope` and keeps its per-chunk slots in function-local atomics.
 //!
 //! The non-default `bp-query-counts` feature (C3b, the query-cost investigation) adds the
 //! `counts` module and, per tree, one probe of relaxed atomics holding the last query's counts.
@@ -163,8 +165,14 @@ pub(crate) mod bvh;
 #[cfg(feature = "bp-query-counts")]
 pub mod counts;
 pub(crate) mod kernel;
+mod parallel;
 #[cfg(test)]
 mod tests;
+
+pub use self::parallel::{
+    S5_CHUNKS_PER_LANE, S5_MAX_CHUNKS, S5_MIN_LEAVES, S5_MIN_LEAVES_PER_CHUNK, S5_MIN_ROW_ENTRIES,
+    S5_ROW_SLACK, S5_SPIN_BURST, s5_chunk_count,
+};
 
 /// Row counts at or below which the Tree runs the brute all-pairs loop instead of the tree.
 ///
@@ -486,6 +494,21 @@ pub struct BroadphaseTree {
     brute_max_rows: u32,
     /// The Q rows' query kernel.
     kernel: QueryKernel,
+    /// S5's switch: `PhysicsConfig::parallel_tree_query` as the broadphase system mirrored it
+    /// on the last Tree step, or what a direct-drive harness set (`false` by default).
+    parallel_query: bool,
+    /// S5's history: the last tree-path step's queried rows (`|Q| + |Wide|`; `0` before the
+    /// first), whose density cuts the next dispatched step's stream regions.
+    hist_rows: u64,
+    /// S5's history: the last tree-path step's stream entries (`fwd + rev`).
+    hist_entries: u64,
+    /// Tree-path steps whose leaf-list query ran on the pool (S5).
+    query_dispatches: u64,
+    /// Active leaf nodes the calling thread answered after a dispatched step's join (S5's tail).
+    query_tail_leaves: u64,
+    /// S5's unit-gate knobs and last-dispatch witness (test builds only).
+    #[cfg(test)]
+    s5_hooks: parallel::TestHooks,
     /// The leaf-list collection cap, lowered by the fallback gate (test builds only; every
     /// other build uses `kernel::LEAF_LIST_CAP`).
     #[cfg(test)]
@@ -548,6 +571,13 @@ impl BroadphaseTree {
             rent: [0; 2],
             brute_max_rows: TREE_BRUTE_MAX_ROWS,
             kernel: QueryKernel::default(),
+            parallel_query: false,
+            hist_rows: 0,
+            hist_entries: 0,
+            query_dispatches: 0,
+            query_tail_leaves: 0,
+            #[cfg(test)]
+            s5_hooks: parallel::TestHooks::default(),
             #[cfg(test)]
             leaf_list_cap: LEAF_LIST_CAP,
             #[cfg(any(test, feature = "bp-query-counts"))]
@@ -604,6 +634,38 @@ impl BroadphaseTree {
     #[inline]
     pub fn query_kernel(&self) -> QueryKernel {
         self.kernel
+    }
+
+    /// Sets S5's switch for a direct-drive harness ([`step_direct`](Self::step_direct),
+    /// [`step_translated`](Self::step_translated)). In a world, the broadphase system writes it
+    /// from `PhysicsConfig::parallel_tree_query` before every Tree step, so a write here is
+    /// overwritten by the next step: set the configuration field instead.
+    #[inline]
+    pub fn set_parallel_query(&mut self, on: bool) {
+        self.parallel_query = on;
+    }
+
+    /// S5's switch as the tree last read it: the configuration's `parallel_tree_query` of the
+    /// last Tree step in a world, or what a direct-drive harness set.
+    #[inline]
+    pub fn parallel_query(&self) -> bool {
+        self.parallel_query
+    }
+
+    /// Tree-path steps whose leaf-list query ran on the pool (S5), cumulative: one per dispatched
+    /// step, none on a step that ran the serial pass. Not a [`TreeDiag`] field: it depends on the
+    /// worker count, and `TreeDiag` is compared across worker counts.
+    #[inline]
+    pub fn query_dispatches(&self) -> u64 {
+        self.query_dispatches
+    }
+
+    /// Active leaf nodes the calling thread answered after a dispatched step's join (S5's tail: a
+    /// leaf node that would pass its chunk's stream region or whose collection passed the cap),
+    /// cumulative. Worker-count dependent, like [`query_dispatches`](Self::query_dispatches).
+    #[inline]
+    pub fn query_tail_leaves(&self) -> u64 {
+        self.query_tail_leaves
     }
 
     /// The leaf-list collection cap: `kernel::LEAF_LIST_CAP`, or the fallback gate's lowered
@@ -748,10 +810,14 @@ impl BroadphaseTree {
             let _zone = zone!(PHYS_BP_QUERY);
             self.query_all(n)
         };
-        {
+        let entries = {
             let _zone = zone!(PHYS_BP_ASSEMBLE);
-            self.assemble(n, out);
-        }
+            self.assemble(n, out)
+        };
+        // S5's history: the density the next dispatched step's stream regions are cut from. Both
+        // are functions of the pair set, so the layout they give is worker-count independent.
+        self.hist_rows = queried;
+        self.hist_entries = entries;
 
         counter!(PHYS_BP_QUERIED, queried);
         counter!(PHYS_BP_MEMBERS, u64::from(self.members[IX_S] + self.members[IX_Z]));
@@ -1357,6 +1423,11 @@ impl BroadphaseTree {
     /// (row order), appending each row's segment to the stream. Returns `|Q| + |Wide|`.
     fn query_all(&mut self, n: usize) -> u64 {
         let cap = self.leaf_list_cap();
+        // S5 is decided before any view of the stream or the records is taken: a dispatched
+        // step's chunks write through the columns' solve views, and no slice over either may
+        // exist from the scope's opening to its join (`parallel.rs`).
+        let parallel =
+            self.parallel_query && self.kernel == QueryKernel::LeafList && self.try_parallel_query(cap);
         let Self {
             active,
             statics,
@@ -1375,22 +1446,24 @@ impl BroadphaseTree {
         let mut stream = aux.build_view();
         let trees = Trees { active, statics, sleepers };
 
-        match *kernel {
-            QueryKernel::LeafList => leaf_list_pass(
-                trees,
-                recs,
-                &mut stream,
-                cap,
-                diag,
-                #[cfg(any(test, feature = "bp-query-counts"))]
-                ll_counts,
-            ),
-            QueryKernel::RowWalk => {
-                stream.clear();
-                for slot in 0..active.leaves() {
-                    row_walk_slot(trees, recs, &mut stream, slot);
+        if !parallel {
+            match *kernel {
+                QueryKernel::LeafList => leaf_list_pass(
+                    trees,
+                    recs,
+                    &mut stream,
+                    cap,
+                    diag,
+                    #[cfg(any(test, feature = "bp-query-counts"))]
+                    ll_counts,
+                ),
+                QueryKernel::RowWalk => {
+                    stream.clear();
+                    for slot in 0..active.leaves() {
+                        row_walk_slot(trees, recs, &mut stream, slot);
+                    }
+                    diag.row_walk_leaves += u64::from(active.leaves().div_ceil(LANES as u32));
                 }
-                diag.row_walk_leaves += u64::from(active.leaves().div_ceil(LANES as u32));
             }
         }
 
@@ -1429,8 +1502,9 @@ impl BroadphaseTree {
 
     /// Places every pair: the rev entries are bucketed by their smaller row (a count, an
     /// exclusive prefix and a scatter over rows ascending, so each bucket arrives sorted), then
-    /// each row's forward run, `SS` run and bucket are merged in order.
-    fn assemble(&mut self, n: usize, out: &mut ContactPairs) {
+    /// each row's forward run, `SS` run and bucket are merged in order. Returns the stream's
+    /// entries, `fwd + rev` (S5's history).
+    fn assemble(&mut self, n: usize, out: &mut ContactPairs) -> u64 {
         let Self { rec, cur, aux, ss, .. } = self;
         let recs = rec[usize::from(*cur)].as_read_slice();
         let ss = ss.as_read_slice();
@@ -1499,6 +1573,7 @@ impl BroadphaseTree {
         }
         debug_assert_eq!(w, p, "every pair was placed exactly once");
         debug_assert_eq!(c, ss.len(), "every SS entry was placed");
+        (fwd_total + rev_total) as u64
     }
 }
 

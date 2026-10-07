@@ -184,6 +184,9 @@ mod tests {
             colored: true,
             parallel_solve: false,
             parallel_narrowphase: false,
+            // Derived, not a literal: S5's C4 flips the default, and a literal would then
+            // compare the default with itself (the `off_default_kind` lesson).
+            parallel_tree_query: !PhysicsConfig::default().parallel_tree_query,
             contact_reuse: false,
             contact_reuse_distance: 0.0025,
             // Off both of V2's values (0 before its C5, 0.02 after).
@@ -234,6 +237,7 @@ mod tests {
             colored,
             parallel_solve,
             parallel_narrowphase,
+            parallel_tree_query,
             contact_reuse,
             contact_reuse_distance,
             speculative_distance,
@@ -267,6 +271,7 @@ mod tests {
         assert_eq!(colored, b.colored, "colored");
         assert_eq!(parallel_solve, b.parallel_solve, "parallel_solve");
         assert_eq!(parallel_narrowphase, b.parallel_narrowphase, "parallel_narrowphase");
+        assert_eq!(parallel_tree_query, b.parallel_tree_query, "parallel_tree_query");
         assert_eq!(contact_reuse, b.contact_reuse, "contact_reuse");
         assert_eq!(
             contact_reuse_distance.to_bits(),
@@ -320,6 +325,7 @@ mod tests {
             colored,
             parallel_solve,
             parallel_narrowphase,
+            parallel_tree_query,
             contact_reuse,
             contact_reuse_distance,
             speculative_distance,
@@ -354,6 +360,7 @@ mod tests {
         assert_ne!(colored, b.colored, "{why} colored");
         assert_ne!(parallel_solve, b.parallel_solve, "{why} parallel_solve");
         assert_ne!(parallel_narrowphase, b.parallel_narrowphase, "{why} parallel_narrowphase");
+        assert_ne!(parallel_tree_query, b.parallel_tree_query, "{why} parallel_tree_query");
         assert_ne!(contact_reuse, b.contact_reuse, "{why} contact_reuse");
         assert_ne!(
             contact_reuse_distance.to_bits(),
