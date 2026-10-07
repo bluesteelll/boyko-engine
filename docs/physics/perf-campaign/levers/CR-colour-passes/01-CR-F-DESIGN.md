@@ -13,9 +13,10 @@ The design's finding (ruling 26(a)) is that J-T already sits at its colouring lo
 
 Sources: the design `D:/tmp/phys-orch/cr/design_r2.md` (§4, §16) and its final critique
 `cr/critique_final.md`; the plan `phys-next/LEVERS-R2-PLAN.md` rev 2 (§2.1, §4.1, §6); the lane cut
-`cr-f/cut.md` and its review (with the implementation's addendum at its end). Code is cited by
-symbol at the CR-F0 code tip `50d66aa0` on `u/phys-cr-f`. This file is not in
-`tests/internal_docs_anchors.rs`'s `GATED_DOCS`; its anchors are not machine-checked.
+`cr-f/cut.md` and its review (with the implementation's addendum at its end), and the fix round
+`cr-f/fix_r1.md` (after `cr-f/test_r1.md` and `cr-f/triage_r1.md`). Code is cited by symbol at the
+CR-F0 code tip `50d66aa0` on `u/phys-cr-f`, and at `08d522cd` for what fix r1 changed. This file is
+not in `tests/internal_docs_anchors.rs`'s `GATED_DOCS`; its anchors are not machine-checked.
 
 ---
 
@@ -62,7 +63,11 @@ Each item boundary has exactly one advancer:
   `poison` is word 1 of the sync line whose word 0 the wait spins on, so the poll adds no line
   traffic. **Participant 0 waits on `ORCH_WAIT`, helpers on `HELPER_WAIT`** (critique W-A): SR's
   waiter axes Rd/Rd2 (helpers) and Re (participant 0) keep their meaning, and `Re+fin` / `all+fin`
-  mean "participant 0 waits for the publish, made by the completer, on its own ladder".
+  mean "participant 0 waits for the publish, made by the completer, on its own ladder". No run can
+  see which ladder waited (the finisher's wait is disarmed; loom models PAUSE and yield alike), so
+  the choice is the `const fn publish_wait_ladder::<P, P0>()`, gated by value in `region::tests`
+  (`a_finisher_waits_for_a_publish_on_its_roles_ladder`, two policies whose ladders differ; fix r1
+  F2), and in codegen by the FIN receipt's yield references (§4).
 - **Inline items never leave participant 0** (W4): `p0_boundary` is reached only on participant 0's
   paths, and `fin_inline_runs_stay_on_participant_0` / LF2 gate it.
 - **Ruling 17 B1 for any advancer.** `publish_next` resets the done line before the Release publish in
@@ -86,14 +91,24 @@ Each item boundary has exactly one advancer:
   published + 1`. `report` debug-asserts it on every region; `check_report` (region tests), loom's
   `assert_receipts` and ω_b's `Frame3::check` assert it in release. Under the finisher it is the
   witness that the schedule ran, since `published` is a table walk.
-- The orchestrator sets its count once, at its END exit (`published + 1`): no increment in v2's loop.
+- The orchestrator's count (`published + 1`) is recorded once per region, after `run_orchestrator`
+  returns and only after a normal END: `orchestrate` (every caller of the orchestrator goes through
+  it) calls `Participant::record_orchestrated_advances`, which reads participant 0's own exit word and
+  stores the advance word. No increment in v2's loop. Fix r1 (triage N1) moved it there from the END
+  exit, where the one store re-allocated registers across v2's whole item loop (§4). A poisoned
+  orchestrated region therefore counts no advance in any receipt (asserted in `region_panic`'s
+  orchestrator cases).
 
 ### 1.5 Cost when off
 
 `V2Policy`'s monomorph gains the `R_ADVANCES` store in `store_receipt` (normal exits and the unwind
-body), the END-exit `published + 1`, `report`'s two sums and the `Participant` / `RegionReport`
-layout growth (+8 B, +16 B). `claim_sweep::<_, _, V2Policy, false>` returns a constant `false` its
-callers ignore. G-CR-F-RCPT (§4) is the codegen receipt for exactly this list.
+body), one out-of-line `record_orchestrated_advances` call per region after `run_orchestrator`
+returns, `report`'s two sums and the `Participant` / `RegionReport` layout growth (+8 B, +16 B).
+`claim_sweep::<_, _, V2Policy, false>` returns a constant `false` its callers ignore. `Participant`
+is `repr(C)` with `advances` after `armed` (fix r1 (h)): four adjacent zeroed `u64`s were one ymm
+store, after which LLVM put a `vzeroupper` before every call of the v2 helper task, the per-block
+stage call among them; every older field keeps its v2 offset. G-CR-F-RCPT (§4) is the codegen
+receipt for this list; its fix r1 reading is that v2's per-item and per-block code is v2's.
 
 ---
 
@@ -113,6 +128,10 @@ callers ignore. G-CR-F-RCPT (§4) is the codegen receipt for exactly this list.
   helper starts block 1, and that helper panics 5 ms later, so participant 0 waits in
   `wait_publish_fin` with nobody left to publish an END; unbounded `Fin<V2Policy>`, W 2/4/8, a 10 s
   watchdog per attempt, a `fired` anti-vacuity. One new ignore site, `miri-unsupported` (cut Q4).
+- **Fix r1:** the orchestrator cases of `region_panic` (cases 1–4) assert that no receipt of their
+  poisoned region counted an advance (case 4 is red when `record_orchestrated_advances` records on
+  any exit; in cases 1–3 participant 0 unwinds and never reaches it);
+  `region::tests::a_finisher_waits_for_a_publish_on_its_roles_ladder` gates W-A (§1.3).
 - **The bounded red that physics cannot carry** (critique W-B): "the finisher omits its last add" is
   red in every `fin_t1_t2_*` as `RegionWaitBound { participant: 0, g: 2 }`; no physics test carries
   it.
@@ -146,7 +165,44 @@ one class of cut Q2 ((a) the receipt store, (b) the END-exit count, (c) `report`
 (d) layout displacements, (e) `Frame3::check`'s identity asserts, (f) the SUMMARY keys) — plus, by the
 implementation addendum, (g) `claim_sweep`'s constant `false` return if the parent's
 `claim_sweep::<_, _, V2Policy>` is out of line. Any other hunk is red and goes to the orchestrator
-with the asm. The FIN set must read no clock. **Result: pending** the lane tester's round.
+with the asm. The FIN set must read no clock.
+
+**The V2 set is a call graph, not a name filter** (triage r1 N1; fix r1). LLVM merges identical
+monomorphs under one representative whose name may be another policy's: V2's orchestrator is
+`run_orchestrator<FrameWords, Stages3, V3Rd, false>` in this binary, which the `8V2Policy` filter
+never selected. Fix r1's extractor (`cr-f/fix1/rcpt2.py`) walks every function reachable from the
+V2-named roots on both sides, pairs a callee with its namesake when its normalised name labels one
+function on each side, and otherwise pairs it by call-site position (merged representatives,
+compared body against body). A call whose target changed is a visible line change. Funclets pair by
+identical body first, then by index.
+
+**Results.**
+- **Test r1 (name filter): RED**, two unattributed classes: (h) the v2 helper task's 12 new
+  `vzeroupper` (the 32-byte `Participant` zero-init became one ymm store), and (i) callee renames
+  under function merging.
+- **Triage r1: a third, N1.** V2's merged orchestrator went 263 → 273 instructions: the END-exit
+  `published + 1` re-allocated registers across its item loop, spilling the sync line's pointer, so
+  all four `poison` polls and both publish stores gained a stack reload. Removing that one line
+  restored v2's body.
+- **Fix r1, parent `b46cf0ec` against the tip `08d522cd`** (155 pairs, 9680 → 9736 instructions,
+  `vzeroupper` 46 → 46, clock sites 14 → 14):
+  - the orchestrator is v2's body (263 → 263, no hunk: only `Stages3::run_block`'s impl index
+    differs, body-identical);
+  - the v2 helper task has no ymm and no `vzeroupper` (324 → 325; frame size and one 8-byte zero
+    store, class (d));
+  - `store_receipt` is class (a); no finisher code is reachable from a V2 root (the two
+    `WithAdvance`-named functions reached are body-identical merged representatives);
+  - **left for the orchestrator's ruling, by the letter outside (a)–(g):** (i) nine channel
+    functions of ω_b's result transport, monomorphised over a message that grows 384 → 448 B with
+    `RegionReport`, and three call sites retargeted to them in the row's `run_detached` task and its
+    funclet (all after the region's timed interval); and the v2 row closure (442 → 473), whose
+    per-region code carries the two `record_orchestrated_advances` call sites (one runs per region),
+    `report`'s sums and the register re-allocation around them — inside ω_b's timed interval, none in
+    a per-item or per-block loop.
+
+  The pre-fix tip on the same extractor reads 12 hunks in the orchestrator and `vzeroupper` 0 → 12
+  in the helper task (the method's red). The FIN set reads 0 yield references in participant 0's
+  closure and 2 in the helper task (W-A in codegen).
 
 ## 5. ω_b (`crates/boyko_physics/benches/omega_b_region.rs`) and window SR
 
