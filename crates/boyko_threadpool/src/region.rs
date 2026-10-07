@@ -1839,8 +1839,9 @@ fn debug_table_checks<P: RegionPolicy>(w: &FrameWords<'_>) {
 // =========================================================================
 
 /// The loom frame view: model-owned loom atomics and a loom-tracked table, so the models drive the
-/// production protocol core ([`open`], [`run_orchestrator`], [`run_helper`], the guards) over
-/// atomics loom can see. `cfg(loom)` only; re-exported through `loom_exports::region`.
+/// production protocol core ([`open`], the role entries [`run_participant0`] and
+/// [`run_helper_participant`], the guards) over atomics loom can see. `cfg(loom)` only;
+/// re-exported through `loom_exports::region`.
 #[cfg(loom)]
 pub struct LoomRegionWords {
     sync: [AtomicU64; 2],

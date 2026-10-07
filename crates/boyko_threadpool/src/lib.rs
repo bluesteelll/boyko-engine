@@ -365,12 +365,15 @@ pub mod loom_exports {
         crate::worker::publish_fence();
     }
 
-    /// SR — the region protocol's production core for `tests/loom_region.rs` (M-R1…M-R15).
+    /// SR — the region protocol's production core for `tests/loom_region.rs` (M-R1…M-R15, their
+    /// `_fin` twins under the finisher advance, and LF1–LF4; CR-F).
     ///
     /// No `PoolInner` can be built under loom, so the models drive the protocol below the pool:
-    /// the real `open` (the epoch reservation, the open reset, OPEN), the real participant loops
-    /// and the real unwind guards, over [`LoomRegionWords`] — model-owned loom atomics and a
-    /// loom-tracked table. Each function is one call into `crate::region` (C1).
+    /// the real `open` (the epoch reservation, the open reset, OPEN), the real role entries
+    /// `PoolInner::region` calls — participant 0's and a helper's, each choosing the orchestrator
+    /// or the finisher by its policy at compile time — and the real unwind guards, over
+    /// [`LoomRegionWords`]: model-owned loom atomics and a loom-tracked table. Each function is one
+    /// call into `crate::region` (C1).
     pub mod region {
         use crate::region::{OrchStats, Participant};
         use crate::{RegionPolicy, RegionReport, RegionStages};
@@ -420,52 +423,36 @@ pub mod loom_exports {
             crate::region::run_helper_participant::<_, S, P, false>(words, stages, &mut part);
         }
 
-        /// Participant 0 over the real protocol, its guard created here (as inside
-        /// `PoolInner::region`'s scope closure). The returned report carries the orchestrator's
-        /// counts only; the receipts are read from the words.
-        #[inline]
-        pub fn run_orchestrator<S: RegionStages, P: RegionPolicy>(
-            words: &LoomRegionWords,
-            base: u64,
-            stages: &S,
-        ) -> RegionReport {
-            let mut part = Participant::new(words, base, 0);
-            report(base, crate::region::run_orchestrator::<_, S, P, false>(words, stages, &mut part))
+        /// A participant with a guard the MODEL owns, so M-R10 can place participant 0's guard
+        /// relative to the helpers' join exactly as `PoolInner::region` does (and its mutation can
+        /// place it wrong). Dropped while armed — by an unwind — it runs the real unwind body.
+        pub struct LoomParticipant<'a> {
+            part: Participant<'a, LoomRegionWords>,
+            index: u32,
         }
 
-        /// Helper `h` over the real protocol, its guard created here.
-        #[inline]
-        pub fn run_helper<S: RegionStages, P: RegionPolicy>(
-            words: &LoomRegionWords,
-            base: u64,
-            h: u32,
-            stages: &S,
-        ) {
-            let mut part = Participant::new(words, base, h);
-            crate::region::run_helper::<_, S, P, false>(words, stages, &mut part);
-        }
-
-        /// Participant 0 with a guard the MODEL owns, so M-R10 can place it relative to the
-        /// helpers' join exactly as `PoolInner::region` does (and its mutation can place it
-        /// wrong). Dropped while armed — by an unwind — it runs the real unwind body.
-        pub struct LoomOrchestrator<'a>(Participant<'a, LoomRegionWords>);
-
-        impl<'a> LoomOrchestrator<'a> {
-            /// The armed guard of participant 0 of the region based at `base`.
+        impl<'a> LoomParticipant<'a> {
+            /// The armed guard of participant `index` of the region based at `base`.
             #[inline]
-            pub fn new(words: &'a LoomRegionWords, base: u64) -> Self {
-                Self(Participant::new(words, base, 0))
+            pub fn new(words: &'a LoomRegionWords, base: u64, index: u32) -> Self {
+                Self { part: Participant::new(words, base, index), index }
             }
 
-            /// Runs the schedule as participant 0 (the real orchestrator loop).
+            /// Runs the schedule through this participant's production role entry. Participant
+            /// 0's report carries its counts; a helper's carries only the base.
             #[inline]
             pub fn run<S: RegionStages, P: RegionPolicy>(
                 &mut self,
                 words: &LoomRegionWords,
                 stages: &S,
             ) -> RegionReport {
-                let base = self.0.base();
-                report(base, crate::region::run_orchestrator::<_, S, P, false>(words, stages, &mut self.0))
+                let base = self.part.base();
+                if self.index == 0 {
+                    report(base, crate::region::run_participant0::<_, S, P, false>(words, stages, &mut self.part))
+                } else {
+                    crate::region::run_helper_participant::<_, S, P, false>(words, stages, &mut self.part);
+                    RegionReport { base, ..RegionReport::default() }
+                }
             }
         }
     }
