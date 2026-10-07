@@ -321,6 +321,8 @@ pub(super) struct TestHooks {
     pub(super) last_participants: usize,
     /// The last dispatch's chunks per participant (`[0]` the caller).
     pub(super) last_ran: [u32; MAX_WORKERS],
+    /// The per-row budget the last dispatch cut its regions with (`Layout::budget`; triage r2 F1).
+    pub(super) last_budget: usize,
 }
 
 #[cfg(test)]
@@ -335,6 +337,7 @@ impl Default for TestHooks {
             pool_free_lanes: None,
             last_participants: 0,
             last_ran: [0; MAX_WORKERS],
+            last_budget: 0,
         }
     }
 }
@@ -503,6 +506,7 @@ impl BroadphaseTree {
         #[cfg(test)]
         {
             self.s5_hooks.last_participants = participants;
+            self.s5_hooks.last_budget = layout.budget;
             for (slot, r) in self.s5_hooks.last_ran.iter_mut().zip(&ran) {
                 *slot = r.load(Ordering::Relaxed);
             }

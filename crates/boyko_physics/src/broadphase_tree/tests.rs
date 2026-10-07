@@ -52,7 +52,7 @@ use super::kernel::{
     leaf_mask_above, leaf_mask_above_scalar, leaf_mask_scalar, sort_network, sort_network_scalar,
 };
 use super::{
-    ADMIT_BUILD_RATIO, BroadphaseTree, JUMPER, KIND_EXCLUDED, KIND_WIDE, LeafListCounts, NoHint,
+    ADMIT_BUILD_RATIO, BroadphaseTree, JUMPER, KIND_EXCLUDED, KIND_NORMAL, KIND_WIDE, LeafListCounts, NoHint,
     QueryKernel, SET_NONE, SET_S, SET_Z, SleepHint, TREE_BRUTE_MAX_ROWS, TreeDiag, all_pairs_into,
     classify, mark_jumpers, merge_into_sorted, sphere_bound_feasible,
 };
@@ -2296,6 +2296,37 @@ fn assert_s5_equals_serial(par: &Sim, serial: &Sim, what: &str) {
     assert_eq!(par.tree.ll_counts, serial.tree.ll_counts, "{what}: S5's LeafListCounts are the serial pass's");
 }
 
+/// The last tree-path step's density `(E, R)` recounted from what the step left behind, never from
+/// what `run` recorded (triage r2 F1): `E` is the pair list's length less its `SS` run — the
+/// assembly places `fwd + rev + |SS|` pairs — cross-checked against `Σ (nfwd + nrev)` over the
+/// records; `R` is the records' Q rows (Normal, in no set: the active tree's items) plus their
+/// Wide rows. Valid right after a tree-path step, before anything else touches the tree or `out`.
+fn s5_recount_history(sim: &Sim) -> (u64, u64) {
+    let n = sim.bodies.len();
+    let tree = &sim.tree;
+    let recs = &tree.rec[usize::from(tree.cur)].as_read_slice()[..n];
+    let by_pairs = (sim.out.pairs_stream().len() - tree.ss.as_read_slice().len()) as u64;
+    let by_recs: u64 = recs.iter().map(|r| u64::from(r.nfwd) + u64::from(r.nrev)).sum();
+    assert_eq!(by_recs, by_pairs, "the pair list is not the records' fwd + rev entries plus SS");
+    let rows = recs
+        .iter()
+        .filter(|r| (r.kind() == KIND_NORMAL && r.set() == SET_NONE) || r.kind() == KIND_WIDE)
+        .count() as u64;
+    (by_pairs, rows)
+}
+
+/// The history a tree-path step recorded is that step's recounted density (triage r2 F1): the
+/// per-row budget of the next dispatched step is cut from these two numbers, and the cut is
+/// value-neutral, so no pair, pose or dispatch gate can see a wrong one.
+fn assert_s5_history(sim: &Sim, what: &str) {
+    let (entries, rows) = s5_recount_history(sim);
+    assert_eq!(
+        (sim.tree.hist_entries, sim.tree.hist_rows),
+        (entries, rows),
+        "{what}: S5's history (stream entries, queried rows) is not the step's recount"
+    );
+}
+
 /// The S5 receipt the scripts check on every step: whether this step should have dispatched, from
 /// the step's own active tree and the history the step started with (`parallel.rs`, "When a step
 /// dispatches"; the reserve term never binds at these sizes).
@@ -2393,6 +2424,10 @@ impl S5Twin {
         let expected = s5_expected(&self.par.tree, had_history, tree_path, self.workers);
         assert_eq!(dispatched, u64::from(expected), "S5's dispatch receipt (n = {n}, W = {})", self.workers);
         assert_s5_equals_serial(&self.par, &self.serial, &format!("n = {n}, W = {}", self.workers));
+        if tree_path {
+            assert_s5_history(&self.serial, &format!("serial, n = {n}"));
+            assert_s5_history(&self.par, &format!("S5, n = {n}, W = {}", self.workers));
+        }
         self.serial.check_oracle();
         self.dispatched += dispatched;
         dispatched == 1
@@ -2507,6 +2542,55 @@ fn s5_row_budget_follows_the_formula() {
     assert_eq!(row_budget(10, 2), 8, "⌈30 / 4⌉: at the floor");
     assert_eq!(row_budget(100, 1_240), 8, "a sparse step, ⌈300 / 2,480⌉ = 1: raised to the floor");
     assert_eq!(row_budget(0, 7), 8, "an empty stream: the floor");
+}
+
+/// The per-row budget a dispatched step cuts its regions with is the formula over the previous
+/// tree-path step's recounted density (triage r2 F1), on a world dense enough to lift it off the
+/// floor: a 7 × 7 × 6 lattice of radius-0.9 spheres on a unit pitch, where every sphere's bound
+/// reaches its 26 lattice neighbours (`√3 ≤ 1.8 < 2`) — 2,741 pairs over 294 Q rows, 9.3 entries a
+/// row, budget `⌈8,223 / 588⌉ = 14` — in 37 active leaf nodes, above the inline threshold, so the
+/// production rules dispatch it. The formula table gates `row_budget` on literals and
+/// [`assert_s5_history`] gates what a step records; this gate is the call between them: a halved
+/// input or the two arguments swapped both give the floor of 8 here.
+#[cfg(not(miri))]
+#[test]
+fn s5_dispatch_budget_is_the_recounted_history() {
+    use super::parallel::{S5_MIN_ROW_ENTRIES, row_budget};
+    let bodies: Vec<BodyState> = (0..294)
+        .map(|k| sphere([(k % 7) as f32, (k / 7 % 7) as f32, (k / 49) as f32], 0.9, 1.0, false))
+        .collect();
+    for workers in [2usize, 8] {
+        let mut twin = S5Twin::production(bodies.clone(), workers);
+        let mut prev: Option<(u64, u64)> = None;
+        for step in 1..=4 {
+            let dispatched = twin.step_with(false, None);
+            assert_eq!(
+                twin.par.tree.active.leaf_nodes().len(),
+                37,
+                "test setup: step {step}'s lattice built another active leaf-node count"
+            );
+            if dispatched {
+                let (entries, rows) = prev.expect("invariant: a dispatched step follows a tree-path step");
+                let want = row_budget(entries, rows);
+                assert!(
+                    want > S5_MIN_ROW_ENTRIES,
+                    "anti-vacuity: the recounted density ({entries} entries over {rows} rows) gives the \
+                     floor, {want}, which a wrong input gives too"
+                );
+                assert_eq!(
+                    twin.par.tree.s5_hooks.last_budget,
+                    want,
+                    "S5: W{workers} step {step} cut its regions with another per-row budget than \
+                     row_budget({entries}, {rows}) over the previous step's recount"
+                );
+            }
+            // The serial twin never dispatches: its recount owes nothing to the S5 tree's state.
+            let density = s5_recount_history(&twin.serial);
+            assert_eq!(density, (2_741, 294), "test setup: step {step}'s lattice pairs over its Q rows");
+            prev = Some(density);
+        }
+        assert_eq!(twin.dispatched, 3, "anti-vacuity: S5 dispatched on every step after the first at W{workers}");
+    }
 }
 
 /// The inline threshold under the production rules (no hook; triage r1 G1): a world of 31 active
