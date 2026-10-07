@@ -135,7 +135,8 @@ fn build_graph(bodies: &[BodyState], manifolds: &[Manifold]) -> ConstraintGraph 
 
 /// The stage kinds the region runs at this commit, each held to the per-kind guard under Miri.
 #[cfg(miri)]
-const GUARDED_KINDS: [&str; 7] = ["gravity", "warm", "biased", "integrate", "relax", "fill", "store"];
+const GUARDED_KINDS: [&str; 8] =
+    ["gravity", "gravity_first", "warm", "biased", "integrate", "relax", "fill", "store"];
 
 /// Every grain term at its floor.
 const LOWERED: RegionGrain =

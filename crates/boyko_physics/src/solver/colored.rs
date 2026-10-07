@@ -971,27 +971,28 @@ struct SolveStep<'a> {
     /// Whether the speculative branch runs: `PhysicsConfig::speculative_contacts`. Off, every
     /// kernel runs its `SPEC = false` instance, the pre-V2 instruction stream.
     spec: bool,
-    /// Each body row's accumulated movement over the step, written by the tracked integrate;
-    /// read only when `spec` (empty otherwise). Never written during a sweep.
+    /// Each body row's accumulated movement over the step, reset by the step's reset and written by
+    /// the tracked integrate; read only when `spec` (empty otherwise). Never written during a sweep.
     deltas: ScratchSolveView<'a, BodyDelta>,
 }
 
 /// Copy of body row `i`'s accumulated step movement through the delta view (V2).
 ///
 /// # Safety contract (caller)
-/// `i < deltas.len()` — a gathered body row on a `spec` step, whose delta column the build
-/// resized to the gathered row count — and no writer of the column during the sweep (the tracked
-/// integrate runs between sweeps: on one thread serially, as the Integrate stage's row blocks in
-/// the solve region, which never share an item with a sweep).
+/// `i < deltas.len()` — a gathered body row on a `spec` step, whose delta column the step's reset
+/// sized to the gathered row count — and no writer of the column during the sweep (the tracked
+/// integrate and the step's reset run between sweeps: on one thread serially, or as the Integrate
+/// stage's and the first gravity stage's row blocks in the solve region, which never share an
+/// item with a sweep).
 #[inline]
 fn delta_copy(deltas: ScratchSolveView<'_, BodyDelta>, i: usize) -> BodyDelta {
     debug_assert!(i < deltas.len(), "invariant: a speculative lane's body row has a delta");
     // SAFETY: `i < deltas.len()` (the contract, debug-asserted): `row_ptr(i)` is the live `i`-th
     //   element on the column's address-stable base. The column is written only by the tracked
-    //   integrate — serially between sweeps, or by the solve region's Integrate stage, whose blocks
-    //   write disjoint rows and never run while a sweep runs (the region's item barrier) — so this
-    //   read aliases no write, whichever worker makes it. `BodyDelta: Copy`, so the read is a byte
-    //   copy with no drop glue.
+    //   integrate and the step's reset — serially between sweeps, or in the solve region by its
+    //   Integrate stage and its first gravity stage, whose blocks write disjoint rows and never run
+    //   while a sweep runs (the region's item barrier) — so this read aliases no write, whichever
+    //   worker makes it. `BodyDelta: Copy`, so the read is a byte copy with no drop glue.
     unsafe { *deltas.row_ptr(i) }
 }
 
@@ -1954,8 +1955,9 @@ pub struct ColoredSoftStepSolver {
     bodies: ScratchColumn<BodyEffective>,
     /// V2: each body row's accumulated movement over the step (`dp`, `dq`), parallel to
     /// `bodies`, for the speculative current separation. Reset to `(0, IDENTITY)` for every row
-    /// at the build of a step whose speculative contacts are on and advanced by the tracked
-    /// integrate; untouched (and unread) otherwise. Its own column, not a field of
+    /// before the first sweep of a step whose speculative contacts are on (serially after the
+    /// build, or by a region step's first gravity stage; [`reset_deltas`](Self::reset_deltas)) and
+    /// advanced by the tracked integrate; untouched (and unread) otherwise. Its own column, not a field of
     /// [`BodyEffective`], whose 64 B line every kernel gather reads.
     deltas: ScratchColumn<BodyDelta>,
     /// The cohort tables, in color order (rebuilt each solve, reused).
@@ -2437,9 +2439,9 @@ impl ColoredSoftStepSolver {
     /// so the write guards, gravity, the integrate, the refresh and the write-back leave a held
     /// row as the colouring does.
     ///
-    /// On a speculative step (`spec`, V2) it also resets every row's accumulated movement to
-    /// `(0, IDENTITY)`; the column is not touched otherwise.
-    fn build_bodies(&mut self, bodies: &[BodyState], cls: &[RowCls], spec: bool) {
+    /// V2's per-step reset of the accumulated movement is not here (SR C5): it follows the build,
+    /// where the step knows whether its region resets it ([`reset_deltas`](Self::reset_deltas)).
+    fn build_bodies(&mut self, bodies: &[BodyState], cls: &[RowCls]) {
         debug_assert!(
             cls.is_empty() || cls.len() >= bodies.len(),
             "invariant: a classification covers every row"
@@ -2468,11 +2470,20 @@ impl ColoredSoftStepSolver {
                 angular_velocity: b.angular_velocity,
             });
         }
-        if spec {
-            let mut deltas = self.deltas.build_view();
+    }
+
+    /// V2's per-step reset of every row's accumulated movement to `(0, IDENTITY)`, on a speculative
+    /// step. The invariant is that the reset precedes the step's first sweep, whose K3 reads the
+    /// column (cut B-F2), not merely the first integrate. Serial here on every path but a region
+    /// step (`region`), whose first substep's gravity stage writes the zeros row-parallel (SR C5,
+    /// `SolveStages::reset_delta_rows`); there the column is only sized to the `rows` — grown with
+    /// zeros or cut, never re-filled serially.
+    fn reset_deltas(&mut self, rows: usize, region: bool) {
+        let mut deltas = self.deltas.build_view();
+        if !region {
             deltas.clear();
-            deltas.resize(bodies.len(), BodyDelta::ZERO);
         }
+        deltas.resize(rows, BodyDelta::ZERO);
     }
 
     /// Builds the cohort layout ([`CohortColumns`]) from the graph's color CSR,
@@ -5384,7 +5395,7 @@ impl ColoredSoftStepSolver {
             let warm_remap = {
                 let bodies_zone = zone!(PHYS_SB_BODIES);
                 self.canary.at(&PHYS_SB_BODIES, bodies_zone.is_some());
-                self.build_bodies(scratch.bodies(), cls, spec);
+                self.build_bodies(scratch.bodies(), cls);
                 // Ruling W1: the write guards read the effective inverse mass of the flag the
                 // colouring read, so a held row is immovable to both.
                 debug_assert!(
@@ -5416,6 +5427,11 @@ impl ColoredSoftStepSolver {
             }
             (built.p2, built.setup_wave, built.fill, warm_remap)
         };
+        // V2: the step's accumulated movement starts at `(0, IDENTITY)` before its first sweep —
+        // serially here, or on a region step by its first substep's gravity stage (SR C5).
+        if spec {
+            self.reset_deltas(scratch.bodies_len(), fill.is_some());
+        }
         // W8S (armed only): the setup wave's reading, a solve wave that is not a colour's.
         if let Some(reading) = setup_wave {
             tally.add(&reading, None);
@@ -5971,7 +5987,7 @@ struct RegionTable {
     claims: usize,
 }
 
-/// SR: gravity on a row range.
+/// SR: gravity on a row range (substeps 2..S).
 const SK_GRAVITY: u8 = 0;
 /// SR: one colour's warm start, on a cohort range.
 const SK_WARM: u8 = 1;
@@ -5986,31 +6002,39 @@ const SK_FILL: u8 = 5;
 /// SR: the warm store (pass 1 on a cohort range, pass 2's carry on a manifold range), the region's
 /// last stage on a step where no row can bounce.
 const SK_STORE: u8 = 6;
+/// SR: the first substep's gravity on a row range, which on a speculative step also resets the
+/// rows' accumulated movement (V2's per-step reset, folded here because it precedes the first
+/// sweep; SR C5).
+const SK_GRAVITY_FIRST: u8 = 7;
 /// SR, test builds: the setup digest, one inline block right after the fill (`step_digest`'s
 /// "seeds before the first sweep").
 #[cfg(test)]
-const SK_DIGEST: u8 = 7;
+const SK_DIGEST: u8 = 8;
 /// SR, Miri: the stage kinds the per-kind tally counts.
 #[cfg(miri)]
-const SK_COUNT: usize = 8;
+const SK_COUNT: usize = 9;
 /// SR: each kind's name, by kind.
 #[cfg(miri)]
-const SK_NAMES: [&str; SK_COUNT] = ["gravity", "warm", "biased", "integrate", "relax", "fill", "store", "digest"];
+const SK_NAMES: [&str; SK_COUNT] =
+    ["gravity", "warm", "biased", "integrate", "relax", "fill", "store", "gravity_first", "digest"];
 
-/// SR: the gravity entry's index (the table's fixed entries come first).
+/// SR: the gravity entry's index (the table's fixed entries come first): substeps 2..S.
 const E_GRAVITY: u16 = 0;
+/// SR: the first substep's gravity entry — its own entry, with its own done line and claim lines,
+/// because a block is not told which item runs it (critique W1).
+const E_GRAVITY_FIRST: u16 = 1;
 /// SR: the integrate entry's index.
-const E_INTEGRATE: u16 = 1;
+const E_INTEGRATE: u16 = 2;
 /// SR: the fill entry's index.
-const E_FILL: u16 = 2;
+const E_FILL: u16 = 3;
 /// SR: the store entry's index (scheduled only on a step where no row can bounce).
-const E_STORE: u16 = 3;
+const E_STORE: u16 = 4;
 /// SR, test builds: the digest entry's index.
 #[cfg(test)]
-const E_DIGEST: u16 = 4;
+const E_DIGEST: u16 = 5;
 /// SR: the first colour entry's index; colour `c`'s warm, biased and relax entries follow (the
 /// digest's entry sits before them in test builds).
-const E_COLOURS: usize = if cfg!(test) { 5 } else { 4 };
+const E_COLOURS: usize = if cfg!(test) { 6 } else { 5 };
 
 /// SR: a step's stage table, built serially before its region — counted loops over the colours
 /// and the passes, so IB's presets change only `substeps`, `biased` and `relax` (ruling 15).
@@ -6272,7 +6296,7 @@ impl SolveStages<'_> {
     fn integrate_rows(&self, lo: usize, hi: usize) {
         let n = hi - lo;
         // SAFETY: as `gravity_rows`: rows `[lo, hi)` are live on all three columns (the delta
-        //   column holds every row on a speculative step, `build_bodies`) and this block's alone;
+        //   column holds every row on a speculative step, `reset_deltas`) and this block's alone;
         //   the body rows are read through the shared slice, which dies before the exclusive one
         //   below is formed.
         let snap = unsafe { slice::from_raw_parts_mut(self.snapshot.row_ptr(lo), n) };
@@ -6290,6 +6314,21 @@ impl SolveStages<'_> {
         // SAFETY: see above.
         let eff = unsafe { slice::from_raw_parts_mut(self.bodies.row_ptr(lo), n) };
         simd::refresh_inertia(eff, snap, self.simd);
+    }
+
+    /// V2's per-step reset of rows `[lo, hi)`'s accumulated movement to `(0, IDENTITY)`: the first
+    /// substep's gravity stage on a speculative step (SR C5), before the step's first sweep.
+    #[inline]
+    fn reset_delta_rows(&self, lo: usize, hi: usize) {
+        debug_assert!(hi <= self.step.deltas.len(), "invariant: the step's reset sized the delta column to the rows");
+        // SAFETY: `lo < hi <= deltas.len()` (the row cut over `[0, n_rows)`; `reset_deltas` sized the
+        //   column to the rows before the region), so the range is live on the column's
+        //   address-stable base. Rows `[lo, hi)` are this block's alone for the item (the cut
+        //   partitions the rows; the item is the first substep's gravity, which no sweep and no
+        //   integrate shares), so the exclusive slice aliases no access, and it dies before the
+        //   block returns.
+        let deltas = unsafe { slice::from_raw_parts_mut(self.step.deltas.row_ptr(lo), hi - lo) };
+        deltas.fill(BodyDelta::ZERO);
     }
 
     /// The fill of cohorts `[lo, hi)` (P-c, stage 0): a block-local [`FillCtx`] over body slices
@@ -6441,6 +6480,12 @@ impl RegionStages for SolveStages<'_> {
         let _ = participant;
         match e.kind {
             SK_GRAVITY => self.gravity_rows(lo, hi),
+            SK_GRAVITY_FIRST => {
+                self.gravity_rows(lo, hi);
+                if self.step.spec {
+                    self.reset_delta_rows(lo, hi);
+                }
+            }
             SK_WARM => ColoredSoftStepSolver::warm_start_apply(self.cols, self.bodies, self.simd_solve, lo, hi),
             SK_BIASED | SK_RELAX => ColoredSoftStepSolver::solve_color_dispatch(
                 self.view,
@@ -6483,7 +6528,7 @@ impl RegionStages for SolveStages<'_> {
                 //   region and reached by participant 0's hooks alone.
                 unsafe { (*hooks.canary).at(&PHYS_SB_PC, hooks.inner.is_some()) };
             }
-            SK_GRAVITY => hooks.inner = zone!(PHYS_GRAVITY),
+            SK_GRAVITY | SK_GRAVITY_FIRST => hooks.inner = zone!(PHYS_GRAVITY),
             SK_STORE => hooks.inner = zone!(PHYS_STORE),
             SK_WARM if first => hooks.outer = zone!(PHYS_WARM_APPLY),
             SK_BIASED | SK_RELAX => {
@@ -6552,6 +6597,7 @@ impl ColoredSoftStepSolver {
         t.cuts.clear();
         let n_body = t.body_cuts(rows, grain);
         t.entry(SK_GRAVITY, 0, n_body, 0);
+        t.entry(SK_GRAVITY_FIRST, 0, n_body, 0);
         t.entry(SK_INTEGRATE, 0, n_body, 0);
         // The fill: S4's ranges, consecutive from cohort 0 (one range covering every cohort under
         // two, which runs inline).
@@ -6625,8 +6671,8 @@ impl ColoredSoftStepSolver {
         schedule.push(SchedItem::new(E_FILL, None));
         #[cfg(test)]
         schedule.push(SchedItem::new(E_DIGEST, None));
-        for _ in 0..k.substeps {
-            schedule.push(SchedItem::new(E_GRAVITY, None));
+        for s in 0..k.substeps {
+            schedule.push(SchedItem::new(if s == 0 { E_GRAVITY_FIRST } else { E_GRAVITY }, None));
             for c in 0..n_colors {
                 schedule.push(SchedItem::new(colour(c, 0), None));
             }

@@ -288,7 +288,7 @@
         let graph = build_graph(&bodies, &manifolds);
 
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&bodies, &[], false);
+        solver.build_bodies(&bodies, &[]);
         solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
         let cols = &solver.columns;
 
@@ -451,7 +451,7 @@
         proptest!(ProptestConfig::with_cases(400), |(seed in any::<u64>())| {
             let (bodies, manifolds, graph) = random_scene(seed);
             let mut solver = ColoredSoftStepSolver::default();
-            solver.build_bodies(&bodies, &[], false);
+            solver.build_bodies(&bodies, &[]);
             solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
             let cols = &solver.columns;
 
@@ -1197,7 +1197,7 @@
         let manifolds = dense_collision_manifolds(&bodies);
         let graph = build_graph(&bodies, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&bodies, &[], false);
+        solver.build_bodies(&bodies, &[]);
         solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
         let cols = &solver.columns;
         let n_colors = cols.color_offsets().len().saturating_sub(1);
@@ -1565,7 +1565,7 @@
         let (region, solver) = run(Some(RegionRoute::Threads(2)));
         assert_eq!(solver.region_dispatches(), 2, "a region per step (the premise)");
         let tally = solver.region_kind_tally();
-        for name in ["gravity", "warm", "biased", "integrate", "relax", "fill", "store"] {
+        for name in ["gravity", "gravity_first", "warm", "biased", "integrate", "relax", "fill", "store"] {
             let k = tally.iter().find(|k| k.kind == name).expect("the tally names every kind it ran");
             assert!(
                 k.max_blocks >= 2 && k.helper_blocks > 0,
@@ -1820,7 +1820,7 @@
 
             // ── Scalar arm ──────────────────────────────────────────────────
             let mut solver_scalar = ColoredSoftStepSolver::default();
-            solver_scalar.build_bodies(&bodies, &[], false);
+            solver_scalar.build_bodies(&bodies, &[]);
             solver_scalar.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
             let cols_scalar = &solver_scalar.columns;
             let n_colors = cols_scalar.color_offsets().len() - 1;
@@ -1845,7 +1845,7 @@
 
             // ── SIMD arm ─────────────────────────────────────────────────────
             let mut solver_simd = ColoredSoftStepSolver::default();
-            solver_simd.build_bodies(&bodies, &[], false);
+            solver_simd.build_bodies(&bodies, &[]);
             solver_simd.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
             let cols_simd = &solver_simd.columns;
             let bodies_simd = body_scratch_from(&pristine_bodies);
@@ -2124,7 +2124,7 @@
         }
         let graph = build_graph(&states, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&states, &[], false);
+        solver.build_bodies(&states, &[]);
         solver.build_columns(&manifolds, &graph, &states, None, RowRemap::Identity, None, false);
         assert_eq!(solver.columns.color_offsets().len(), 2, "body-disjoint specs form one color");
         assert_eq!(solver.columns.group_start().len(), groups.len() + 1, "one group per spec");
@@ -2869,7 +2869,7 @@
         let (bodies, manifolds) = ragged_colored_scene(11);
         let graph = build_graph(&bodies, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&bodies, &[], false);
+        solver.build_bodies(&bodies, &[]);
         solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
         let mut rng = SplitMix64(0x11C3_5EED_A1B2_C3D4);
         seed_live_lanes(&mut solver, &mut rng);
@@ -6144,7 +6144,7 @@
                 sleep
             });
             // The effective body rows the fill reads (the solve builds them before the columns).
-            solver.build_bodies(&frame.bodies, &[], false);
+            solver.build_bodies(&frame.bodies, &[]);
             // SR: the region's fill reads the gather snapshot through its column (the W5 rule).
             let mut scratch = SolverScratch::with_capacity(frame.bodies.len());
             scratch.set_bodies(&frame.bodies);
