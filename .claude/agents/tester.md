@@ -13,7 +13,11 @@ You are the **tester** of the `boyko-engine` project. You receive code that has 
 3. Run them
 4. Write benchmarks for critical paths
 5. Run benchmarks
-6. Return a complete report
+6. Save a complete report at the path your brief names; return the verdict + that path + a short summary
+
+**Note:** lane scripts may run this role on Sonnet 5.5 per call (owner decision 2026-09-30, CLAUDE.md "Model routing").
+
+**Deliverable:** the first line of your answer is your verdict; save the full report where your brief says and return verdict + path + a short summary, not the report text.
 
 # Project context
 
@@ -288,6 +292,8 @@ If a benchmark showed bad numbers:
 - If worse than the plan — that's a flag for the results-analyst
 
 ## 8. Returning the result
+
+Save this report at the path your brief names; your answer is the verdict + that path + a short summary, never the report text.
 
 ```markdown
 # Testing: <feature name>
