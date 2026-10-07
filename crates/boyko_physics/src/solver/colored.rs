@@ -2562,12 +2562,14 @@ impl ColoredSoftStepSolver {
         let n_cohorts = cols.heads.len();
         // SR (phase B): a step whose gate holds runs its substeps as one region and its fill as
         // the region's stage 0 (KD5): this build stops after the serial sources and hands the
-        // fill's plan over. Test builds force it with `SetupMode::Pool` (G4-A's region modes).
-        // A table too wide for the region's entry index (`region_fits`) solves serially.
-        #[cfg(test)]
-        let forced = matches!(setup_mode, SetupMode::Pool(_));
-        #[cfg(not(test))]
+        // fill's plan over. Test builds force it with `SetupMode::Pool` (G4-A's region modes): a
+        // `#[cfg(test)]` statement narrows the production binding, never a `not(test)` pair, which
+        // the workspace's source censuses would read as test-only
+        // (`production_reachability_census`). A table too wide for the region's entry index
+        // (`region_fits`) solves serially.
         let forced = false;
+        #[cfg(test)]
+        let forced = forced || matches!(setup_mode, SetupMode::Pool(_));
         let region = (p2 || forced) && n_cohorts > 0 && region_fits(graph.n_colors() as usize);
         // The region's fill takes the region grain's terms (its default is S4's); a step that
         // opens no region fills on this thread.
@@ -6082,13 +6084,13 @@ impl ColoredSoftStepSolver {
         let store = self.warm_effective && !restitution_possible && k.substeps > 0;
         #[cfg(all(test, miri))]
         let route = self.region_route;
+        let p = try_with_active_pool(|pool| pool.num_threads());
+        // The Stacked Borrows route has no pool: its participants are the route's threads.
         #[cfg(all(test, miri))]
         let p = match route {
-            RegionRoute::Pool => try_with_active_pool(|pool| pool.num_threads()),
+            RegionRoute::Pool => p,
             RegionRoute::Threads(n) => Some(n as usize),
         };
-        #[cfg(not(all(test, miri)))]
-        let p = try_with_active_pool(|pool| pool.num_threads());
         let p = u32::try_from(p.expect("invariant: the region path runs only where P2 saw a pool of two workers or more"))
             .expect("invariant: a pool's workers fit a u32");
         let table = self.build_region_table(p, k, fill, store);
