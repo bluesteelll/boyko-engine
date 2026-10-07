@@ -304,8 +304,9 @@ pub struct PhysicsConfig {
     ///
     /// Effective only on the grid broadphase path
     /// ([`BroadphaseKind::Grid`](BroadphaseKind::Grid)); it is a no-op for the
-    /// shipped all-pairs loop and for the tree broadphase, which is serial by
-    /// design (its parallel query wave is deferred, D6 of its design). When `true`,
+    /// shipped all-pairs loop and for the tree broadphase, whose query has a
+    /// switch of its own, [`parallel_tree_query`](Self::parallel_tree_query) (S5;
+    /// this flag keeps its Grid-only meaning, D6 of the tree's design). When `true`,
     /// [`physics_broadphase`](crate::systems::physics_broadphase) routes the grid
     /// to [`BroadphaseGrid::build_parallel`](BroadphaseGrid::build_parallel), which
     /// keeps the CSR build (count + prefix-sum + scatter) and the oversized emit
@@ -394,6 +395,14 @@ pub struct PhysicsConfig {
     /// blocks), pinned by the frame allocation census. Toggling it changes performance,
     /// never the result.
     pub parallel_narrowphase: bool,
+    /// S5, the PARALLEL TREE QUERY (default `false`;
+    /// `docs/physics/perf-campaign/levers/scaling/01-DESIGN.md` §6.5).
+    ///
+    /// Read only on the tree broadphase path ([`BroadphaseKind::Tree`]): the broadphase
+    /// system mirrors it into the [`BroadphaseTree`](crate::broadphase_tree::BroadphaseTree)
+    /// on every Tree step (`BroadphaseTree::parallel_query`). The query that reads it lands in
+    /// S5's commit C2; until then it changes nothing.
+    pub parallel_tree_query: bool,
     /// L9b CONTACT REUSE (default `true` since commit C4, built in commit C3 of
     /// `docs/physics/perf-campaign/levers/L9-contact-reuse/02-DESIGN-REV1.md`).
     ///
@@ -719,6 +728,9 @@ impl Default for PhysicsConfig {
             // chunks below two lanes, so W=1 opens no scope. The serial loop stays the
             // same-binary A/B (`parallel_narrowphase = false`).
             parallel_narrowphase: true,
+            // Default OFF until S5's C4 flips it, after the census and the ledger are derived on
+            // the solve region's form (rulings 2026-10-01, item 19 Q3).
+            parallel_tree_query: false,
             // Default ON since L9 C4 (window 6's decision). `false` is the exact narrowphase,
             // every trajectory the engine produced before contact reuse existed.
             contact_reuse: true,

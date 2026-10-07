@@ -75,6 +75,9 @@ pub(crate) const NO_LANE_ROW: u32 = u32::MAX;
 /// Lanes per node.
 pub(crate) const LANES: usize = 8;
 
+/// The serial leaf-list pass's `PackedBvh8::collect_leaves_in` site.
+pub(crate) const SITE_PASS: u8 = 0;
+
 /// The most levels a tree can have: `8^13 > 2^24` rows, the row bound of this crate.
 pub(crate) const MAX_LEVELS: usize = 13;
 
@@ -478,7 +481,29 @@ impl PackedBvh8 {
     /// unsealed, and the caller answers the rows another way. On `true` the list is sealed.
     ///
     /// In test and `bp-query-counts` builds, `box_tests` accumulates the walk's 8-wide box tests.
+    #[inline]
     pub(crate) fn collect_leaves<const MAXROW: bool>(
+        &self,
+        q: &QueryBox,
+        out: &mut CandList,
+        cap: usize,
+        #[cfg(any(test, feature = "bp-query-counts"))] box_tests: &mut u64,
+    ) -> bool {
+        self.collect_leaves_in::<MAXROW, SITE_PASS>(
+            q,
+            out,
+            cap,
+            #[cfg(any(test, feature = "bp-query-counts"))]
+            box_tests,
+        )
+    }
+
+    /// [`collect_leaves`](Self::collect_leaves) for the caller `SITE`, which the body reads
+    /// nowhere: it gives each caller an instantiation of its own (the serial leaf-list pass
+    /// [`SITE_PASS`], S5's chunk kernel and tail theirs, `parallel.rs`), so the serial pass's keeps
+    /// its single caller and the inlining it had before S5 (the narrowphase's `STAMPED` model; S5's
+    /// codegen receipt).
+    pub(crate) fn collect_leaves_in<const MAXROW: bool, const SITE: u8>(
         &self,
         q: &QueryBox,
         out: &mut CandList,
