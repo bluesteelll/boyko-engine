@@ -2223,9 +2223,11 @@ fn fm_c3_d_max_of(from: &[(u32, Vec3)], to: &[(u32, Vec3)]) -> f32 {
 }
 
 /// FM C3's band rule, pinned before its first use: the D_max edges classified on the tip whatever
-/// the parent, the freeze step against the parent (never the tip, never a C0 reading), and the
-/// non-finite STOP reachable through [`fm_c3_d_max_of`]. Pure arithmetic: it runs in both profiles
-/// and under Miri, like A7-R0.
+/// the parent; the freeze step against the parent (never the tip, never a C0 reading), both of its
+/// edges inclusive and its difference two-sided (on and one past each edge, below the parent as well
+/// as above); [`fm_c3_d_max_of`]'s norm horizontal (x and z, never y); and the non-finite STOP
+/// reachable through [`fm_c3_d_max_of`]. Pure arithmetic: it runs in both profiles and under Miri,
+/// like A7-R0.
 #[test]
 fn fm_c3_bands_classify_against_the_parent() {
     use FmBand::{Confirm as C, Report as R, Stop as S};
@@ -2258,6 +2260,25 @@ fn fm_c3_bands_classify_against_the_parent() {
         (86, 107, R),
         (86, 108, S),
         (200, 215, C),
+        // On and one past each edge of a parent whose 10 % and 25 % are whole steps, above and
+        // below it: an exclusive edge or a one-sided difference misreads one of these.
+        (100, 110, C),
+        (100, 111, R),
+        (100, 90, C),
+        (100, 89, R),
+        (100, 125, R),
+        (100, 126, S),
+        (100, 75, R),
+        (100, 74, S),
+        // The lower side at C0's readings, as arithmetic (at 61 no pile can reach it: provenance at
+        // `FM_C3_FREEZE_REPORT_PCT`): a tip that froze sooner is judged like one that froze later.
+        (86, 78, C),
+        (86, 77, R),
+        (86, 65, R),
+        (86, 64, S),
+        (61, 54, R),
+        (61, 46, R),
+        (61, 45, S),
     ] {
         let (got, line) = fm_c3_freeze_band(parent, tip);
         assert_eq!(got, want, "freeze band, parent {parent}, tip {tip}: {line}");
@@ -2270,6 +2291,17 @@ fn fm_c3_bands_classify_against_the_parent() {
     let finite = fm_c3_d_max_of(&from, &to);
     assert_eq!(finite.to_bits(), 0.000_976_562_5_f32.to_bits(), "finite D_max: {finite}");
     assert_eq!(fm_c3_d_max_band(0.0007, finite).0, C, "a finite pile classifies by its maximum");
+    // The norm is horizontal: 3-4-5 in powers of two (every square and the root exact in binary)
+    // under a vertical move of 0.5 m. A norm that drops x or z, or adds y, misses these bits.
+    let norm = fm_c3_d_max_of(
+        &[(1, Vec3::new(0.0, 1.0, 0.0))],
+        &[(1, Vec3::new(0.002_929_687_5, 1.5, 0.003_906_25))],
+    );
+    assert_eq!(
+        norm.to_bits(),
+        0.004_882_812_5_f32.to_bits(),
+        "(3, 4)·2^-10 m horizontally is 5·2^-10 m whatever the vertical move: {norm}"
+    );
     for (what, to) in [
         ("one box NaN, before a finite larger one", [(1, at(f32::NAN, 0.0)), to[1], (3, at(0.0, 2.5))]),
         ("one box NaN, after the maximum", [to[0], to[1], (3, at(f32::NAN, f32::NAN))]),
