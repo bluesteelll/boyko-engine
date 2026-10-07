@@ -7,7 +7,8 @@
 //! `--sanity` or `--scene-dump` never builds a [`DynRun`], so its run is the runner's unchanged.
 //!
 //! * Kicks are written to `RigidBody::linear_velocity` at a step boundary, which the step-input
-//!   contract admits (`boyko_physics::step_inputs`, "Body components"), and read back.
+//!   contract admits (`boyko_physics::step_inputs`, "Body components"), and read back against
+//!   `v + Δv` computed apart from the write.
 //! * Launches spawn a J-T box with a velocity, appended to the run's bodies in spawn order.
 //! * `--sanity` reads, per state, the energies and bounds of the sanity CSV, and per step the
 //!   static-pair receipts (ruling 22): candidate pairs with a static endpoint, static-static pairs,
@@ -298,17 +299,23 @@ impl DynRun {
             for x in &ev.entries {
                 let e = rig.boxes[x.index as usize];
                 let dv = x.dv();
-                let (e0, want) = {
+                // The write and the expected value are separate expressions, as in Jolt's
+                // `AddLinearVelocity(dv)` checked against its own `before + dv` (triage r1 F2).
+                // The write adds Δv to the live component through `Vec3`'s `Add`. The expected
+                // value adds it per axis to the velocity read before the write. A slip in either
+                // expression reads back as a mismatch, which voids the run. Both are the same IEEE
+                // f32 adds of the same operands, so a correct pair agrees bit for bit.
+                let (e0, before) = {
                     let mut body =
                         rig.world.get_component_mut::<RigidBody>(e).expect("invariant: a kicked box is live");
-                    let before = body.linear_velocity;
-                    let e0 = dyn_spec::energy(v3(body.position), v3(before), v3(body.angular_velocity), self.gravity);
-                    let want = Vec3::new(before.x + dv[0], before.y + dv[1], before.z + dv[2]);
-                    body.linear_velocity = want;
-                    (e0, want)
+                    let before = v3(body.linear_velocity);
+                    let e0 = dyn_spec::energy(v3(body.position), before, v3(body.angular_velocity), self.gravity);
+                    body.linear_velocity = body.linear_velocity + Vec3::new(dv[0], dv[1], dv[2]);
+                    (e0, before)
                 };
+                let want = [before[0] + dv[0], before[1] + dv[1], before[2] + dv[2]];
                 let b = rig.world.get_component::<RigidBody>(e).expect("invariant: a kicked box is live");
-                let ok = v3(b.linear_velocity).map(f32::to_bits) == v3(want).map(f32::to_bits);
+                let ok = v3(b.linear_velocity).map(f32::to_bits) == want.map(f32::to_bits);
                 self.e_inj +=
                     dyn_spec::energy(v3(b.position), v3(b.linear_velocity), v3(b.angular_velocity), self.gravity) - e0;
                 self.readback_mismatches += usize::from(!ok);

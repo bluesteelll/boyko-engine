@@ -98,7 +98,8 @@ gravity <h> <h> <h>             (read back at the end of the run)
 static <half x3> <p x3> <q x4> <friction> <restitution> <convex radius>          (creation order)
 body <i> <p x3> <q x4> <v x3> <w x3> <half x3> <friction> <restitution> <convex radius>
      <inv mass / box 0's> <inv inertia diag / box 0's x3> <linear damping> <angular damping> <can sleep> <ccd>
-kick <step> <i> <dv x3>         (the velocity read back equals v + dv bit for bit; else `READBACK-MISMATCH`)
+kick <step> <i> <dv x3>         (the velocity read back equals v + dv, computed apart from the write, bit
+                                 for bit; else `READBACK-MISMATCH`)
 launch <step> <the body fields of the projectile, read back after its creation>
 end <events applied> <dynamic bodies at the end>
 ```
@@ -115,7 +116,12 @@ line and field). Pins (FNV-1a 64 of the canonical text; `tests/dyn_scenes_spec.r
 
 Each harness also enforces what the dump cannot carry: ours voids a run whose statics are not
 static; Rapier voids a body whose gyroscopic setting is not the row's or that may sleep (the row's
-`--gyro`, `can_sleep(false)`); every harness voids (or, Jolt, exits 1 on) a kick read-back mismatch.
+`--gyro`, `can_sleep(false)`). Ours and Rapier void a run with a kick read-back mismatch. Jolt
+counts mismatches on its receipts line (`readback_mismatches=`), which `jolt_gates.sh` G5 and the 9c
+protocol require to be 0. In all three harnesses the expected `v + Δv` is a separate expression from
+the write. Jolt writes with `AddLinearVelocity(dv)`; ours and Rapier add Δv to the live velocity
+through their vector type's `Add`. Each then compares with its own per-axis `before + dv`, so a slip
+in either expression is a mismatch (fix r1, section 5.5).
 
 ## 4. The sanity bar: one bar, one scorer (`gate/dyn_sanity.py`)
 
@@ -168,7 +174,8 @@ the runner pins hold (12/12) and both L10 pose-gate sets pass (264/264, both neg
 The scene dump of every harness equals the canonical text byte for byte, for every program: ours at
 W1 and W8, Jolt at `-t=1` and `-t=8`, Rapier on every ruling-22 row at W1. The dump is read back from
 each engine after creation (shape, convex radius, damping, can-sleep, CCD / motion quality, mass and
-inertia ratios, gravity, dt; each kick's velocity read back as `v + Δv` bit for bit), so a projectile
+inertia ratios, gravity, dt; each kick's velocity read back against `v + Δv` computed apart from the
+write, bit for bit), so a projectile
 or wall created with an engine default, or a missed gravity override, cannot pass it.
 
 ### 5.2 Final poses: determinism and worker counts
@@ -348,6 +355,24 @@ a mutant before it was called green; the outputs are in `D:/tmp/phys-orch/dyn-sc
   (`0xb359465c13962c6d` against `0x5c27d4ede389f12a`). The predicate also reds, case by case, on
   another program's pose, one flipped bit, a wrong printed hash, no hash printed, a flipped pinned
   sha256 and a missing pose.
+* **The kick read-back made independent (triage r1 F2, part 2).** Ours and Rapier compared the
+  velocity they read back with the same `want` they had written, so a slip in that one formula read
+  back clean. Jolt's check was already independent. Both glues now write by adding Δv to the live
+  velocity through the vector type's `Add`, and compare the result with a per-axis `before + dv`
+  that is a separate expression. The two are the same IEEE adds, so no pose moves. Ours: 49/49 on
+  the rebuilt runner, every pose equal to its pin. The runner's existing rows are unchanged against
+  window 9b's exe (11/11), the runner pins hold (12/12), and both L10 pose-gate sets pass (d = 0 and
+  V2: 264/264 each, both negatives exit 4, 26/26, 17/17). Rapier:
+  the dyn exes were rebuilt with `build_dyn.sh` (section 6). G1 now ties each one to
+  `dyn/bin/SHA256SUMS` and to pins.json `exes`; it reds on a flipped pinned sha. G2's 70 frozen rows reproduce their
+  fixtures at W1 and W8, and the SUMMARY equals the frozen exe's, 4/4. G3 is 200/200, and every
+  one of the 24 dyn poses equals its fixture.
+  Red-first on a switch hub over the new code (ours, and Rapier's simd8 arm on `simd8/s1p9q2`):
+  * a slip in the expected value only, or in the write only, reads back 1,486 mismatches out of
+    1,488 kicks and voids the run (the 2 kicks with Δv_y = 0 cannot differ);
+  * a slip in both reads back clean, and only part 1's pin check catches it (ours
+    `0xb359465c13962c6d`, Rapier `0x2ef6e70d662886d4`);
+  * with the switch off, every gate is green.
 
 ## 6. Pins and fixtures
 
@@ -357,7 +382,7 @@ a mutant before it was called green; the outputs are in `D:/tmp/phys-orch/dyn-sc
 | ours, W1 = every W (`fixtures/ours_<p>.pose`) | kick `0x5c27d4ede389f12a` (sha256 `91884a6c…`), shoot `0x49e2bf025baa5294` (`dea05a4e…`), slide `0xe627f35c282605ba` (`9107ceb3…`); S-LAND = the trunk's `docs/measurements/2026-09-30-v2-speculative/w8/J500.pose` (byte-equal) |
 | Jolt 5.6 dyn exe (`fixtures/jolt56_<p>.pose`, `-t=1`) | none `0xb8522b4e3fc62cfe` (`33a3d320…`), kick `0x63faa28ed77e1a89` (`b409997f…`), shoot `0xc989d89c28ecdd03` (`a7b98658…`), slide `0x781c433c5d8278f1` (`8d41c963…`) |
 | Rapier dyn fixtures | `pins.json` `rapier`: per ruling-22 row and program, the pose hash, the fixture path under `D:/tmp/rapier-parity/dyn/fixtures/<arm>/` and its sha256 |
-| exes | `pins.json` `exes`: Jolt dyn `9df09901…`; Rapier dyn simd8 `1d1f499f…`, simd4 `6e372558…`, block `41e29ab5…` |
+| exes | `pins.json` `exes`: Jolt dyn `9df09901…`; Rapier dyn simd8 `c71f7470…`, simd4 `be272344…`, block `5b0a1b60…` (rebuilt by fix r1 for the independent kick read-back; the C4 builds were `1d1f499f…`, `6e372558…`, `41e29ab5…`, and every fixture is unchanged) |
 
 The Rapier `dyn/` sources are copied here as `rapier/*.txt` (`.txt` keeps them out of every Rust
 census; `-text`, so their bytes are the ones `dyn/bin/SOURCES.sha256` pins).

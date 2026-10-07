@@ -13,6 +13,8 @@ G1  the freeze is intact: every file sha256 FROZEN-9b section 1 pins (frozen9b.j
     dyn_spec.rs). crates/boyko_physics/tests/dyn_scenes_hook_order.rs reads main.rs.txt, so this is what makes
     its verdict about the source the dyn exes were built from (triage r1 F1). `--sums PATH` checks PATH in
     place of SOURCES.sha256 (the red-first).
+    The dyn exes: each arm's exe hashes to dyn/bin/SHA256SUMS (the build's record of its outputs) and to
+    pins.json `exes` (fix r1 rebuilt them; `--pins` for the red-first).
 G2  J-T unchanged by the hooks: all 70 frozen rows' commands (frozen9b.json `command`) on the dyn exe of the
     row's arm at W1 and W8, each exit 0 with `--expect-pose` = the row's fixture; and for one row per arm at
     W1, the SUMMARY equal to the frozen exe's minus the source hashes, `args` and the timing keys.
@@ -107,8 +109,26 @@ def gate1_sources(sums_path):
           not bad, ', '.join(bad) or 'all equal')
 
 
-def gate1(out, lock, sums):
+def gate1_exes(pins_path):
+    """The dyn exes against the build's SHA256SUMS and pins.json `exes`."""
+    pins = json.load(open(pins_path or pose_pin.PINS))['exes']
+    built = {}
+    for ln in open(RP + '/dyn/bin/SHA256SUMS', encoding='utf-8'):
+        if ln.strip():
+            h, name = ln.split(None, 1)
+            built[os.path.basename(name.strip().lstrip('*'))] = h
+    bad = []
+    for arm in ('simd8', 'simd4', 'block'):
+        p = pins['rapier-dyn-' + arm]
+        live = sha256(p['path']) if os.path.exists(p['path']) else None
+        if not (live == p['sha256'] == built.get(os.path.basename(p['path']))):
+            bad.append(arm)
+    check('G1 dyn exes = dyn/bin/SHA256SUMS = pins.json exes (3 arms)', not bad, ','.join(bad) or 'all equal')
+
+
+def gate1(out, lock, sums, pins_path):
     gate1_sources(sums)
+    gate1_exes(pins_path)
     d = json.load(open(FROZEN))
     bad = []
     for name, want in d['files'].items():
@@ -243,7 +263,7 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     only = a.rows.split(',') if a.rows else None
     if a.gate in ('1', 'all'):
-        gate1(a.out, a.lock, a.sums)
+        gate1(a.out, a.lock, a.sums, a.pins)
     if a.gate in ('2', 'all'):
         gate2(a.out, a.exe_dir, a.frozen_exe_dir, only)
     if a.gate in ('3', 'all'):

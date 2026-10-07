@@ -238,13 +238,17 @@ impl DynRun {
                 let h = w.boxes[x.index as usize];
                 let dv = x.dv();
                 let b = &mut w.bodies[h];
-                let (p, before, ang) = (b.translation().to_array(), b.linvel(), b.angvel().to_array());
-                let want = Vector::new(before.x + dv[0], before.y + dv[1], before.z + dv[2]);
-                b.set_linvel(want, true);
-                let after = b.linvel();
-                let ok = after.to_array().map(f32::to_bits) == want.to_array().map(f32::to_bits);
-                self.e_inj += spec::energy(p, after.to_array(), ang, self.gravity)
-                    - spec::energy(p, before.to_array(), ang, self.gravity);
+                let (p, before, ang) = (b.translation().to_array(), b.linvel().to_array(), b.angvel().to_array());
+                // The write and the expected value are separate expressions, as in Jolt's
+                // `AddLinearVelocity(dv)` checked against its own `before + dv` (boyko triage r1
+                // F2). The write adds Δv to the body's velocity through the vector type's `Add`.
+                // The expected value adds it per axis to the velocity read before the write. A slip
+                // in either expression reads back as a mismatch, which voids the run.
+                b.set_linvel(b.linvel() + Vector::from_array(dv), true);
+                let want = [before[0] + dv[0], before[1] + dv[1], before[2] + dv[2]];
+                let after = b.linvel().to_array();
+                let ok = after.map(f32::to_bits) == want.map(f32::to_bits);
+                self.e_inj += spec::energy(p, after, ang, self.gravity) - spec::energy(p, before, ang, self.gravity);
                 self.readback_mismatches += usize::from(!ok);
                 if let Some(d) = &mut self.dump {
                     let r = if ok {
