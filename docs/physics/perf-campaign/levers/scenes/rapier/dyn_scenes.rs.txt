@@ -1,0 +1,401 @@
+//! Dynamic parity scenes (boyko lane DYN-SCENES) on Rapier 0.36: the glue between the shared program
+//! specification ([`crate::spec`], a byte copy of boyko's `benches/jolt_parity_pyramid/dyn_spec.rs`)
+//! and Rapier's sets. Every call here runs OUTSIDE the timed pair: [`configure_world`] after the
+//! spawn, [`DynRun::before_step`] before a step's `Instant::now()`, [`DynRun::after_step`] and
+//! [`DynRun::finish`] after the pair closed. A row without `--dyn`, `--sanity` or `--scene-dump`
+//! builds no [`DynRun`].
+
+use rapier3d::prelude::*;
+
+use crate::spec::{self, BodyLine, KickEvent, Launch, Program, SanityRow, StaticLine};
+use crate::{World, json_f64, material};
+
+/// Inserts `program`'s statics after the J-T boxes (the floor is the spawn's) and sets its gravity.
+pub fn configure_world(w: &mut World, program: Program) {
+    for s in &program.statics()[1..] {
+        let h = w.bodies.insert(
+            RigidBodyBuilder::fixed().translation(Vector::new(s.center[0] as f32, s.center[1] as f32, s.center[2] as f32)),
+        );
+        w.colliders.insert_with_parent(
+            material(ColliderBuilder::cuboid(s.half[0] as f32, s.half[1] as f32, s.half[2] as f32)),
+            h,
+            &mut w.bodies,
+        );
+        w.statics.push(h);
+    }
+    let g = program.gravity();
+    w.gravity = Vector::new(g[0], g[1], g[2]);
+}
+
+/// The body's collider (every body of these scenes has exactly one).
+fn collider_of(w: &World, h: RigidBodyHandle) -> &Collider {
+    let c = w.bodies[h].colliders()[0];
+    &w.colliders[c]
+}
+
+/// A cuboid collider's half-extents and border radius; NaN for another shape (the dump cannot match).
+fn cuboid(c: &Collider) -> ([f32; 3], f32) {
+    if let Some(b) = c.shape().as_cuboid() {
+        (b.half_extents.to_array(), 0.0)
+    } else if let Some(b) = c.shape().as_round_cuboid() {
+        (b.inner_shape.half_extents.to_array(), b.border_radius)
+    } else {
+        ([f32::NAN; 3], f32::NAN)
+    }
+}
+
+/// A dynamic body's dump line, READ BACK from Rapier's sets.
+fn body_line(w: &World, h: RigidBodyHandle, index: u32, box0: (f32, [f32; 3])) -> BodyLine {
+    let b = &w.bodies[h];
+    let c = collider_of(w, h);
+    let (half, radius) = cuboid(c);
+    let m = &b.mass_properties().local_mprops;
+    let i = m.inv_principal_inertia.to_array();
+    let a = b.activation();
+    BodyLine {
+        index,
+        p: b.translation().to_array(),
+        q: b.rotation().to_array(),
+        v: b.linvel().to_array(),
+        w: b.angvel().to_array(),
+        half,
+        friction: c.friction(),
+        restitution: c.restitution(),
+        radius,
+        inv_mass_ratio: m.inv_mass / box0.0,
+        inv_inertia_ratio: [i[0] / box0.1[0], i[1] / box0.1[1], i[2] / box0.1[2]],
+        linear_damping: b.linear_damping(),
+        angular_damping: b.angular_damping(),
+        can_sleep: a.normalized_linear_threshold >= 0.0 || a.angular_threshold >= 0.0,
+        ccd: b.is_ccd_enabled(),
+    }
+}
+
+/// The static-pair receipts of one step (ruling 22), from the narrow phase's pairs: every pair the
+/// broad phase reported (`contact_pairs`), its raw manifolds with at least one point, their points.
+#[derive(Clone, Copy, Default)]
+pub struct StaticCounts {
+    pub pairs: u64,
+    pub pairs_static: u64,
+    pub pairs_static_static: u64,
+    pub manifolds: u64,
+    pub manifolds_static: u64,
+    pub manifolds_static_static: u64,
+    pub points_static: u64,
+}
+
+impl StaticCounts {
+    fn read(w: &World) -> Self {
+        let fixed = |ch: ColliderHandle| w.colliders[ch].parent().is_none_or(|b| w.bodies[b].is_fixed());
+        let mut c = Self::default();
+        for pair in w.narrow_phase.contact_pairs() {
+            let (f1, f2) = (fixed(pair.collider1), fixed(pair.collider2));
+            c.pairs += 1;
+            c.pairs_static += u64::from(f1 != f2);
+            c.pairs_static_static += u64::from(f1 && f2);
+            for m in pair.manifolds().iter().filter(|m| !m.points.is_empty()) {
+                c.manifolds += 1;
+                if f1 || f2 {
+                    c.manifolds_static += u64::from(f1 != f2);
+                    c.manifolds_static_static += u64::from(f1 && f2);
+                    c.points_static += m.points.len() as u64;
+                }
+            }
+        }
+        c
+    }
+
+    fn add(&mut self, o: &Self) {
+        self.pairs += o.pairs;
+        self.pairs_static += o.pairs_static;
+        self.pairs_static_static += o.pairs_static_static;
+        self.manifolds += o.manifolds;
+        self.manifolds_static += o.manifolds_static;
+        self.manifolds_static_static += o.manifolds_static_static;
+        self.points_static += o.points_static;
+    }
+
+    fn json(&self) -> String {
+        format!(
+            "{{\"pairs\":{},\"pairs_static\":{},\"pairs_static_static\":{},\"manifolds\":{},\
+             \"manifolds_static\":{},\"manifolds_static_static\":{},\"points_static\":{}}}",
+            self.pairs,
+            self.pairs_static,
+            self.pairs_static_static,
+            self.manifolds,
+            self.manifolds_static,
+            self.manifolds_static_static,
+            self.points_static
+        )
+    }
+}
+
+/// One run's dynamic program and its untimed readouts.
+pub struct DynRun {
+    program: Program,
+    events_on: bool,
+    gyro: bool,
+    kicks: Vec<KickEvent>,
+    launches: Vec<Launch>,
+    next_kick: usize,
+    next_launch: usize,
+    events_applied: usize,
+    gravity: [f32; 3],
+    e_inj: f64,
+    kicks_applied: usize,
+    launches_applied: usize,
+    readback_mismatches: usize,
+    /// Bodies whose gyroscopic setting is not the row's, or that may sleep (critique W3).
+    bad_bodies: usize,
+    clearance_min: f64,
+    sanity: Option<Vec<SanityRow>>,
+    statics_window: StaticCounts,
+    dump: Option<String>,
+    box0: (f32, [f32; 3]),
+}
+
+impl DynRun {
+    /// Reads the spawned world (before step 0).
+    pub fn new(w: &mut World, program: Program, events_on: bool, gyro: bool, steps: usize, sanity: bool, dump: bool) -> Self {
+        let m0 = &w.bodies[w.boxes[0]].mass_properties().local_mprops;
+        let box0 = (m0.inv_mass, m0.inv_principal_inertia.to_array());
+        let g = w.gravity.to_array();
+        let dump = dump.then(|| {
+            let mut s = String::with_capacity(400 * 1024);
+            for &h in std::iter::once(&w.floor).chain(&w.statics) {
+                let b = &w.bodies[h];
+                let c = collider_of(w, h);
+                let (half, radius) = cuboid(c);
+                StaticLine {
+                    half,
+                    p: b.translation().to_array(),
+                    q: b.rotation().to_array(),
+                    friction: c.friction(),
+                    restitution: c.restitution(),
+                    radius,
+                }
+                .write(&mut s)
+                .expect("invariant: writing to a String cannot fail");
+            }
+            for (n, &h) in w.boxes.iter().enumerate() {
+                body_line(w, h, n as u32, box0).write_body(&mut s).expect("invariant: writing to a String cannot fail");
+            }
+            s
+        });
+        let mut run = Self {
+            program,
+            events_on,
+            gyro,
+            kicks: if events_on && program == Program::Kick { spec::kick_program().to_vec() } else { Vec::new() },
+            launches: if events_on && program == Program::Shoot { spec::shoot_program().to_vec() } else { Vec::new() },
+            next_kick: 0,
+            next_launch: 0,
+            events_applied: 0,
+            gravity: g,
+            e_inj: 0.0,
+            kicks_applied: 0,
+            launches_applied: 0,
+            readback_mismatches: 0,
+            bad_bodies: 0,
+            clearance_min: f64::INFINITY,
+            sanity: sanity.then(|| Vec::with_capacity(steps + 1)),
+            statics_window: StaticCounts::default(),
+            dump,
+            box0,
+        };
+        run.bad_bodies = w.boxes.iter().filter(|&&h| run.bad_body(w, h)).count();
+        w.boxes.reserve(run.launches.len());
+        run.push_row(w, 0);
+        run
+    }
+
+    /// A body that is not the row's: a gyroscopic setting other than the row's, or allowed to sleep.
+    fn bad_body(&self, w: &World, h: RigidBodyHandle) -> bool {
+        let b = &w.bodies[h];
+        let a = b.activation();
+        b.gyroscopic_forces_enabled() != self.gyro || a.normalized_linear_threshold >= 0.0 || a.angular_threshold >= 0.0
+    }
+
+    fn push_row(&mut self, w: &World, state: usize) {
+        if let Some(rows) = &mut self.sanity {
+            let mut row = SanityRow::new(state, self.gravity, self.e_inj);
+            for &h in &w.boxes {
+                let b = &w.bodies[h];
+                row.add_body(b.translation().to_array(), b.rotation().to_array(), b.linvel().to_array(), b.angvel().to_array());
+            }
+            rows.push(row);
+        }
+    }
+
+    /// Applies the events of `step`, before the step of loop index `step` runs.
+    pub fn before_step(&mut self, step: usize, w: &mut World) {
+        if !self.events_on {
+            return;
+        }
+        while let Some(ev) = self.kicks.get(self.next_kick).filter(|e| e.step as usize == step) {
+            let ev = *ev;
+            for x in &ev.entries {
+                let h = w.boxes[x.index as usize];
+                let dv = x.dv();
+                let b = &mut w.bodies[h];
+                let (p, before, ang) = (b.translation().to_array(), b.linvel().to_array(), b.angvel().to_array());
+                // The write and the expected value are separate expressions, as in Jolt's
+                // `AddLinearVelocity(dv)` checked against its own `before + dv` (boyko triage r1
+                // F2). The write adds Δv to the body's velocity through the vector type's `Add`.
+                // The expected value adds it per axis to the velocity read before the write. A slip
+                // in either expression reads back as a mismatch, which voids the run.
+                b.set_linvel(b.linvel() + Vector::from_array(dv), true);
+                let want = [before[0] + dv[0], before[1] + dv[1], before[2] + dv[2]];
+                let after = b.linvel().to_array();
+                let ok = after.map(f32::to_bits) == want.map(f32::to_bits);
+                self.e_inj += spec::energy(p, after, ang, self.gravity) - spec::energy(p, before, ang, self.gravity);
+                self.readback_mismatches += usize::from(!ok);
+                if let Some(d) = &mut self.dump {
+                    let r = if ok {
+                        spec::write_kick(ev.step, x.index, dv, d)
+                    } else {
+                        spec::write_kick_mismatch(ev.step, x.index, d)
+                    };
+                    r.expect("invariant: writing to a String cannot fail");
+                }
+                self.kicks_applied += 1;
+            }
+            self.next_kick += 1;
+            self.events_applied += 1;
+        }
+        while let Some(l) = self.launches.get(self.next_launch).filter(|l| l.step as usize == step) {
+            let l = *l;
+            let p = l.position();
+            let clearance = spec::clearance(p, w.boxes.iter().map(|&h| w.bodies[h].translation().to_array()));
+            self.clearance_min = self.clearance_min.min(clearance);
+            if let Some(row) = self.sanity.as_mut().and_then(|rows| rows.last_mut()) {
+                row.set_clearance(clearance);
+            }
+            let v = l.velocity();
+            // The J-T box's body (`spawn`), with the launch velocity.
+            let h = w.bodies.insert(
+                RigidBodyBuilder::dynamic()
+                    .translation(Vector::from_array(p))
+                    .linvel(Vector::from_array(v))
+                    .can_sleep(false)
+                    .gyroscopic_forces_enabled(self.gyro),
+            );
+            w.colliders.insert_with_parent(
+                material(ColliderBuilder::cuboid(crate::HALF_BOX, crate::HALF_BOX, crate::HALF_BOX)),
+                h,
+                &mut w.bodies,
+            );
+            w.boxes.push(h);
+            let index = (w.boxes.len() - 1) as u32;
+            debug_assert_eq!(index, l.index, "invariant: launches append in program order");
+            self.bad_bodies += usize::from(self.bad_body(w, h));
+            let line = body_line(w, h, index, self.box0);
+            self.e_inj += spec::energy(line.p, line.v, line.w, self.gravity);
+            if let Some(d) = &mut self.dump {
+                line.write_launch(l.step, d).expect("invariant: writing to a String cannot fail");
+            }
+            self.launches_applied += 1;
+            self.next_launch += 1;
+            self.events_applied += 1;
+        }
+    }
+
+    /// Reads the state after `step + 1` steps and the step's static-pair receipts (`--sanity` only).
+    pub fn after_step(&mut self, step: usize, w: &World) {
+        if self.sanity.is_none() {
+            return;
+        }
+        self.push_row(w, step + 1);
+        let (a, b) = self.program.metric_window();
+        if (a..b).contains(&step) {
+            let c = StaticCounts::read(w);
+            self.statics_window.add(&c);
+        }
+    }
+
+    /// The run's void reasons: a kick whose read-back velocity is not `v + Δv`, or a body that is not
+    /// the row's.
+    pub fn void_reason(&self) -> Option<String> {
+        if self.bad_bodies > 0 {
+            return Some(format!("dyn: {} bodies with another gyroscopic setting or allowed to sleep", self.bad_bodies));
+        }
+        (self.readback_mismatches > 0)
+            .then(|| format!("dyn: {} kicks read back a velocity other than v + dv", self.readback_mismatches))
+    }
+
+    /// Writes `--sanity` and `--scene-dump` and returns the summary's `"dyn"` object (a leading comma).
+    pub fn finish(
+        &mut self,
+        w: &World,
+        sanity_path: Option<&std::path::Path>,
+        dump_path: Option<&std::path::Path>,
+    ) -> Result<String, String> {
+        let program = self.program;
+        let mut canonical = String::with_capacity(400 * 1024);
+        spec::canonical_dump(program, &mut canonical).expect("invariant: writing to a String cannot fail");
+        let canonical_fnv = crate::fnv1a64(canonical.as_bytes());
+        let mut dump_fnv = None;
+        if let (Some(body), Some(path)) = (&self.dump, dump_path) {
+            let mut text = String::with_capacity(body.len() + 256);
+            spec::write_header(program, w.params.dt, w.gravity.to_array(), &mut text)
+                .expect("invariant: writing to a String cannot fail");
+            text.push_str(body);
+            spec::write_end(self.events_applied, w.boxes.len(), &mut text)
+                .expect("invariant: writing to a String cannot fail");
+            dump_fnv = Some(crate::fnv1a64(text.as_bytes()));
+            std::fs::write(path, text).map_err(|e| format!("writing {}: {e}", path.display()))?;
+        }
+        let mut last = SanityRow::new(0, self.gravity, 0.0);
+        for &h in &w.boxes {
+            let b = &w.bodies[h];
+            last.add_body(b.translation().to_array(), b.rotation().to_array(), b.linvel().to_array(), b.angvel().to_array());
+        }
+        let final_json = format!(
+            "{{\"nonfinite\":{},\"min_y\":{},\"max_speed\":{},\"escaped\":{}}}",
+            last.nonfinite(),
+            json_f64(last.min_y()),
+            json_f64(last.max_speed()),
+            last.escaped(program)
+        );
+        let sanity_json = match &self.sanity {
+            None => "null".to_owned(),
+            Some(rows) => {
+                if let Some(path) = sanity_path {
+                    let mut text = String::with_capacity(rows.len() * 320 + 256);
+                    text.push_str(spec::SANITY_HEADER);
+                    text.push('\n');
+                    for r in rows {
+                        r.write_csv(&mut text).expect("invariant: writing to a String cannot fail");
+                    }
+                    std::fs::write(path, text).map_err(|e| format!("writing {}: {e}", path.display()))?;
+                }
+                let (a, b) = program.metric_window();
+                format!(
+                    "{{\"rows\":{},\"e0\":{},\"e_inj\":{},\"clearance_min\":{},\"statics_window\":[{a},{b}],\"statics\":{}}}",
+                    rows.len(),
+                    json_f64(rows.first().map_or(f64::NAN, SanityRow::e_total)),
+                    json_f64(self.e_inj),
+                    json_f64(self.clearance_min),
+                    self.statics_window.json(),
+                )
+            }
+        };
+        let (a, b) = program.metric_window();
+        Ok(format!(
+            ",\"dyn\":{{\"program\":\"{}\",\"events_on\":{},\"program_steps\":{},\"metric_window\":[{a},{b}],\
+             \"statics\":{},\"canonical_dump_fnv\":\"{canonical_fnv:#018x}\",\"scene_dump_fnv\":{},\
+             \"kicks\":{},\"launches\":{},\"readback_mismatches\":{},\"bad_bodies\":{},\"bodies\":{},\
+             \"final\":{final_json},\"sanity\":{sanity_json}}}",
+            program.name(),
+            self.events_on,
+            program.steps(),
+            1 + w.statics.len(),
+            dump_fnv.map_or_else(|| "null".to_owned(), |h| format!("\"{h:#018x}\"")),
+            self.kicks_applied,
+            self.launches_applied,
+            self.readback_mismatches,
+            self.bad_bodies,
+            w.boxes.len(),
+        ))
+    }
+}

@@ -1,15 +1,23 @@
-boyko parity patch for Jolt's PerformanceTest (physics perf campaign, plan section 1: H3, H8, H10, O5).
-Applies with `git apply` to Jolt v5.3.0 and v5.6.0 (checked 2026-09-19; v5.6.0 at line offsets only).
+boyko parity patch for Jolt's PerformanceTest (physics perf campaign, plan section 1: H3, H8, H10, O5; v2: lane DYN-SCENES).
+The v1 hunks apply with `git apply` to Jolt v5.3.0 and v5.6.0 (checked 2026-09-19); the v2 hunks, the dynamic parity
+scenes, are checked on v5.6.0 only (2026-10-06: the comparison is against Jolt 5.6 alone).
 Build recipe, flags and what each change is for: the header of ../jolt_parity_pyramid.rs, "Build (Jolt)".
 
-  PyramidScene.h         damping 0 (boyko has no rigid-body damping); mAllowSleeping from SetAllowSleeping
-  PerformanceTestScene.h SetAllowSleeping, false for every scene that does not support it
+  PyramidScene.h         damping 0 (boyko has no rigid-body damping); mAllowSleeping from SetAllowSleeping;
+                         v2: namespace BoykoDyn (the programs, an independent C++ derivation of boyko's
+                         dyn_spec.rs) and BoykoDynPyramidScene (J-T plus a program, events in ApplyEvents)
+  PerformanceTestScene.h SetAllowSleeping, false for every scene that does not support it;
+                         v2: BoykoDynLog and ApplyEvents, called before each step's clock starts
   PerformanceTest.cpp    -no_pair_cache, -allow_sleep (+ an Active Bodies column in -f's CSV),
                          -receipt (a counting ContactListener: receipt_<quality>_th<N>.csv),
-                         and one "boyko-parity-patch v1" line naming the options in force
+                         and one "boyko-parity-patch v1" line naming the options in force (unchanged by v2);
+                         v2: -dyn=kick|shoot|slide, -sanity, -scene_dump=, -pose_out=, -spawn_pose_out=, a second
+                         "boyko-parity-dyn v1" line printed only with them, Update's error flags kept and counted
 
-Text above the first `diff --git a/PerformanceTest/PerformanceTest.cpp b/PerformanceTest/PerformanceTest.cpp
-index 15e3258..06ca0b4 100644
+git apply ignores this prose: the patch proper starts at the first file header below.
+
+diff --git a/PerformanceTest/PerformanceTest.cpp b/PerformanceTest/PerformanceTest.cpp
+index 5f241cf..4e2ddd0 100644
 --- a/PerformanceTest/PerformanceTest.cpp
 +++ b/PerformanceTest/PerformanceTest.cpp
 @@ -31,6 +31,7 @@ JPH_SUPPRESS_WARNINGS_STD_BEGIN
@@ -20,7 +28,7 @@ index 15e3258..06ca0b4 100644
  JPH_SUPPRESS_WARNINGS_STD_END
  
  using namespace JPH;
-@@ -68,6 +69,30 @@ static void TraceImpl(const char *inFMT, ...)
+@@ -69,6 +70,147 @@ static void TraceImpl(const char *inFMT, ...)
  #endif
  }
  
@@ -30,38 +38,160 @@ index 15e3258..06ca0b4 100644
 +class ReceiptContactListener : public ContactListener
 +{
 +public:
-+	virtual void			OnContactAdded([[maybe_unused]] const Body &inBody1, [[maybe_unused]] const Body &inBody2, const ContactManifold &inManifold, [[maybe_unused]] ContactSettings &ioSettings) override { Count(inManifold); }
-+	virtual void			OnContactPersisted([[maybe_unused]] const Body &inBody1, [[maybe_unused]] const Body &inBody2, const ContactManifold &inManifold, [[maybe_unused]] ContactSettings &ioSettings) override { Count(inManifold); }
++	virtual void			OnContactAdded(const Body &inBody1, const Body &inBody2, const ContactManifold &inManifold, [[maybe_unused]] ContactSettings &ioSettings) override { Count(inBody1, inBody2, inManifold); }
++	virtual void			OnContactPersisted(const Body &inBody1, const Body &inBody2, const ContactManifold &inManifold, [[maybe_unused]] ContactSettings &ioSettings) override { Count(inBody1, inBody2, inManifold); }
 +
-+	void					Reset()								{ mManifolds = 0; mPoints = 0; }
++	void					Reset()								{ mManifolds = 0; mPoints = 0; mStatic = 0; mStaticStatic = 0; mStaticPoints = 0; }
 +	uint					GetManifolds() const				{ return mManifolds.load(memory_order_relaxed); }
 +	uint					GetPoints() const					{ return mPoints.load(memory_order_relaxed); }
++	uint					GetStatic() const					{ return mStatic.load(memory_order_relaxed); }			// boyko parity patch v2
++	uint					GetStaticStatic() const				{ return mStaticStatic.load(memory_order_relaxed); }	// boyko parity patch v2
++	uint					GetStaticPoints() const				{ return mStaticPoints.load(memory_order_relaxed); }	// boyko parity patch v2
 +
 +private:
-+	void					Count(const ContactManifold &inManifold)
++	void					Count(const Body &inBody1, const Body &inBody2, const ContactManifold &inManifold)
 +	{
++		uint points = uint(inManifold.mRelativeContactPointsOn1.size());
 +		mManifolds.fetch_add(1, memory_order_relaxed);
-+		mPoints.fetch_add(uint(inManifold.mRelativeContactPointsOn1.size()), memory_order_relaxed);
++		mPoints.fetch_add(points, memory_order_relaxed);
++		if (inBody1.IsStatic() || inBody2.IsStatic()) // boyko parity patch v2: manifolds with a static endpoint
++		{
++			(inBody1.IsStatic() && inBody2.IsStatic()? mStaticStatic : mStatic).fetch_add(1, memory_order_relaxed);
++			mStaticPoints.fetch_add(points, memory_order_relaxed);
++		}
 +	}
 +
 +	atomic<uint>			mManifolds { 0 };
 +	atomic<uint>			mPoints { 0 };
++	atomic<uint>			mStatic { 0 };
++	atomic<uint>			mStaticStatic { 0 };
++	atomic<uint>			mStaticPoints { 0 };
 +};
++
++// boyko parity patch v2 (-sanity): one sanity CSV row's leading columns (up to `bodies,`), the state after
++// inStep steps: energies per unit J-T box mass, bounds, the centroid, non-finite bodies, over every dynamic
++// body (body index order = creation order on a fresh system)
++static string BoykoSanityRow(PhysicsSystem &inPhysicsSystem, uint inStep, double inInjected)
++{
++	BodyInterface &bi = inPhysicsSystem.GetBodyInterfaceNoLock();
++	Vec3 g = inPhysicsSystem.GetGravity();
++	BodyIDVector ids;
++	inPhysicsSystem.GetBodies(ids);
++	double e_lin = 0.0, e_rot = 0.0, e_pot = 0.0, max_speed = 0.0;
++	double mn[3] = { HUGE_VAL, HUGE_VAL, HUGE_VAL }, mx[3] = { -HUGE_VAL, -HUGE_VAL, -HUGE_VAL }, sum[3] = { 0.0, 0.0, 0.0 };
++	int nonfinite = 0, bodies = 0;
++	for (BodyID id : ids)
++	{
++		if (bi.GetMotionType(id) == EMotionType::Static)
++			continue;
++		++bodies;
++		Vec3 p = Vec3(bi.GetPosition(id)), v = bi.GetLinearVelocity(id), w = bi.GetAngularVelocity(id);
++		Quat q = bi.GetRotation(id);
++		float vals[13] = { p.GetX(), p.GetY(), p.GetZ(), q.GetX(), q.GetY(), q.GetZ(), q.GetW(), v.GetX(), v.GetY(), v.GetZ(), w.GetX(), w.GetY(), w.GetZ() };
++		bool finite = true;
++		for (float f : vals)
++			finite = finite && isfinite(f);
++		if (!finite)
++			++nonfinite;
++		double v2 = double(v.GetX()) * v.GetX() + double(v.GetY()) * v.GetY() + double(v.GetZ()) * v.GetZ();
++		double w2 = double(w.GetX()) * w.GetX() + double(w.GetY()) * w.GetY() + double(w.GetZ()) * w.GetZ();
++		e_lin += 0.5 * v2;
++		e_rot += w2 / 3.0;
++		e_pot -= double(g.GetX()) * p.GetX() + double(g.GetY()) * p.GetY() + double(g.GetZ()) * p.GetZ();
++		if (sqrt(v2) > max_speed)
++			max_speed = sqrt(v2);
++		double x[3] = { double(p.GetX()), double(p.GetY()), double(p.GetZ()) };
++		for (int a = 0; a < 3; ++a)
++		{
++			mn[a] = min(mn[a], x[a]);
++			mx[a] = max(mx[a], x[a]);
++			sum[a] += x[a];
++		}
++	}
++	double n = bodies > 0? double(bodies) : 1.0;
++	char buf[1024];
++	snprintf(buf, sizeof(buf), "%u,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d,%d,",
++		inStep, e_lin, e_rot, e_pot, e_lin + e_rot + e_pot, inInjected, max_speed, mn[0], mx[0], mn[1], mx[1], mn[2], mx[2], sum[0] / n, sum[1] / n, sum[2] / n, nonfinite, bodies);
++	return buf;
++}
++
++// boyko parity patch v2 (-sanity): candidate pairs with a static endpoint, by Jolt's own broadphase predicate
++// recomputed per pair (QuadTree::FindCollidingPairs: an active body's bounds expanded by the speculative
++// contact distance overlap the other body's bounds). Static-static pairs are 0 by construction: the first
++// body of every pair is active, and NON_MOVING pairs only with MOVING.
++static uint BoykoStaticCandidatePairs(PhysicsSystem &inPhysicsSystem)
++{
++	const BodyLockInterfaceNoLock &bli = inPhysicsSystem.GetBodyLockInterfaceNoLock();
++	float spec = inPhysicsSystem.GetPhysicsSettings().mSpeculativeContactDistance;
++	BodyIDVector ids;
++	inPhysicsSystem.GetBodies(ids);
++	Array<AABox> statics, active;
++	for (BodyID id : ids)
++	{
++		BodyLockRead lock(bli, id);
++		const Body &b = lock.GetBody();
++		if (b.IsStatic())
++			statics.push_back(b.GetWorldSpaceBounds());
++		else if (b.IsActive())
++		{
++			AABox bounds = b.GetWorldSpaceBounds();
++			bounds.ExpandBy(Vec3::sReplicate(spec));
++			active.push_back(bounds);
++		}
++	}
++	uint n = 0;
++	for (const AABox &a : active)
++		for (const AABox &s : statics)
++			n += a.Overlaps(s)? 1 : 0;
++	return n;
++}
++
++// boyko parity patch v2: little-endian f32 bits of every dynamic body's position, linear velocity, rotation
++// (x, y, z, w) and angular velocity, in body index order: boyko's --pose-out format
++static bool BoykoWritePose(PhysicsSystem &inPhysicsSystem, const char *inPath)
++{
++	BodyInterface &bi = inPhysicsSystem.GetBodyInterfaceNoLock();
++	BodyIDVector ids;
++	inPhysicsSystem.GetBodies(ids);
++	string out;
++	for (BodyID id : ids)
++	{
++		if (bi.GetMotionType(id) == EMotionType::Static)
++			continue;
++		Vec3 p = Vec3(bi.GetPosition(id)), v = bi.GetLinearVelocity(id), w = bi.GetAngularVelocity(id);
++		Quat q = bi.GetRotation(id);
++		float vals[13] = { p.GetX(), p.GetY(), p.GetZ(), v.GetX(), v.GetY(), v.GetZ(), q.GetX(), q.GetY(), q.GetZ(), q.GetW(), w.GetX(), w.GetY(), w.GetZ() };
++		for (float f : vals)
++		{
++			uint32 b = BoykoDyn::Bits(f);
++			char c[4] = { char(b & 0xff), char((b >> 8) & 0xff), char((b >> 16) & 0xff), char((b >> 24) & 0xff) };
++			out.append(c, 4);
++		}
++	}
++	ofstream f(inPath, ofstream::out | ofstream::binary | ofstream::trunc);
++	f.write(out.data(), streamsize(out.size()));
++	return bool(f);
++}
 +
  // Program entry point
  int main(int argc, char** argv)
  {
-@@ -99,6 +124,9 @@ int main(int argc, char** argv)
+@@ -100,6 +242,14 @@ int main(int argc, char** argv)
  	unique_ptr<PerformanceTestScene> scene;
  	const char *validate_hash = nullptr;
  	int repeat = 1;
 +	bool no_pair_cache = false; // boyko parity patch
 +	bool allow_sleep = false; // boyko parity patch
 +	bool receipt = false; // boyko parity patch
++	const char *dyn_program = nullptr; // boyko parity patch v2
++	bool dyn_sanity = false; // boyko parity patch v2
++	const char *scene_dump = nullptr; // boyko parity patch v2
++	const char *pose_out = nullptr; // boyko parity patch v2
++	const char *spawn_pose_out = nullptr; // boyko parity patch v2
  	for (int argidx = 1; argidx < argc; ++argidx)
  	{
  		const char *arg = argv[argidx];
-@@ -160,6 +188,18 @@ int main(int argc, char** argv)
+@@ -163,6 +313,38 @@ int main(int argc, char** argv)
  		{
  			disable_sleep = true;
  		}
@@ -77,20 +207,44 @@ index 15e3258..06ca0b4 100644
 +		{
 +			receipt = true;
 +		}
++		else if (strncmp(arg, "-dyn=", 5) == 0)
++		{
++			dyn_program = arg + 5;
++		}
++		else if (strcmp(arg, "-sanity") == 0)
++		{
++			dyn_sanity = true;
++		}
++		else if (strncmp(arg, "-scene_dump=", 12) == 0)
++		{
++			scene_dump = arg + 12;
++		}
++		else if (strncmp(arg, "-pose_out=", 10) == 0)
++		{
++			pose_out = arg + 10;
++		}
++		else if (strncmp(arg, "-spawn_pose_out=", 16) == 0)
++		{
++			spawn_pose_out = arg + 16;
++		}
  		else if (strcmp(arg, "-p") == 0)
  		{
  			enable_profiler = true;
-@@ -204,6 +244,9 @@ int main(int argc, char** argv)
+@@ -207,6 +389,13 @@ int main(int argc, char** argv)
  				  "-r: Record debug renderer output for JoltViewer\n"
  				  "-f: Record per frame timings\n"
  				  "-no_sleep: Disable sleeping\n"
 +				  "-no_pair_cache: Disable the body pair contact cache (boyko parity patch)\n"
 +				  "-allow_sleep: Let the Pyramid scene's bodies sleep (boyko parity patch)\n"
 +				  "-receipt: Write receipt_<quality>_th<N>.csv with manifolds, points, active bodies and top box y per frame (boyko parity patch)\n"
++				  "-dyn=<kick|shoot|slide>: A dynamic parity scene on Pyramid, its events applied before each step's clock starts (boyko parity patch v2)\n"
++				  "-sanity: Write sanity_<quality>_th<N>.csv (the dynamic scenes' bar) and statics_<quality>_th<N>.csv (boyko parity patch v2)\n"
++				  "-scene_dump=<path>: Write the canonical scene dump, read back from the bodies (boyko parity patch v2)\n"
++				  "-pose_out=<path>, -spawn_pose_out=<path>: Write the final / spawned pose bytes, boyko's format (boyko parity patch v2)\n"
  				  "-rs: Record state\n"
  				  "-vs: Validate state\n"
  				  "-validate_hash=<hash>: Validate hash (return 0 if successful, 1 if failed)\n"
-@@ -228,6 +271,19 @@ int main(int argc, char** argv)
+@@ -231,6 +420,57 @@ int main(int argc, char** argv)
  	// Output scene we're running
  	Trace("Running scene: %s", scene->GetName());
  
@@ -107,10 +261,48 @@ index 15e3258..06ca0b4 100644
 +	}
 +	Trace("boyko-parity-patch v1: damping 0 (Pyramid), no_pair_cache=%d, allow_sleep=%d, receipt=%d", no_pair_cache? 1 : 0, allow_sleep? 1 : 0, receipt? 1 : 0);
 +
++	// boyko parity patch v2: the dynamic parity scenes and their structural outputs, on Pyramid only, one run per process
++	bool dyn_any = dyn_program != nullptr || dyn_sanity || scene_dump != nullptr || pose_out != nullptr || spawn_pose_out != nullptr;
++	BoykoDyn::EProgram dyn = BoykoDyn::EProgram::None;
++	if (dyn_any)
++	{
++		if (strcmp(scene->GetName(), "Pyramid") != 0 || allow_sleep)
++		{
++			Trace("-dyn, -sanity, -scene_dump, -pose_out and -spawn_pose_out run on the Pyramid scene without -allow_sleep only");
++			return 1;
++		}
++		if (specified_quality == -1 || specified_threads <= 0 || repeat != 1)
++		{
++			Trace("-dyn, -sanity, -scene_dump, -pose_out and -spawn_pose_out need -q=, -t= and one repeat: one run per process");
++			return 1;
++		}
++		if (dyn_program != nullptr)
++		{
++			if (strcmp(dyn_program, "kick") == 0)
++				dyn = BoykoDyn::EProgram::Kick;
++			else if (strcmp(dyn_program, "shoot") == 0)
++				dyn = BoykoDyn::EProgram::Shoot;
++			else if (strcmp(dyn_program, "slide") == 0)
++				dyn = BoykoDyn::EProgram::Slide;
++			else
++			{
++				Trace("-dyn=: expected kick|shoot|slide (S-LAND is the Pyramid run itself)");
++				return 1;
++			}
++			scene = unique_ptr<PerformanceTestScene>(new BoykoDynPyramidScene(dyn));
++		}
++		if (max_iterations > BoykoDyn::Steps(dyn) || (scene_dump != nullptr && max_iterations != BoykoDyn::Steps(dyn)))
++		{
++			Trace("-i=%u: the %s program has %u steps, and -scene_dump writes a complete program", max_iterations, BoykoDyn::Name(dyn), BoykoDyn::Steps(dyn));
++			return 1;
++		}
++		Trace("boyko-parity-dyn v1: program=%s, sanity=%d, scene_dump=%d, pose_out=%d", BoykoDyn::Name(dyn), dyn_sanity? 1 : 0, scene_dump != nullptr? 1 : 0, pose_out != nullptr? 1 : 0);
++	}
++
  	// Create temp allocator
  	TempAllocatorImpl temp_allocator(scene->GetTempAllocatorSizeMB() * 1024 * 1024);
  
-@@ -311,6 +367,19 @@ int main(int argc, char** argv)
+@@ -317,6 +557,19 @@ int main(int argc, char** argv)
  				PhysicsSystem physics_system;
  				physics_system.Init(scene->GetMaxBodies(), 0, scene->GetMaxBodyPairs(), scene->GetMaxContactConstraints(), broad_phase_layer_interface, object_vs_broadphase_layer_filter, object_vs_object_layer_filter);
  
@@ -124,13 +316,13 @@ index 15e3258..06ca0b4 100644
 +
 +				// boyko parity patch (-receipt): the counting listener
 +				ReceiptContactListener receipt_listener;
-+				if (receipt)
++				if (receipt || dyn_sanity) // boyko parity patch v2: -sanity reads its static-pair receipts from it
 +					physics_system.SetContactListener(&receipt_listener);
 +
  				// Start test scene
  				scene->StartTest(physics_system, motion_quality);
  
-@@ -335,6 +404,23 @@ int main(int argc, char** argv)
+@@ -341,9 +594,96 @@ int main(int argc, char** argv)
  				// Optimize the broadphase to prevent an expensive first frame
  				physics_system.OptimizeBroadPhase();
  
@@ -154,7 +346,80 @@ index 15e3258..06ca0b4 100644
  				// A tag used to identify the test
  				String tag = ToLower(motion_quality_str) + "_th" + ConvertToString(num_threads + 1);
  
-@@ -352,7 +438,15 @@ int main(int argc, char** argv)
++				// boyko parity patch v2: the spawned world read back (-scene_dump, -spawn_pose_out) and the sanity state 0
++				BoykoDynLog dyn_log;
++				dyn_log.mRecordDump = scene_dump != nullptr;
++				string dyn_dump_spawn, sanity_pending;
++				ofstream sanity_file, statics_file;
++				uint32 sanity_err = 0;
++				int update_errors = 0;
++				if (dyn_any)
++				{
++					const BodyLockInterfaceNoLock &bli = physics_system.GetBodyLockInterfaceNoLock();
++					BodyIDVector dyn_ids;
++					physics_system.GetBodies(dyn_ids);
++					float box0_inv_mass = 1.0f;
++					Vec3 box0_inv_inertia = Vec3::sOne();
++					for (BodyID id : dyn_ids)
++					{
++						BodyLockRead lock(bli, id);
++						if (!lock.GetBody().IsStatic())
++						{
++							box0_inv_mass = lock.GetBody().GetMotionPropertiesUnchecked()->GetInverseMass();
++							box0_inv_inertia = lock.GetBody().GetMotionPropertiesUnchecked()->GetInverseInertiaDiagonal();
++							break;
++						}
++					}
++					if (scene_dump != nullptr)
++					{
++						string statics, bodies;
++						uint index = 0;
++						for (BodyID id : dyn_ids)
++						{
++							BodyLockRead lock(bli, id);
++							const Body &b = lock.GetBody();
++							if (b.IsStatic())
++							{
++								const Shape *shape = b.GetShape();
++								bool box = shape->GetSubType() == EShapeSubType::Box;
++								Vec3 half = box? static_cast<const BoxShape *>(shape)->GetHalfExtent() : Vec3::sReplicate(nanf(""));
++								RVec3 p = b.GetPosition();
++								Quat q = b.GetRotation();
++								float vals[] = { half.GetX(), half.GetY(), half.GetZ(), float(p.GetX()), float(p.GetY()), float(p.GetZ()), q.GetX(), q.GetY(), q.GetZ(), q.GetW(),
++												 b.GetFriction(), b.GetRestitution(), box? static_cast<const BoxShape *>(shape)->GetConvexRadius() : nanf("") };
++								statics += "static";
++								for (float f : vals)
++									BoykoDyn::AppendHex(statics, f);
++								statics += "\n";
++							}
++							else
++							{
++								bodies += "body ";
++								BoykoDyn::AppendBodyFields(bodies, b, index++, box0_inv_mass, box0_inv_inertia);
++								bodies += "\n";
++							}
++						}
++						dyn_dump_spawn = statics + bodies;
++					}
++					if (spawn_pose_out != nullptr && !BoykoWritePose(physics_system, spawn_pose_out))
++					{
++						Trace("cannot write %s", spawn_pose_out);
++						return 1;
++					}
++					if (dyn_sanity)
++					{
++						sanity_file.open(("sanity_" + tag + ".csv").c_str(), ofstream::out | ofstream::binary | ofstream::trunc);
++						sanity_file << "step,e_lin,e_rot,e_pot,e_total,e_inj,max_speed,min_x,max_x,min_y,max_y,min_z,max_z,cx,cy,cz,nonfinite,bodies,clearance,engine_err\n";
++						statics_file.open(("statics_" + tag + ".csv").c_str(), ofstream::out | ofstream::binary | ofstream::trunc);
++						statics_file << "frame,pairs_static,pairs_static_static,manifolds,manifolds_static,manifolds_static_static,points,points_static\n";
++						sanity_pending = BoykoSanityRow(physics_system, 0, 0.0);
++					}
++				}
++
+ 			#ifdef JPH_DEBUG_RENDERER
+ 				// Open renderer output
+ 				ofstream renderer_file;
+@@ -358,7 +698,15 @@ int main(int argc, char** argv)
  				if (enable_per_frame_recording)
  				{
  					per_frame_file.open(("per_frame_" + tag + ".csv").c_str(), ofstream::out | ofstream::trunc);
@@ -171,7 +436,40 @@ index 15e3258..06ca0b4 100644
  				}
  
  				ofstream record_state_file;
-@@ -398,7 +492,19 @@ int main(int argc, char** argv)
+@@ -376,6 +724,23 @@ int main(int argc, char** argv)
+ 					JPH_PROFILE_NEXTFRAME();
+ 					JPH_DET_LOG("Iteration: " << iterations);
+ 
++					// boyko parity patch v2 (-dyn): this step's events, untimed, before the clock starts; then the state
++					// before them (row `iterations`) is written with the clearance of a launch applied here
++					if (dyn_any)
++					{
++						dyn_log.mClearance = -1.0;
++						scene->ApplyEvents(physics_system, iterations, dyn_log);
++						if (dyn_sanity)
++						{
++							char tail[64];
++							if (dyn_log.mClearance >= 0.0)
++								snprintf(tail, sizeof(tail), "%.17g,%u\n", dyn_log.mClearance, uint(sanity_err));
++							else
++								snprintf(tail, sizeof(tail), ",%u\n", uint(sanity_err));
++							sanity_file << sanity_pending << tail;
++						}
++					}
++
+ 					// Start measuring
+ 					chrono::high_resolution_clock::time_point clock_start = chrono::high_resolution_clock::now();
+ 
+@@ -383,7 +748,7 @@ int main(int argc, char** argv)
+ 					scene->UpdateTest(physics_system, temp_allocator, cDeltaTime);
+ 
+ 					// Do a physics step
+-					physics_system.Update(cDeltaTime, 1, &temp_allocator, &job_system);
++					EPhysicsUpdateError update_error = physics_system.Update(cDeltaTime, 1, &temp_allocator, &job_system); // boyko parity patch v2: the result is kept
+ 
+ 					// Stop measuring
+ 					chrono::high_resolution_clock::time_point clock_end = chrono::high_resolution_clock::now();
+@@ -404,7 +769,36 @@ int main(int argc, char** argv)
  
  					// Record time taken this iteration
  					if (enable_per_frame_recording)
@@ -183,6 +481,23 @@ index 15e3258..06ca0b4 100644
 +							per_frame_file << iterations << ", " << (1.0e-6 * duration.count()) << endl;
 +					}
 +
++					// boyko parity patch v2: the step's engine errors (-dyn receipts line) and, under -sanity, the state after
++					// it and its static-pair receipts
++					if (dyn_any)
++					{
++						update_errors += update_error != EPhysicsUpdateError::None? 1 : 0;
++						if (dyn_sanity)
++						{
++							sanity_err = uint32(update_error);
++							sanity_pending = BoykoSanityRow(physics_system, iterations + 1, dyn_log.mInjected);
++							statics_file << iterations << "," << BoykoStaticCandidatePairs(physics_system) << ",0," << receipt_listener.GetManifolds() << ","
++										 << receipt_listener.GetStatic() << "," << receipt_listener.GetStaticStatic() << "," << receipt_listener.GetPoints() << ","
++										 << receipt_listener.GetStaticPoints() << "\n";
++							if (!receipt)
++								receipt_listener.Reset();
++						}
++					}
++
 +					// boyko parity patch (-receipt)
 +					if (receipt)
 +					{
@@ -192,11 +507,86 @@ index 15e3258..06ca0b4 100644
  
  					// Dump profile information every 100 iterations
  					if (enable_profiler && iterations % 100 == 0)
+@@ -456,6 +850,53 @@ int main(int argc, char** argv)
+ 				#endif // JPH_ENABLE_DETERMINISM_LOG
+ 				}
+ 
++				// boyko parity patch v2: the final state's row, the pose, the scene dump and the receipts line
++				if (dyn_any)
++				{
++					if (dyn_sanity)
++					{
++						char tail[64];
++						snprintf(tail, sizeof(tail), ",%u\n", uint(sanity_err));
++						sanity_file << sanity_pending << tail;
++						sanity_file.close();
++						statics_file.close();
++					}
++					if (pose_out != nullptr && !BoykoWritePose(physics_system, pose_out))
++					{
++						Trace("cannot write %s", pose_out);
++						return 1;
++					}
++					int final_bodies = 0;
++					{
++						BodyInterface &dbi = physics_system.GetBodyInterfaceNoLock();
++						BodyIDVector ids;
++						physics_system.GetBodies(ids);
++						for (BodyID id : ids)
++							final_bodies += dbi.GetMotionType(id) != EMotionType::Static? 1 : 0;
++					}
++					if (scene_dump != nullptr)
++					{
++						string text = "boyko-dyn-scene v1\nprogram " + string(BoykoDyn::Name(dyn)) + "\nsteps " + to_string(BoykoDyn::Steps(dyn)) + "\ndt";
++						BoykoDyn::AppendHex(text, cDeltaTime);
++						text += "\ngravity";
++						Vec3 g = physics_system.GetGravity();
++						BoykoDyn::AppendHex(text, g.GetX());
++						BoykoDyn::AppendHex(text, g.GetY());
++						BoykoDyn::AppendHex(text, g.GetZ());
++						text += "\n" + dyn_dump_spawn + dyn_log.mDumpLines + "end " + to_string(dyn_log.mEventsApplied) + " " + to_string(final_bodies) + "\n";
++						ofstream f(scene_dump, ofstream::out | ofstream::binary | ofstream::trunc);
++						f.write(text.data(), streamsize(text.size()));
++						if (!f)
++						{
++							Trace("cannot write %s", scene_dump);
++							return 1;
++						}
++					}
++					Trace("boyko-parity-dyn receipts: program=%s, events=%d, kicks=%d, launches=%d, readback_mismatches=%d, update_errors=%d, clearance_min=%.17g, bodies=%d",
++						BoykoDyn::Name(dyn), dyn_log.mEventsApplied, dyn_log.mKicksApplied, dyn_log.mLaunchesApplied, dyn_log.mReadbackMismatches, update_errors,
++						dyn_log.mLaunchesApplied > 0? dyn_log.mClearanceMin : -1.0, final_bodies);
++				}
++
+ 				// Calculate hash of all positions and rotations of the bodies
+ 				uint64 hash = HashBytes(nullptr, 0); // Ensure we start with the proper seed
+ 				BodyInterface &bi = physics_system.GetBodyInterfaceNoLock();
 diff --git a/PerformanceTest/PerformanceTestScene.h b/PerformanceTest/PerformanceTestScene.h
-index 99fe6f5..06a6b91 100644
+index 99fe6f5..273c7fe 100644
 --- a/PerformanceTest/PerformanceTestScene.h
 +++ b/PerformanceTest/PerformanceTestScene.h
-@@ -29,6 +29,10 @@ public:
+@@ -4,6 +4,20 @@
+ 
+ #pragma once
+ 
++// boyko parity patch v2 (-dyn): what a dynamic program's events did, for -sanity and -scene_dump
++struct BoykoDynLog
++{
++	string					mDumpLines;							///< kick / launch lines in application order (-scene_dump)
++	bool					mRecordDump = false;
++	double					mInjected = 0.0;					///< energy the applied events injected, per unit J-T box mass
++	double					mClearance = -1.0;					///< the clearance of a launch applied at this step, < 0 if none
++	double					mClearanceMin = 1.0e300;
++	int						mEventsApplied = 0;
++	int						mKicksApplied = 0;
++	int						mLaunchesApplied = 0;
++	int						mReadbackMismatches = 0;
++};
++
+ // Base class for a test scene to test performance
+ class PerformanceTestScene
+ {
+@@ -29,9 +43,16 @@ public:
  	// Load assets for the scene
  	virtual bool			Load([[maybe_unused]] const String &inAssetPath)	{ return true; }
  
@@ -207,8 +597,14 @@ index 99fe6f5..06a6b91 100644
  	// Start a new test by adding objects to inPhysicsSystem
  	virtual void			StartTest(PhysicsSystem &inPhysicsSystem, EMotionQuality inMotionQuality) = 0;
  
++	// boyko parity patch v2 (-dyn): apply the events of loop index inStep; called before the step's clock starts
++	virtual void			ApplyEvents([[maybe_unused]] PhysicsSystem &inPhysicsSystem, [[maybe_unused]] uint inStep, [[maybe_unused]] BoykoDynLog &ioLog) { }
++
+ 	// Step the test
+ 	virtual void			UpdateTest([[maybe_unused]] PhysicsSystem &inPhysicsSystem, [[maybe_unused]] TempAllocator &ioTempAllocator, [[maybe_unused]] float inDeltaTime) { }
+ 
 diff --git a/PerformanceTest/PyramidScene.h b/PerformanceTest/PyramidScene.h
-index 469b902..de8b201 100644
+index 469b902..08f6aeb 100644
 --- a/PerformanceTest/PyramidScene.h
 +++ b/PerformanceTest/PyramidScene.h
 @@ -20,6 +20,13 @@ public:
@@ -225,7 +621,7 @@ index 469b902..de8b201 100644
  	virtual void			StartTest(PhysicsSystem &inPhysicsSystem, EMotionQuality inMotionQuality) override
  	{
  		BodyInterface &bi = inPhysicsSystem.GetBodyInterface();
-@@ -41,8 +48,13 @@ public:
+@@ -41,8 +48,349 @@ public:
  				{
  					RVec3 position(Real(-cPyramidHeight + cBoxSize * j + (i & 1? cHalfBoxSize : 0.0f)), Real(1.0f + (cBoxSize + cBoxSeparation) * i), Real(-cPyramidHeight + cBoxSize * k + (i & 1? cHalfBoxSize : 0.0f)));
  					BodyCreationSettings settings(box_shape, position, Quat::sIdentity(), EMotionType::Dynamic, Layers::MOVING);
@@ -239,4 +635,340 @@ index 469b902..de8b201 100644
 +
 +private:
 +	bool					mAllowSleeping = false;
++};
++
++// boyko parity patch v2 (-dyn): the dynamic parity scenes on the J-T pyramid. The programs are boyko's
++// crates/boyko_physics/benches/jolt_parity_pyramid/dyn_spec.rs, derived here INDEPENDENTLY in C++ from
++// the record (docs/physics/perf-campaign/levers/scenes/01-DESIGN.md). Integer arithmetic only; every
++// float is an exact int * 2^-k, so -ffp-contract / -mfma cannot move a bit, and the scene dump must
++// equal boyko's and Rapier's byte for byte.
++namespace BoykoDyn
++{
++	enum class EProgram { None, Kick, Shoot, Slide };
++
++	// SplitMix64 (Steele, Lea, Flood 2014)
++	class SplitMix64
++	{
++	public:
++		explicit			SplitMix64(uint64 inSeed) : mState(inSeed) { }
++
++		uint64				Next()
++		{
++			mState += 0x9E3779B97F4A7C15ULL;
++			uint64 z = mState;
++			z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
++			z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
++			return z ^ (z >> 31);
++		}
++
++		// Uniform in [0, inN): draws below 2^64 mod inN are rejected
++		uint64				Below(uint64 inN)
++		{
++			uint64 t = (uint64(0) - inN) % inN;
++			for (;;)
++			{
++				uint64 z = Next();
++				if (z >= t)
++					return z % inN;
++			}
++		}
++
++		// Uniform in [inLo, inHi], inclusive
++		int64				Range(int64 inLo, int64 inHi)		{ return inLo + int64(Below(uint64(inHi - inLo + 1))); }
++
++	private:
++		uint64				mState;
++	};
++
++	struct Kick { uint mStep; uint mIndex; int mK[3]; };						// dv = k / 64 m/s
++	struct Launch { uint mStep; int mPos16[3]; int mVel256[3]; };			// p = pos / 16 m, v = vel / 256 m/s
++	struct StaticBox { int mHalf[3]; int mCenter[3]; };
++
++	inline const char *		Name(EProgram inP)		{ return inP == EProgram::Kick? "kick" : inP == EProgram::Shoot? "shoot" : inP == EProgram::Slide? "slide" : "none"; }
++	inline uint				Steps(EProgram inP)		{ return inP == EProgram::Kick || inP == EProgram::Shoot? 800 : 500; }
++	inline int				Events(EProgram inP)	{ return inP == EProgram::Kick? 24 : inP == EProgram::Shoot? 60 : 0; }
++
++	// Floor first, then the arena (S-SHOOT: walls whose faces stand at x, z = +-50 and a ceiling at y = 61;
++	// S-SLIDE: the same with the +x wall moved in to x = 31)
++	inline int				Statics(EProgram inP, const StaticBox *&outBoxes)
++	{
++		static const StaticBox cJT[1] = { { { 50, 1, 50 }, { 0, -1, 0 } } };
++		static const StaticBox cShoot[6] = { { { 50, 1, 50 }, { 0, -1, 0 } }, { { 1, 31, 52 }, { 51, 30, 0 } }, { { 1, 31, 52 }, { -51, 30, 0 } },
++											 { { 52, 31, 1 }, { 0, 30, 51 } }, { { 52, 31, 1 }, { 0, 30, -51 } }, { { 52, 1, 52 }, { 0, 62, 0 } } };
++		static const StaticBox cSlide[6] = { { { 50, 1, 50 }, { 0, -1, 0 } }, { { 1, 31, 52 }, { 31, 30, 0 } }, { { 1, 31, 52 }, { -51, 30, 0 } },
++											 { { 52, 31, 1 }, { 0, 30, 51 } }, { { 52, 31, 1 }, { 0, 30, -51 } }, { { 52, 1, 52 }, { 0, 62, 0 } } };
++		if (inP == EProgram::Shoot) { outBoxes = cShoot; return 6; }
++		if (inP == EProgram::Slide) { outBoxes = cSlide; return 6; }
++		outBoxes = cJT;
++		return 1;
++	}
++
++	inline float			FromBits(uint32 inBits)	{ float f; memcpy(&f, &inBits, sizeof(f)); return f; }
++	inline uint32			Bits(float inValue)		{ uint32 b; memcpy(&b, &inValue, sizeof(b)); return b; }
++
++	// S-KICK: 24 events at 200 + 25e; 62 distinct boxes drawn first, then a dv per box in draw order with
++	// 64^2 <= |k|^2 <= 320^2; applied (and returned) step-major, ascending index
++	inline Array<Kick>		KickProgram()
++	{
++		SplitMix64 rng(0x6b69636b00000001ULL);
++		Array<Kick> out;
++		for (int e = 0; e < 24; ++e)
++		{
++			uint idx[62];
++			int n = 0;
++			while (n < 62)
++			{
++				uint c = uint(rng.Below(1240));
++				bool seen = false;
++				for (int i = 0; i < n; ++i)
++					seen |= idx[i] == c;
++				if (!seen)
++					idx[n++] = c;
++			}
++			Kick ev[62];
++			for (int i = 0; i < 62; ++i)
++			{
++				int64 k[3];
++				for (;;)
++				{
++					k[0] = rng.Range(-320, 320);
++					k[1] = rng.Range(-320, 320);
++					k[2] = rng.Range(-320, 320);
++					int64 n2 = k[0] * k[0] + k[1] * k[1] + k[2] * k[2];
++					if (n2 >= 64 * 64 && n2 <= 320 * 320)
++						break;
++				}
++				ev[i] = { uint(200 + 25 * e), idx[i], { int(k[0]), int(k[1]), int(k[2]) } };
++			}
++			for (int i = 1; i < 62; ++i) // insertion sort by index
++				for (int j = i; j > 0 && ev[j - 1].mIndex > ev[j].mIndex; --j)
++				{
++					Kick t = ev[j]; ev[j] = ev[j - 1]; ev[j - 1] = t;
++				}
++			for (int i = 0; i < 62; ++i)
++				out.push_back(ev[i]);
++		}
++		return out;
++	}
++
++	// S-SHOOT: 60 launches at 200 + 10k from a 30-34 m ring around the pile axis (x = z = -1 m), 40-48 m
++	// up, each at least 30 degrees from the previous one, at 15-40 m/s toward a point 4-28 m up the axis
++	inline Array<Launch>	ShootProgram()
++	{
++		SplitMix64 rng(0x73686f6f00000001ULL);
++		Array<Launch> out;
++		bool have_prev = false;
++		int64 pa = 0, pb = 0;
++		for (int k = 0; k < 60; ++k)
++		{
++			int64 a, b;
++			for (;;)
++			{
++				a = rng.Range(-544, 544);
++				b = rng.Range(-544, 544);
++				int64 r2 = a * a + b * b;
++				if (r2 < 480 * 480 || r2 > 544 * 544)
++					continue;
++				if (have_prev)
++				{
++					int64 dot = a * pa + b * pb;
++					int64 pr2 = pa * pa + pb * pb;
++					if (!(dot <= 0 || 4 * dot * dot <= 3 * r2 * pr2))
++						continue;
++				}
++				break;
++			}
++			int64 hl = rng.Range(640, 768);
++			int64 ht = rng.Range(64, 448);
++			int64 s = rng.Range(15, 40);
++			int64 d[3] = { -a, ht - hl, -b };
++			uint64 dd = uint64(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
++			uint64 n = uint64(sqrt(double(dd))); // then the exact floor: the fix-up loops make sqrt's rounding irrelevant
++			while (n * n > dd)
++				--n;
++			while ((n + 1) * (n + 1) <= dd)
++				++n;
++			Launch l;
++			l.mStep = uint(200 + 10 * k);
++			l.mPos16[0] = int(a - 16);
++			l.mPos16[1] = int(hl);
++			l.mPos16[2] = int(b - 16);
++			for (int i = 0; i < 3; ++i)
++				l.mVel256[i] = int((s * 256 * d[i]) / int64(n)); // C++ integer division truncates toward zero
++			out.push_back(l);
++			pa = a;
++			pb = b;
++			have_prev = true;
++		}
++		return out;
++	}
++
++	// One body's mechanical energy per unit J-T box mass: |v|^2 / 2 + |w|^2 / 3 - g.p (a cube of side 2 has I = 2/3 m)
++	inline double			Energy(Vec3Arg inP, Vec3Arg inV, Vec3Arg inW, Vec3Arg inG)
++	{
++		double v2 = double(inV.GetX()) * inV.GetX() + double(inV.GetY()) * inV.GetY() + double(inV.GetZ()) * inV.GetZ();
++		double w2 = double(inW.GetX()) * inW.GetX() + double(inW.GetY()) * inW.GetY() + double(inW.GetZ()) * inW.GetZ();
++		double gp = double(inG.GetX()) * inP.GetX() + double(inG.GetY()) * inP.GetY() + double(inG.GetZ()) * inP.GetZ();
++		return 0.5 * v2 + w2 / 3.0 - gp;
++	}
++
++	inline void				AppendHex(string &ioOut, float inValue)
++	{
++		char buf[16];
++		snprintf(buf, sizeof(buf), " %08x", uint(Bits(inValue)));
++		ioOut += buf;
++	}
++
++	// A dynamic body's dump fields as READ BACK from Jolt (boyko's BodyLine::write_fields order)
++	inline void				AppendBodyFields(string &ioOut, const Body &inBody, uint inIndex, float inBox0InvMass, Vec3Arg inBox0InvInertia)
++	{
++		ioOut += to_string(inIndex);
++		RVec3 p = inBody.GetPosition();
++		Quat q = inBody.GetRotation();
++		Vec3 v = inBody.GetLinearVelocity(), w = inBody.GetAngularVelocity();
++		const Shape *shape = inBody.GetShape();
++		bool box = shape->GetSubType() == EShapeSubType::Box;
++		Vec3 half = box? static_cast<const BoxShape *>(shape)->GetHalfExtent() : Vec3::sReplicate(nanf(""));
++		float radius = box? static_cast<const BoxShape *>(shape)->GetConvexRadius() : nanf("");
++		const MotionProperties *mp = inBody.GetMotionPropertiesUnchecked();
++		float fields[] = { float(p.GetX()), float(p.GetY()), float(p.GetZ()), q.GetX(), q.GetY(), q.GetZ(), q.GetW(),
++						   v.GetX(), v.GetY(), v.GetZ(), w.GetX(), w.GetY(), w.GetZ(), half.GetX(), half.GetY(), half.GetZ(),
++						   inBody.GetFriction(), inBody.GetRestitution(), radius, mp->GetInverseMass() / inBox0InvMass,
++						   mp->GetInverseInertiaDiagonal().GetX() / inBox0InvInertia.GetX(), mp->GetInverseInertiaDiagonal().GetY() / inBox0InvInertia.GetY(),
++						   mp->GetInverseInertiaDiagonal().GetZ() / inBox0InvInertia.GetZ(), mp->GetLinearDamping(), mp->GetAngularDamping() };
++		for (float f : fields)
++			AppendHex(ioOut, f);
++		ioOut += inBody.GetAllowSleeping()? " 1" : " 0";
++		ioOut += mp->GetMotionQuality() == EMotionQuality::LinearCast? " 1" : " 0";
++	}
++}
++
++// boyko parity patch v2 (-dyn): J-T (PyramidScene::StartTest, unchanged) plus a dynamic program, applied by
++// ApplyEvents between updates, outside the timed pair
++class BoykoDynPyramidScene : public PyramidScene
++{
++public:
++	explicit				BoykoDynPyramidScene(BoykoDyn::EProgram inProgram) : mProgram(inProgram) { }
++
++	virtual void			StartTest(PhysicsSystem &inPhysicsSystem, EMotionQuality inMotionQuality) override
++	{
++		PyramidScene::StartTest(inPhysicsSystem, inMotionQuality); // J-T exactly: the floor, then the 1240 boxes
++
++		// The dynamic bodies in creation order (body index order on a fresh system)
++		BodyInterface &bi = inPhysicsSystem.GetBodyInterfaceNoLock();
++		BodyIDVector ids;
++		inPhysicsSystem.GetBodies(ids);
++		mBoxes.clear();
++		for (BodyID id : ids)
++			if (bi.GetMotionType(id) != EMotionType::Static)
++				mBoxes.push_back(id);
++
++		// The arena after the boxes, as in every harness
++		const BoykoDyn::StaticBox *statics = nullptr;
++		int n = BoykoDyn::Statics(mProgram, statics);
++		for (int i = 1; i < n; ++i)
++		{
++			const BoykoDyn::StaticBox &s = statics[i];
++			bi.CreateAndAddBody(BodyCreationSettings(new BoxShape(Vec3(float(s.mHalf[0]), float(s.mHalf[1]), float(s.mHalf[2])), 0.0f), RVec3(Real(s.mCenter[0]), Real(s.mCenter[1]), Real(s.mCenter[2])), Quat::sIdentity(), EMotionType::Static, Layers::NON_MOVING), EActivation::DontActivate);
++		}
++
++		// S-SLIDE: gravity 9.81 (sin t, -cos t, 0) with tan t = 1/2, rounded once to f32: y is exactly -2x
++		if (mProgram == BoykoDyn::EProgram::Slide)
++			inPhysicsSystem.SetGravity(Vec3(BoykoDyn::FromBits(0x408c63a9), BoykoDyn::FromBits(0xc10c63a9), 0.0f));
++
++		mKicks = mProgram == BoykoDyn::EProgram::Kick? BoykoDyn::KickProgram() : Array<BoykoDyn::Kick>();
++		mLaunches = mProgram == BoykoDyn::EProgram::Shoot? BoykoDyn::ShootProgram() : Array<BoykoDyn::Launch>();
++		mNextKick = 0;
++		mNextLaunch = 0;
++		mProjectile = new BoxShape(Vec3::sReplicate(1.0f), 0.0f); // the J-T box shape
++	}
++
++	virtual void			ApplyEvents(PhysicsSystem &inPhysicsSystem, uint inStep, BoykoDynLog &ioLog) override
++	{
++		BodyInterface &bi = inPhysicsSystem.GetBodyInterfaceNoLock();
++		const BodyLockInterfaceNoLock &bli = inPhysicsSystem.GetBodyLockInterfaceNoLock();
++		Vec3 g = inPhysicsSystem.GetGravity();
++		bool kicked = false;
++		while (mNextKick < mKicks.size() && mKicks[mNextKick].mStep == inStep)
++		{
++			const BoykoDyn::Kick &k = mKicks[mNextKick++];
++			BodyID id = mBoxes[k.mIndex];
++			Vec3 dv(float(k.mK[0]) * (1.0f / 64.0f), float(k.mK[1]) * (1.0f / 64.0f), float(k.mK[2]) * (1.0f / 64.0f));
++			Vec3 p = Vec3(bi.GetPosition(id)), w = bi.GetAngularVelocity(id);
++			Vec3 before = bi.GetLinearVelocity(id);
++			double e0 = BoykoDyn::Energy(p, before, w, g);
++			bi.AddLinearVelocity(id, dv);
++			Vec3 after = bi.GetLinearVelocity(id);
++			Vec3 want(before.GetX() + dv.GetX(), before.GetY() + dv.GetY(), before.GetZ() + dv.GetZ());
++			bool ok = BoykoDyn::Bits(after.GetX()) == BoykoDyn::Bits(want.GetX()) && BoykoDyn::Bits(after.GetY()) == BoykoDyn::Bits(want.GetY()) && BoykoDyn::Bits(after.GetZ()) == BoykoDyn::Bits(want.GetZ());
++			ioLog.mInjected += BoykoDyn::Energy(p, after, w, g) - e0;
++			ioLog.mReadbackMismatches += ok? 0 : 1;
++			ioLog.mKicksApplied++;
++			if (ioLog.mRecordDump)
++			{
++				ioLog.mDumpLines += "kick " + to_string(k.mStep) + " " + to_string(k.mIndex);
++				if (ok)
++				{
++					BoykoDyn::AppendHex(ioLog.mDumpLines, dv.GetX());
++					BoykoDyn::AppendHex(ioLog.mDumpLines, dv.GetY());
++					BoykoDyn::AppendHex(ioLog.mDumpLines, dv.GetZ());
++				}
++				else
++					ioLog.mDumpLines += " READBACK-MISMATCH";
++				ioLog.mDumpLines += "\n";
++			}
++			kicked = true;
++		}
++		if (kicked)
++			ioLog.mEventsApplied++;
++		while (mNextLaunch < mLaunches.size() && mLaunches[mNextLaunch].mStep == inStep)
++		{
++			const BoykoDyn::Launch &l = mLaunches[mNextLaunch++];
++			Vec3 p(float(l.mPos16[0]) * (1.0f / 16.0f), float(l.mPos16[1]) * (1.0f / 16.0f), float(l.mPos16[2]) * (1.0f / 16.0f));
++			Vec3 v(float(l.mVel256[0]) * (1.0f / 256.0f), float(l.mVel256[1]) * (1.0f / 256.0f), float(l.mVel256[2]) * (1.0f / 256.0f));
++
++			// The clearance: the spawn point's distance to the nearest dynamic body's centre
++			double clearance = 1.0e300;
++			for (BodyID id : mBoxes)
++			{
++				Vec3 c = Vec3(bi.GetPosition(id));
++				double dx = double(c.GetX()) - p.GetX(), dy = double(c.GetY()) - p.GetY(), dz = double(c.GetZ()) - p.GetZ();
++				clearance = min(clearance, sqrt(dx * dx + dy * dy + dz * dz));
++			}
++			ioLog.mClearance = clearance;
++			ioLog.mClearanceMin = min(ioLog.mClearanceMin, clearance);
++
++			// The J-T box's settings (PyramidScene.h), with the launch velocity
++			BodyCreationSettings settings(mProjectile, RVec3(p), Quat::sIdentity(), EMotionType::Dynamic, Layers::MOVING);
++			settings.mAllowSleeping = false;
++			settings.mLinearDamping = 0.0f;
++			settings.mAngularDamping = 0.0f;
++			settings.mLinearVelocity = v;
++			BodyID id = bi.CreateAndAddBody(settings, EActivation::Activate);
++			mBoxes.push_back(id);
++
++			BodyLockRead lock(bli, id);
++			const Body &body = lock.GetBody();
++			ioLog.mInjected += BoykoDyn::Energy(Vec3(body.GetPosition()), body.GetLinearVelocity(), body.GetAngularVelocity(), g);
++			ioLog.mLaunchesApplied++;
++			ioLog.mEventsApplied++;
++			if (ioLog.mRecordDump)
++			{
++				BodyLockRead lock0(bli, mBoxes[0]);
++				const MotionProperties *mp0 = lock0.GetBody().GetMotionPropertiesUnchecked();
++				ioLog.mDumpLines += "launch " + to_string(l.mStep) + " ";
++				BoykoDyn::AppendBodyFields(ioLog.mDumpLines, body, uint(mBoxes.size() - 1), mp0->GetInverseMass(), mp0->GetInverseInertiaDiagonal());
++				ioLog.mDumpLines += "\n";
++			}
++		}
++	}
++
++private:
++	BoykoDyn::EProgram		mProgram;
++	BodyIDVector			mBoxes;
++	Array<BoykoDyn::Kick>	mKicks;
++	Array<BoykoDyn::Launch>	mLaunches;
++	size_t					mNextKick = 0;
++	size_t					mNextLaunch = 0;
++	RefConst<Shape>			mProjectile;
  };

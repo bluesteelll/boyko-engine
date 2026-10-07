@@ -1,0 +1,6 @@
+# The dyn/ arms' own target directory (critique O6): without this file a cargo call here would
+# inherit the frozen harness's `target-dir` (../.cargo/config.toml) and build the same package name
+# into the frozen target directory. Only `target-dir` is set: an array key such as `build.rustflags`
+# would be JOINED with the parent's, and build_dyn.sh exports the frozen recipe's RUSTFLAGS anyway.
+[build]
+target-dir = "D:/wt/_targets/rapier-parity-dyn"
