@@ -333,6 +333,21 @@ a mutant before it was called green; the outputs are in `D:/tmp/phys-orch/dyn-sc
   pass it. `rapier_gates.py` G1 now ties `rapier/*.txt` (HEAD blobs) and the live `dyn/` sources
   to `dyn/bin/SOURCES.sha256`, so the census reads the bytes the dyn exes were built from. Red:
   an edited live source with no rebuild, and a flipped digit in the sums file.
+* **A run compared with its pin (triage r1 F2, part 1).** Every other structural check compares a
+  run with itself: W against W1, a second run against the first, `--sanity` against plain. Only
+  the 9c protocol compared a run with the committed pin. So a pose that moved at every W at once
+  passed the whole standing suite. Tester r1's mutant 7 did exactly that: it used one slip for
+  both the kick's write and its read-back. `gate/pose_pin.py` adds the pin check to the standing
+  suite. It requires that the fixture hashes to its pinned sha256, that the W1 pose equals the
+  fixture byte for byte, and that the printed hash equals the pinned one. Three gates call it:
+  `ours_gates.sh` (pins.json `ours`, every program), `jolt_gates.sh` G5 (`jolt56`, `-t=1`) and
+  `rapier_gates.py` G3 (`rapier`, per row and program, checked before `--write-fixtures` writes).
+  Green on the pinned builds: ours 49/49 on the head runner, Jolt 49 PASS plus 4 cross-W receipts,
+  Rapier G3 200/200, of which 24 are pin checks. Red-first: mutant 7 on the head code (tester r1's
+  hub, `T1_MUT=7`) passes 12 of the 13 kick checks; it fails only the new pin check
+  (`0xb359465c13962c6d` against `0x5c27d4ede389f12a`). The predicate also reds, case by case, on
+  another program's pose, one flipped bit, a wrong printed hash, no hash printed, a flipped pinned
+  sha256 and a missing pose.
 
 ## 6. Pins and fixtures
 

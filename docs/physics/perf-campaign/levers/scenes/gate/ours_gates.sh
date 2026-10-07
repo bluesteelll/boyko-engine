@@ -10,6 +10,9 @@
 #   armed            --arm-profiler at W1 and W8 exits 0 with void_steps 0, same pose
 #   counts           kick 1488 kicks / 24 events; shoot 60 launches / 1300 bodies; slide 0; none 0
 #   prefix (kick)    --dyn kick --steps 200 == --scene jolt --steps 200 (same exe)
+#   pin              the W1 pose and its printed hash = pins.json `ours.<P>` (pose_pin.py: the fixture's
+#                    sha256, then the bytes). Every check above compares a run with itself; this is the
+#                    one that compares it with the committed pin (triage r1 F2)
 # Writes OUT/gates.tsv (one line per check, PASS/FAIL) and OUT/<P>/ (every process's output).
 # A scorer's verdict is its exit code (the first cut piped it through `head`, whose status `$?` read:
 # that gate could not fail, which red-first (a) of C3 exposed).
@@ -72,6 +75,8 @@ for P in $PROGRAMS; do
     slide) want='"kicks":0,"launches":0,"readback_mismatches":0,"bad_statics":0,"bodies":1240' ;;
   esac
   [ "$counts" = "$want" ] && check "$P counts" PASS "$counts" || check "$P counts" FAIL "$counts want $want"
+  r=$(python "$G/pose_pin.py" ours "$P" "$D/w1.pose" --hash "$(hash_of "$D/w1.out")"); rc=$?
+  [ $rc = 0 ] && check "$P W1 pose = pin (pins.json)" PASS "$r" || check "$P W1 pose = pin (pins.json)" FAIL "$r"
   if [ "$P" = kick ]; then
     run pre_dyn --scene jolt --dyn kick --steps 200 --workers 1 --pose-out "$D/pre_dyn.pose"
     run pre_jt --scene jolt --steps 200 --workers 1 --pose-out "$D/pre_jt.pose"

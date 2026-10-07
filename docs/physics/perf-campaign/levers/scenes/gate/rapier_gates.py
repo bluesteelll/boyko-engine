@@ -2,7 +2,7 @@
 """Dynamic parity scenes, C4: the Rapier 0.36 dyn/ arms, structural only (no timing column is read).
 
 usage: rapier_gates.py OUTDIR [--gate 1|2|3|all] [--rows ID,ID,...] [--exe-dir DIR] [--frozen-exe-dir DIR]
-                              [--write-fixtures] [--lock PATH] [--sums PATH]
+                              [--write-fixtures] [--lock PATH] [--sums PATH] [--pins PATH]
 
 G1  the freeze is intact: every file sha256 FROZEN-9b section 1 pins (frozen9b.json `files`), the frozen exes
     against gate/bin/SHA256SUMS(.block), and dyn/Cargo.toml, dyn/Cargo.lock byte-identical to the frozen
@@ -19,8 +19,11 @@ G2  J-T unchanged by the hooks: all 70 frozen rows' commands (frozen9b.json `com
 G3  the dynamic programs on the ruling-22 rows (9b's 7-row R-CLAIM union plus simd8/D0): the dump equals
     the canonical text; determinism (W1 twice, W8 twice); the pose at W1/2/4/8/16 equals W1's; --sanity
     changes no bit; dyn_sanity.py B1-B6 and the premises at W1, S-LAND (J-T --sanity) included; the summary's
-    counts and void list; a --receipt run's work counts (rows, Np, Nm over the metric window); and, with
-    --write-fixtures, dyn/fixtures/<arm>/<row>_<program>.pose and its sha256 into OUTDIR/rapier_pins.json.
+    counts and void list; a --receipt run's work counts (rows, Np, Nm over the metric window); the W1 pose
+    and its hash against pins.json `rapier.<row>.<program>` (pose_pin.check_pose: the fixture's sha256, then
+    the bytes; the one check against the committed pin rather than the run itself, triage r1 F2; `--pins`
+    for the red-first); and, with --write-fixtures (after that check), dyn/fixtures/<arm>/<row>_<program>.pose
+    and its sha256 into OUTDIR/rapier_pins.json.
 Writes OUTDIR/gates.tsv and prints it.
 """
 import argparse
@@ -42,6 +45,8 @@ SOURCE_COPIES = {'src/main.rs': COPIES + 'main.rs.txt', 'src/dyn_scenes.rs': COP
                  'src/spec.rs': SPEC_BLOB, 'build_dyn.sh': COPIES + 'build_dyn.sh.txt',
                  '.cargo/config.toml': COPIES + 'cargo_config.toml.txt'}
 G = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, G)
+import pose_pin  # noqa: E402  (beside this script)
 Q1_ROWS = ['simd8/s1p7q2pd0+roff', 'simd8/s1p8q2pd0+roff', 'simd8/s1p9q2', 'simd4/s1p8q3pd0+roff',
            'block/s1p4q3pd0+roff', 'block/s1p5q2pd0+roff', 'block/s1p5q3pd0+roff', 'simd8/D0']
 STEPS = {'none': 500, 'kick': 800, 'shoot': 800, 'slide': 500}
@@ -149,8 +154,9 @@ def gate2(out, exe_dir, frozen_dir, only):
         check('G2 SUMMARY dyn = frozen exe (%s, W1)' % r['id'], rc == 0 and not diff, ','.join(diff) or 'equal')
 
 
-def gate3(out, exe_dir, only, write_fixtures):
+def gate3(out, exe_dir, only, write_fixtures, pins_path):
     d = json.load(open(FROZEN))
+    pinned = json.load(open(pins_path or pose_pin.PINS))['rapier']
     by_id = {r['id']: r for r in d['rows']}
     canon = os.path.join(out, 'canon')
     os.makedirs(canon, exist_ok=True)
@@ -196,6 +202,14 @@ def gate3(out, exe_dir, only, write_fixtures):
             got = (dy.get('kicks'), dy.get('launches'), dy.get('bodies'))
             check('G3 %s %s counts' % (rid, prog), got == want and dy.get('readback_mismatches') == 0 and dy.get('bad_bodies') == 0,
                   'kicks/launches/bodies %s, mismatches %s, bad bodies %s' % (got, dy.get('readback_mismatches'), dy.get('bad_bodies')))
+            pin = pinned.get(rid, {}).get(prog)
+            if pin is None:
+                check('G3 %s %s W1 pose = pin (pins.json)' % (rid, prog), False, 'no pin')
+            else:
+                ok, det = pose_pin.check_pose(os.path.join(dd, 'w1.pose'), os.path.join(RP, pin['fixture']), pin['fixture_sha256'])
+                h = (res['w1'][1] or {}).get('pose_hash')
+                check('G3 %s %s W1 pose = pin (pins.json)' % (rid, prog), ok and h == pin['pose_hash'],
+                      '%s; hash %s, pinned %s' % (det, h, pin['pose_hash']))
             wm = (res['rcpt1'][1] or {}).get('window_mean') or {}
             pins.setdefault(rid, {})[prog] = {
                 'pose_hash': (res['w1'][1] or {}).get('pose_hash'),
@@ -224,6 +238,7 @@ def main():
     ap.add_argument('--write-fixtures', action='store_true')
     ap.add_argument('--lock')
     ap.add_argument('--sums')
+    ap.add_argument('--pins')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     only = a.rows.split(',') if a.rows else None
@@ -232,7 +247,7 @@ def main():
     if a.gate in ('2', 'all'):
         gate2(a.out, a.exe_dir, a.frozen_exe_dir, only)
     if a.gate in ('3', 'all'):
-        gate3(a.out, a.exe_dir, only, a.write_fixtures)
+        gate3(a.out, a.exe_dir, only, a.write_fixtures, a.pins)
     with open(os.path.join(a.out, 'gates.tsv'), 'a') as f:
         f.write('\n'.join(T) + '\n')
     n_fail = sum(1 for t in T if '\tFAIL\t' in t)

@@ -10,7 +10,9 @@
 #      dyn_spec_ref.py's canonical text; determinism (-t=1 twice, -t=8 twice); the pose at -t=1/2/4/8/16
 #      (a receipt: Jolt promises no W-independence); -sanity changes no bit; dyn_sanity.py B1-B6 and
 #      the premises at -t=1; the receipts line (readback_mismatches 0, update_errors 0); -receipt
-#      runs for the work counts
+#      runs for the work counts; the -t=1 pose and the stat line's hash = pins.json `jolt56.<P>`
+#      (pose_pin.py: the fixture's sha256, then the bytes; the one check against the committed pin
+#      rather than the run itself, triage r1 F2)
 #   G6 ApplyEvents is called before clock_start inside the step loop (the patched source)
 # The manifest receipt (G2: driver.py's source_is_repo_patch) is run by the caller at the lane head.
 # Env: PROGRAMS (default "none kick shoot slide") narrows G5; JOLT_SRC points G6 at another source.
@@ -85,6 +87,8 @@ for P in ${PROGRAMS:-none kick shoot slide}; do
   [ $rc = 0 ] && check "G5 $P final B1-B3" PASS "$r" || check "G5 $P final B1-B3" FAIL "$r"
   rl=$(grep '^boyko-parity-dyn receipts' "$OUT/$P/san1/out.txt" | tr -d '\r')
   echo "$rl" | grep -q 'readback_mismatches=0, update_errors=0' && check "G5 $P receipts line" PASS "$rl" || check "G5 $P receipts line" FAIL "$rl"
+  r=$(python "$G/pose_pin.py" jolt56 $P "$OUT/$P/t1/final.pose" --hash "$(hash_of "$OUT/$P/t1/out.txt")"); rc=$?
+  [ $rc = 0 ] && check "G5 $P -t=1 pose = pin (pins.json)" PASS "$r" || check "G5 $P -t=1 pose = pin (pins.json)" FAIL "$r"
 done
 # G6
 SRC=${JOLT_SRC:-D:/tmp/jolt/wt-v5.6.0-dyn/PerformanceTest/PerformanceTest.cpp}
