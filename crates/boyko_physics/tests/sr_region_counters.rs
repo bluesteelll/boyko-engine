@@ -253,6 +253,8 @@ fn predict(
     let tasks = (grain.max_bpp as usize * p).min(points / grain.fill_points as usize).min(all_cohorts.len()).min(32);
     let fill = if tasks >= 2 { cohort_blocks(&all_cohorts, tasks).max(1) } else { 1 };
     item(fill, 1);
+    // The store (once, last): the fill's cohort ranges; these piles are warm and no row bounces.
+    item(fill, 1);
     out
 }
 

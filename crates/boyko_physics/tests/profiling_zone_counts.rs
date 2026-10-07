@@ -344,6 +344,8 @@ fn predict_region(scene: &Scene, p: usize, grain: RegionGrain, substeps: u64, re
     // The fill (stage 0, once): S4's ranges (the default grain's task count is S4's), one inline
     // block under two.
     item(fill.max(1) as usize, 1);
+    // The store (once, last): the fill's ranges; the harness is warm and its rows do not bounce.
+    item(fill.max(1) as usize, 1);
     for c in 0..graph.n_colors() {
         let groups: Vec<u32> =
             graph.color(c).iter().map(|&mi| u32::from(manifolds[mi as usize].count)).filter(|&n| n != 0).collect();

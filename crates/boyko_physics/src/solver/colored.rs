@@ -2013,6 +2013,9 @@ pub struct ColoredSoftStepSolver {
     region: RegionColumns,
     /// SR: steps whose substeps ran as one region ([`region_dispatches`](Self::region_dispatches)).
     region_dispatches: u64,
+    /// SR: region steps whose warm store ran in the region
+    /// ([`region_store_dispatches`](Self::region_store_dispatches)).
+    region_store_dispatches: u64,
     /// SR: the last region's report ([`last_region_report`](Self::last_region_report)).
     region_last: RegionReport,
     /// SR, Miri: the per-kind helper blocks and widest entries of the regions so far.
@@ -2079,6 +2082,7 @@ impl ColoredSoftStepSolver {
             region_switch: false,
             region: RegionColumns::new(),
             region_dispatches: 0,
+            region_store_dispatches: 0,
             region_last: RegionReport::default(),
             #[cfg(miri)]
             region_tally: [RegionKindCount::default(); SK_COUNT],
@@ -2183,6 +2187,15 @@ impl ColoredSoftStepSolver {
     #[inline]
     pub fn region_dispatches(&self) -> u64 {
         self.region_dispatches
+    }
+
+    /// SR: the region steps whose warm store ran as the region's last stage (a warm step on which
+    /// no row could bounce), since construction. The rest stored serially after the restitution
+    /// pass.
+    #[doc(hidden)]
+    #[inline]
+    pub fn region_store_dispatches(&self) -> u64 {
+        self.region_store_dispatches
     }
 
     /// SR: the last region's report — its published and inline items, the blocks its helpers ran,
@@ -5137,6 +5150,14 @@ impl ColoredSoftStepSolver {
             carry_hits <= self.warm_stats.carry_points,
             "invariant: the carry keeps at most the frozen manifolds' live points"
         );
+        self.swap_and_stamp(rows);
+    }
+
+    /// The store's tail (L11 D3): the written side becomes the read side, and the warm cursor is
+    /// stamped with `rows`, the gather it was keyed by. The serial store's, and a region step's
+    /// whose store ran in the region (SR).
+    #[inline]
+    fn swap_and_stamp(&mut self, rows: &RowIdentity) {
         self.warm_cur ^= 1;
         self.warm_cursor.stamp(rows);
     }
@@ -5519,9 +5540,9 @@ impl ColoredSoftStepSolver {
         // SR (phase B): a step whose build handed its fill over (the switch on and the parallel
         // gate holding) runs the fill and its substeps as ONE region (`solve_region`) instead of
         // the loop below.
-        let region_report = match &fill {
+        let (region_report, region_store) = match &fill {
             Some(fill) => {
-                let (report, counts) = self.solve_region(
+                let (report, counts, stored) = self.solve_region(
                     scratch,
                     &RegionStep {
                         bias_rate: soft.bias_rate,
@@ -5550,9 +5571,9 @@ impl ColoredSoftStepSolver {
                     h.rules.restore_rec_searches += u64::from(counts.restore_searches);
                     h.rules.restore_rec_hits += u64::from(counts.restore_hits);
                 }
-                Some(report)
+                (Some(report), stored)
             }
-            None => None,
+            None => (None, false),
         };
 
         // L10 C3a: the fast path runs no substep; a region step ran them in its region.
@@ -5672,28 +5693,36 @@ impl ColoredSoftStepSolver {
         }
 
         // Post-loop restitution (ONCE, velocity-only, bias-free); not on the fast path, which
-        // lays out no point.
+        // lays out no point. A region step whose store ran in the region had no row that could
+        // bounce: the pass has no work, and its span stays (one per step) with an empty body.
         if !fast {
             let _z = zone!(PHYS_RESTITUTION);
-            Self::apply_restitution(
-                &mut self.columns,
-                self.bodies.solve_view(),
-                &mut self.counters,
-                spec,
-            );
+            if !region_store {
+                Self::apply_restitution(
+                    &mut self.columns,
+                    self.bodies.solve_view(),
+                    &mut self.counters,
+                    spec,
+                );
+            }
         }
 
         // D3: store every manifold's record by index, carry the frozen manifolds'
-        // points (B1), then swap the sides.
+        // points (B1), then swap the sides. A region step whose store ran in the region (its span
+        // opened there, the Store item's hook) leaves the capture and the swap.
         {
-            let _z = zone!(PHYS_STORE);
+            let _z = if region_store { None } else { zone!(PHYS_STORE) };
             // L10 A1′ (design 08 O10): the move-in capture, before the swap, on both paths.
             if let Some(h) = held.as_mut() {
                 let remap = self.warm_cursor.peek(&scratch.rows);
                 self.capture_moved_in(remap, h);
             }
-            let restore = held.as_ref().and_then(|h| h.restore);
-            self.store_and_swap(&scratch.rows, manifolds, restore);
+            if region_store {
+                self.swap_and_stamp(&scratch.rows);
+            } else {
+                let restore = held.as_ref().and_then(|h| h.restore);
+                self.store_and_swap(&scratch.rows, manifolds, restore);
+            }
             // L10 E6′ (design 06): the logical carry adds the held store's points and hits —
             // `Off` carries the same frozen manifolds' records every step with the same hits.
             if let Some(h) = held.as_ref()
@@ -5954,16 +5983,19 @@ const SK_INTEGRATE: u8 = 3;
 const SK_RELAX: u8 = 4;
 /// SR: the fill (P-c, the region's stage 0, KD5), on a cohort range.
 const SK_FILL: u8 = 5;
+/// SR: the warm store (pass 1 on a cohort range, pass 2's carry on a manifold range), the region's
+/// last stage on a step where no row can bounce.
+const SK_STORE: u8 = 6;
 /// SR, test builds: the setup digest, one inline block right after the fill (`step_digest`'s
 /// "seeds before the first sweep").
 #[cfg(test)]
-const SK_DIGEST: u8 = 6;
+const SK_DIGEST: u8 = 7;
 /// SR, Miri: the stage kinds the per-kind tally counts.
 #[cfg(miri)]
-const SK_COUNT: usize = 7;
+const SK_COUNT: usize = 8;
 /// SR: each kind's name, by kind.
 #[cfg(miri)]
-const SK_NAMES: [&str; SK_COUNT] = ["gravity", "warm", "biased", "integrate", "relax", "fill", "digest"];
+const SK_NAMES: [&str; SK_COUNT] = ["gravity", "warm", "biased", "integrate", "relax", "fill", "store", "digest"];
 
 /// SR: the gravity entry's index (the table's fixed entries come first).
 const E_GRAVITY: u16 = 0;
@@ -5971,12 +6003,14 @@ const E_GRAVITY: u16 = 0;
 const E_INTEGRATE: u16 = 1;
 /// SR: the fill entry's index.
 const E_FILL: u16 = 2;
+/// SR: the store entry's index (scheduled only on a step where no row can bounce).
+const E_STORE: u16 = 3;
 /// SR, test builds: the digest entry's index.
 #[cfg(test)]
-const E_DIGEST: u16 = 3;
+const E_DIGEST: u16 = 4;
 /// SR: the first colour entry's index; colour `c`'s warm, biased and relax entries follow (the
 /// digest's entry sits before them in test builds).
-const E_COLOURS: usize = if cfg!(test) { 4 } else { 3 };
+const E_COLOURS: usize = if cfg!(test) { 5 } else { 4 };
 
 /// SR: a step's stage table, built serially before its region — counted loops over the colours
 /// and the passes, so IB's presets change only `substeps`, `biased` and `relax` (ruling 15).
@@ -6108,6 +6142,8 @@ struct SolveStages<'a> {
     last_colour: u16,
     /// The fill's inputs (stage 0).
     fill: FillParts<'a>,
+    /// The store's inputs (the last stage, on a step where no row can bounce).
+    store: StoreParts<'a>,
     /// Participant 0's span slots (the hooks only; see [`RegionHooks`]).
     hooks: *mut RegionHooks,
     /// Miri: blocks the helpers ran, per kind.
@@ -6146,6 +6182,24 @@ struct FillParts<'a> {
     digest: *mut u64,
 }
 
+/// SR: what a Store block needs (`store_and_swap`'s two passes, split by range): the write side's
+/// record base, the manifolds, the carry's lookups, and one carry slot per Store block. The `plan`
+/// and `tags` slices the carry reads are formed in the block: the fill, earlier in the region,
+/// writes both through raw bases, and a shared slice held across it would be invalidated.
+#[derive(Clone, Copy)]
+struct StoreParts<'a> {
+    /// The write side's records (written per manifold: a solved one's impulses in pass 1, an
+    /// unsolved one's whole record in pass 2).
+    recs_w: *mut WarmRecord,
+    manifolds: &'a [Manifold],
+    /// The read side's lookup.
+    lookup: WarmLookup<'a>,
+    /// L10's restore source's lookup, on a step that has one.
+    restore: Option<WarmLookup<'a>>,
+    /// One carry-hit slot per Store block (`SETUP_MAX_TASKS` of them, on `solve_region`'s frame).
+    carry: *mut u32,
+}
+
 /// SR: the step's inputs the fill reads, from `solve_colored_inner`.
 #[derive(Clone, Copy)]
 struct RegionSources<'a> {
@@ -6167,6 +6221,10 @@ struct RegionSources<'a> {
 //     and its own `outs` slot; the cuts partition the cohorts, each cohort owns consecutive ranks
 //     and each laid-out manifold is one lane of one cohort (`fill_range`'s contract), and the body
 //     rows it reads are written by no block of its item;
+//   * a store: the records of its cohort range's lanes' (solved) manifolds and of its manifold
+//     range's unsolved manifolds — two disjoint sets, each partitioned by the ranges — and its
+//     own carry slot; it reads the read side, the restore source, `plan`, `tags` and the rank
+//     blocks, which no block of its item writes;
 //   * the digest (test builds): its own slot, one inline block.
 //   No block writes the table, the cuts, the cohort heads outside the fill, the CSRs or the struct
 //   `cols` names, and two items never overlap (the region's barrier), so a block reads nothing
@@ -6282,6 +6340,65 @@ impl SolveStages<'_> {
         unsafe { ptr::write(f.outs.add(block as usize), out) };
     }
 
+    /// The warm store of Store block `block` (`store_and_swap`'s passes, split by range): pass 1
+    /// writes the converged impulses of every live lane of cohorts `[k_lo, k_hi)` into its solved
+    /// manifold's record (whose shape the fill wrote); pass 2 writes every unsolved manifold of
+    /// `[m_lo, m_hi)` — a frozen one's carry (B1), an empty one's `EMPTY` — and the carry's hits
+    /// into the block's slot.
+    fn store_block(&self, block: u32, k_lo: usize, k_hi: usize, m_lo: usize, m_hi: usize) {
+        let st = self.store;
+        let heads = &self.cols.heads()[k_lo..k_hi];
+        let colds = &self.cols.cold.as_read_slice()[k_lo..k_hi];
+        let blocks = self.cols.blocks();
+        let tags = self.cols.tags();
+        for (head, cold) in heads.iter().zip(colds) {
+            let rank_base = head.rank_base as usize;
+            for l in 0..head.nlanes as usize {
+                debug_assert!(
+                    tags[cold.mi[l] as usize].solved(),
+                    "invariant: a laid-out lane's manifold is tagged solved, so pass 2 never writes its record"
+                );
+                // SAFETY: the write side holds one record per manifold of the step and `cold.mi[l]`
+                //   is a laid-out manifold, so the record is live; it is this lane's alone — each
+                //   laid-out manifold is one lane of one cohort, the Store blocks' cohort ranges
+                //   partition the cohorts, and pass 2 writes only unsolved manifolds' records — so
+                //   the one-element `&mut` aliases nothing.
+                let rec = unsafe { &mut *st.recs_w.add(cold.mi[l] as usize) };
+                debug_assert_eq!(
+                    usize::from(rec.count()),
+                    head.width[l] as usize,
+                    "invariant: the fill wrote the solved record's shape"
+                );
+                for (p, blk) in blocks[rank_base..rank_base + head.width[l] as usize].iter().enumerate() {
+                    rec.set_impulses(p, [blk.ni[l], blk.ti1[l], blk.ti2[l]]);
+                }
+            }
+        }
+        let sources = WarmSources { lookup: st.lookup, restore: st.restore, plan: self.cols.plan(), tags };
+        let mut hits = 0u32;
+        for (mi, (m, &tag)) in st.manifolds.iter().zip(tags).enumerate().take(m_hi).skip(m_lo) {
+            if tag.solved() {
+                continue;
+            }
+            let rec = if tag.frozen() && tag.count != 0 {
+                debug_assert_eq!(tag.count, m.count, "invariant: a frozen tag holds its manifold's live-point count");
+                let (lookup, run) = sources.of(mi);
+                let (rec, h) = lookup.carry(run, m, usize::from(tag.count));
+                hits += h;
+                rec
+            } else {
+                WarmRecord::EMPTY
+            };
+            // SAFETY: record `mi` is live (one per manifold) and this block's alone: the Store
+            //   blocks' manifold ranges partition `[0, M)`, and pass 1 writes only solved
+            //   manifolds' records. A plain write of a `Copy` record forms no reference.
+            unsafe { ptr::write(st.recs_w.add(mi), rec) };
+        }
+        debug_assert!((block as usize) < SETUP_MAX_TASKS, "invariant: a Store block has a slot");
+        // SAFETY: slot `block` is this block's alone, on `solve_region`'s frame, read after END.
+        unsafe { ptr::write(st.carry.add(block as usize), hits) };
+    }
+
     /// Colour `c`'s place in the group and cohort tables.
     #[inline]
     fn colour_ctx(&self, c: usize) -> ColorCtx {
@@ -6337,6 +6454,11 @@ impl RegionStages for SolveStages<'_> {
             ),
             SK_INTEGRATE => self.integrate_rows(lo, hi),
             SK_FILL => self.fill_block(block, lo, hi),
+            SK_STORE => {
+                // The manifold ranges follow the cohort ranges in the cut column.
+                let m = e.first_cut as usize + usize::from(e.n_blocks) + 1 + block as usize;
+                self.store_block(block, lo, hi, self.cuts[m] as usize, self.cuts[m + 1] as usize);
+            }
             #[cfg(test)]
             SK_DIGEST => {
                 // SAFETY: the digest's slot is written by this one inline block, on
@@ -6362,6 +6484,7 @@ impl RegionStages for SolveStages<'_> {
                 unsafe { (*hooks.canary).at(&PHYS_SB_PC, hooks.inner.is_some()) };
             }
             SK_GRAVITY => hooks.inner = zone!(PHYS_GRAVITY),
+            SK_STORE => hooks.inner = zone!(PHYS_STORE),
             SK_WARM if first => hooks.outer = zone!(PHYS_WARM_APPLY),
             SK_BIASED | SK_RELAX => {
                 if first {
@@ -6411,8 +6534,9 @@ fn push_region_counters(report: Option<RegionReport>) {
 impl ColoredSoftStepSolver {
     /// SR: builds this step's stage table into the region columns and sizes the frame lines for
     /// `p` participants. Serial, before the region. `fill` is the fill's cohort ranges, which the
-    /// Fill entry takes as its blocks.
-    fn build_region_table(&mut self, p: u32, k: &RegionStep, fill: &FillPlan) -> RegionTable {
+    /// Fill entry takes as its blocks, and the Store entry too (its pass 1), beside as many equal
+    /// manifold ranges (its pass 2); `store` schedules the store as the region's last item.
+    fn build_region_table(&mut self, p: u32, k: &RegionStep, fill: &FillPlan, store: bool) -> RegionTable {
         let Self { columns: cols, region: rc, grain, bodies, .. } = self;
         let grain = *grain;
         let color_offsets = cols.color_offsets();
@@ -6444,6 +6568,19 @@ impl ColoredSoftStepSolver {
             t.cuts.push(hi);
         }
         t.entry(SK_FILL, 0, fill.n_ranges, fill_first);
+        // The store: the fill's cohort ranges (pass 1), then as many equal manifold ranges (pass
+        // 2's carry). The entry exists on every region step; its item is scheduled only when no
+        // row can bounce.
+        let store_first = t.cuts.len();
+        t.cuts.push(fill.cuts[0].0);
+        for &(_, hi) in &fill.cuts[..fill.n_ranges] {
+            t.cuts.push(hi);
+        }
+        let n_manifolds = cols.tags().len();
+        for b in 0..=fill.n_ranges {
+            t.cuts.push(u32::try_from(b * n_manifolds / fill.n_ranges).expect("invariant: manifold indices fit a u32"));
+        }
+        t.entry(SK_STORE, 0, fill.n_ranges, store_first);
         #[cfg(test)]
         {
             let digest_first = t.cuts.len();
@@ -6451,6 +6588,7 @@ impl ColoredSoftStepSolver {
             t.cuts.push(1);
             t.entry(SK_DIGEST, 0, 1, digest_first);
         }
+        debug_assert_eq!(t.entries.len(), E_COLOURS, "invariant: the fixed entries sit at their `E_*` indices");
         for c in 0..n_colors {
             let (g_lo, g_hi) = (color_group_start[c] as usize, color_group_start[c + 1] as usize);
             let (k_lo, k_hi) = (color_cohort_start[c] as usize, color_cohort_start[c + 1] as usize);
@@ -6504,6 +6642,10 @@ impl ColoredSoftStepSolver {
                 }
             }
         }
+        // The store, after the last relax item: its pass 1 reads the converged impulses.
+        if store {
+            schedule.push(SchedItem::new(E_STORE, None));
+        }
         grow_to(&mut rc.hints, entries, 0);
         {
             let mut hints = rc.hints.build_view();
@@ -6525,8 +6667,11 @@ impl ColoredSoftStepSolver {
     /// relax sweeps and integrate + the inertia refresh run as its stages on the ambient pool's
     /// workers; after its END the fill's tail reduces the ranges' reports. `build_columns` decided the
     /// region (its `FillPlan`), which it admits only for a colour count the table's `u16` indices
-    /// name. Returns the region's report and the plan counts with the ranges' searches added (L10's
-    /// restore counts among them).
+    /// name. Returns the region's report, the plan counts with the ranges' searches added (L10's
+    /// restore counts among them), and whether the warm store ran in the region — on a warm step
+    /// where no row can bounce (`restitution_possible`, an O(rows) scan of every row's coefficient,
+    /// statics included, on the region path only): the restitution pass then has no work and the
+    /// store is the region's last stage; otherwise the caller runs both serially, as before.
     ///
     /// Out of line on purpose: the one-worker step's instruction stream (`solve_colored_inner`)
     /// stays the serial loop's, with one predicate and a call it never takes. Takes no body slice
@@ -6538,9 +6683,15 @@ impl ColoredSoftStepSolver {
         k: &RegionStep,
         fill: &FillPlan,
         src: RegionSources<'_>,
-    ) -> (RegionReport, PlanCounts) {
+    ) -> (RegionReport, PlanCounts, bool) {
         let n_colors = self.columns.color_offsets().len().saturating_sub(1);
         debug_assert!(region_fits(n_colors), "invariant: build_columns admits only a table a u16 names");
+        // A contact's coefficient is the max of its two rows' (`fill_cohort`), so a superset test
+        // over every row; the written form is the restitution pass's skip rule's complement, NaN
+        // included (review O3).
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        let restitution_possible = scratch.bodies().iter().any(|b| !(b.restitution <= 0.0));
+        let store = self.warm_effective && !restitution_possible && k.substeps > 0;
         #[cfg(all(test, miri))]
         let route = self.region_route;
         #[cfg(all(test, miri))]
@@ -6552,7 +6703,7 @@ impl ColoredSoftStepSolver {
         let p = try_with_active_pool(|pool| pool.num_threads());
         let p = u32::try_from(p.expect("invariant: the region path runs only where P2 saw a pool of two workers or more"))
             .expect("invariant: a pool's workers fit a u32");
-        let table = self.build_region_table(p, k, fill);
+        let table = self.build_region_table(p, k, fill, store);
 
         let armed = zone_enabled!(PHYS_REGION_OPENS);
         let Self {
@@ -6561,6 +6712,7 @@ impl ColoredSoftStepSolver {
             columns,
             region: rc,
             region_dispatches,
+            region_store_dispatches,
             region_last,
             warm,
             warm_cur,
@@ -6584,7 +6736,15 @@ impl ColoredSoftStepSolver {
         // records written per lane manifold through their raw base (S4's `FillCtx`).
         let (read, write) = Self::warm_sides(warm, *warm_cur);
         let index: &WarmIndex = warm_index;
+        debug_assert!(
+            !store
+                || (write.recs().len() == src.manifolds.len()
+                    && columns.tags.len() == src.manifolds.len()
+                    && columns.plan.len() == src.manifolds.len()),
+            "invariant: the write side, the tags and the plan hold one row per manifold of this step"
+        );
         let mut outs = [RangeOut::default(); SETUP_MAX_TASKS];
+        let mut carry = [0u32; SETUP_MAX_TASKS];
         #[cfg(test)]
         let mut digest = 0u64;
         let fill_parts = FillParts {
@@ -6605,6 +6765,13 @@ impl ColoredSoftStepSolver {
             outs: outs.as_mut_ptr(),
             #[cfg(test)]
             digest: &raw mut digest,
+        };
+        let store_parts = StoreParts {
+            recs_w: if store { write.recs_base() } else { ptr::null_mut() },
+            manifolds: src.manifolds,
+            lookup: WarmLookup { read, index },
+            restore: src.restore.map(|read| WarmLookup { read, index }),
+            carry: carry.as_mut_ptr(),
         };
         let RegionColumns { sync, done, receipts, claims, entries, schedule, cuts, epoch, .. } = rc;
         let entries = &entries.as_read_slice()[..table.entries];
@@ -6631,6 +6798,7 @@ impl ColoredSoftStepSolver {
             simd_solve: k.simd_solve,
             last_colour: u16::try_from(n_colors.saturating_sub(1)).expect("invariant: checked above"),
             fill: fill_parts,
+            store: store_parts,
             hooks: &raw mut hooks,
             #[cfg(miri)]
             tally: &tally,
@@ -6682,6 +6850,17 @@ impl ColoredSoftStepSolver {
             warm_cursor.resets(),
         );
         counter!(PHYS_SETUP_CHUNKS, if fill.n_ranges >= 2 { fill.n_ranges as u64 } else { 0 });
+        // The store's carry hits, in block order (integer sums), as `store_and_swap` counts them.
+        if store {
+            *region_store_dispatches += 1;
+            let carry_hits: u32 = carry[..fill.n_ranges].iter().sum();
+            warm_stats.carry_hits = carry_hits;
+            counters.carry(carry_hits);
+            debug_assert!(
+                carry_hits <= warm_stats.carry_points,
+                "invariant: the carry keeps at most the frozen manifolds' live points"
+            );
+        }
         #[cfg(test)]
         {
             *step_digest = digest;
@@ -6697,7 +6876,7 @@ impl ColoredSoftStepSolver {
                 count.max_blocks = count.max_blocks.max(u32::from(e.n_blocks));
             }
         }
-        (report, plan_counts)
+        (report, plan_counts, store)
     }
 
     /// SR, test builds: the fill alone as a region — `fill` (a `FillPlan` `build_columns` returned)
@@ -6725,7 +6904,8 @@ impl ColoredSoftStepSolver {
             biased: 0,
             relax: 0,
         };
-        self.solve_region(scratch, &none, fill, src)
+        let (report, counts, _) = self.solve_region(scratch, &none, fill, src);
+        (report, counts)
     }
 
     /// SR: runs `frame` on the ambient pool, armed or not. `None` without a pool.

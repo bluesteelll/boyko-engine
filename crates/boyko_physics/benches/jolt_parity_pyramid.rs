@@ -1513,16 +1513,22 @@ fn step_shape(
     // here the task count, which the check scales by P2.
     shape.setup_tasks = expected_setup_tasks(&cohorts, lanes);
     let rows = shape.rows as usize;
+    // The store joins the region on a warm step where no row can bounce (any row, statics too).
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    let store = world.resource::<PhysicsConfig>().warm_start && !bodies.iter().any(|b| !(b.restitution <= 0.0));
     (shape.region_published, shape.region_inline, shape.region_blocks_max, shape.region_fill) =
-        expected_region(&colours, rows, lanes, st.grain, simd_solve, st.substeps, st.relax);
+        expected_region(&colours, rows, lanes, st.grain, simd_solve, st.substeps, st.relax, store);
     shape
 }
 
 /// SR: this runner's replica of the solve region's table builder (`solver/colored.rs`,
 /// `build_region_table`) — `(published, inline, widest published)` items and the fill's blocks (0
 /// when it runs inline) for a step whose colours' laid-out groups hold `colours` points each, on
-/// `rows` rows and `p` participants, one biased and `relax` relax passes per substep — so a region
-/// whose counters disagree voids the row.
+/// `rows` rows and `p` participants, one biased and `relax` relax passes per substep, and the
+/// store as its last item when `store` — so a region whose counters disagree voids the row.
+// Every argument is a term of the builder's count; a struct built once per step for this one reader
+// would add nothing.
+#[allow(clippy::too_many_arguments)]
 fn expected_region(
     colours: &[Vec<u32>],
     rows: usize,
@@ -1531,6 +1537,7 @@ fn expected_region(
     simd: bool,
     substeps: u64,
     relax: u64,
+    store: bool,
 ) -> (u64, u64, u64, u64) {
     let (mut published, mut inline, mut widest) = (0u64, 0u64, 0u64);
     let mut item = |blocks: usize, times: u64| {
@@ -1618,6 +1625,10 @@ fn expected_region(
         if n < 2 { 0 } else { n }
     };
     item(fill.max(1), 1);
+    // The store: the fill's cohort ranges (pass 1) beside as many manifold ranges.
+    if store {
+        item(fill.max(1), 1);
+    }
     (published, inline, widest, fill as u64)
 }
 

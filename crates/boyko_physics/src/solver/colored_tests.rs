@@ -1565,7 +1565,7 @@
         let (region, solver) = run(Some(RegionRoute::Threads(2)));
         assert_eq!(solver.region_dispatches(), 2, "a region per step (the premise)");
         let tally = solver.region_kind_tally();
-        for name in ["gravity", "warm", "biased", "integrate", "relax", "fill"] {
+        for name in ["gravity", "warm", "biased", "integrate", "relax", "fill", "store"] {
             let k = tally.iter().find(|k| k.kind == name).expect("the tally names every kind it ran");
             assert!(
                 k.max_blocks >= 2 && k.helper_blocks > 0,
