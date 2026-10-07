@@ -1491,6 +1491,27 @@
         assert_eq!(shapes.get(), 7, "anti-vacuity: every pile shape was drawn (bits {:03b})", shapes.get());
     }
 
+    /// SR (tester r1, triage F2): `region_fits` is the one place that keeps a step's stage table
+    /// addressable by the `u16` entry indices of `StageEntry` / `SchedItem`; no test pinned its
+    /// edge. The largest colour count whose last entry index is still a `u16` is accepted, and one
+    /// colour more is not. Red-first: `+ 1` → `+ 10` in `region_fits` reds it.
+    #[test]
+    fn region_fits_accepts_the_largest_u16_table_and_refuses_one_colour_more() {
+        let max_colours = (usize::from(u16::MAX) + 1 - E_COLOURS) / 3;
+        assert!(region_fits(0) && region_fits(1), "small worlds fit");
+        assert!(region_fits(max_colours), "the largest table a u16 can index ({max_colours} colours) fits");
+        assert!(
+            u16::try_from(E_COLOURS + 3 * max_colours - 1).is_ok(),
+            "premise: the last entry index of the largest accepted table is a u16"
+        );
+        assert!(!region_fits(max_colours + 1), "one colour more does not fit");
+        assert!(
+            u16::try_from(E_COLOURS + 3 * (max_colours + 1) - 1).is_err(),
+            "premise: the last entry index of the first refused table is not a u16"
+        );
+        assert!(!region_fits(usize::from(u16::MAX)), "a world of 65535 colours does not fit");
+    }
+
     /// SR (the cut's §2.6, Q3): the Stacked Borrows leg of the region's physics stages, on the
     /// pool-free route (`RegionRoute::Threads`, `boyko_threadpool::region_on_threads`; the pool's
     /// deque transport is not Stacked-Borrows clean). Twenty spheres on a floor, four carrying a
