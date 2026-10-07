@@ -2,12 +2,17 @@
 """Dynamic parity scenes, C4: the Rapier 0.36 dyn/ arms, structural only (no timing column is read).
 
 usage: rapier_gates.py OUTDIR [--gate 1|2|3|all] [--rows ID,ID,...] [--exe-dir DIR] [--frozen-exe-dir DIR]
-                              [--write-fixtures] [--lock PATH]
+                              [--write-fixtures] [--lock PATH] [--sums PATH]
 
 G1  the freeze is intact: every file sha256 FROZEN-9b section 1 pins (frozen9b.json `files`), the frozen exes
     against gate/bin/SHA256SUMS(.block), and dyn/Cargo.toml, dyn/Cargo.lock byte-identical to the frozen
     ones and dyn/src/spec.rs to boyko's committed dyn_spec.rs (`git show HEAD:...`, the LF blob).
     `--lock PATH` checks PATH in place of dyn/Cargo.lock (the red-first).
+    The dyn sources: every file dyn/bin/SOURCES.sha256 pins (the build's record of its inputs) hashes to its
+    pin both live under dyn/ and as the repository's copy (scenes/rapier/*.txt, HEAD blobs; spec.rs as
+    dyn_spec.rs). crates/boyko_physics/tests/dyn_scenes_hook_order.rs reads main.rs.txt, so this is what makes
+    its verdict about the source the dyn exes were built from (triage r1 F1). `--sums PATH` checks PATH in
+    place of SOURCES.sha256 (the red-first).
 G2  J-T unchanged by the hooks: all 70 frozen rows' commands (frozen9b.json `command`) on the dyn exe of the
     row's arm at W1 and W8, each exit 0 with `--expect-pose` = the row's fixture; and for one row per arm at
     W1, the SUMMARY equal to the frozen exe's minus the source hashes, `args` and the timing keys.
@@ -30,6 +35,12 @@ RP = 'D:/tmp/rapier-parity'
 FROZEN = RP + '/sweep/frozen9b.json'
 REPO = 'D:/wt/merge'
 SPEC_BLOB = 'crates/boyko_physics/benches/jolt_parity_pyramid/dyn_spec.rs'
+COPIES = 'docs/physics/perf-campaign/levers/scenes/rapier/'
+# The repository's copy of each dyn source, by the name dyn/bin/SOURCES.sha256 gives it. The copies are
+# `-text` (.gitattributes), so a HEAD blob is the file's bytes.
+SOURCE_COPIES = {'src/main.rs': COPIES + 'main.rs.txt', 'src/dyn_scenes.rs': COPIES + 'dyn_scenes.rs.txt',
+                 'src/spec.rs': SPEC_BLOB, 'build_dyn.sh': COPIES + 'build_dyn.sh.txt',
+                 '.cargo/config.toml': COPIES + 'cargo_config.toml.txt'}
 G = os.path.dirname(os.path.abspath(__file__))
 Q1_ROWS = ['simd8/s1p7q2pd0+roff', 'simd8/s1p8q2pd0+roff', 'simd8/s1p9q2', 'simd4/s1p8q3pd0+roff',
            'block/s1p4q3pd0+roff', 'block/s1p5q2pd0+roff', 'block/s1p5q3pd0+roff', 'simd8/D0']
@@ -71,7 +82,28 @@ def row_args(row, w, prefix, fixture=True):
     return a
 
 
-def gate1(out, lock):
+def gate1_sources(sums_path):
+    """The dyn sources, live and as the repository's copies, against the build's SOURCES.sha256."""
+    pinned = {}
+    for ln in open(sums_path or RP + '/dyn/bin/SOURCES.sha256', encoding='utf-8'):
+        if ln.strip():
+            h, name = ln.split(None, 1)
+            pinned[name.strip().lstrip('*')] = h
+    bad = ['%s not in SOURCES.sha256' % n for n in sorted(set(SOURCE_COPIES) - set(pinned))]
+    for name, want in sorted(pinned.items()):
+        live = os.path.join(RP, 'dyn', name)
+        if not os.path.exists(live) or sha256(live) != want:
+            bad.append('%s live' % name)
+        if name in SOURCE_COPIES:
+            blob = subprocess.run(['git', '-C', REPO, 'show', 'HEAD:' + SOURCE_COPIES[name]], capture_output=True).stdout
+            if hashlib.sha256(blob).hexdigest() != want:
+                bad.append('%s repo copy %s' % (name, SOURCE_COPIES[name].rsplit('/', 1)[-1]))
+    check('G1 dyn sources = SOURCES.sha256, live and the repo copies (%d files, %d copies)' % (len(pinned), len(SOURCE_COPIES)),
+          not bad, ', '.join(bad) or 'all equal')
+
+
+def gate1(out, lock, sums):
+    gate1_sources(sums)
     d = json.load(open(FROZEN))
     bad = []
     for name, want in d['files'].items():
@@ -191,11 +223,12 @@ def main():
     ap.add_argument('--frozen-exe-dir', default=RP + '/gate/bin')
     ap.add_argument('--write-fixtures', action='store_true')
     ap.add_argument('--lock')
+    ap.add_argument('--sums')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     only = a.rows.split(',') if a.rows else None
     if a.gate in ('1', 'all'):
-        gate1(a.out, a.lock)
+        gate1(a.out, a.lock, a.sums)
     if a.gate in ('2', 'all'):
         gate2(a.out, a.exe_dir, a.frozen_exe_dir, only)
     if a.gate in ('3', 'all'):

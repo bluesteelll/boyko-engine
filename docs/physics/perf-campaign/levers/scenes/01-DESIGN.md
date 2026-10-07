@@ -25,7 +25,10 @@ sleeping, CCD and damping off. Each engine keeps its own solver: ours flagless V
 | **S-SLIDE** | `--dyn slide` | `-dyn=slide` | `--dyn slide` | 500 | **[0, 500)** | the arena with the downhill wall's face at x = 30; gravity tilted to an effective 26.57° slope (tan θ = 1/2): the pile slides at ~2.6 m/s², shears, tumbles and piles against the wall |
 
 * **Events** are applied between steps, after the state after t steps is read and before the step
-  of loop index t runs: outside the timed pair in all three harnesses. A kick is a **velocity
+  of loop index t runs: outside the timed pair in all three harnesses. That order is a property of
+  the source, which no run can see, so a census of the source gates it:
+  `crates/boyko_physics/tests/dyn_scenes_hook_order.rs` for ours and Rapier, `gate/jolt_gates.sh` G6
+  for Jolt (section 5.5). A kick is a **velocity
   change** (`v ← v + Δv`, an f32 add per component), so Jolt's 1,000× density cannot change it.
 * **The settle prefix** (ruling 22 Q3): S-KICK and S-SHOOT run J-T's own first 200 steps, untimed in
   the claim (outside the metric window). S-KICK's steps [0, 200) are J-T's bit for bit in our runner
@@ -312,6 +315,25 @@ FIXED_FIXED. This extra work is part of what S-SHOOT and S-SLIDE measure for our
 the fix (static-static pairs never reaching the narrowphase or the solver, a tight static bound in
 every broadphase) belongs to lever CS (ruling 22 (b)), which re-reads these receipts.
 
+### 5.5 Gate-adequacy fixes (fix r1, after test r1 and triage r1)
+
+Test r1 found two lane claims that no standing gate could see fail. Each fix below was shown red on
+a mutant before it was called green; the outputs are in `D:/tmp/phys-orch/dyn-scenes/fix_r1/`.
+
+* **The hook outside the timed pair (triage r1 F1).** Moving the hook into the pair changes no
+  bit, so tester r1's mutant O3 (`let t0` above `before_step`) passed every structural check and
+  the pose pin. `tests/dyn_scenes_hook_order.rs` reads both loops from source: our runner's step
+  loop and Rapier's `drive` loop, the latter in `rapier/main.rs.txt`. In each loop the timed pair
+  must be exactly `let t0`, the step call and `let wall`, on three consecutive code lines; the
+  pre-step hook must come before the pair and the post-step hook after it. Every anchor must
+  occur once. A calibration test derives eight mutants from the real sources (the O3 hoist, either
+  hook moved into the pair, an extra statement in the pair or on the call's line, a second timer,
+  and two prose or literal controls that must pass) and requires each verdict. Red-first:
+  the O3 hoist written to disk in each file reds the census, and the restored bytes (md5-checked)
+  pass it. `rapier_gates.py` G1 now ties `rapier/*.txt` (HEAD blobs) and the live `dyn/` sources
+  to `dyn/bin/SOURCES.sha256`, so the census reads the bytes the dyn exes were built from. Red:
+  an edited live source with no rebuild, and a flipped digit in the sums file.
+
 ## 6. Pins and fixtures
 
 | what | value |
@@ -403,7 +425,10 @@ A row that fails a scene's bar is excluded from that scene's claim; for ours a f
   has no `main.rs`, so Cargo takes no target from it). IB's move of the runner to
   `boyko-physics-parity/src/bin/` must carry the directory `jolt_parity_pyramid/` beside it
   (`src/bin/jolt_parity_pyramid/` without a `main.rs` is not a target either) and re-point
-  `tests/dyn_scenes_spec.rs`'s `#[path]`. Either miss is a compile error, not a silent one.
+  `tests/dyn_scenes_spec.rs`'s `#[path]`. Either miss is a compile error, not a silent one. The
+  move must also re-point `tests/dyn_scenes_hook_order.rs`'s `OURS.path`. A stale path fails that
+  test (the file must be readable), and its anchors must be kept: the step loop, the hooks and
+  the timed pair.
 * **PC-DYN-2 (S5, SR):** expect a manual merge in the runner's `Args`, `self_check` literal, parse
   arms, usage literal and SUMMARY format; keep both sides. SR's `--scene pairs` lives in
   `SceneKind`, which this lane does not touch.
