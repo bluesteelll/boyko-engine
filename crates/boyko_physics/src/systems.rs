@@ -627,14 +627,19 @@ fn broadphase_arms(
                 grid.build(bodies, pairs);
             }
         }
-        // The tree broadphase: the exact set, serial, on the calling thread. The row
-        // identity is the gather's (`scratch.rows`), which the tree's verify uses to
-        // carry its persistent sets through a row change. With L10's hint it withholds the
-        // pairs of its sleeper set (design 04 T3).
-        BroadphaseKind::Tree => match hint {
-            Some(cls) => tree.step_hinted(bodies, rows, pairs, &HeldHint::new(cls)),
-            None => tree.step(bodies, rows, pairs),
-        },
+        // The tree broadphase: the exact set. The row identity is the gather's
+        // (`scratch.rows`), which the tree's verify uses to carry its persistent sets through
+        // a row change. With L10's hint it withholds the pairs of its sleeper set (design 04
+        // T3). S5's switch is mirrored into the tree on every Tree step, so the tree reads the
+        // configuration this step latched and a direct-drive harness keeps the tree's own
+        // default.
+        BroadphaseKind::Tree => {
+            tree.set_parallel_query(cfg.parallel_tree_query);
+            match hint {
+                Some(cls) => tree.step_hinted(bodies, rows, pairs, &HeldHint::new(cls)),
+                None => tree.step(bodies, rows, pairs),
+            }
+        }
     }
 
     // Strict: the pairs are unique as well as sorted — over the LOGICAL view, the stream merged

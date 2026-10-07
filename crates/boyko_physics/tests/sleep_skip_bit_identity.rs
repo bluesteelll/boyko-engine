@@ -3116,6 +3116,7 @@ fn da9_rows(shape: Shape) -> Vec<Row> {
         colored: _,
         parallel_solve: _,
         parallel_narrowphase: _,
+        parallel_tree_query: _,
         contact_reuse: _,
         contact_reuse_distance: _,
         speculative_distance: _,
@@ -3167,6 +3168,9 @@ fn da9_rows(shape: Shape) -> Vec<Row> {
         Row { name: "colored", write: |c| c.colored = !c.colored, class: W },
         Row { name: "parallel_solve", write: |c| c.parallel_solve = !c.parallel_solve, class: U },
         Row { name: "parallel_narrowphase", write: |c| c.parallel_narrowphase = !c.parallel_narrowphase, class: U },
+        // S5: the parallel tree query writes the serial query's segments, so the pair set and
+        // every pose bit are the serial one's at any worker count.
+        Row { name: "parallel_tree_query", write: |c| c.parallel_tree_query = !c.parallel_tree_query, class: U },
         Row { name: "contact_reuse", write: |c| c.contact_reuse = !c.contact_reuse, class: O },
         Row { name: "contact_reuse_distance", write: |c| c.contact_reuse_distance = 0.0, class: O },
         // V2: relative, so it perturbs on both sides of the lane's flip of the default (0 -> 0.02).
