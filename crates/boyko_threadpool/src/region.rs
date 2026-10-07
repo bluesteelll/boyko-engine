@@ -890,6 +890,30 @@ impl<'a, W: RegionWords> Participant<'a, W> {
         self.armed = false;
     }
 
+    /// Participant 0 after [`run_orchestrator`] returned: if it left by the END, it made every
+    /// publish of its region — each of the `published` items' epochs and the END (the identity on
+    /// [`RegionReport::advances`]) — and its receipt's advance word is set to that count, once.
+    /// After a poisoned exit the word stays 0 (a poisoned END is no advance).
+    ///
+    /// Placed on measurement (CR-F fix r1, triage N1; the G-CR-F-RCPT asm). The same count written
+    /// at `run_orchestrator`'s END exit — inline, or as an out-of-line call there — re-allocated
+    /// registers across the whole item loop of the v2 monomorph: the sync line's pointer spilled,
+    /// a stack reload on every `poison` poll and publish; or, as a call, the entry-bound compare
+    /// read from the stack. Recorded after it returns, `run_orchestrator` stays v2's, and the
+    /// cost is per-region code in the caller. Out of line because that caller code is the smaller
+    /// for it: ω_b's v2 row closure is 473 instructions with the call, 498 inlined (v2's: 442).
+    #[inline(never)]
+    fn record_orchestrated_advances(&mut self, published: u32) {
+        let p = self.index as usize;
+        // Relaxed: participant 0's own receipt stores, just made by this thread (no other thread
+        // writes this line in the region), so program order alone shows the exit it stored.
+        if self.w.receipt_word(p, R_EXIT).load(Ordering::Relaxed) == RegionExit::End as u64 {
+            self.advances = u64::from(published) + 1;
+            // Relaxed: as every receipt store; read after the scope's join.
+            self.w.receipt_word(p, R_ADVANCES).store(self.advances, Ordering::Relaxed);
+        }
+    }
+
     /// The unwind body: the receipt (PANICKED or BOUND), `poison = 1`, and on participant 0 the
     /// tagged END.
     #[cold]
@@ -1298,10 +1322,9 @@ pub(crate) fn run_orchestrator<W: RegionWords, S: RegionStages, P: RegionPolicy,
             stages.item_end(i as u32);
         }
     }
-    // Participant 0 made every publish of this region: each published item's epoch and the END
-    // below (the identity on `RegionReport::advances`). Set once, here, so the item loop carries
-    // no extra increment.
-    part.advances = u64::from(stats.published) + 1;
+    // Participant 0 made every publish of this region, each published item's epoch and the END
+    // below; `orchestrate` records the count after this returns (why there:
+    // `Participant::record_orchestrated_advances`).
     part.exit(RegionExit::End);
     // Relaxed: no reader depends on an edge from this store (tester r3 N4). A helper that loads
     // END runs no block and reads nothing participant 0 wrote: it checks the tag, loads `poison`
@@ -1439,8 +1462,22 @@ pub(crate) fn run_participant0<W: RegionWords, S: RegionStages, P: RegionPolicy,
         run_finisher::<W, S, P, true>(w, stages, part);
         table_stats(w)
     } else {
-        run_orchestrator::<W, S, P, ARMED>(w, stages, part)
+        orchestrate::<W, S, P, ARMED>(w, stages, part)
     }
+}
+
+/// [`run_orchestrator`], then participant 0's advance count
+/// ([`Participant::record_orchestrated_advances`]): every caller of the orchestrator goes through
+/// here, so the count is recorded on every path that runs it, one participant included.
+#[inline]
+fn orchestrate<W: RegionWords, S: RegionStages, P: RegionPolicy, const ARMED: bool>(
+    w: &W,
+    stages: &S,
+    part: &mut Participant<'_, W>,
+) -> OrchStats {
+    let stats = run_orchestrator::<W, S, P, ARMED>(w, stages, part);
+    part.record_orchestrated_advances(stats.published);
+    stats
 }
 
 /// A helper's role entry: the finisher path under [`fin`], the v2 helper otherwise (a const
@@ -1752,7 +1789,7 @@ impl PoolInner {
         let participants = words.participants;
         let stats = if participants <= 1 {
             let mut orch = Participant::new(&words, base, 0);
-            run_orchestrator::<_, S, P, ARMED>(&words, stages, &mut orch)
+            orchestrate::<_, S, P, ARMED>(&words, stages, &mut orch)
         } else {
             let words = &words;
             self.scope(|s| {

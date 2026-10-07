@@ -42,7 +42,9 @@
 //! **CR-F (the finisher advance, `WithAdvance<_, true>`).** Every case above has a `fin_` twin
 //! under `Fin<TestPolicy>`, and F-FRAME B gains a `Fin<V2Policy>` round. Under the finisher the
 //! oversize entry of case 3 is published by whichever participant completed the item before it, so
-//! `fin_case3` asserts exactly one PANICKED receipt, that publisher's. **G-CR-F-PANIC**
+//! `fin_case3` asserts exactly one PANICKED receipt, that publisher's. The orchestrator cases also
+//! assert that no receipt of their poisoned region counted an advance (CR-F fix r1: participant
+//! 0's count is recorded after `run_orchestrator` returns, and only after a normal END). **G-CR-F-PANIC**
 //! (`fin_helper_panic_while_participant0_waits`) places a helper's panic in a published block
 //! while participant 0 waits in its publish wait: entry 0's block 0 holds participant 0 until a
 //! helper starts block 1 (only a helper can, participant 0 being inside block 0), and that helper
@@ -60,7 +62,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use boyko_threadpool::{
-    RegionExit, RegionLine, RegionPolicy, RegionReceipt, RegionReport, RegionStages,
+    Advance, RegionExit, RegionLine, RegionPolicy, RegionReceipt, RegionReport, RegionStages,
     RegionWaitBound, ThreadPool, V2Policy, WithAdvance, try_with_active_pool,
 };
 
@@ -176,6 +178,19 @@ fn assert_receipts(receipts: &[RegionReceipt], base: u64, panicked: u32, what: &
     }
 }
 
+/// A poisoned region run by the orchestrator counts no advance in any receipt: helpers never
+/// advance under it, a poisoned END is no advance, and participant 0's count is recorded only
+/// after it left by a normal END (`RegionReceipt::advances`; CR-F fix r1, where the count moved out
+/// of `run_orchestrator` behind an exit check). Under the finisher a receipt counts the publishes
+/// its participant made before the poison, so nothing is asserted there.
+fn assert_orchestrated_advances_zero<P: RegionPolicy>(receipts: &[RegionReceipt], what: &str) {
+    if P::ADVANCE == Advance::Orchestrator {
+        for (q, r) in receipts.iter().enumerate() {
+            assert_eq!(r.advances, 0, "{what}: participant {q} of a poisoned orchestrated region counted an advance ({receipts:?})");
+        }
+    }
+}
+
 fn case<P: RegionPolicy + 'static>(kind: Kind, who: Who, label: &str) {
     for &p in panic_participant_counts() {
         let pool = pool(p);
@@ -183,7 +198,9 @@ fn case<P: RegionPolicy + 'static>(kind: Kind, who: Who, label: &str) {
         let mut frame = Frame::new(blocks.len(), p as usize, 4 * 16 * 8);
         frame.set_table::<P>(&blocks, &order, p, 0);
         let (ran, base) = poisoned_run::<P>(&pool, frame, kind, p, inject);
-        assert_poisoned(&ran, p, base, who, &format!("{label}{kind:?} P{p}"));
+        let what = format!("{label}{kind:?} P{p}");
+        assert_poisoned(&ran, p, base, who, &what);
+        assert_orchestrated_advances_zero::<P>(&ran.frame.receipts(p), &what);
     }
 }
 
@@ -231,6 +248,7 @@ fn case3_body<P: RegionPolicy + 'static>(label: &str, any_publisher: bool) {
             0
         };
         assert_receipts(&receipts, base, panicked, &what);
+        assert_orchestrated_advances_zero::<P>(&receipts, &what);
         if !cfg!(miri) {
             assert!(ran.wall < Duration::from_secs(1), "{what}: (c) the call took {:?}", ran.wall);
         }
