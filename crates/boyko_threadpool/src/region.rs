@@ -835,24 +835,32 @@ fn run_block<S: RegionStages>(stages: &S, entry: u32, block: u32, participant: u
 /// armed (an unwind) it stores the receipt (PANICKED, or BOUND if the wait bound fired), then
 /// `poison = 1`, and — on participant 0 — publishes the tagged END, so no helper can be left
 /// waiting for a publish that will never come.
+///
+/// `repr(C)` in this order, because the layout reaches the hot loops' code (CR-F fix r1, from the
+/// G-CR-F-RCPT asm): `advances` sits apart from the three tallies zeroed at creation. Four adjacent
+/// zeroed `u64`s are one 32-byte store — a ymm store under the x86-64-v3 baseline — after which
+/// LLVM puts a `vzeroupper` before every call of the function, the stage call in the v2 helper's
+/// per-block loop among them; three are a 16-byte and an 8-byte store, as before the field
+/// existed. Every field before `advances` keeps the offset it had then.
+#[repr(C)]
 pub(crate) struct Participant<'a, W: RegionWords> {
-    w: &'a W,
     base: u64,
-    index: u32,
     blocks: u64,
     stalls: u64,
     max_wait_ns: u64,
-    /// Publishes this participant made (the receipt's `R_ADVANCES` word).
-    advances: u64,
+    w: &'a W,
+    index: u32,
     bound: bool,
     armed: bool,
+    /// Publishes this participant made (the receipt's `R_ADVANCES` word).
+    advances: u64,
 }
 
 impl<'a, W: RegionWords> Participant<'a, W> {
     /// Participant `index` of the region based at `base`, armed.
     #[inline]
     pub(crate) fn new(w: &'a W, base: u64, index: u32) -> Self {
-        Self { w, base, index, blocks: 0, stalls: 0, max_wait_ns: 0, advances: 0, bound: false, armed: true }
+        Self { base, blocks: 0, stalls: 0, max_wait_ns: 0, w, index, bound: false, armed: true, advances: 0 }
     }
 
     /// The base of this participant's region.
