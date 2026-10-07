@@ -5,6 +5,74 @@
 //! it must not move and how its friction must behave, so that FM is judged against bounds and
 //! pins written on the per-point solver that ships today.
 //!
+//! # The friction behaviour gates (G-P1, G-P2, G-P3, G-P7)
+//!
+//! Each gate is one box on the static floor, run on the shipped default world (the colored solve,
+//! W 1, `simd_solve` on). The floor's friction always equals the box's: the solver combines
+//! friction as `max(a, b)` (`solver/colored.rs`, `solver/soft_step.rs`), so a floor at any other μ
+//! would silently be the scene's μ. Bodies spawn touching (centre height = half-height), so V2's
+//! speculative contact exists on step 1. Tilted gravity is `9.81·(sin θ, −cos θ, 0)` with
+//! `tan θ` given, computed in `f64` and rounded once to `f32`; downhill is +x on a level floor, so a
+//! yaw stays exactly about the contact normal. Every bound below was fixed in the design
+//! (`fm/design_r2.md` §8 C0) or in the cut (`fm-c0/cut.md` §1.1) before any run of these scenes.
+//!
+//! | gate | scene | (component) bound |
+//! |---|---|---|
+//! | **G-P1** incline threshold | box half (0.5, 0.2, 0.5), 1 kg, spawned at (−40, 0.2, 0); yaw 0° and 30°; μ ∈ {0.2, 0.5, 0.8}; `tan θ = k·μ`; dt 1/120, 480 frames. 18 cells; tipping needs `tan θ > 2.5`, the largest is 1.6 | **stick** (k 0.95): creep `\|(x, z)(480) − (x, z)(240)\| < 5 mm`. **slide** (k 1.05): `x(480) − x(0) ∈ [0.5, 1.5]·½·a·(4 s)²`. **accel** (k 2): `(v_x(480) − v_x(240)) / 2 s` within ±5 % of `a`. Here `a = 9.81·(sin θ − μ cos θ)` |
+//! | **G-P2** twist stop | box half (1, 0.25, 1), 8 kg, μ 0.2, at rest with ω₀ = (0, 2, 0) rad/s; dt 1/60, 300 steps | **stop**: the first step `s*` at whose end `\|ω\| < 1e-3` lies in [25, 33]. **hold**: `\|ω\| < 1e-3` at the end of each of the 60 steps after `s*`. **drift**: `\|(x, z)(s* + 60) − (x, z)(0)\| ≤ 1 mm` |
+//! | **G-P3** yaw while sliding (Jolt #983) | box half (0.5, 0.25, 0.5), 1 kg, μ 0.3, yaw 30°, v₀ = (3, 0, 0) m/s; dt 1/60, 180 steps | **heading**: `ψ = atan2(−e.z, e.x)` with `e = R·x̂`, `\|ψ(180) − ψ(0)\| ≤ 0.5°`. **lateral**: `\|z(180) − z(0)\| ≤ 1 cm`. **stop distance**: `x(180) − x(0)` within ±5 % of `v₀² / (2μg)` = 1.529 m |
+//! | **G-P7** single-box slide | one J-T box (half 1, `inv_mass` 0.125), μ 0.2, at rest; gravity = S-SLIDE's literal bits (`tan θ = ½`, `benches/jolt_parity_pyramid/dyn_spec.rs`); dt 1/60, 70 steps | **acceleration**: `(v_x(70) − v_x(10)) / 1 s` within ±3 % of `9.81·(sin θ − 0.2 cos θ)` = 2.632 m/s² |
+//!
+//! Derivations and estimator choices:
+//!
+//! * **G-P2's stop band** is the analytic per-corner model: four corners at `√2` from the axis,
+//!   each carrying `mg/4`, give a friction torque `μmg√2` and a stop after `ω₀·I_y / (μmg√2)` =
+//!   0.4805 s = 28.8 steps. Lever ruling L8 Review OQ1: the base registers inside [25, 33], and a
+//!   base reading outside it is a finding, not a band change.
+//! * **G-P2's drift bound** (design OQ1): in exact Coulomb the four corner forces of a symmetric
+//!   box spinning in place cancel pairwise, so the ideal drift is 0. Per-point Gauss-Seidel sees
+//!   each corner after the previous one's update and can break that symmetry, so the per-point
+//!   base may drift; FM's tangent rows act at the patch centre, on the spin axis, and are
+//!   predicted to pass.
+//! * **G-P7's estimator is the velocity difference**, not the displacement: under symplectic Euler
+//!   the displacement form `2·(x(70) − x(10) − v_x(10)·1 s)` reads `a` high by `+1/N` for `N`
+//!   integration steps (+0.42 % at 240 substeps, +1.67 % at 60 steps), a bias inside a ±3 % band;
+//!   the velocity difference is exact under constant acceleration. The displacement form is
+//!   printed beside it as a receipt.
+//! * **G-P1's windows**: stick and accel read the second half of the run (the first half settles
+//!   the contact); slide reads the whole run from rest.
+//!
+//! Every gate also asserts its scene's premises, and a premise red is a STOP (the scene does not
+//! stand: a fixture or engine finding), never a bound edit: every body finite on every step; the
+//! box holds a manifold on every step of its gate's window; G-P2's box-floor manifold holds 4
+//! points at step 1 (the analytic's 4 corners); G-P3's box has stopped (`|v(180)| < 1e-3`);
+//! G-P7's box stays within 1° of its spawn orientation (no tumble; tipping needs `tan θ > 1`).
+//!
+//! Every gate also runs its scenes on the reference [`SoftStepSolver`] and prints `"<gate>
+//! reference receipt (SoftStepSolver)"` lines. The reference is a receipt, never asserted (lever
+//! ruling L8 W4): if it misses a bound that is reported, and the colored bound is never adjusted.
+//!
+//! # How a per-point arm that misses its bound is recorded (design OQ2)
+//!
+//! A gate is a set of (cell, component) pairs, each named `"<cell>: <component>"`. The bounds were
+//! fixed before the per-point base first ran, and that run splits the pairs:
+//!
+//! * pairs the base passes form the plain test `<gate>_per_point`;
+//! * pairs the base misses would form `<gate>_per_point_characterization`, a test that passes by
+//!   asserting each listed pair still misses its bound on the side the base run recorded, with the
+//!   live value in its message, never skipped by an ignore attribute and never `should_panic`. A
+//!   test exists only for a non-empty set.
+//!
+//! **The base run met every pair** (msvc, trunk `b46cf0ec`, 2026-10-07, debug and release printing
+//! identical values), so every pair is a plain gate and no characterization exists. That includes
+//! G-P3, which the design expected the per-point base to fail (the Jolt #983 class): it read a
+//! heading change of 0.00035° and a lateral drift of 2.7 µm. The base's readings, every reference
+//! receipt among them, are this file's `--nocapture` lines.
+//!
+//! At FM C1 the FM arm is a plain gate against the same bounds. A per-point pair that misses later
+//! is a change in the per-point solver, reported as such. The bound is never edited to follow a
+//! reading.
+//!
 //! # The count-1 scene hashes (G-P5's fixtures)
 //!
 //! FM changes only manifolds of two or more points: a one-point contact has no patch, so its rows
@@ -45,11 +113,12 @@
 //!
 //! # Harness
 //!
-//! Bodies are spawned with `EcsMaster::spawn_batch` of [`RigidBodyBundle`] (no `unsafe` in this
-//! file); a dynamic body is then enabled as [`Simulated`], a static one is not. The world is the
-//! shipped default, `add_physics_systems::<DefaultRigidSolver>` (the colored solve), or
+//! Bodies are spawned with `EcsMaster::spawn_batch` of [`RigidBodyBundle`], the safe bundle path,
+//! so the file needs no raw byte view; a dynamic body is then enabled as [`Simulated`], a static
+//! one is not. The world is the shipped default, `add_physics_systems::<DefaultRigidSolver>` (the
+//! colored solve), `add_physics_systems::<SoftStepSolver>` for a reference receipt, or
 //! `add_physics_sdf::<DefaultRigidSolver>` for the SDF scene, on a `ThreadPoolBuilder` pool of the
-//! cell's W. After the build, [`PhysicsConfig`] gets the scene's gravity, the cell's `simd_solve`
+//! cell's W (W 1 for every G-P scene). After the build, [`PhysicsConfig`] gets the scene's gravity, the cell's `simd_solve`
 //! and `sleeping = false`, written explicitly (lever ruling L8 W1; it is also the default). Every
 //! other field keeps its default. The per-arm configuration is the one [`Arm`] parameter, so an arm
 //! that later needs one more flag is one hunk in [`Sim::new`].
@@ -66,6 +135,7 @@
 
 #![cfg(not(miri))]
 
+use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
@@ -81,7 +151,7 @@ use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::{add_physics_sdf, add_physics_systems};
 use boyko_physics::resources::{Manifolds, PhysicsConfig};
 use boyko_physics::sdf_query::SdfField;
-use boyko_physics::solver::{DefaultRigidSolver, RigidSolver};
+use boyko_physics::solver::{DefaultRigidSolver, RigidSolver, SoftStepSolver};
 use boyko_sdf_math::{SdfEdit, sdf_op};
 
 // ── Harness ──────────────────────────────────────────────────────────────────
@@ -119,6 +189,17 @@ impl BodySpec {
             inv_mass: 0.0,
             friction,
         }
+    }
+
+    /// A dynamic box at rest.
+    fn dynamic_box(
+        position: Vec3,
+        rotation: Quat,
+        half_extents: Vec3,
+        inv_mass: f32,
+        friction: f32,
+    ) -> Self {
+        Self { inv_mass, ..Self::static_box(position, rotation, half_extents, friction) }
     }
 
     /// A dynamic sphere at rest.
@@ -538,4 +619,609 @@ fn count1_sphere_on_box_hash_is_pinned_across_w_and_simd() {
         &sphere_on_box(0.0),
         PIN_COUNT1_SPHERE_ON_BOX,
     );
+}
+
+// ── The friction behaviour gates (G-P1, G-P2, G-P3, G-P7) ────────────────────
+
+/// Gravity's magnitude in every G-P scene, in m/s² (the engine's default `(0, -9.81, 0)`).
+const G: f64 = 9.81;
+/// The default gravity, for the G-P scenes on a level floor.
+const DOWN: Vec3 = Vec3::new(0.0, -9.81, 0.0);
+/// The box's row in every G-P scene: the floor spawns first, at row 0.
+const BOX_ROW: usize = 1;
+
+/// A bound on one reading, fixed before any run.
+#[derive(Clone, Copy, Debug)]
+enum Bound {
+    /// `value < hi`.
+    Below(f64),
+    /// `value <= hi`.
+    AtMost(f64),
+    /// `lo <= value <= hi`.
+    Within(f64, f64),
+}
+
+/// The side of its bound a reading misses on.
+#[derive(Clone, Copy, Debug)]
+enum Side {
+    Low,
+    High,
+}
+
+/// One (cell, component) pair's reading against its bound.
+#[derive(Clone, Debug)]
+struct Reading {
+    /// `"<cell>: <component>"`, unique within its gate.
+    pair: String,
+    value: f64,
+    bound: Bound,
+}
+
+impl Reading {
+    /// `None` when the reading meets its bound, else the side it misses on. `INFINITY` stands for
+    /// "never happened" (no stop within the run) and misses high; a NaN misses high too.
+    fn miss(&self) -> Option<Side> {
+        let v = self.value;
+        match self.bound {
+            Bound::Below(hi) if v < hi => None,
+            Bound::AtMost(hi) if v <= hi => None,
+            Bound::Within(lo, hi) if lo <= v && v <= hi => None,
+            Bound::Within(lo, _) if v < lo => Some(Side::Low),
+            _ => Some(Side::High),
+        }
+    }
+
+    /// The reading's verdict, for the printed record.
+    fn verdict(&self) -> String {
+        self.miss().map_or_else(|| "meets it".to_string(), |side| format!("misses {side:?}"))
+    }
+}
+
+/// A G-P run's record of the box.
+struct Trace {
+    /// The box after every step; `states[0]` is the spawn state.
+    states: Vec<RigidBody>,
+    /// On every step, the largest point count of a manifold holding the box (0: none);
+    /// `points[0]` = 0, no step ran.
+    points: Vec<u8>,
+    /// The first step after which some body was non-finite.
+    first_non_finite: Option<usize>,
+}
+
+impl Trace {
+    /// The premises every G-P gate shares: every body finite on every step, and the box holding a
+    /// manifold on every step of `window`, without which friction is vacuous there.
+    fn standing(&self, window: RangeInclusive<usize>) -> Result<(), String> {
+        if let Some(step) = self.first_non_finite {
+            return Err(format!("a body is non-finite after step {step}"));
+        }
+        match window.clone().find(|&step| self.points[step] == 0) {
+            Some(step) => Err(format!(
+                "the box holds no manifold on step {step} of its window {window:?}, so friction \
+                 is vacuous there"
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// The box after `step`.
+    fn at(&self, step: usize) -> &RigidBody {
+        &self.states[step]
+    }
+}
+
+/// Runs `scene` for `steps` on solver `S` (W 1, `simd_solve` on) and records the box.
+fn trace<S: RigidSolver + Default>(scene: &Scene, steps: usize) -> Trace {
+    let mut sim = Sim::new::<S>(scene, DEFAULT_ARM);
+    let mut states = Vec::with_capacity(steps + 1);
+    let mut points = Vec::with_capacity(steps + 1);
+    let mut first_non_finite = None;
+    states.push(sim.bodies()[BOX_ROW]);
+    points.push(0);
+    for step in 1..=steps {
+        sim.step();
+        let bodies = sim.bodies();
+        if first_non_finite.is_none()
+            && !bodies.iter().all(|b| body_words(b).iter().all(|w| w.is_finite()))
+        {
+            first_non_finite = Some(step);
+        }
+        states.push(bodies[BOX_ROW]);
+        let box_points = sim
+            .manifolds()
+            .iter()
+            .filter(|m| m.body_a.0 as usize == BOX_ROW || m.body_b.0 as usize == BOX_ROW)
+            .map(|m| m.count)
+            .max()
+            .unwrap_or(0);
+        points.push(box_points);
+    }
+    Trace { states, points, first_non_finite }
+}
+
+/// Runs one G-P cell: the reference first, printed as a receipt and never asserted, then the
+/// colored default, whose premises `read` asserts (a premise red is a STOP). Prints every colored
+/// reading against its bound and returns them with the colored trace.
+fn run_gate_cell<F>(
+    gate: &str,
+    cell: &str,
+    scene: &Scene,
+    steps: usize,
+    read: F,
+) -> (Vec<Reading>, Trace)
+where
+    F: Fn(&Trace) -> Result<Vec<Reading>, String>,
+{
+    match read(&trace::<SoftStepSolver>(scene, steps)) {
+        Ok(readings) => {
+            for r in readings {
+                println!(
+                    "{gate} reference receipt (SoftStepSolver): {} = {} (bound {:?}; {})",
+                    r.pair,
+                    r.value,
+                    r.bound,
+                    r.verdict()
+                );
+            }
+        }
+        Err(premise) => println!(
+            "{gate} reference receipt (SoftStepSolver), {cell}: a premise fails: {premise}"
+        ),
+    }
+    let colored = trace::<DefaultRigidSolver>(scene, steps);
+    let readings = read(&colored).unwrap_or_else(|premise| {
+        panic!(
+            "{gate}, {cell}, premise: {premise}. The scene does not stand: a fixture or engine \
+             finding. STOP; never edit a bound or the fixture to make it stand"
+        )
+    });
+    for r in &readings {
+        println!(
+            "{gate}, per-point base: {} = {} (bound {:?}; {})",
+            r.pair,
+            r.value,
+            r.bound,
+            r.verdict()
+        );
+    }
+    (readings, colored)
+}
+
+/// The plain per-point gate: every pair meets its bound.
+fn assert_gate(gate: &str, readings: &[Reading]) {
+    assert!(!readings.is_empty(), "harness: {gate} read no pair, so it would pass vacuously");
+    let misses: Vec<String> = readings
+        .iter()
+        .filter(|r| r.miss().is_some())
+        .map(|r| format!("{} = {} ({:?}; {})", r.pair, r.value, r.bound, r.verdict()))
+        .collect();
+    assert!(
+        misses.is_empty(),
+        "{gate}, per-point base: {} of {} pairs miss their bounds, which were fixed before any \
+         run (fm/design_r2.md §8 C0): {}. The per-point base met every pair when this file was \
+         written, so a miss is a change in the per-point solver; never edit a bound to follow a \
+         reading",
+        misses.len(),
+        readings.len(),
+        misses.join("; ")
+    );
+}
+
+/// `tan θ`'s incline gravity, `9.81·(sin θ, −cos θ, 0)`, computed in `f64` and rounded once.
+fn incline_gravity(tan: f64) -> Vec3 {
+    let theta = tan.atan();
+    Vec3::new((G * theta.sin()) as f32, (-G * theta.cos()) as f32, 0.0)
+}
+
+/// The analytic sliding acceleration down `tan θ` at friction `mu`: `9.81·(sin θ − μ cos θ)`.
+fn incline_acceleration(mu: f64, tan: f64) -> f64 {
+    let theta = tan.atan();
+    G * (theta.sin() - mu * theta.cos())
+}
+
+/// A yaw of `degrees` about +y, built by hand as `(0, sin ψ/2, 0, cos ψ/2)`.
+fn yaw(degrees: f64) -> Quat {
+    let half = degrees.to_radians() / 2.0;
+    Quat::new(0.0, half.sin() as f32, 0.0, half.cos() as f32)
+}
+
+/// `body` on the static floor, which carries the body's own friction.
+fn on_floor(body: BodySpec, gravity: Vec3, dt: f32) -> Scene {
+    Scene { bodies: vec![floor(body.friction), body], gravity, dt, ground: Ground::Bodies }
+}
+
+/// The horizontal distance between the box's centre after steps `from` and `to`.
+fn horizontal_distance(t: &Trace, from: usize, to: usize) -> f64 {
+    let (a, b) = (t.at(from).position, t.at(to).position);
+    f64::from(b.x - a.x).hypot(f64::from(b.z - a.z))
+}
+
+/// The magnitude of `v`, in `f64`.
+fn norm(v: Vec3) -> f64 {
+    (f64::from(v.x).powi(2) + f64::from(v.y).powi(2) + f64::from(v.z).powi(2)).sqrt()
+}
+
+// G-P1: the incline threshold.
+
+/// G-P1's friction coefficients.
+const G_P1_MU: [f64; 3] = [0.2, 0.5, 0.8];
+/// G-P1's yaws about +y, in degrees.
+const G_P1_YAW_DEG: [f64; 2] = [0.0, 30.0];
+/// G-P1's step, in seconds.
+const G_P1_DT_S: f64 = 1.0 / 120.0;
+/// G-P1's frames: 4 s.
+const G_P1_FRAMES: usize = 480;
+/// The frame that opens the stick and accel windows (the first half settles the contact).
+const G_P1_HALF: usize = 240;
+/// G-P1's box: tips only above `tan θ = 0.5 / 0.2 = 2.5`.
+const G_P1_BOX_HALF: Vec3 = Vec3::new(0.5, 0.2, 0.5);
+/// G-P1's spawn: far uphill, so the accel arm's 33.3 m at μ 0.8 stays on the floor.
+const G_P1_SPAWN: Vec3 = Vec3::new(-40.0, 0.2, 0.0);
+/// The stick arm's creep bound over frames 240-480, in metres.
+const G_P1_CREEP_M: f64 = 0.005;
+/// The slide arm's band, as multiples of `½·a·t²`.
+const G_P1_SLIDE_BAND: [f64; 2] = [0.5, 1.5];
+/// The accel arm's tolerance around the analytic `a`.
+const G_P1_ACCEL_TOLERANCE: f64 = 0.05;
+
+/// G-P1's three arms.
+#[derive(Clone, Copy, Debug)]
+enum Incline {
+    /// `tan θ = 0.95μ`: inside the cone, the box must hold.
+    Stick,
+    /// `tan θ = 1.05μ`: just outside it, the box must slide by about `½·a·t²`.
+    Slide,
+    /// `tan θ = 2μ`: well outside it, the box must accelerate at `a`.
+    Accel,
+}
+
+impl Incline {
+    /// `tan θ / μ`.
+    fn k(self) -> f64 {
+        match self {
+            Self::Stick => 0.95,
+            Self::Slide => 1.05,
+            Self::Accel => 2.0,
+        }
+    }
+}
+
+/// G-P1's scene for one cell of `arm`.
+fn g_p1_scene(arm: Incline, mu: f64, yaw_deg: f64) -> Scene {
+    let body = BodySpec::dynamic_box(G_P1_SPAWN, yaw(yaw_deg), G_P1_BOX_HALF, 1.0, mu as f32);
+    on_floor(body, incline_gravity(arm.k() * mu), G_P1_DT_S as f32)
+}
+
+/// G-P1's readings for `arm`: one pair per (μ, yaw) cell.
+fn g_p1_readings(arm: Incline) -> Vec<Reading> {
+    let gate = format!("G-P1 {arm:?}");
+    let mut out = Vec::new();
+    for mu in G_P1_MU {
+        for yaw_deg in G_P1_YAW_DEG {
+            let cell = format!("μ {mu}, yaw {yaw_deg}°");
+            let a = incline_acceleration(mu, arm.k() * mu);
+            let scene = g_p1_scene(arm, mu, yaw_deg);
+            let (readings, _) = run_gate_cell(&gate, &cell, &scene, G_P1_FRAMES, |t| match arm {
+                Incline::Stick => {
+                    t.standing(G_P1_HALF + 1..=G_P1_FRAMES)?;
+                    Ok(vec![Reading {
+                        pair: format!("{cell}: creep"),
+                        value: horizontal_distance(t, G_P1_HALF, G_P1_FRAMES),
+                        bound: Bound::Below(G_P1_CREEP_M),
+                    }])
+                }
+                Incline::Slide => {
+                    t.standing(1..=G_P1_FRAMES)?;
+                    let time = G_P1_FRAMES as f64 * G_P1_DT_S;
+                    let expected = 0.5 * a * time * time;
+                    Ok(vec![Reading {
+                        pair: format!("{cell}: displacement"),
+                        value: f64::from(t.at(G_P1_FRAMES).position.x - t.at(0).position.x),
+                        bound: Bound::Within(
+                            G_P1_SLIDE_BAND[0] * expected,
+                            G_P1_SLIDE_BAND[1] * expected,
+                        ),
+                    }])
+                }
+                Incline::Accel => {
+                    t.standing(G_P1_HALF + 1..=G_P1_FRAMES)?;
+                    let dv = t.at(G_P1_FRAMES).linear_velocity.x
+                        - t.at(G_P1_HALF).linear_velocity.x;
+                    Ok(vec![Reading {
+                        pair: format!("{cell}: acceleration"),
+                        value: f64::from(dv) / ((G_P1_FRAMES - G_P1_HALF) as f64 * G_P1_DT_S),
+                        bound: Bound::Within(
+                            a * (1.0 - G_P1_ACCEL_TOLERANCE),
+                            a * (1.0 + G_P1_ACCEL_TOLERANCE),
+                        ),
+                    }])
+                }
+            });
+            out.extend(readings);
+        }
+    }
+    out
+}
+
+/// G-P1, stick arm: inside the friction cone (`tan θ = 0.95μ`) the box holds.
+#[test]
+fn g_p1_incline_stick_per_point() {
+    assert_gate("G-P1 Stick", &g_p1_readings(Incline::Stick));
+}
+
+/// G-P1, slide arm: just outside the cone (`tan θ = 1.05μ`) the box slides about `½·a·t²`.
+#[test]
+fn g_p1_incline_slide_per_point() {
+    assert_gate("G-P1 Slide", &g_p1_readings(Incline::Slide));
+}
+
+/// G-P1, accel arm: well outside the cone (`tan θ = 2μ`) the box accelerates at `a` ±5 %.
+#[test]
+fn g_p1_incline_accel_per_point() {
+    assert_gate("G-P1 Accel", &g_p1_readings(Incline::Accel));
+}
+
+// G-P2: the twist stop.
+
+/// G-P2's box: 2 m × 0.5 m × 2 m.
+const G_P2_BOX_HALF: Vec3 = Vec3::new(1.0, 0.25, 1.0);
+/// G-P2's inverse mass: 8 kg.
+const G_P2_INV_MASS: f32 = 0.125;
+/// G-P2's friction coefficient.
+const G_P2_MU: f64 = 0.2;
+/// G-P2's initial spin about +y, in rad/s.
+const G_P2_OMEGA0: f32 = 2.0;
+/// G-P2's step, in seconds.
+const G_P2_DT_S: f64 = 1.0 / 60.0;
+/// G-P2's run length, the last step a stop may be found on.
+const G_P2_STEPS: usize = 300;
+/// `|ω|` below this, in rad/s, is at rest.
+const G_P2_REST: f64 = 1.0e-3;
+/// The steps after the stop that must stay at rest.
+const G_P2_HOLD_STEPS: usize = 60;
+/// The stop step's band (analytic 28.8 steps).
+const G_P2_STOP_BAND: [f64; 2] = [25.0, 33.0];
+/// The COM drift bound, in metres (design OQ1).
+const G_P2_DRIFT_M: f64 = 0.001;
+
+/// G-P2's scene.
+fn g_p2_scene() -> Scene {
+    let mut body = BodySpec::dynamic_box(
+        Vec3::new(0.0, G_P2_BOX_HALF.y, 0.0),
+        Quat::IDENTITY,
+        G_P2_BOX_HALF,
+        G_P2_INV_MASS,
+        G_P2_MU as f32,
+    );
+    body.angular_velocity = Vec3::new(0.0, G_P2_OMEGA0, 0.0);
+    on_floor(body, DOWN, G_P2_DT_S as f32)
+}
+
+/// G-P2's readings: the stop step `s*` (`INFINITY` if none within the run), the largest `|ω|`
+/// over the [`G_P2_HOLD_STEPS`] after it (`INFINITY` if they do not fit in the run), and the COM
+/// drift at `s* + 60` (at the last step if that does not fit).
+fn g_p2_readings() -> Vec<Reading> {
+    let (readings, _) = run_gate_cell("G-P2", "twist", &g_p2_scene(), G_P2_STEPS, |t| {
+        if t.points[1] != 4 {
+            return Err(format!(
+                "the box-floor manifold holds {} points at step 1, not the 4 corners the analytic \
+                 stop assumes",
+                t.points[1]
+            ));
+        }
+        let spin = |step: usize| norm(t.at(step).angular_velocity);
+        let stop = (1..=G_P2_STEPS).find(|&step| spin(step) < G_P2_REST);
+        let held = stop.filter(|&s| s + G_P2_HOLD_STEPS <= G_P2_STEPS);
+        let read_at = held.map_or(G_P2_STEPS, |s| s + G_P2_HOLD_STEPS);
+        t.standing(1..=read_at)?;
+        Ok(vec![
+            Reading {
+                pair: "twist: stop step".to_string(),
+                value: stop.map_or(f64::INFINITY, |s| s as f64),
+                bound: Bound::Within(G_P2_STOP_BAND[0], G_P2_STOP_BAND[1]),
+            },
+            Reading {
+                pair: "twist: largest |ω| over the 60 steps after the stop".to_string(),
+                value: held.map_or(f64::INFINITY, |s| {
+                    (s + 1..=s + G_P2_HOLD_STEPS).map(spin).fold(0.0, f64::max)
+                }),
+                bound: Bound::Below(G_P2_REST),
+            },
+            Reading {
+                pair: "twist: COM drift".to_string(),
+                value: horizontal_distance(t, 0, read_at),
+                bound: Bound::AtMost(G_P2_DRIFT_M),
+            },
+        ])
+    });
+    readings
+}
+
+/// G-P2, stop and hold: a box spun in place on the floor stops inside the analytic band and stays
+/// stopped.
+#[test]
+fn g_p2_twist_stops_and_holds_per_point() {
+    let readings: Vec<Reading> =
+        g_p2_readings().into_iter().filter(|r| !r.pair.ends_with("COM drift")).collect();
+    assert_gate("G-P2 stop", &readings);
+}
+
+/// G-P2, drift: the spinning box's centre does not wander (design OQ1).
+#[test]
+fn g_p2_twist_drift_per_point() {
+    let readings: Vec<Reading> =
+        g_p2_readings().into_iter().filter(|r| r.pair.ends_with("COM drift")).collect();
+    assert_gate("G-P2 drift", &readings);
+}
+
+// G-P3: yaw while sliding.
+
+/// G-P3's box.
+const G_P3_BOX_HALF: Vec3 = Vec3::new(0.5, 0.25, 0.5);
+/// G-P3's friction coefficient.
+const G_P3_MU: f64 = 0.3;
+/// G-P3's yaw, in degrees.
+const G_P3_YAW_DEG: f64 = 30.0;
+/// G-P3's launch speed along +x, in m/s.
+const G_P3_V0: f64 = 3.0;
+/// G-P3's step, in seconds.
+const G_P3_DT_S: f64 = 1.0 / 60.0;
+/// G-P3's run: the analytic stop is at 61.2 steps.
+const G_P3_STEPS: usize = 180;
+/// The heading-change bound, in degrees.
+const G_P3_HEADING_DEG: f64 = 0.5;
+/// The lateral-displacement bound, in metres.
+const G_P3_LATERAL_M: f64 = 0.01;
+/// The stop distance's tolerance around `v₀² / (2μg)`.
+const G_P3_STOP_TOLERANCE: f64 = 0.05;
+/// The premise's rest speed at the last step, in m/s.
+const G_P3_REST: f64 = 1.0e-3;
+
+/// G-P3's scene.
+fn g_p3_scene() -> Scene {
+    let mut body = BodySpec::dynamic_box(
+        Vec3::new(0.0, G_P3_BOX_HALF.y, 0.0),
+        yaw(G_P3_YAW_DEG),
+        G_P3_BOX_HALF,
+        1.0,
+        G_P3_MU as f32,
+    );
+    body.linear_velocity = Vec3::new(G_P3_V0 as f32, 0.0, 0.0);
+    on_floor(body, DOWN, G_P3_DT_S as f32)
+}
+
+/// The heading of a box's local +x, `atan2(−e.z, e.x)` with `e = R·x̂`, in degrees.
+fn heading_deg(rotation: Quat) -> f64 {
+    let e = rotation.rotate(Vec3::new(1.0, 0.0, 0.0));
+    f64::from(-e.z).atan2(f64::from(e.x)).to_degrees()
+}
+
+/// G-P3's readings: the heading change, the lateral displacement and the stop distance.
+fn g_p3_readings() -> Vec<Reading> {
+    let (readings, _) = run_gate_cell("G-P3", "slide", &g_p3_scene(), G_P3_STEPS, |t| {
+        t.standing(1..=G_P3_STEPS)?;
+        let speed = norm(t.at(G_P3_STEPS).linear_velocity);
+        if speed >= G_P3_REST {
+            return Err(format!(
+                "the box has not stopped by step {G_P3_STEPS}: |v| = {speed} m/s (premise < \
+                 {G_P3_REST})"
+            ));
+        }
+        let turn = heading_deg(t.at(G_P3_STEPS).rotation) - heading_deg(t.at(0).rotation);
+        let expected = G_P3_V0 * G_P3_V0 / (2.0 * G_P3_MU * G);
+        Ok(vec![
+            Reading {
+                pair: "slide: heading change (deg)".to_string(),
+                value: ((turn + 540.0).rem_euclid(360.0) - 180.0).abs(),
+                bound: Bound::AtMost(G_P3_HEADING_DEG),
+            },
+            Reading {
+                pair: "slide: lateral displacement".to_string(),
+                value: f64::from(t.at(G_P3_STEPS).position.z - t.at(0).position.z).abs(),
+                bound: Bound::AtMost(G_P3_LATERAL_M),
+            },
+            Reading {
+                pair: "slide: stop distance".to_string(),
+                value: f64::from(t.at(G_P3_STEPS).position.x - t.at(0).position.x),
+                bound: Bound::Within(
+                    expected * (1.0 - G_P3_STOP_TOLERANCE),
+                    expected * (1.0 + G_P3_STOP_TOLERANCE),
+                ),
+            },
+        ])
+    });
+    readings
+}
+
+/// G-P3 (Jolt #983): a yawed box launched along +x slides straight and stops at `v₀² / (2μg)`.
+#[test]
+fn g_p3_yaw_while_sliding_per_point() {
+    assert_gate("G-P3", &g_p3_readings());
+}
+
+// G-P7: the single-box slide.
+
+/// S-SLIDE's gravity, `9.81·(1, −2, 0) / √5`, as the literal bits the dynamic parity scenes run
+/// (`benches/jolt_parity_pyramid/dyn_spec.rs`, `SLIDE_GRAVITY_BITS`): `tan θ = ½`.
+const G_P7_GRAVITY_BITS: [u32; 3] = [0x408c_63a9, 0xc10c_63a9, 0];
+/// G-P7's friction coefficient (S-SLIDE's).
+const G_P7_MU: f64 = 0.2;
+/// The J-T box: half-extent 1.
+const G_P7_BOX_HALF: Vec3 = Vec3::new(1.0, 1.0, 1.0);
+/// The J-T box's inverse mass: 8 kg.
+const G_P7_INV_MASS: f32 = 0.125;
+/// G-P7's step, in seconds.
+const G_P7_DT_S: f64 = 1.0 / 60.0;
+/// The step that opens G-P7's window.
+const G_P7_FROM: usize = 10;
+/// G-P7's last step: a 60-step (1 s) window.
+const G_P7_TO: usize = 70;
+/// The acceleration's tolerance around the analytic value.
+const G_P7_TOLERANCE: f64 = 0.03;
+/// The premise's largest tilt from the spawn orientation, in degrees.
+const G_P7_TILT_DEG: f64 = 1.0;
+
+/// G-P7's scene.
+fn g_p7_scene() -> Scene {
+    let body = BodySpec::dynamic_box(
+        Vec3::new(0.0, G_P7_BOX_HALF.y, 0.0),
+        Quat::IDENTITY,
+        G_P7_BOX_HALF,
+        G_P7_INV_MASS,
+        G_P7_MU as f32,
+    );
+    let [gx, gy, gz] = G_P7_GRAVITY_BITS.map(f32::from_bits);
+    on_floor(body, Vec3::new(gx, gy, gz), G_P7_DT_S as f32)
+}
+
+/// The angle of `rotation` away from the identity, in degrees.
+fn tilt_deg(rotation: Quat) -> f64 {
+    let (x, y, z, w) = (
+        f64::from(rotation.x),
+        f64::from(rotation.y),
+        f64::from(rotation.z),
+        f64::from(rotation.w),
+    );
+    let cos_half = (w.abs() / (x * x + y * y + z * z + w * w).sqrt()).min(1.0);
+    2.0 * cos_half.acos().to_degrees()
+}
+
+/// G-P7's reading, and the displacement-form receipt read from the same colored trace.
+fn g_p7_reading() -> (Vec<Reading>, f64) {
+    let window = (G_P7_TO - G_P7_FROM) as f64 * G_P7_DT_S;
+    let theta = 0.5f64.atan();
+    let expected = G * (theta.sin() - G_P7_MU * theta.cos());
+    let (readings, t) = run_gate_cell("G-P7", "slide", &g_p7_scene(), G_P7_TO, |t| {
+        t.standing(1..=G_P7_TO)?;
+        let worst = (0..=G_P7_TO).map(|s| tilt_deg(t.at(s).rotation)).fold(0.0, f64::max);
+        if worst > G_P7_TILT_DEG {
+            return Err(format!(
+                "the box tilted {worst}° from its spawn orientation (premise <= {G_P7_TILT_DEG}°)"
+            ));
+        }
+        let dv = t.at(G_P7_TO).linear_velocity.x - t.at(G_P7_FROM).linear_velocity.x;
+        Ok(vec![Reading {
+            pair: "slide: acceleration".to_string(),
+            value: f64::from(dv) / window,
+            bound: Bound::Within(
+                expected * (1.0 - G_P7_TOLERANCE),
+                expected * (1.0 + G_P7_TOLERANCE),
+            ),
+        }])
+    });
+    let dx = f64::from(t.at(G_P7_TO).position.x - t.at(G_P7_FROM).position.x);
+    let v_from = f64::from(t.at(G_P7_FROM).linear_velocity.x);
+    (readings, 2.0 * (dx - v_from * window) / (window * window))
+}
+
+/// G-P7: one J-T box under S-SLIDE's incline gravity accelerates at `9.81·(sin θ − 0.2 cos θ)` =
+/// 2.632 m/s² ±3 %.
+#[test]
+fn g_p7_single_box_slide_per_point() {
+    let (readings, displacement_form) = g_p7_reading();
+    println!(
+        "G-P7, per-point base: displacement-form receipt 2·(x(70) − x(10) − v_x(10)·1 s) = \
+         {displacement_form} m/s² (biased by +1/N under symplectic Euler; not the gate)"
+    );
+    assert_gate("G-P7", &readings);
 }
