@@ -935,8 +935,8 @@
         run_dense_in_pool_counted(n, steps, parallel_solve, workers).0
     }
 
-    /// [`run_dense_in_pool`], and the steps whose solve setup opened its scope (S4's
-    /// `setup_dispatches`), so a {1, N} gate can show it covered the parallel setup.
+    /// [`run_dense_in_pool`], and the steps whose substeps ran as one solve region (SR's
+    /// `region_dispatches`), so a {1, N} gate can show it covered the region.
     #[cfg(not(miri))]
     fn run_dense_in_pool_counted(
         n: usize,
@@ -944,20 +944,19 @@
         parallel_solve: bool,
         workers: usize,
     ) -> (Vec<u32>, u64) {
-        let (bits, setups, _) = run_dense_in_pool_region(n, steps, parallel_solve, workers, None);
-        (bits, setups)
+        run_dense_in_pool_region(n, steps, parallel_solve, workers, None)
     }
 
-    /// [`run_dense_in_pool_counted`] with the solve region (SR) on under `region`'s grain, or off
-    /// (`None`); also returns the steps whose substeps ran as one region.
+    /// [`run_dense_in_pool_counted`] with the solve region's grain set to `grain` (`None` keeps
+    /// the default).
     #[cfg(not(miri))]
     fn run_dense_in_pool_region(
         n: usize,
         steps: usize,
         parallel_solve: bool,
         workers: usize,
-        region: Option<RegionGrain>,
-    ) -> (Vec<u32>, u64, u64) {
+        grain: Option<RegionGrain>,
+    ) -> (Vec<u32>, u64) {
         use boyko_threadpool::ThreadPoolBuilder;
 
         let cfg = PhysicsConfig {
@@ -966,8 +965,7 @@
             ..PhysicsConfig::default()
         };
         let mut solver = ColoredSoftStepSolver::default();
-        if let Some(grain) = region {
-            solver.set_region(true);
+        if let Some(grain) = grain {
             assert!(solver.set_region_grain(grain), "construction: a valid grain");
         }
         let mut scratch = SolverScratch::with_capacity(n + 1);
@@ -983,7 +981,7 @@
                 solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
             }
         });
-        (snapshot_bits(&scratch), solver.setup_dispatches(), solver.region_dispatches())
+        (snapshot_bits(&scratch), solver.region_dispatches())
     }
 
     /// One G3 run: the layout and record bytes after the last step, and the padding
@@ -993,8 +991,8 @@
         layout: Vec<u32>,
         records: Vec<u32>,
         padding: PaddingAudit,
-        /// S4: the steps whose setup opened its scope.
-        setup: u64,
+        /// SR: the steps whose substeps (and fill) ran as one solve region.
+        regions: u64,
     }
 
     /// Like [`run_dense_in_pool`] but over the churned stream, with `simd_solve` as
@@ -1032,7 +1030,7 @@
             layout: layout_snapshot(&solver.columns),
             records: records_snapshot(&solver),
             padding: audit_padding(&solver.columns),
-            setup: solver.setup_dispatches(),
+            regions: solver.region_dispatches(),
         }
     }
 
@@ -1085,17 +1083,17 @@
         // (b) Parallel == serial, byte for byte, across {1, 2, 4, 8, 16} workers, on
         // both kernels. Every worker writes the SAME bytes into the SAME lanes
         // regardless of worker count, and identical to the single-threaded reference.
-        assert_eq!(single_a.setup, 0, "S4: a serial run never opens the setup scope");
+        assert_eq!(single_a.regions, 0, "SR: a serial run never opens a solve region");
         for simd in [false, true] {
             for workers in [1usize, 2, 4, 8, 16] {
                 let run = run_layout_in_pool(n, 12, true, simd, workers);
-                // S4's non-vacuity: the {1, N} bytes below cover the parallel setup's ranges on
+                // SR's non-vacuity: the {1, N} bytes below cover the region's fill and sweeps on
                 // every multi-worker run (the scene crosses its gate on every step), and a
                 // one-worker pool takes the inline path (the gate's lanes term).
                 assert_eq!(
-                    run.setup,
+                    run.regions,
                     if workers >= 2 { 12 } else { 0 },
-                    "S4: the setup's dispatches over the 12 steps at {workers} workers (simd {simd})"
+                    "SR: the regions over the 12 steps at {workers} workers (simd {simd})"
                 );
                 assert_eq!(
                     single_a.layout, run.layout,
@@ -1359,36 +1357,24 @@
     fn parallel_solve_bit_identical_across_workers_on_random_scenes() {
         // Worker spin-up dominates; keep the case count modest but the worker sweep
         // wide. Each case runs 6 worker configs × 8 steps over up to ~520 bodies.
-        // S4 (W8S lane, commit 4): the upper part of the range lays out enough points for the
-        // parallel setup to dispatch at 2 / 4 / 8 workers, and at one worker it never does; the
-        // count is summed over the cases so a run that never covered the setup cannot pass.
-        let setups = std::cell::Cell::new(0u64);
-        // SR (the cut's C2): the same scenes with the solve region on, at 2 / 4 / 8 workers.
+        // SR: the upper part of the range has a colour wide enough for the solve region at
+        // 2 / 4 / 8 workers, and at one worker it never opens; the count is summed over the cases
+        // so a run that never covered the region cannot pass.
         let regions = std::cell::Cell::new(0u64);
         proptest!(ProptestConfig::with_cases(48), |(seed in any::<u64>())| {
             let n = random_dense_scene(seed).len() - 1; // dyn count (last row = floor)
             let single = run_dense_in_pool(n, 8, false, 1);
-            let (p1, s1) = run_dense_in_pool_counted(n, 8, true, 1);
-            let (p2, s2) = run_dense_in_pool_counted(n, 8, true, 2);
-            let (p4, s4) = run_dense_in_pool_counted(n, 8, true, 4);
-            let (p8, s8) = run_dense_in_pool_counted(n, 8, true, 8);
-            prop_assert_eq!(s1, 0, "S4: one worker never dispatches the setup (seed {})", seed);
-            setups.set(setups.get() + s2 + s4 + s8);
+            let (p1, r1) = run_dense_in_pool_counted(n, 8, true, 1);
+            let (p2, r2) = run_dense_in_pool_counted(n, 8, true, 2);
+            let (p4, r4) = run_dense_in_pool_counted(n, 8, true, 4);
+            let (p8, r8) = run_dense_in_pool_counted(n, 8, true, 8);
+            prop_assert_eq!(r1, 0, "SR: one worker never opens a region (seed {})", seed);
+            regions.set(regions.get() + r2 + r4 + r8);
             prop_assert_eq!(&p1, &single, "parallel(1) == single-threaded (seed {})", seed);
             prop_assert_eq!(&p1, &p2, "parallel: 1 vs 2 workers bit-identical (seed {})", seed);
             prop_assert_eq!(&p1, &p4, "parallel: 1 vs 4 workers bit-identical (seed {})", seed);
             prop_assert_eq!(&p1, &p8, "parallel: 1 vs 8 workers bit-identical (seed {})", seed);
-            for workers in [2, 4, 8] {
-                let (r, _, g) = run_dense_in_pool_region(n, 8, true, workers, Some(RegionGrain::DEFAULT));
-                regions.set(regions.get() + g);
-                prop_assert_eq!(&p1, &r, "region: 1 vs {} workers bit-identical (seed {})", workers, seed);
-            }
         });
-        assert!(
-            setups.get() > 0,
-            "anti-vacuity: no case dispatched S4's parallel setup, so the {{1, N}} bits never \
-             covered it"
-        );
         assert!(
             regions.get() > 0,
             "anti-vacuity: no case opened a solve region, so the {{1, N}} bits never covered it"
@@ -1464,7 +1450,6 @@
         let graph = build_graph(bodies, manifolds);
         let cfg = PhysicsConfig { dt: 1.0 / 60.0, parallel_solve: workers > 0, simd_solve, ..PhysicsConfig::default() };
         let mut solver = ColoredSoftStepSolver::default();
-        solver.set_region(true);
         assert!(solver.set_region_grain(grain), "construction: a valid grain");
         let mut scratch = SolverScratch::with_capacity(bodies.len());
         scratch.set_bodies(bodies);
@@ -1548,7 +1533,6 @@
         let run = |route: Option<RegionRoute>| {
             let cfg = PhysicsConfig { dt: 1.0 / 60.0, parallel_solve: route.is_some(), simd_solve: false, ..PhysicsConfig::default() };
             let mut solver = ColoredSoftStepSolver::default();
-            solver.set_region(true);
             assert!(solver.set_region_grain(lowered));
             if let Some(route) = route {
                 solver.region_route = route;
@@ -6068,13 +6052,11 @@
             Parent,
             /// Shape F's fused search, one range here.
             SerialFused,
-            /// `tasks` ranges on a pool of `workers`.
-            Pool { workers: usize, tasks: usize },
             /// `tasks` ranges on scoped std threads.
             Threads(usize),
-            /// SR (C3): `tasks` ranges as the solve region's stage 0 on a pool of `workers` — the
-            /// region switch on, `build_columns` hands its fill over, and the fill alone runs as a
-            /// region (`fill_in_region`).
+            /// SR: `tasks` ranges as the solve region's stage 0 on a pool of `workers` —
+            /// `build_columns` hands its fill over, and the fill alone runs as a region
+            /// (`fill_in_region`).
             Region { workers: usize, tasks: usize },
         }
 
@@ -6128,10 +6110,9 @@
             solver.setup_mode = match mode {
                 Mode::Parent => SetupMode::Auto,
                 Mode::SerialFused => SetupMode::SerialFused,
-                Mode::Pool { tasks, .. } | Mode::Region { tasks, .. } => SetupMode::Pool(tasks),
+                Mode::Region { tasks, .. } => SetupMode::Pool(tasks),
                 Mode::Threads(t) => SetupMode::Threads(t),
             };
-            solver.set_region(matches!(mode, Mode::Region { .. }));
             let graph = build_graph(&frame.bodies, &frame.manifolds);
             let n_rows = frame.bodies.len();
             let sleep = (!frame.frozen_rows.is_empty()).then(|| {
@@ -6169,7 +6150,7 @@
                 out
             };
             let out = match mode {
-                Mode::Pool { workers, .. } | Mode::Region { workers, .. } => {
+                Mode::Region { workers, .. } => {
                     let pool = boyko_threadpool::ThreadPoolBuilder::new().num_threads(workers).build();
                     pool.install(|_| go())
                 }
@@ -6185,8 +6166,8 @@
             // from the final heads (the widths it cut by are the layout's).
             let mut owner = vec![None; frame.manifolds.len()];
             let mut restore_ranges = 0;
-            let dispatched = solver.setup_dispatches() + region_published;
-            if let Mode::Pool { tasks, .. } | Mode::Threads(tasks) | Mode::Region { tasks, .. } = mode
+            let dispatched = solver.counters.thread_fills + region_published;
+            if let Mode::Threads(tasks) | Mode::Region { tasks, .. } = mode
                 && dispatched > 0
             {
                 let points: usize = cols.heads().iter().map(|h| h.width.iter().map(|&w| usize::from(w)).sum::<usize>()).sum();
@@ -6249,7 +6230,7 @@
         /// Builds `frame` in every mode of `modes` and requires each equal to the parent path.
         fn compare(frame: &Frame, modes: &[Mode], tally: &mut Tally) {
             let parent = build(frame, Mode::Parent);
-            assert_eq!(parent.dispatched, 0, "the parent path never opens the setup scope");
+            assert_eq!(parent.dispatched, 0, "the parent path fills in one range on its own thread");
             for &mode in modes {
                 let run = build(frame, mode);
                 assert_eq!(
@@ -6283,10 +6264,6 @@
         fn s4_setup_matches_the_parent_path_on_random_frames() {
             let modes = [
                 Mode::SerialFused,
-                Mode::Pool { workers: 2, tasks: 2 },
-                Mode::Pool { workers: 4, tasks: 5 },
-                Mode::Pool { workers: 8, tasks: 16 },
-                // SR (C3): the same ranges as the solve region's stage 0.
                 Mode::Region { workers: 2, tasks: 2 },
                 Mode::Region { workers: 4, tasks: 5 },
                 Mode::Region { workers: 8, tasks: 16 },

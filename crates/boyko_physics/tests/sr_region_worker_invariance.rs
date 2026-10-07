@@ -1,9 +1,9 @@
 //! SR phase B — the solve region is worker-count invariant, bit for bit (`levers/scaling/
 //! 02-SR-DESIGN.md` §2; the cut's C2 gate).
 //!
-//! The default world runs with the solver's region switch on (`ColoredSoftStepSolver::set_region`),
-//! so every step whose parallel gate holds — `parallel_solve`, a pool of two workers or more, a
-//! colour at least the grain's wide floor — runs its substeps as ONE region: gravity, the warm start
+//! In the default world every step whose parallel gate holds — `parallel_solve`, a pool of two
+//! workers or more, a colour at least the grain's wide floor — runs its substeps as ONE region (the
+//! default since SR's flip): the fill, gravity, the warm start
 //! per colour, the biased and relax sweeps per colour and integrate + inertia, each a stage of the
 //! region's table. The per-frame FNV-1a hash of every `RigidBody` bit and of the step's
 //! `WarmSeedStats` (the fill's reduce, which a region step runs after its END: SR C3's warm-stats
@@ -34,8 +34,8 @@
 //!   frame of the one-worker run, and the same drop at restitution 0 never does (the witness is the
 //!   restitution pass's, not the drop's).
 //!
-//! The switch is off by default until SR's flip; this file is the identity gate of the switch-on
-//! path. Spins real thread pools (intractable under Miri), so `cfg(not(miri))`.
+//! This file is the region path's identity gate (since SR's flip, the default world's own path at
+//! W ≥ 2). Spins real thread pools (intractable under Miri), so `cfg(not(miri))`.
 
 #![cfg(not(miri))]
 
@@ -272,8 +272,7 @@ struct Run {
     max_up: f32,
 }
 
-/// Runs the default world with `arm`'s configuration and the region switch on, on a
-/// `workers`-wide pool.
+/// Runs the default world with `arm`'s configuration on a `workers`-wide pool.
 fn run(arm: Arm, workers: usize) -> Run {
     let mut world = EcsMaster::new();
     spawn_scene(&mut world, arm.restitution, arm.drop);
@@ -296,7 +295,6 @@ fn run(arm: Arm, workers: usize) -> Run {
     }
     {
         let solver = world.resource_mut::<DefaultRigidSolver>();
-        solver.set_region(true);
         assert!(solver.set_region_grain(arm.grain), "construction: the arm's grain is valid");
     }
     let spawn_hash = state_hash(&mut world);

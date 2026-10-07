@@ -16,10 +16,12 @@
 //!
 //! Under Miri the solver counts, per stage kind, the blocks the helpers ran and the most blocks an
 //! entry of the kind had (`ColoredSoftStepSolver::region_kind_tally`, `cfg(miri)` only — natively
-//! the tally does not exist). Each kind this commit's region runs — gravity, the warm start, the
-//! biased and relax sweeps, integrate — must have had an entry of at least two blocks AND a helper
-//! block. A mutation is read only after this guard is green: a Tree Borrows green on a run whose
-//! helpers ran no block of a kind says nothing about that kind's writes.
+//! the tally does not exist). Each kind the region runs — the fill, the first substep's gravity
+//! (which also resets V2's step movement) and the later substeps', the warm start, the biased and
+//! relax sweeps, integrate and the store ([`GUARDED_KINDS`]) — must have had an entry of at least
+//! two blocks AND a helper block. A mutation is read only after this guard is green: a Tree
+//! Borrows green on a run whose helpers ran no block of a kind says nothing about that kind's
+//! writes.
 //!
 //! Natively the same scene runs (the pool route, no tally) and its bits must equal the serial
 //! solve's, so the file is never an empty target.
@@ -149,7 +151,6 @@ fn solve(region: bool, steps: usize, simd_solve: bool) -> (Vec<u32>, ColoredSoft
     let graph = build_graph(&bodies, &manifolds);
     let config = PhysicsConfig { dt: 1.0 / 60.0, parallel_solve: region, simd_solve, ..PhysicsConfig::default() };
     let mut solver = ColoredSoftStepSolver::default();
-    solver.set_region(true);
     assert!(solver.set_region_grain(LOWERED), "construction: the lowered grain is valid");
     let mut scratch = SolverScratch::with_capacity(bodies.len());
     scratch.set_bodies(&bodies);

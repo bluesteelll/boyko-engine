@@ -1,11 +1,11 @@
 //! SR phase B — the warm store as the solve region's last stage (the cut's C4 gate): the records the
 //! store writes, read back as the next step's seeds, equal the one-worker run's on every frame.
 //!
-//! The default world runs with the solver's region switch on at W 1, 4 and 8. On every frame the
-//! next step's seed of every point of every logical manifold — the stream's, whose records the
-//! store just wrote, and the held store's (`ColoredSoftStepSolver::for_each_warm_seed`) — and the
-//! step's `WarmSeedStats` are folded with the bodies' bits into one FNV-1a hash, which must equal
-//! W1's (W1 never opens a region). Arms:
+//! The default world runs at W 1, 4 and 8 (the solve region is the default since SR's flip). On
+//! every frame the next step's seed of every point of every logical manifold — the stream's, whose
+//! records the store just wrote, and the held store's (`ColoredSoftStepSolver::for_each_warm_seed`)
+//! — and the step's `WarmSeedStats` are folded with the bodies' bits into one FNV-1a hash, which
+//! must equal W1's (W1 never opens a region). Arms:
 //!
 //! | arm | the store | what it covers |
 //! |---|---|---|
@@ -257,7 +257,6 @@ fn run(arm: Arm, workers: usize) -> Run {
         cfg.parallel_solve = true;
         cfg.sleeping = arm.sleeping;
     }
-    world.resource_mut::<DefaultRigidSolver>().set_region(true);
     let (r0, s0) = {
         let solver = world.resource::<DefaultRigidSolver>();
         (solver.region_dispatches(), solver.region_store_dispatches())

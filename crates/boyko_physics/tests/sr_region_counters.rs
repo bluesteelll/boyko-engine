@@ -16,13 +16,13 @@
 //!   called —
 //!   `cargo test -p boyko-physics --test sr_region_counters helpers -- --test-threads=1`.
 //! * **The scope count** of a warmed region step at W4, under a thread-local counting
-//!   allocator: two allocations (the scope's shared frame and its first task chunk) per scope the
-//!   step opened — the region's one alone: since SR's commit (7) the fill is the region's stage 0
-//!   and S4's setup scope opens no more on a region step (`setup_dispatches` must not move) — on
-//!   twelve warmed steps.
+//!   allocator: two allocations (the scope's shared frame and its first task chunk) for the one
+//!   scope the step opens, the region's — the fill is the region's stage 0 (SR commit 7) and SR's
+//!   flip retired S4's setup scope and the per-colour scopes — on twelve warmed steps.
 //!   Some steps add one allocation of the pool's own (its deque and epoch bookkeeping: the same
-//!   scene with the switch off reads 28 and 29 alternating), so a step may read one more, and the
-//!   fewest must read exactly two per scope: a per-step allocation in the region path lifts them all.
+//!   scene on the retired per-colour scopes read 28 and 29 alternating), so a step may read one
+//!   more, and the fewest must read exactly two: a per-step allocation in the region path lifts
+//!   them all.
 //!
 //! Spins real thread pools (intractable under Miri), so `cfg(not(miri))`.
 
@@ -289,7 +289,6 @@ fn region_counts_equal_the_builder_replica() {
         for (name, grain) in grains() {
             for workers in [2usize, 3, 4, 8, 16] {
                 let mut solver = ColoredSoftStepSolver::default();
-                solver.set_region(true);
                 assert!(solver.set_region_grain(grain), "{name}: a valid grain");
                 let mut scratch = SolverScratch::with_capacity(bodies.len());
                 scratch.set_bodies(&bodies);
@@ -330,7 +329,6 @@ fn helpers_run_blocks_on_every_step_at_w8_and_w16() {
     let graph = build_graph(&bodies, &manifolds);
     for workers in [8usize, 16] {
         let mut solver = ColoredSoftStepSolver::default();
-        solver.set_region(true);
         let mut scratch = SolverScratch::with_capacity(bodies.len());
         scratch.set_bodies(&bodies);
         let pool = ThreadPoolBuilder::new().num_threads(workers).build();
@@ -356,12 +354,11 @@ fn a_warmed_region_step_allocates_two_per_scope_it_opened() {
     let (bodies, manifolds) = pile(400, 40);
     let graph = build_graph(&bodies, &manifolds);
     let mut solver = ColoredSoftStepSolver::default();
-    solver.set_region(true);
     let mut scratch = SolverScratch::with_capacity(bodies.len());
     scratch.set_bodies(&bodies);
     let pool = ThreadPoolBuilder::new().num_threads(4).build();
-    // Per warmed step: (allocations, regions, setup scopes).
-    let steps: Vec<(usize, u64, u64)> = pool.install(|_| {
+    // Per warmed step: (allocations, regions).
+    let steps: Vec<(usize, u64)> = pool.install(|_| {
         for _ in 0..8 {
             scratch.touched.reset(scratch.bodies().len());
             solver.solve_colored(&cfg(true), &manifolds, &graph, &mut scratch);
@@ -369,31 +366,34 @@ fn a_warmed_region_step_allocates_two_per_scope_it_opened() {
         (0..12)
             .map(|_| {
                 scratch.touched.reset(scratch.bodies().len());
-                let (r0, s0) = (solver.region_dispatches(), solver.setup_dispatches());
+                let r0 = solver.region_dispatches();
                 let before = ALLOC.count();
                 solver.solve_colored(&cfg(true), &manifolds, &graph, &mut scratch);
                 let allocs = ALLOC.count().wrapping_sub(before);
-                (allocs, solver.region_dispatches() - r0, solver.setup_dispatches() - s0)
+                (allocs, solver.region_dispatches() - r0)
             })
             .collect()
     });
-    eprintln!("[SR C2] warmed region steps at W4 (allocs, regions, setup scopes): {steps:?}");
-    for &(allocs, regions, setups) in &steps {
+    eprintln!("[SR] warmed region steps at W4 (allocs, regions): {steps:?}");
+    for &(allocs, regions) in &steps {
         assert_eq!(regions, 1, "non-vacuity: every warmed step opened its region");
-        assert_eq!(setups, 0, "the fill is the region's stage 0: no setup scope on a region step");
-        let scopes = 2 * (regions + setups) as usize;
+        let scopes = 2 * regions as usize;
         // The pool's own deque and epoch bookkeeping adds one allocation on some steps, whatever
-        // the solve does (measured on this scene with the switch off: 28 and 29 alternating).
+        // the solve does (measured on this scene on the retired per-colour scopes: 28 and 29
+        // alternating).
         assert!(
             (scopes..=scopes + 1).contains(&allocs),
-            "a warmed region step allocates the shared frame and the first task chunk of each scope              it opens ({regions} region(s), {setups} setup scope(s)), and at most one allocation of              the pool's own: {allocs}"
+            "a warmed region step allocates the shared frame and the first task chunk of the one \
+             scope it opens ({regions} region(s)), and at most one allocation of the pool's own: \
+             {allocs}"
         );
     }
-    let fewest = steps.iter().map(|&(a, r, s)| a - 2 * (r + s) as usize).min();
+    let fewest = steps.iter().map(|&(a, r)| a - 2 * r as usize).min();
     assert_eq!(
         fewest,
         Some(0),
-        "some warmed step must allocate exactly two per scope: a per-step allocation in the region          path would lift every step ({steps:?})"
+        "some warmed step must allocate exactly two per scope: a per-step allocation in the region \
+         path would lift every step ({steps:?})"
     );
 }
 
