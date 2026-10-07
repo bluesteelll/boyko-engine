@@ -419,6 +419,22 @@ Written for the tip of `u/phys-sr-b` after the flip; no row passes `--sr` (the f
    --blocks-per-participant 1,2,4,6 --route worker --plan` exit 0 with 256 `PLAN` lines and `PLAN_CELLS 256`; v2's
    arm `--bench --mode omega-b2 --participants 2,4,8,16 --stages 36,72 --blocks-per-participant 1,2,4,6 --helper
    spin --route worker --regions 0` exit 2 with its message; the bare runner and the bare omega bench exit 0.
+4. The `u` attribution rows (triage r1 W1, below) on the tip's runner: J-T with `--steps 60 --arm-profiler
+   --canary-zone phys_sb_pc --canary-ns 50000000` at W 1/2/8, each exit 0 — the canary's spin counted exactly once
+   by `u`'s subtracted set, at W 1 inside the build span and at W ≥ 2 as the region's fill span. Untimed: both of
+   the runner's bounds are load-robust (module docs, "The in-zone canary").
+
+**Reading `u` and the build span on a tip row** (triage r1 W1, PC-SR-B6). On a region step the fill's span
+`phys_sb_pc` is opened by the region's stage-0 hook after `phys_solve_build` closed, so it is a sibling of the build
+span, not a part of it (`boyko_physics::profiling`'s module docs): a tip row's `phys_solve_build` lacks the fill a
+PARENT row's held, and the two must not be compared. The runner counts `phys_sb_pc` among `u`'s subtracted spans on
+exactly the steps whose `phys_region_opens` is 1 — until fix r1 it did not, and a region step's `u` carried the
+fill. What stays in a region step's `u` is the region's own unzoned fixed cost: the `restitution_possible` scan,
+the stage table's build, `pool.region`'s open, recruitment and join, the fill's tail and the store's carry
+reduction. So a tip row's `u` is not the residue window 9b's closure rule (`u` above 3 % of the solve span stops the
+analysis) was set on; on PARENT rows the rule reads what it always read. Whether the window's driver reads a tip
+row's `u` as a report or re-derives that ceiling at prep is the orchestrator's call — the lane timed nothing, `u`
+included.
 
 **The timed window** (`W = D:/tmp/phys-orch/win-sr`; the driver is a renamed copy of window 9b's with SR's rows; run
 through `Start-Process` in its own console — background shells are reaped after about 30 minutes — with no agent

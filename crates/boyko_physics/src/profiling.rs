@@ -46,7 +46,7 @@
 //! | [`PHYS_SB_BODIES`] | `build_bodies` + the warm cursor's remap classification | 1 |
 //! | [`PHYS_SB_PA`] | the build's P-a: the sizing and the tags | 1 |
 //! | [`PHYS_SB_PB`] | the build's P-b: the cohort layout | 1 |
-//! | [`PHYS_SB_PC`] | the build's P-c: the warm source search and the cohort fill | 1 |
+//! | [`PHYS_SB_PC`] | the build's P-c: the warm source search and the cohort fill; on a region step the fill alone, in the region's stage 0 | 1 |
 //!
 //! The four `phys_sb_*` spans (W8S, `docs/physics/perf-campaign/levers/scaling/01-DESIGN.md` §7)
 //! split [`PHYS_SOLVE_BUILD`]: they nest inside it and do not overlap, so `phys_solve_build`
@@ -54,7 +54,17 @@
 //! no-awake fast path as well, which still builds. Since S4 the warm source search runs after
 //! P-b (the layout reads only the tags' counts and frozen flags), so it is P-c's, not P-a's:
 //! commit (1) of `u/phys-w8s` measured it inside `phys_sb_pa`, commit (4) inside `phys_sb_pc`.
-//! An armed setup wave closes `phys_sb_pc` at its join.
+//!
+//! **Except on a region step** (SR phase B, PC-SR-B6: a step whose [`PHYS_REGION_OPENS`] is 1).
+//! There the fill is the solve region's stage 0, and participant 0's hook opens [`PHYS_SB_PC`]
+//! around the Fill item, after [`PHYS_SOLVE_BUILD`] closed: the span holds the fill alone and is a
+//! sibling of the build span, not nested in it, while the warm source search stays in the build,
+//! in its residue. So a region step's `phys_solve_build` lacks the fill that a pre-SR step's
+//! held — a window must not compare window 9b's build span with SR's — and a reader that sums the
+//! solve's top-level spans (the parity runner's unzoned residue `u`) counts `phys_sb_pc` on a region
+//! step and only there. The region's own fixed cost — the restitution scan, the table's build, the
+//! region's open, recruitment and join, the fill's tail and the store's carry reduction — is in no
+//! span, so it lands in that residue.
 //!
 //! On a step of the colored solve's no-awake fast path (L10 C3a: sleeping on, no dynamic row
 //! awake and no contact point laid out) the substep loop, the restitution pass and the freeze

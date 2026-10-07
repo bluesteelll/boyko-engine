@@ -173,7 +173,13 @@
 //! at W = 1 it counts colors that ran inline), the executor gap `g = wall − Σ system spans`, the
 //! unzoned residue `u = solve span − Σ in-solve zones` and `r = Σ pass spans − Σ color spans`
 //! (plan §2 identity, O2). The driver applies the closure rules to them; the runner only
-//! reports.
+//! reports. The in-solve zones are the solve's top-level spans: on a step whose
+//! `phys_region_opens` is 1 they include `phys_sb_pc`, which the solve region's stage 0 opens
+//! for the fill after `phys_solve_build` closed (elsewhere it nests in the build span). Since
+//! SR's flip a region step's `u` also carries the region's own unzoned fixed cost — the
+//! restitution scan, the stage table's build, the region's open, recruitment and join, the fill's
+//! tail and the store's carry reduction — so it is not the pre-SR residue: a closure ceiling set
+//! on pre-SR rows does not read a region row (`levers/scaling/02-SR-DESIGN.md` §5).
 //!
 //! # Thread counts (rulings, open question 2)
 //!
@@ -208,12 +214,18 @@
 //!
 //! The span gate's own resolution check: the solver busy-waits N ns on the calling thread each
 //! time zone Z opens armed (`ColoredSoftStepSolver::set_zone_canary`). Z is one of
-//! `boyko_physics::profiling::CANARY_ZONES` by name — `phys_solve_build` and its four
-//! `phys_sb_*` sub-zones. Refused (exit 2) without `--arm-profiler`, since a disarmed zone never
-//! spins, and off the colored solver. A step whose span of Z reads below N × its samples is void
-//! (exit 3), and so is a run whose solver counted a different number of canary spins than Z's
-//! armed openings (`ColoredSoftStepSolver::zone_canary_spins`): the span check alone cannot see a
-//! canary that never ran when Z's own cost already exceeds N, which `phys_solve_build`'s does.
+//! `boyko_physics::profiling::CANARY_ZONES` by name — `phys_solve_build` and the four `phys_sb_*`
+//! zones (its sub-zones, except `phys_sb_pc` on a region step). Refused (exit 2) without
+//! `--arm-profiler`, since a disarmed zone never spins, and off the colored solver. A step whose
+//! span of Z reads below N × its samples is void (exit 3), and so is a run whose solver counted a
+//! different number of canary spins than Z's armed openings
+//! (`ColoredSoftStepSolver::zone_canary_spins`): the span check alone cannot see a canary that
+//! never ran when Z's own cost already exceeds N, which `phys_solve_build`'s does. A step is also
+//! void when the spin is not counted exactly once by `u`'s in-solve zones (SR-B triage r1 W1):
+//! their sum below N × its samples (Z outside every one of them), or `u` below −N × its samples / 2
+//! (Z counted twice). A correct row cannot fail either bound under load — a preemption lengthens
+//! the spans around it and the solve span alike — so `--canary-zone phys_sb_pc` at W ≥ 2 is the
+//! red-first witness that a region step's fill is subtracted from `u`.
 //!
 //! # The query kernel (`--bp-kernel K`)
 //!
@@ -2689,31 +2701,11 @@ fn run(args: &Args) -> ExitCode {
             let ns = |ticks: u64| ticks as f64 / tpn;
             let n_sys = zones.systems.len();
             let span = |h: &ZoneHandle| n_sys + span_index(h);
-            // W8S: the in-zone canary landed where the row says: its zone spun at least N ns per
-            // opening.
-            if let Some((zone, _)) = zone_canary {
-                canary_openings += counts[span(zone)];
-            }
-            if let Some((zone, canary)) = zone_canary
-                && verdict.is_ok()
-            {
-                let (k, total) = (counts[span(zone)], ns(values[span(zone)]));
-                if k > 0 && total < (canary * k) as f64 {
-                    verdict = Err(format!(
-                        "the in-zone canary: `{}` read {total:.0} ns over {k} spans, below {canary} ns each",
-                        zone.desc.name
-                    ));
-                }
-            }
-            let void = verdict.is_err();
-            if let Err(why) = verdict {
-                void_steps += 1;
-                first_void.get_or_insert_with(|| format!("step {step}: {why}"));
-            }
-            if (window.0..window.1).contains(&step) {
-                w8s.add(&counts, &values, n_sys + SPAN_ZONES.len());
-            }
-            let sys_sum: f64 = (0..n_sys).map(|k| ns(values[k])).sum();
+            // `u`'s subtracted set, the solve's top-level spans. SR: a step that opened a solve
+            // region opens the fill's `phys_sb_pc` in the region's stage 0, after
+            // `phys_solve_build` closed, so it is one of them there and nested in the build
+            // elsewhere (SR-B triage r1 W1).
+            let region_step = values[n_sys + SPAN_ZONES.len() + counter_index(&PHYS_REGION_OPENS)] != 0;
             let in_solve: f64 = [
                 &PHYS_SOLVE_BUILD,
                 &PHYS_GRAVITY,
@@ -2730,7 +2722,47 @@ fn run(args: &Args) -> ExitCode {
             ]
             .iter()
             .map(|h| ns(values[span(h)]))
-            .sum();
+            .sum::<f64>()
+                + if region_step { ns(values[span(&PHYS_SB_PC)]) } else { 0.0 };
+            // W8S: the in-zone canary landed where the row says: its zone spun at least N ns per
+            // opening — and (W1) inside exactly one span of `u`'s subtracted set: the set reaches
+            // the spin, and `u` stays above −spin / 2, which a zone counted twice (the spin again,
+            // at least) cannot. Load cannot red a correct row: a preemption lengthens the spans
+            // around it and the solve span alike, so the spin stays inside its span and `u` ≥ 0.
+            if let Some((zone, _)) = zone_canary {
+                canary_openings += counts[span(zone)];
+            }
+            if let Some((zone, canary)) = zone_canary
+                && verdict.is_ok()
+            {
+                let (k, total) = (counts[span(zone)], ns(values[span(zone)]));
+                let spin = (canary * k) as f64;
+                let u = zones.solve.map(|s| ns(values[s]) - in_solve);
+                if k > 0 && total < spin {
+                    verdict = Err(format!(
+                        "the in-zone canary: `{}` read {total:.0} ns over {k} spans, below {canary} ns each",
+                        zone.desc.name
+                    ));
+                } else if k > 0
+                    && let Some(u) = u
+                    && (in_solve < spin || u < -spin / 2.0)
+                {
+                    verdict = Err(format!(
+                        "the in-zone canary: `{}`'s {spin:.0} ns lie outside u's subtracted set or in it \
+                         twice (in-solve spans {in_solve:.0} ns, u {u:.0} ns)",
+                        zone.desc.name
+                    ));
+                }
+            }
+            let void = verdict.is_err();
+            if let Err(why) = verdict {
+                void_steps += 1;
+                first_void.get_or_insert_with(|| format!("step {step}: {why}"));
+            }
+            if (window.0..window.1).contains(&step) {
+                w8s.add(&counts, &values, n_sys + SPAN_ZONES.len());
+            }
+            let sys_sum: f64 = (0..n_sys).map(|k| ns(values[k])).sum();
             let passes = ns(values[span(&PHYS_PASS_BIASED)]) + ns(values[span(&PHYS_PASS_RELAX)]);
             let colors = ns(values[span(&PHYS_COLOR_WIDE)]) + ns(values[span(&PHYS_COLOR_NARROW)]);
             // The solve's own samples: every span but the narrowphase's, which the narrowphase
