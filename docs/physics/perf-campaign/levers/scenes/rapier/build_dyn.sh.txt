@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Builds the dyn/ arms (boyko lane DYN-SCENES): the frozen harness plus the dynamic parity scenes, from
+# dyn/src (main.rs = the frozen src/main.rs + the scenes' hooks; spec.rs = a byte copy of boyko's
+# benches/jolt_parity_pyramid/dyn_spec.rs; dyn_scenes.rs = the glue) with dyn/Cargo.toml and
+# dyn/Cargo.lock = BYTE COPIES of the frozen ones, so `--locked` resolves the identical dependency graph.
+# Mirrors ../build.sh and ../build_block.sh (toolchain, `--locked`, release profile lto = "fat",
+# codegen-units = 1, the exported RUSTFLAGS="-C target-cpu=x86-64-v3" of the frozen recipe), with its
+# OWN target directory (dyn/.cargo/config.toml and the export below) and its OWN output names, so the
+# frozen exes in ../gate/bin are never written:
+#   bin/rapier-parity-dyn-simd8.exe  default features (rapier3d parallel + simd8)
+#   bin/rapier-parity-dyn-simd4.exe  --no-default-features --features simd4
+#   bin/rapier-parity-dyn-block.exe  default features + rapier3d/block-solver
+# Writes bin/SHA256SUMS, bin/SOURCES.sha256 and bin/features_<arm>.txt.
+set -eu
+cd "$(dirname "$0")"
+export PATH="$HOME/.cargo/bin:$PATH"
+export RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc
+export CARGO_TARGET_DIR=D:/wt/_targets/rapier-parity-dyn
+export RUSTFLAGS="-C target-cpu=x86-64-v3"
+JOBS="${JOBS:-4}"
+mkdir -p bin
+
+build_arm() { # build_arm <arm> <cargo feature flags...>
+    local arm="$1"; shift
+    cargo build --release --locked -j "$JOBS" "$@"
+    cp "$CARGO_TARGET_DIR/release/rapier-parity.exe" "bin/rapier-parity-dyn-$arm.exe"
+    cargo tree --locked -e features -i rapier3d "$@" > "bin/features_$arm.txt"
+    cargo tree --locked -e features -i parry3d "$@" >> "bin/features_$arm.txt"
+}
+
+build_arm simd8
+build_arm simd4 --no-default-features --features simd4
+build_arm block --features rapier3d/block-solver
+
+sha256sum bin/rapier-parity-dyn-simd8.exe bin/rapier-parity-dyn-simd4.exe bin/rapier-parity-dyn-block.exe > bin/SHA256SUMS
+sha256sum src/main.rs src/spec.rs src/dyn_scenes.rs Cargo.toml Cargo.lock build_dyn.sh .cargo/config.toml > bin/SOURCES.sha256
+cat bin/SHA256SUMS bin/SOURCES.sha256

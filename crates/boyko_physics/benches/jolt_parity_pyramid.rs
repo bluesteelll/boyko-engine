@@ -44,6 +44,37 @@
 //! bodies, checked on the measured world: a drift there means the two engines no longer run the
 //! same scene.
 //!
+//! # Dynamic scenes (`--dyn`, lane DYN-SCENES)
+//!
+//! `--dyn kick|shoot|slide` runs one of the dynamic parity scenes on the `jolt` scene
+//! (`docs/physics/perf-campaign/levers/scenes/01-DESIGN.md`; ruling 21 of 2026-10-01: every type of
+//! interaction, not only the resting pile). The programs are integer data from
+//! `jolt_parity_pyramid/dyn_spec.rs`, shared byte for byte with the Rapier harness and derived
+//! independently by Jolt's patch and a Python script, so all three engines run the same scene:
+//!
+//! | `--dyn` | steps | metric window | what it adds to J-T |
+//! |---|---|---|---|
+//! | (none: S-LAND) | 500 | [0, 100) | nothing: J-T's landing, read from the J-T row's CSV |
+//! | `kick` (S-KICK) | 800 | [200, 800) | every 25 steps from step 200, 62 seeded boxes get a velocity change of 1-5 m/s |
+//! | `shoot` (S-SHOOT) | 800 | [200, 800) | a closed arena (4 walls and a ceiling); every 10 steps from step 200 a J-T box launched at 15-40 m/s into the pile |
+//! | `slide` (S-SLIDE) | 500 | [0, 500) | the arena with the downhill wall at x = 30, gravity tilted to an effective 26.6° slope |
+//!
+//! Events are applied between steps, before the step's `Instant::now()`: the timed pair is the
+//! J-T row's, unchanged. `--steps` defaults to the program's length. The arena's statics are large
+//! on purpose and their extra broadphase and narrowphase work is part of what S-SHOOT and S-SLIDE
+//! measure (ruling 22); `--sanity` reports it. A `--dyn` row's L9 reuse probe is the whole run
+//! (void iff no record was reused anywhere): S-SLIDE moves from step 0, so J-T's [100, 500) premise
+//! does not hold for it. Refused (exit 2) off `--scene jolt`, at another `--gap`, with sleeping on,
+//! `--threshold`, `--frozen-by` or `--solver reference`; every other flag composes with it.
+//!
+//! * `--sanity PATH` (any `jolt` row, `--dyn` or not): one CSV row per state for the shared bar
+//!   `scenes/gate/dyn_sanity.py` scores (energies per unit box mass, bounds, speeds, the launch
+//!   clearance), and the static-pair receipts in the summary's `dyn.sanity`. Untimed, but it reads
+//!   every body and every pair each step: a structural run, never a timed row.
+//! * `--scene-dump PATH`: the canonical scene dump, from values read back from the world (statics,
+//!   boxes and projectiles as created, each kick's velocity read back); it must equal
+//!   `scenes/gate/dyn_spec_ref.py`'s text byte for byte. Needs the program's full length.
+//!
 //! # Configurations (`--cfg`, `--solver`)
 //!
 //! The runner sets every knob it depends on explicitly but three, so a change of a shipped default
@@ -315,6 +346,9 @@
 //! --pose-out PATH              write the final pose bytes (every dynamic body's full state)
 //! --expect-pose PATH           compare the final pose bytes with a file; exit 4 if they differ
 //! --label TEXT                 echoed into the summary
+//! --dyn kick|shoot|slide       a dynamic parity scene on --scene jolt (see "Dynamic scenes")
+//! --sanity PATH                the per-state sanity CSV and the static-pair receipts (--scene jolt)
+//! --scene-dump PATH            the canonical scene dump, read back from the world (--scene jolt)
 //! --bench                      ignored (cargo bench passes it)
 //! ```
 //!
@@ -346,11 +380,17 @@
 //! * `bp_query_dispatches` / `bp_query_tail_leaves` (S5, every row): the tree's query
 //!   dispatches over the run and the window, counted and recomputed from the structure, and the
 //!   leaf nodes S5's tail answered (module docs, "The parallel tree query").
+//! * `dyn` (only with `--dyn`, `--sanity` or `--scene-dump`): the program, its counts (kicks,
+//!   launches, statics, bodies), the canonical and the read-back dump's FNV-1a 64, the final state's
+//!   receipts (non-finite bodies, lowest centre, top speed, escaped) and, with `--sanity`, the
+//!   per-state receipts and the static-pair receipts over the metric window. Receipts, not a
+//!   verdict: the bar is the scorer's, one authority for every engine.
 //! * exit code: 0 ok; 2 bad flags; 3 void (anti-vacuity, frozen-by, disarmed ring traffic,
 //!   dropped samples, a reuse-on row that collided box pairs over steps [100, 500) and reused no
 //!   record there, or whose window collided none and whose whole run reused no record, an S5
-//!   dispatch count that differs from the structure's on any step);
-//!   4 `--expect-pose` mismatch; 101 panic.
+//!   dispatch count that differs from the structure's on any step; a `--dyn` row whose run reused
+//!   no record; a dynamic scene's static that is not static, or a kick whose read-back velocity is
+//!   not `v + Δv`); 4 `--expect-pose` mismatch; 101 panic.
 //!
 //! # Self-check (no `--scene`)
 //!
@@ -373,7 +413,8 @@
 //!
 //! # Build (Jolt)
 //!
-//! `benches/jolt_parity/pyramid_scene.patch` applies to Jolt v5.3.0 and v5.6.0 alike. It:
+//! `benches/jolt_parity/pyramid_scene.patch` applies to Jolt v5.3.0 and v5.6.0 alike (its v2 hunks
+//! are checked on v5.6.0 only: the comparison is against Jolt 5.6). It:
 //!
 //! * sets `mLinearDamping = mAngularDamping = 0` in `PyramidScene.h` (H3);
 //! * adds `-no_pair_cache`: `PhysicsSettings::mUseBodyPairContactCache = false` (H10);
@@ -383,7 +424,20 @@
 //! * adds `-receipt` (untimed; H8): a counting `ContactListener` writes
 //!   `receipt_<quality>_th<N>.csv` with, per frame, the manifolds and points it reported (added +
 //!   persisted, cache hits included), the active body count and the top box's y;
-//! * prints one `boyko-parity-patch` line naming the options in force.
+//! * prints one `boyko-parity-patch` line naming the options in force;
+//! * v2 (lane DYN-SCENES, module docs "Dynamic scenes"): adds `-dyn=kick|shoot|slide` on Pyramid
+//!   (`BoykoDynPyramidScene` in `PyramidScene.h`: J-T's `StartTest` unchanged, then the arena and
+//!   the gravity; the programs are an independent C++ derivation of `dyn_spec.rs`), whose events
+//!   `ApplyEvents` applies at the top of the step loop, BEFORE `clock_start` (Jolt's own
+//!   `UpdateTest` hook runs inside its timed pair, so it is not used); `-sanity`
+//!   (`sanity_<tag>.csv`, the shared bar's CSV, and `statics_<tag>.csv`, the static-pair receipts:
+//!   Jolt's broadphase predicate recomputed per active-static pair and the contact listener's
+//!   manifolds with a static endpoint), `-scene_dump=`, `-pose_out=` and `-spawn_pose_out=` (this
+//!   runner's pose format). With any of them a second line `boyko-parity-dyn v1: program=…` and a
+//!   `boyko-parity-dyn receipts:` line are printed; the v1 line is byte-identical. Jolt ignores an
+//!   option it does not know, so a row must also require the v2 line (an old exe given `-dyn=` runs
+//!   J-T). `Update`'s `EPhysicsUpdateError` is kept (one return-value store in the timed pair) and
+//!   counted.
 //!
 //! ```text
 //! # WinLibs MinGW-w64 (g++, POSIX threads, UCRT) first on PATH: its bin directory holds
@@ -402,6 +456,14 @@
 //! # patch and recipe into build-v5.6.0-dist. It needed no extra option on this host; its new
 //! # compute options (JPH_USE_DX12 / _VK / _MTL / _CPU_COMPUTE) stay at their default ON and the
 //! # driver's manifest records them (plan open question 2: recorded, never patched away).
+//! # Patch v2 (the dynamic scenes): its own worktree and build directory, so window 9b's exe
+//! # (build-v5.6.0-dist, sha256 918fd2b7…) and its source tree stay as they were (ruling 22 Q5):
+//! #   git -C D:/tmp/jolt/JoltPhysics worktree add --detach D:/tmp/jolt/wt-v5.6.0-dyn e77f175
+//! #   git -C D:/tmp/jolt/wt-v5.6.0-dyn apply <repo>/crates/boyko_physics/benches/jolt_parity/pyramid_scene.patch
+//! #   the same configure into D:/tmp/jolt/build-v5.6.0-dyn-dist with the WinLibs cmake.exe and
+//! #   -DCMAKE_C_COMPILER / -DCMAKE_CXX_COMPILER / -DCMAKE_MAKE_PROGRAM set to its gcc, c++ and
+//! #   mingw32-make (its CMakeCache equals build-v5.6.0-dist's option for option), the same build
+//! #   command and the same three DLLs. Window 9c runs every Jolt row on this exe.
 //! ```
 //!
 //! The compiler installation is the one the 2026-09-10 binary's `CMakeCache.txt` names (g++ 16.1.0
@@ -490,6 +552,16 @@ use boyko_physics::broadphase_tree::{
     S5_CHUNKS_PER_LANE, S5_MAX_CHUNKS, S5_MIN_LEAVES, S5_MIN_LEAVES_PER_CHUNK,
 };
 use boyko_physics::solver::{ColoredSoftStepSolver, SoftStepSolver};
+
+// The dynamic parity scenes (lane DYN-SCENES). `#[path]` from this crate root resolves next to it,
+// in `benches/jolt_parity_pyramid/`, a directory Cargo does not take for a target (it has no
+// `main.rs`); a move of this file must carry the directory, or the build fails loudly.
+#[path = "jolt_parity_pyramid/dyn_scenes.rs"]
+mod dyn_scenes;
+#[path = "jolt_parity_pyramid/dyn_spec.rs"]
+mod dyn_spec;
+
+use dyn_spec::Program;
 
 // ── Scene constants (Jolt `PyramidScene.h`, transcribed) ─────────────────────
 
@@ -683,7 +755,20 @@ struct Args {
     pose_out: Option<PathBuf>,
     expect_pose: Option<PathBuf>,
     label: Option<String>,
+    /// `--dyn`: the dynamic program on the `jolt` scene; `None` is J-T (S-LAND).
+    dyn_program: Option<Program>,
+    /// `--sanity PATH`: the per-state sanity CSV.
+    sanity: Option<PathBuf>,
+    /// `--scene-dump PATH`: the canonical scene dump, read back from the world.
+    scene_dump: Option<PathBuf>,
     raw: Vec<String>,
+}
+
+impl Args {
+    /// Whether the run reads a dynamic program (`--dyn`, `--sanity` or `--scene-dump`).
+    fn dyn_any(&self) -> bool {
+        self.dyn_program.is_some() || self.sanity.is_some() || self.scene_dump.is_some()
+    }
 }
 
 /// What `main` does with the command line.
@@ -709,7 +794,8 @@ fn usage_error(msg: &str) -> ExitCode {
          [--threshold T] \
          [--frozen-by K] [--arm-profiler] [--canary-frac F --canary-ref-ns T] \
          [--canary-zone Z --canary-ns N] [--bp-kernel rowwalk|leaflist] [--csv PATH] \
-         [--pose-out PATH] [--expect-pose PATH] [--label TEXT]"
+         [--pose-out PATH] [--expect-pose PATH] [--label TEXT] [--dyn kick|shoot|slide] \
+         [--sanity PATH] [--scene-dump PATH]"
     );
     ExitCode::from(EXIT_USAGE)
 }
@@ -735,7 +821,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     }
     let mut scene = None;
     let mut workers = 1usize;
-    let mut steps = 500usize;
+    let mut steps = None;
     let mut window = None;
     let mut gap = None;
     let mut solver = SolverKind::Colored;
@@ -762,6 +848,9 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     let mut pose_out = None;
     let mut expect_pose = None;
     let mut label = None;
+    let mut dyn_program = None;
+    let mut sanity = None;
+    let mut scene_dump = None;
 
     let mut it = raw.iter().cloned().peekable();
     while let Some(flag) = it.next() {
@@ -772,7 +861,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
                 scene = Some(SceneKind::parse(&v).ok_or_else(|| format!("--scene: unknown {v:?}"))?);
             }
             "--workers" => workers = parse_num("--workers", it.next())?,
-            "--steps" => steps = parse_num("--steps", it.next())?,
+            "--steps" => steps = Some(parse_num("--steps", it.next())?),
             "--window" => window = Some(parse_window(it.next())?),
             "--gap" => gap = Some(parse_num::<f32>("--gap", it.next())?),
             "--solver" => {
@@ -873,6 +962,19 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
                 expect_pose = Some(PathBuf::from(it.next().ok_or("--expect-pose needs a path")?));
             }
             "--label" => label = Some(it.next().ok_or("--label needs a value")?),
+            "--dyn" => {
+                let v = it.next().ok_or("--dyn needs a program")?;
+                dyn_program = Some(match Program::parse(&v) {
+                    Some(Program::None) | None => {
+                        return Err(format!(
+                            "--dyn: expected kick|shoot|slide, got {v:?} (S-LAND is the J-T row itself)"
+                        ));
+                    }
+                    Some(p) => p,
+                });
+            }
+            "--sanity" => sanity = Some(PathBuf::from(it.next().ok_or("--sanity needs a path")?)),
+            "--scene-dump" => scene_dump = Some(PathBuf::from(it.next().ok_or("--scene-dump needs a path")?)),
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -880,7 +982,7 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
     let scene = scene.ok_or("--scene needs a value")?;
     let args = Args {
         workers,
-        steps,
+        steps: steps.unwrap_or_else(|| dyn_program.map_or(500, Program::steps)),
         window,
         scene,
         gap: gap.unwrap_or_else(|| scene.default_gap()),
@@ -908,6 +1010,9 @@ fn parse_args(raw: Vec<String>) -> Result<Mode, String> {
         pose_out,
         expect_pose,
         label,
+        dyn_program,
+        sanity,
+        scene_dump,
         raw,
     };
     validate(&args)?;
@@ -1074,6 +1179,45 @@ fn validate(a: &Args) -> Result<(), String> {
     {
         return Err(format!("--expect-pose: {} is not a file", p.display()));
     }
+    if a.dyn_any() {
+        validate_dyn(a)?;
+    }
+    Ok(())
+}
+
+/// The dynamic scenes' refusals (module docs, "Dynamic scenes"): every one names a row that would
+/// not be the scene the other engines run.
+fn validate_dyn(a: &Args) -> Result<(), String> {
+    if a.scene != SceneKind::Jolt || a.gap.to_bits() != JOLT_SEPARATION.to_bits() {
+        return Err(
+            "--dyn, --sanity and --scene-dump run on --scene jolt at its gap 0.5: the dynamic scenes \
+             are J-T-based"
+                .into(),
+        );
+    }
+    let sleeping = match (a.sleeping, a.cfg) {
+        (Some(on), _) => on,
+        (None, CfgKind::Default) => PhysicsConfig::default().sleeping,
+        (None, _) => false,
+    };
+    if sleeping || a.threshold.is_some() || a.frozen_by.is_some() || a.solver == SolverKind::Reference {
+        return Err(
+            "--dyn, --sanity and --scene-dump run the colored solver with sleeping off: every engine \
+             runs the scenes awake"
+                .into(),
+        );
+    }
+    let program = a.dyn_program.unwrap_or(Program::None);
+    if a.steps > program.steps() {
+        return Err(format!("--steps {} exceeds the {} program's {} steps", a.steps, program.name(), program.steps()));
+    }
+    if a.scene_dump.is_some() && a.steps != program.steps() {
+        return Err(format!(
+            "--scene-dump writes a complete program: --steps must be the {} program's {}",
+            program.name(),
+            program.steps()
+        ));
+    }
     Ok(())
 }
 
@@ -1139,11 +1283,11 @@ fn spawn_box(world: &mut EcsMaster, position: Vec3, friction: f32, dynamic: bool
     e
 }
 
-/// Spawns the floor and the scene's dynamic bodies. Returns the dynamic bodies in spawn order;
-/// the last one is the scene's top box.
-fn spawn_scene(world: &mut EcsMaster, scene: SceneKind, gap: f32) -> Vec<Entity> {
+/// Spawns the floor and the scene's dynamic bodies. Returns the floor and the dynamic bodies in
+/// spawn order; the last one is the scene's top box.
+fn spawn_scene(world: &mut EcsMaster, scene: SceneKind, gap: f32) -> (Entity, Vec<Entity>) {
     let friction = scene.friction();
-    spawn_box(world, Vec3::new(0.0, -1.0, 0.0), friction, false);
+    let floor = spawn_box(world, Vec3::new(0.0, -1.0, 0.0), friction, false);
     let mut boxes = Vec::with_capacity(scene.bodies());
     match scene {
         SceneKind::Jolt | SceneKind::Rest => {
@@ -1171,7 +1315,7 @@ fn spawn_scene(world: &mut EcsMaster, scene: SceneKind, gap: f32) -> Vec<Entity>
             }
         }
     }
-    boxes
+    (floor, boxes)
 }
 
 /// The canary's spin, in ns.
@@ -1193,7 +1337,10 @@ fn parity_canary(spin: Res<CanarySpin>) {
 struct Rig {
     world: EcsMaster,
     physics: Schedule,
+    /// The dynamic bodies in spawn order (a dynamic scene's projectiles appended).
     boxes: Vec<Entity>,
+    /// The static bodies in creation order: the floor, then a dynamic scene's arena.
+    statics: Vec<Entity>,
 }
 
 /// Sets the knobs `args` names (module docs, "Configurations").
@@ -1256,7 +1403,7 @@ fn configure(cfg: &mut PhysicsConfig, args: &Args) {
 /// Spawns the scene and wires the schedule. The one world of the process.
 fn build(args: &Args, canary_ns: Option<u64>) -> Rig {
     let mut world = EcsMaster::new();
-    let boxes = spawn_scene(&mut world, args.scene, args.gap);
+    let (floor, boxes) = spawn_scene(&mut world, args.scene, args.gap);
     assert_eq!(
         boxes.len(),
         args.scene.bodies(),
@@ -1286,8 +1433,12 @@ fn build(args: &Args, canary_ns: Option<u64>) -> Rig {
     }
     world.insert_resource(FixedTime::new(Duration::from_secs_f32(DT)));
     configure(world.resource_mut::<PhysicsConfig>(), args);
+    let mut statics = vec![floor];
+    if let Some(program) = args.dyn_program {
+        dyn_scenes::configure_world(&mut world, &mut statics, program);
+    }
     let physics = builder.build(&mut world);
-    Rig { world, physics, boxes }
+    Rig { world, physics, boxes, statics }
 }
 
 // ── The profile ──────────────────────────────────────────────────────────────
@@ -2246,6 +2397,9 @@ fn self_check() -> ExitCode {
         pose_out: None,
         expect_pose: None,
         label: Some("self-check".to_owned()),
+        dyn_program: None,
+        sanity: None,
+        scene_dump: None,
         raw: Vec::new(),
     };
     println!(
@@ -2404,8 +2558,22 @@ fn run(args: &Args) -> ExitCode {
     let mut classes: Vec<PairClasses> =
         Vec::with_capacity(if read_classes { args.steps } else { 0 });
     let top = *rig.boxes.last().expect("invariant: every scene spawns dynamic bodies");
+    // The dynamic scenes (module docs): built only for a row that names one of their flags.
+    let mut dyn_run = args.dyn_any().then(|| {
+        dyn_scenes::DynRun::new(
+            &mut rig,
+            args.dyn_program.unwrap_or(Program::None),
+            args.dyn_program.is_some(),
+            args.steps,
+            args.sanity.is_some(),
+            args.scene_dump.is_some(),
+        )
+    });
 
     for step in 0..args.steps {
+        if let Some(d) = dyn_run.as_mut() {
+            d.before_step(step, &mut rig);
+        }
         let t0 = Instant::now();
         rig.physics.run(&mut rig.world);
         let wall = t0.elapsed();
@@ -2447,6 +2615,9 @@ fn run(args: &Args) -> ExitCode {
         if let Err(why) = s5.step(&rig.world, (window.0..window.1).contains(&step)) {
             void_steps += 1;
             first_void.get_or_insert_with(|| format!("step {step}: {why}"));
+        }
+        if let Some(d) = dyn_run.as_mut() {
+            d.after_step(step, &rig);
         }
         if let Some(sets) = rig.world.try_resource::<SleepSets>() {
             let stats = sets.stats();
@@ -2634,7 +2805,12 @@ fn run(args: &Args) -> ExitCode {
     // still voids: its run collides box pairs on its first steps and reuses none. It tests the
     // effective config, which is also what `read_classes` tests, so `classes` holds one entry per
     // step on every row it indexes, the flag named or not.
-    let reuse_probe = REUSE_PROBE.0..REUSE_PROBE.1.min(args.steps);
+    // A `--dyn` row reads the whole run (module docs, "Dynamic scenes").
+    let reuse_probe = if args.dyn_program.is_some() {
+        0..args.steps
+    } else {
+        REUSE_PROBE.0..REUSE_PROBE.1.min(args.steps)
+    };
     if contact_reuse && !reuse_probe.is_empty() {
         let probe = &classes[reuse_probe.clone()];
         let collided = probe.iter().any(|c| c.sep_hits + c.reused + c.full != 0);
@@ -2685,6 +2861,11 @@ fn run(args: &Args) -> ExitCode {
         )
     };
 
+    if let Some(why) = dyn_run.as_ref().and_then(dyn_scenes::DynRun::void_reason) {
+        void_steps += 1;
+        first_void.get_or_insert(why);
+    }
+
     let pose = pose_bytes(&rig.world, &rig.boxes);
     let pose_hash = fnv1a64(&pose);
     let mut exit = if void_steps > 0 { EXIT_VOID } else { 0 };
@@ -2723,6 +2904,18 @@ fn run(args: &Args) -> ExitCode {
         eprintln!("jolt_parity_pyramid: writing {}: {e}", path.display());
         exit = EXIT_USAGE;
     }
+    // The summary's `dyn` object: empty (no key at all) on every other row.
+    let dyn_json = match dyn_run.as_mut() {
+        None => String::new(),
+        Some(d) => match d.finish(&rig, args.sanity.as_deref(), args.scene_dump.as_deref()) {
+            Ok(json) => json,
+            Err(e) => {
+                eprintln!("jolt_parity_pyramid: {e}");
+                exit = EXIT_USAGE;
+                ",\"dyn\":null".to_owned()
+            }
+        },
+    };
 
     // The summary.
     let win = &rows[window.0..window.1];
@@ -2814,6 +3007,16 @@ fn run(args: &Args) -> ExitCode {
          over the window",
         s5.dispatches.0, s5.expected.0, s5.dispatches.1, s5.expected.1, s5.tail.0, s5.tail.1
     );
+    if let Some(program) = args.dyn_program {
+        println!(
+            "dyn: program {} ({} statics, {} bodies at the end), sanity {}, scene dump {}",
+            program.name(),
+            rig.statics.len(),
+            rig.boxes.len(),
+            args.sanity.is_some(),
+            args.scene_dump.is_some()
+        );
+    }
     if let Some(why) = &first_void {
         println!("VOID: {why}");
     }
@@ -2838,7 +3041,7 @@ fn run(args: &Args) -> ExitCode {
          \"canary_zone\":{},\"canary_zone_ns\":{},\"route_note\":{},\
          \"host\":{{\"logical_cores\":{logical_cores}}},\
          \"threads\":{{\"pool_workers\":{},\"dispatcher\":1,\"solve_on_dispatcher_steps\":\
-         {solve_on_dispatcher_steps},\"armed_steps\":{},\"dispatcher_lane_samples_max\":{disp_max}}}}}",
+         {solve_on_dispatcher_steps},\"armed_steps\":{},\"dispatcher_lane_samples_max\":{disp_max}}}{dyn_json}}}",
         json_str(RUNNER_ID),
         args.label.as_deref().map_or_else(|| "null".to_owned(), json_str),
         args.raw.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","),
