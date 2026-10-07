@@ -1,0 +1,654 @@
+{
+ "schema": "boyko-dyn-scenes pins v1",
+ "note": "Lane DYN-SCENES (rulings 21, 22): structural pins only (hashes and sha256s); nothing here was timed. Written by the lane from its gate outputs; 01-DESIGN.md section 6 explains each entry.",
+ "canonical_dump_fnv1a64": {
+  "none": "0x90a27955d1811c55",
+  "kick": "0x964622ebd4902cd7",
+  "shoot": "0x7d804c68b157a6ac",
+  "slide": "0x3a62433918d71628"
+ },
+ "rapier": {
+  "simd8/s1p7q2pd0+roff": {
+   "kick": {
+    "pose_hash": "0xec01f9a343e63d78",
+    "receipt_window": [
+     200,
+     800
+    ],
+    "rows": 200569.645,
+    "Np": 18860.968333333334,
+    "Nm": 5136.821666666667,
+    "statics": {
+     "pairs": 4728726,
+     "pairs_static": 139023,
+     "pairs_static_static": 0,
+     "manifolds": 3082180,
+     "manifolds_static": 138860,
+     "manifolds_static_static": 0,
+     "points_static": 555440
+    },
+    "fixture": "dyn/fixtures/simd8/s1p7q2pd0+roff_kick.pose",
+    "fixture_sha256": "a19e067dd11154ed8d3c44056b77e759ff9bc900743356bc279fa2a8b20fec79"
+   },
+   "shoot": {
+    "pose_hash": "0xcb5ba15b0fef0bae",
+    "receipt_window": [
+     200,
+     800
+    ],
+    "rows": 208160.315,
+    "Np": 19487.835,
+    "Nm": 5461.633333333333,
+    "statics": {
+     "pairs": 5103999,
+     "pairs_static": 140853,
+     "pairs_static_static": 0,
+     "manifolds": 3277430,
+     "manifolds_static": 140693,
+     "manifolds_static_static": 0,
+     "points_static": 562772
+    },
+    "fixture": "dyn/fixtures/simd8/s1p7q2pd0+roff_shoot.pose",
+    "fixture_sha256": "5a8d94325afe482b45f792cb0016e1737dabc0e5f8c01baa4175760a13d4e393"
+   },
+   "slide": {
+    "pose_hash": "0x1465647bc2b165f5",
+    "receipt_window": [
+     0,
+     500
+    ],
+    "rows": 171529.074,
+    "Np": 16033.014,
+    "Nm": 4538.658,
+    "statics": {
+     "pairs": 4028013,
+     "pairs_static": 147517,
+     "pairs_static_static": 0,
+     "manifolds": 2357381,
+     "manifolds_static": 146441,
+     "manifolds_static_static": 0,
+     "points_static": 585764
+    },
+    "fixture": "dyn/fixtures/simd8/s1p7q2pd0+roff_slide.pose",
+    "fixture_sha256": "c097af80f18ed13a9cdfbd0838e64d3c9592df6cf86a05dd9905836aeed4293d"
+   }
+  },
+  "simd8/s1p8q2pd0+roff": {
+   "kick": {
+    "pose_hash": "0x142d964ddcb4455b",
+    "receipt_window": [
+     200,
+     800
+    ],
+    "rows": 220791.97,
+    "Np": 18981.87,
+    "Nm": 5162.211666666667,
+    "statics": {
+     "pairs": 4720076,
+     "pairs_static": 138803,
+     "pairs_static_static": 0,
+     "manifolds": 3097432,
+     "manifolds_static": 138638,
+     "manifolds_static_static": 0,
+     "points_static": 554552
+    },
+    "fixture": "dyn/fixtures/simd8/s1p8q2pd0+roff_kick.pose",
+    "fixture_sha256": "5e63041ff01cd8584078009aba4e85cf173effda2705b8c601c80c12b591e24e"
+   },
+   "shoot": {
+    "pose_hash": "0xb21d9621143d426b",
+    "receipt_window": [
+     200,
+     800
+    ],
+    "rows": 230055.69,
+    "Np": 19683.165,
+    "Nm": 5537.34,
+    "statics": {
+     "pairs": 5106019,
+     "pairs_static": 140857,
+     "pairs_static_static": 0,
+     "manifolds": 3322878,
+     "manifolds_static": 140689,
+     "manifolds_static_static": 0,
+     "points_static": 562756
+    },
+    "fixture": "dyn/fixtures/simd8/s1p8q2pd0+roff_shoot.pose",
+    "fixture_sha256": "81bf6b32d2e08e35c16acd832253242da18dd2fa0d721793802eebce5430927d"
+   },
+   "slide": {
+    "pose_hash": "0x890e3eff90128583",
+    "receipt_window": [
+     0,
+     500
+    ],
+    "rows": 192066.728,
+    "Np": 16443.44,
+    "Nm": 4605.388,
+    "statics": {
+     "pairs": 3974059,
+     "pairs_static": 146144,
+     "pairs_static_static": 0,
+     "manifolds": 2389756,
+     "manifolds_static": 145622,
+     "manifolds_static_static": 0,
+     "points_static": 582488
+    },
+    "fixture": "dyn/fixtures/simd8/s1p8q2pd0+roff_slide.pose",
+    "fixture_sha256": "06cf5dc7c1caafb8f8ad632ee8cc7a44245161df13d55944d1cf1204d79b513e"
+   }
+  },
+  "simd8/s1p9q2": {
+   "kick": {
+    "pose_hash": "0xba6c8e3ed1302089",
+    "receipt_window": [
+     200,
+     800
+    ],
+    "rows": 373809.49,
+    "Np": 29884.29,
+    "Nm": 7513.716666666666,
+    "statics": {
+     "pairs": 4836294,
+     "pairs_static": 138402,
+     "pairs_static_static": 0,
+     "manifolds": 4510772,
+     "manifolds_static": 138363,
+     "manifolds_static_static": 0,
+     "points_static": 553452
+    },
+    "fixture": "dyn/fixtures/simd8/s1p9q2_kick.pose",
+    "fixture_sha256": "6730c792d5a5423b59ef5e4b25a037e1f2f2b2f8b349fd7ff279b65baafb5958"
+   },
+   "shoot": {
+    "pose_hash": "0x2fc9a586b9606847",
+    "receipt_window": [
+     200,
+     800
+    ],
+    "rows": 413076.4083333333,
+    "Np": 33023.14166666667,
+    "Nm": 8303.641666666666,
+    "statics": {
+     "pairs": 5108417,
+     "pairs_static": 142301,
+     "pairs_static_static": 0,
+     "manifolds": 4982433,
+     "manifolds_static": 142239,
+     "manifolds_static_static": 0,
+     "points_static": 568964
+    },
+    "fixture": "dyn/fixtures/simd8/s1p9q2_shoot.pose",
+    "fixture_sha256": "5073aca26a0649c422130818b5fcfd75b7000dbf087f81eee8982d445b9fe040"
+   },
+   "slide": {
+    "pose_hash": "0x3b1c5fc0369d3b1a",
+    "receipt_window": [
+     0,
+     500
+    ],
+    "rows": 304625.372,
+    "Np": 24290.008,
+    "Nm": 6239.214,
+    "statics": {
+     "pairs": 4239490,
+     "pairs_static": 146084,
+     "pairs_static_static": 0,
+     "manifolds": 3121587,
+     "manifolds_static": 146007,
+     "manifolds_static_static": 0,
+     "points_static": 584028
+    },
+    "fixture": "dyn/fixtures/simd8/s1p9q2_slide.pose",
+    "fixture_sha256": "00bd71b9ada3bfe6f550ab459390858d9df592f062d163e8a3e99b34e6a84903"
+   }
+  },
+  "simd4/s1p8q3pd0+roff": {
+   "kick": {
+    "pose_hash": "0xba1575baa5653c8e",
+    "receipt_window": [
+     200,
+     800
+    ],
+    "rows": 256427.095,
+    "Np": 19053.92,
+    "Nm": 5203.775,
+    "statics": {
+     "pairs": 4725728,
+     "pairs_static": 138951,
+     "pairs_static_static": 0,
+     "manifolds": 3122352,
+     "manifolds_static": 138810,
+     "manifolds_static_static": 0,
+     "points_static": 555240
+    },
+    "fixture": "dyn/fixtures/simd4/s1p8q3pd0+roff_kick.pose",
+    "fixture_sha256": "f1c7ced79e6cbbbff1daa1629c9af8094cff78fbe321baad431a5afe5fd347b7"
+   },
+   "shoot": {
+    "pose_hash": "0xd61fe31752686278",
+    "receipt_window": [
+     200,
+     800
+    ],
+    "rows": 266157.5,
+    "Np": 19667.125,
+    "Nm": 5535.458333333333,
+    "statics": {
+     "pairs": 5108629,
+     "pairs_static": 141256,
+     "pairs_static_static": 0,
+     "manifolds": 3322186,
+     "manifolds_static": 141045,
+     "manifolds_static_static": 0,
+     "points_static": 564180
+    },
+    "fixture": "dyn/fixtures/simd4/s1p8q3pd0+roff_shoot.pose",
+    "fixture_sha256": "fb7fc1574fd48c37c3c812dcac06f2b0244b189e5af2f9f3a610c2f02f776bcb"
+   },
+   "slide": {
+    "pose_hash": "0xc7f74de28af03456",
+    "receipt_window": [
+     0,
+     500
+    ],
+    "rows": 225961.352,
+    "Np": 16730.176,
+    "Nm": 4658.824,
+    "statics": {
+     "pairs": 4122927,
+     "pairs_static": 145856,
+     "pairs_static_static": 0,
+     "manifolds": 2415253,
+     "manifolds_static": 141816,
+     "manifolds_static_static": 0,
+     "points_static": 567264
+    },
+    "fixture": "dyn/fixtures/simd4/s1p8q3pd0+roff_slide.pose",
+    "fixture_sha256": "3696286aa128ef22cba28b054c52ebf3069efeb2a146755d7fa476851c545bfb"
+   }
+  },
+  "block/s1p4q3pd0+roff": {
+   "kick": {
+    "pose_hash": "0x324d42f6d51411c7",
+    "receipt_window": [
+     200,
+     800
+    ],
+    "rows": 177314.175,
+    "Np": 18689.04,
+    "Nm": 5165.655,
+    "statics": {
+     "pairs": 4714429,
+     "pairs_static": 139036,
+     "pairs_static_static": 0,
+     "manifolds": 3099485,
+     "manifolds_static": 138882,
+     "manifolds_static_static": 0,
+     "points_static": 555528
+    },
+    "fixture": "dyn/fixtures/block/s1p4q3pd0+roff_kick.pose",
+    "fixture_sha256": "a74587c3edb30d934ebbf0b2daa3023764ca602a227ea7fbb08823c6c10a3294"
+   },
+   "shoot": {
+    "pose_hash": "0x5be135c6b923ddf3",
+    "receipt_window": [
+     200,
+     800
+    ],
+    "rows": 183625.35166666665,
+    "Np": 19253.766666666666,
+    "Nm": 5427.665,
+    "statics": {
+     "pairs": 5105403,
+     "pairs_static": 140506,
+     "pairs_static_static": 0,
+     "manifolds": 3257229,
+     "manifolds_static": 140358,
+     "manifolds_static_static": 0,
+     "points_static": 561432
+    },
+    "fixture": "dyn/fixtures/block/s1p4q3pd0+roff_shoot.pose",
+    "fixture_sha256": "abcd20a3f313059b40d2a84ec6b58d49a9ab27dcc66dd40759c95eb626871931"
+   },
+   "slide": {
+    "pose_hash": "0x7e79e2ac5c0e370d",
+    "receipt_window": [
+     0,
+     500
+    ],
+    "rows": 159913.798,
+    "Np": 16867.108,
+    "Nm": 4649.338,
+    "statics": {
+     "pairs": 4074092,
+     "pairs_static": 145770,
+     "pairs_static_static": 0,
+     "manifolds": 2418998,
+     "manifolds_static": 141292,
+     "manifolds_static_static": 0,
+     "points_static": 565168
+    },
+    "fixture": "dyn/fixtures/block/s1p4q3pd0+roff_slide.pose",
+    "fixture_sha256": "a01b9fcb00ab8755e0d638504b880a66fbd886af51ade99180da6933db5d61b8"
+   }
+  },
+  "block/s1p5q2pd0+roff": {
+   "kick": {
+    "pose_hash": "0x69079128ab40cd5a",
+    "receipt_window": [
+     200,
+     800
+    ],
+    "rows": 162094.52833333332,
+    "Np": 18747.318333333333,
+    "Nm": 5143.883333333333,
+    "statics": {
+     "pairs": 4715401,
+     "pairs_static": 139271,
+     "pairs_static_static": 0,
+     "manifolds": 3086421,
+     "manifolds_static": 139123,
+     "manifolds_static_static": 0,
+     "points_static": 556492
+    },
+    "fixture": "dyn/fixtures/block/s1p5q2pd0+roff_kick.pose",
+    "fixture_sha256": "439b01eede324ceae1d27b15f5c15be05a728f9182979dd790a63999970f22b0"
+   },
+   "shoot": {
+    "pose_hash": "0x63b84973d7033932",
+    "receipt_window": [
+     200,
+     800
+    ],
+    "rows": 167978.385,
+    "Np": 19345.945,
+    "Nm": 5426.128333333333,
+    "statics": {
+     "pairs": 5097119,
+     "pairs_static": 141174,
+     "pairs_static_static": 0,
+     "manifolds": 3256246,
+     "manifolds_static": 141064,
+     "manifolds_static_static": 0,
+     "points_static": 564256
+    },
+    "fixture": "dyn/fixtures/block/s1p5q2pd0+roff_shoot.pose",
+    "fixture_sha256": "be8db8bbd97ee463a3b0c066faa55d38abb9ae35780f6df0c78c86039673aae8"
+   },
+   "slide": {
+    "pose_hash": "0x0e628ea206c9cf51",
+    "receipt_window": [
+     0,
+     500
+    ],
+    "rows": 133409.044,
+    "Np": 15319.252,
+    "Nm": 4362.38,
+    "statics": {
+     "pairs": 3896395,
+     "pairs_static": 145936,
+     "pairs_static_static": 0,
+     "manifolds": 2275383,
+     "manifolds_static": 144513,
+     "manifolds_static_static": 0,
+     "points_static": 578052
+    },
+    "fixture": "dyn/fixtures/block/s1p5q2pd0+roff_slide.pose",
+    "fixture_sha256": "465ce036b2fa8afe42a49b4061c1bb6b100cf153117bbf9ebafc45b1a3d7f76d"
+   }
+  },
+  "block/s1p5q3pd0+roff": {
+   "kick": {
+    "pose_hash": "0xcb83b30269076544",
+    "receipt_window": [
+     200,
+     800
+    ],
+    "rows": 197846.62166666667,
+    "Np": 18889.863333333335,
+    "Nm": 5191.968333333333,
+    "statics": {
+     "pairs": 4727993,
+     "pairs_static": 138998,
+     "pairs_static_static": 0,
+     "manifolds": 3115309,
+     "manifolds_static": 138838,
+     "manifolds_static_static": 0,
+     "points_static": 555352
+    },
+    "fixture": "dyn/fixtures/block/s1p5q3pd0+roff_kick.pose",
+    "fixture_sha256": "7ed812f45956adc113c1e51fcb16852bd26cb27ef14cb88a524d05819b980267"
+   },
+   "shoot": {
+    "pose_hash": "0xf2365df9295098ba",
+    "receipt_window": [
+     200,
+     800
+    ],
+    "rows": 204910.295,
+    "Np": 19443.535,
+    "Nm": 5484.668333333333,
+    "statics": {
+     "pairs": 5101503,
+     "pairs_static": 140469,
+     "pairs_static_static": 0,
+     "manifolds": 3291039,
+     "manifolds_static": 140350,
+     "manifolds_static_static": 0,
+     "points_static": 561400
+    },
+    "fixture": "dyn/fixtures/block/s1p5q3pd0+roff_shoot.pose",
+    "fixture_sha256": "97bd84d6b725368e643df8ecca214fdb2e8e1316151b6b9e03948c465a3e68ce"
+   },
+   "slide": {
+    "pose_hash": "0xf80328e08691aedb",
+    "receipt_window": [
+     0,
+     500
+    ],
+    "rows": 177385.906,
+    "Np": 16944.164,
+    "Nm": 4648.066,
+    "statics": {
+     "pairs": 4058931,
+     "pairs_static": 145781,
+     "pairs_static_static": 0,
+     "manifolds": 2418131,
+     "manifolds_static": 140302,
+     "manifolds_static_static": 0,
+     "points_static": 561208
+    },
+    "fixture": "dyn/fixtures/block/s1p5q3pd0+roff_slide.pose",
+    "fixture_sha256": "65d9e4f78d5c63138b2e887b974141c244e4fcf6fbd2cff5ecb655224927cac3"
+   }
+  },
+  "simd8/D0": {
+   "kick": {
+    "pose_hash": "0x9e933ff0fb6f557e",
+    "receipt_window": [
+     200,
+     800
+    ],
+    "rows": 311835.2,
+    "Np": 28284.8,
+    "Nm": 7129.733333333334,
+    "statics": {
+     "pairs": 4774987,
+     "pairs_static": 138678,
+     "pairs_static_static": 0,
+     "manifolds": 4280230,
+     "manifolds_static": 138607,
+     "manifolds_static_static": 0,
+     "points_static": 554428
+    },
+    "fixture": "dyn/fixtures/simd8/D0_kick.pose",
+    "fixture_sha256": "70fa6609c4824447fb2a4e1b9790954077bf8b81175ccab987d1c216cf43a1d8"
+   },
+   "shoot": {
+    "pose_hash": "0xeaadaed4c8830fa9",
+    "receipt_window": [
+     200,
+     800
+    ],
+    "rows": 348770.5933333333,
+    "Np": 31645.816666666666,
+    "Nm": 7967.005,
+    "statics": {
+     "pairs": 5076043,
+     "pairs_static": 142807,
+     "pairs_static_static": 0,
+     "manifolds": 4781442,
+     "manifolds_static": 142645,
+     "manifolds_static_static": 0,
+     "points_static": 570582
+    },
+    "fixture": "dyn/fixtures/simd8/D0_shoot.pose",
+    "fixture_sha256": "6221047251f88a19cde7d9687cc2c1b5a0f5e9dd0ca98a4987367a3ca19c2951"
+   },
+   "slide": {
+    "pose_hash": "0x3afb44f4eaebe777",
+    "receipt_window": [
+     0,
+     500
+    ],
+    "rows": 254862.52,
+    "Np": 22962.122,
+    "Nm": 5930.462,
+    "statics": {
+     "pairs": 4013820,
+     "pairs_static": 146563,
+     "pairs_static_static": 0,
+     "manifolds": 2967367,
+     "manifolds_static": 146491,
+     "manifolds_static_static": 0,
+     "points_static": 585964
+    },
+    "fixture": "dyn/fixtures/simd8/D0_slide.pose",
+    "fixture_sha256": "91a2ec9bd893efa29d02b851a08bf9b9b2edb65a93959e0ca328ccb320f9e1db"
+   }
+  }
+ },
+ "ours": {
+  "kick": {
+   "pose_hash": "0x5c27d4ede389f12a",
+   "fixture": "docs/physics/perf-campaign/levers/scenes/fixtures/ours_kick.pose",
+   "fixture_sha256": "91884a6ccec6b909551d1247adae503e378c4b9370323fd97dcc58f1d9d0c93a",
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ]
+  },
+  "shoot": {
+   "pose_hash": "0x49e2bf025baa5294",
+   "fixture": "docs/physics/perf-campaign/levers/scenes/fixtures/ours_shoot.pose",
+   "fixture_sha256": "dea05a4e546819fb0a5ef65ab0a550a64b3f88958e066a2867b6e970373e8ee3",
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ]
+  },
+  "slide": {
+   "pose_hash": "0xe627f35c282605ba",
+   "fixture": "docs/physics/perf-campaign/levers/scenes/fixtures/ours_slide.pose",
+   "fixture_sha256": "9107ceb33ac00721550e71f5ab52afc93c7328b9c16f3923bdc29b7892de9d1f",
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ]
+  },
+  "none": {
+   "pose_hash": "0x441a568e91a4f9c9",
+   "fixture": "docs/measurements/2026-09-30-v2-speculative/w8/J500.pose",
+   "fixture_sha256": "db0d8822886298c358d77fd0e9af7a008d944dd53f2cc3a2c6b4b475b6e1fe70",
+   "workers": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ]
+  }
+ },
+ "jolt56": {
+  "none": {
+   "hash": "0xb8522b4e3fc62cfe",
+   "banner": "boyko-parity-dyn v1: program=none",
+   "fixture": "docs/physics/perf-campaign/levers/scenes/fixtures/jolt56_none.pose",
+   "fixture_sha256": "33a3d3208a577fd09c9f0c23617f9d1271eb50f6bc79a2511b8b5a9b9897ae97",
+   "threads_receipt": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ]
+  },
+  "kick": {
+   "hash": "0x63faa28ed77e1a89",
+   "banner": "boyko-parity-dyn v1: program=kick",
+   "fixture": "docs/physics/perf-campaign/levers/scenes/fixtures/jolt56_kick.pose",
+   "fixture_sha256": "b409997f4a8c0ebfe0e3c6b0429741ee719b45c49cb3353ed65b602da3564f8f",
+   "threads_receipt": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ]
+  },
+  "shoot": {
+   "hash": "0xc989d89c28ecdd03",
+   "banner": "boyko-parity-dyn v1: program=shoot",
+   "fixture": "docs/physics/perf-campaign/levers/scenes/fixtures/jolt56_shoot.pose",
+   "fixture_sha256": "a7b98658bd8ce2ca9118f4d9c35924d1db6935e5e00589800cd2983045bbec01",
+   "threads_receipt": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ]
+  },
+  "slide": {
+   "hash": "0x781c433c5d8278f1",
+   "banner": "boyko-parity-dyn v1: program=slide",
+   "fixture": "docs/physics/perf-campaign/levers/scenes/fixtures/jolt56_slide.pose",
+   "fixture_sha256": "8d41c9638f26c77f5c5a0224dd3b505eec44ffe4f4e06397cd61e2e0e0ab4358",
+   "threads_receipt": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ]
+  }
+ },
+ "exes": {
+  "rapier-dyn-simd8": {
+   "path": "D:/tmp/rapier-parity/dyn/bin/rapier-parity-dyn-simd8.exe",
+   "sha256": "c71f747042688c9558aaee2bdb8a0e7bfaf79642cd99c25d8621acd8274ebfeb"
+  },
+  "rapier-dyn-simd4": {
+   "path": "D:/tmp/rapier-parity/dyn/bin/rapier-parity-dyn-simd4.exe",
+   "sha256": "be272344cfe6336f6f8a9196cc769bdb13a8cb1bcd8b3d627039c2efe4355d70"
+  },
+  "rapier-dyn-block": {
+   "path": "D:/tmp/rapier-parity/dyn/bin/rapier-parity-dyn-block.exe",
+   "sha256": "5b0a1b60c23e3b34f6a16c3bf15ab4f591d3469d4805ad667dfa26cb06e5fb6b"
+  },
+  "jolt56-dyn": {
+   "path": "D:/tmp/jolt/build-v5.6.0-dyn-dist/PerformanceTest.exe",
+   "sha256": "9df0990168bef31f6ba722ff6950b9b6bbfb5e9077a174d17c27c95eb0913a98"
+  }
+ }
+}
