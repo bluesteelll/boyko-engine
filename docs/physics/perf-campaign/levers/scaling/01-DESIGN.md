@@ -318,6 +318,13 @@ pins.
 
 ### 6.1 S1: the solve region (the kernel primitive)
 
+**As built (SR, phase A on the trunk `f277269d`, phase B on `u/phys-sr-b`; `02-SR-DESIGN.md` is the record).**
+The claim words became plain `u64` lines (`RegionLine`, `#[repr(C, align(64))] { w: [u64; 8] }`) that the caller
+owns in `ScratchColumn`s and the region projects as atomics for its lifetime, with **epoch** claims (item `i` runs
+at `base + 1 + i`; a word is never reset) in place of the `exec` counters, and four separate line groups (sync,
+done, receipts, claims). The helpers are `pool.num_threads() − 1`, with no physical-core cap (ruling W8B-2), and
+spin `PauseThenYield`, never parking. The rest of this section is the design as first written.
+
 **What it is.** A **phased region** API in `boyko_threadpool`. It is a kernel feature under Principle 0, usable
 by every multi-stage consumer (the soft-body coloured solve, the narrowphase plus fill), not a physics adapter.
 
@@ -477,6 +484,13 @@ is 4 barriers instead of about 36, the same add order, but a CSR plus random gat
 the ω_b microbench.
 
 ### 6.3 S3: the integrate group on S1
+
+**As built (SR phase B).** Gravity and integrate + `refresh_inertia` are row-block stages over every row; the
+store is ONE entry (pass 1 by cohort range, pass 2's carry by manifold range, two disjoint write sets) and runs in
+the region only on a warm step where no row can bounce (`restitution_possible`, an O(rows) scan): restitution takes
+`&mut CohortColumns` and stays serial, and a bouncing step keeps the serial store. V2's per-step Δ reset is the first
+substep's gravity entry (`GravityFirst`); its invariant is that the reset precedes the first sweep, which reads Δ
+through K3 (`02-SR-DESIGN.md` §2.5).
 
 Gravity, integrate with `refresh_inertia`, and store are per-row or per-manifold independent. `write_back` is not
 (a shared non-atomic touched mask), and it stays serial.
@@ -641,6 +655,13 @@ unresolved. Pose hashes must be equal across W and to the parent (`--expect-pose
   rate. The census pins S1 moves include S1d and S8b's sleeping-on scenes, under the same counter rule (§6.10).
 
 ### 6.10 The pin ledger (rev 1 W4)
+
+**As built (SR phase B's flip).** S1's row realised as written below, by the counter rule: S1c, S1e and S1f read
+**3..=3 / 3..=3 / dispatch MAX 7** on every frame of every 4,352-frame long run, in both profiles; the structural
+assertion is `scope == 1 + np + region` with `region` read from `region_dispatches`; the S4 term retired with S4's
+setup scope, and with it `setup_dispatches`; row D reads `scope == chunk == 1 + region` per frame and its lane-growth
+arm the region's widest item. The fan-out mutation's successor, a scope opened inside a region block, reds the
+census, row D and the threadpool's debug assertion (`02-SR-DESIGN.md` §2.8).
 
 The per-frame structural assertion of the frame census, `f.scope > passes + np && (f.scope − 1 −
 np).is_multiple_of(passes)` (`alloc_frame_census.rs:2149-2179`), is red on **every** frame both for S4 as its own
