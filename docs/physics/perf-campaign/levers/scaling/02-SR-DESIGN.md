@@ -340,7 +340,12 @@ bound profiler world is needed).
 The fan-out regression S1c/S1e were the gate of (+12 scope frames a frame) cannot occur any more; its successor,
 a scope opened inside a region block (`01-DESIGN.md` §6.10), reds the census's structural assertion (4 against
 `1 + 1 + 1` on S1c's first steady frame), row D (3 scope frames against 2) and, in debug, the threadpool's own
-assertion.
+assertion. In release that red is not guaranteed to be printed (triage r1 F1): the scope's join can run the
+enclosing region's own queued helper task, which then waits for a publish the participant inside the block cannot
+make — the debug assertion's own text (`Scope::new`, `boyko_threadpool/src/scope.rs`) — so the release outcome is
+the reds above or a deadlock, by scheduling. Measured both ways with one mutation spec (on the tip's `colored.rs`
+it gives md5 `61c3f3ae…`): the lane's two release runs on its pre-flip scratch tree printed the reds, the tester's
+three on the tip hung and were killed. Neither is a green; a hang is the CI's timeout.
 
 ### 2.9 The codegen receipts and the tool
 
