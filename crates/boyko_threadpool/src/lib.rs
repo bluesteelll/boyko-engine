@@ -394,6 +394,32 @@ pub mod loom_exports {
             }
         }
 
+        /// Participant 0 through its production role entry (CR-F: the finisher under
+        /// `Advance::Finisher`, the orchestrator otherwise; disarmed), its guard created here. The
+        /// returned report carries participant 0's counts (the table walk under the finisher);
+        /// the receipts are read from the words.
+        #[inline]
+        pub fn run_participant0<S: RegionStages, P: RegionPolicy>(
+            words: &LoomRegionWords,
+            base: u64,
+            stages: &S,
+        ) -> RegionReport {
+            let mut part = Participant::new(words, base, 0);
+            report(base, crate::region::run_participant0::<_, S, P, false>(words, stages, &mut part))
+        }
+
+        /// Helper `h` through its production role entry (CR-F), its guard created here.
+        #[inline]
+        pub fn run_helper_participant<S: RegionStages, P: RegionPolicy>(
+            words: &LoomRegionWords,
+            base: u64,
+            h: u32,
+            stages: &S,
+        ) {
+            let mut part = Participant::new(words, base, h);
+            crate::region::run_helper_participant::<_, S, P, false>(words, stages, &mut part);
+        }
+
         /// Participant 0 over the real protocol, its guard created here (as inside
         /// `PoolInner::region`'s scope closure). The returned report carries the orchestrator's
         /// counts only; the receipts are read from the words.

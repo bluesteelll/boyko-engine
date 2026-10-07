@@ -38,6 +38,18 @@
 //! participant 0's own block, and item 1 ran while a helper was still inside block 1 (5 of 5 runs
 //! in release; debug panicked at the open's done-line check). The test must read no overlap, and
 //! runs under a watchdog, so a hang is a red, never a hung suite.
+//!
+//! **CR-F (the finisher advance, `WithAdvance<_, true>`).** Every case above has a `fin_` twin
+//! under `Fin<TestPolicy>`, and F-FRAME B gains a `Fin<V2Policy>` round. Under the finisher the
+//! oversize entry of case 3 is published by whichever participant completed the item before it, so
+//! `fin_case3` asserts exactly one PANICKED receipt, that publisher's. **G-CR-F-PANIC**
+//! (`fin_helper_panic_while_participant0_waits`) places a helper's panic in a published block
+//! while participant 0 waits in its publish wait: entry 0's block 0 holds participant 0 until a
+//! helper starts block 1 (only a helper can, participant 0 being inside block 0), and that helper
+//! panics 5 ms later, by which time participant 0 has swept the rest of the item. Nothing then
+//! publishes an END (only participant 0's guard would), so participant 0's poison poll in that
+//! wait is its only exit: the unbounded `Fin<V2Policy>` region runs under a 10 s watchdog, and a
+//! wait without the poll (N-FIN-NOPOLL) is "no verdict within 10 s".
 
 mod region_common;
 
@@ -48,14 +60,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use boyko_threadpool::{
-    RegionExit, RegionLine, RegionReceipt, RegionReport, RegionStages, RegionWaitBound, ThreadPool,
-    V2Policy, try_with_active_pool,
+    RegionExit, RegionLine, RegionPolicy, RegionReceipt, RegionReport, RegionStages,
+    RegionWaitBound, ThreadPool, V2Policy, WithAdvance, try_with_active_pool,
 };
 
 use region_common::{
-    Frame, Inject, Injected, Ran, Rendezvous, Route, Stages, TestPolicy, Who,
+    Frame, Inject, Injected, LatePanic, Ran, Rendezvous, Route, Stages, TestPolicy, Who,
     panic_participant_counts, pool, run_region, within,
 };
+
+/// `P` under the finisher advance (CR-F).
+type Fin<P> = WithAdvance<P, true>;
 
 /// Attempts allowed for an injection that depends on which participant claims a block.
 const ATTEMPTS: usize = 8;
@@ -93,8 +108,15 @@ fn table(kind: Kind, p: u32) -> (Vec<u16>, Vec<u16>, Inject) {
     }
 }
 
-/// Runs the injected region until the injection fires (at most [`ATTEMPTS`]); returns the run.
-fn poisoned_run(pool: &Arc<boyko_threadpool::ThreadPool>, mut frame: Frame, kind: Kind, p: u32, inject: Inject) -> (Ran, u64) {
+/// Runs the injected region of policy `P` until the injection fires (at most [`ATTEMPTS`]);
+/// returns the run.
+fn poisoned_run<P: RegionPolicy + 'static>(
+    pool: &Arc<boyko_threadpool::ThreadPool>,
+    mut frame: Frame,
+    kind: Kind,
+    p: u32,
+    inject: Inject,
+) -> (Ran, u64) {
     for attempt in 0..ATTEMPTS {
         let base = frame.epoch.max(1);
         let mut stages = Stages::new(&frame).with_inject(inject);
@@ -104,7 +126,7 @@ fn poisoned_run(pool: &Arc<boyko_threadpool::ThreadPool>, mut frame: Frame, kind
             stages = stages.with_slow(0, Duration::from_micros(50)).with_await_helper(0);
         }
         let route = if attempt % 2 == 0 { Route::External } else { Route::Worker };
-        let ran = run_region::<TestPolicy, false>(pool, route, frame, Arc::new(stages), p);
+        let ran = run_region::<P, false>(pool, route, frame, Arc::new(stages), p);
         if ran.result.is_err() {
             return (ran, base);
         }
@@ -154,70 +176,115 @@ fn assert_receipts(receipts: &[RegionReceipt], base: u64, panicked: u32, what: &
     }
 }
 
-fn case(kind: Kind, who: Who) {
+fn case<P: RegionPolicy + 'static>(kind: Kind, who: Who, label: &str) {
     for &p in panic_participant_counts() {
         let pool = pool(p);
         let (blocks, order, inject) = table(kind, p);
         let mut frame = Frame::new(blocks.len(), p as usize, 4 * 16 * 8);
-        frame.set_table::<TestPolicy>(&blocks, &order, p, 0);
-        let (ran, base) = poisoned_run(&pool, frame, kind, p, inject);
-        assert_poisoned(&ran, p, base, who, &format!("{kind:?} P{p}"));
+        frame.set_table::<P>(&blocks, &order, p, 0);
+        let (ran, base) = poisoned_run::<P>(&pool, frame, kind, p, inject);
+        assert_poisoned(&ran, p, base, who, &format!("{label}{kind:?} P{p}"));
     }
 }
 
 #[test]
 fn case1_orchestrator_panics_in_an_inline_entry() {
-    case(Kind::OrchestratorInline, Who::Orchestrator);
+    case::<TestPolicy>(Kind::OrchestratorInline, Who::Orchestrator, "");
 }
 
 #[test]
 fn case2_orchestrator_panics_in_a_claimed_block() {
-    case(Kind::OrchestratorClaimed, Who::Orchestrator);
+    case::<TestPolicy>(Kind::OrchestratorClaimed, Who::Orchestrator, "");
 }
 
-/// Case 3: the region's own `n_blocks ≤ 8·P` debug assertion fires on participant 0, on an
-/// oversize entry placed after a multi-block one. Debug profile only (it is a `debug_assert!`).
+/// Case 3: the region's own `n_blocks ≤ 8·P` debug assertion fires on the participant that
+/// publishes an oversize entry placed after a multi-block one: participant 0 under the
+/// orchestrator, the completer of the item before it under the finisher (`any_publisher`). Debug
+/// profile only (it is a `debug_assert!`).
 #[cfg(debug_assertions)]
-#[test]
-fn case3_a_region_debug_assertion_fires_on_the_orchestrator() {
+fn case3_body<P: RegionPolicy + 'static>(label: &str, any_publisher: bool) {
     for &p in panic_participant_counts() {
         let pool = pool(p);
         let oversize = (8 * p + 1) as u16;
         let mut frame = Frame::new(2, p as usize, 4 * 16 * 8 + 64);
-        frame.set_table::<TestPolicy>(&[(2 * p) as u16, oversize], &[0, 1], p, 0);
+        frame.set_table::<P>(&[(2 * p) as u16, oversize], &[0, 1], p, 0);
         let base = frame.epoch.max(1);
         let stages = Arc::new(Stages::new(&frame));
-        let ran = run_region::<TestPolicy, false>(&pool, Route::External, frame, stages, p);
-        let what = format!("case 3 P{p}");
+        let ran = run_region::<P, false>(&pool, Route::External, frame, stages, p);
+        let what = format!("{label} P{p}");
         let payload = ran.result.as_ref().expect_err("case 3: the region panicked");
         let msg = payload
             .downcast_ref::<String>()
             .unwrap_or_else(|| panic!("{what}: (a) the payload is not the assertion's message"));
         assert!(msg.contains("more than 8 per participant"), "{what}: (a) the payload is {msg:?}");
-        assert_receipts(&ran.frame.receipts(p), base, 0, &what);
+        let receipts = ran.frame.receipts(p);
+        let panicked = if any_publisher {
+            let who: Vec<usize> = receipts
+                .iter()
+                .enumerate()
+                .filter(|(_, rc)| rc.exit == Some(RegionExit::Panicked))
+                .map(|(q, _)| q)
+                .collect();
+            assert_eq!(who.len(), 1, "{what}: exactly one PANICKED receipt, the oversize entry's publisher ({receipts:?})");
+            who[0] as u32
+        } else {
+            0
+        };
+        assert_receipts(&receipts, base, panicked, &what);
         if !cfg!(miri) {
             assert!(ran.wall < Duration::from_secs(1), "{what}: (c) the call took {:?}", ran.wall);
         }
     }
 }
 
+#[cfg(debug_assertions)]
+#[test]
+fn case3_a_region_debug_assertion_fires_on_the_orchestrator() {
+    case3_body::<TestPolicy>("case 3", false);
+}
+
 #[test]
 fn case4_a_helper_panics_in_a_claimed_block() {
-    case(Kind::HelperClaimed, Who::Helper);
+    case::<TestPolicy>(Kind::HelperClaimed, Who::Helper, "");
+}
+
+// The finisher twins (G-CR-F-PANIC's bounded part): the same cases, every receipt and payload
+// rule unchanged, under `Fin<TestPolicy>`.
+
+#[test]
+fn fin_case1_orchestrator_panics_in_an_inline_entry() {
+    case::<Fin<TestPolicy>>(Kind::OrchestratorInline, Who::Orchestrator, "fin ");
+}
+
+#[test]
+fn fin_case2_orchestrator_panics_in_a_claimed_block() {
+    case::<Fin<TestPolicy>>(Kind::OrchestratorClaimed, Who::Orchestrator, "fin ");
+}
+
+/// The finisher's case 3: the oversize entry's publisher is the completer of item 0, any
+/// participant; exactly one PANICKED receipt is that participant's.
+#[cfg(debug_assertions)]
+#[test]
+fn fin_case3_a_region_debug_assertion_fires_on_the_publisher() {
+    case3_body::<Fin<TestPolicy>>("fin case 3", true);
+}
+
+#[test]
+fn fin_case4_a_helper_panics_in_a_claimed_block() {
+    case::<Fin<TestPolicy>>(Kind::HelperClaimed, Who::Helper, "fin ");
 }
 
 /// W8: a caught poisoned region, then a healthy region over the same frame, at P = 2, 8, 16, for
 /// every injection kind.
-#[test]
-fn w8_poisoned_region_then_same_frame_completes() {
+fn w8_body<P: RegionPolicy + 'static>(label: &str) {
     for &p in panic_participant_counts() {
         let pool = pool(p);
         for kind in [Kind::OrchestratorInline, Kind::OrchestratorClaimed, Kind::HelperClaimed] {
             let (blocks, order, inject) = table(kind, p);
             let mut frame = Frame::new(blocks.len(), p as usize, 4 * 16 * 8);
-            frame.set_table::<TestPolicy>(&blocks, &order, p, 0);
-            let what = format!("W8 {kind:?} P{p}");
-            let (ran, base_a) = poisoned_run(&pool, frame, kind, p, inject);
+            frame.set_table::<P>(&blocks, &order, p, 0);
+            let what = format!("{label} {kind:?} P{p}");
+            let (ran, base_a) = poisoned_run::<P>(&pool, frame, kind, p, inject);
             let who = if matches!(kind, Kind::HelperClaimed) { Who::Helper } else { Who::Orchestrator };
             assert_poisoned(&ran, p, base_a, who, &what);
             let frame = ran.frame;
@@ -226,7 +293,7 @@ fn w8_poisoned_region_then_same_frame_completes() {
             // Region B: the SAME frame and table, no injection. Its outcome is asserted before the
             // counter arithmetic, so mutation M-W8 reds on B's behaviour (the cut's prediction).
             let stages = Arc::new(Stages::new(&frame));
-            let ran = run_region::<TestPolicy, false>(&pool, Route::External, frame, stages, p);
+            let ran = run_region::<P, false>(&pool, Route::External, frame, stages, p);
             let r: RegionReport = match &ran.result {
                 Ok(r) => *r,
                 Err(e) => panic!(
@@ -246,6 +313,16 @@ fn w8_poisoned_region_then_same_frame_completes() {
             }
         }
     }
+}
+
+#[test]
+fn w8_poisoned_region_then_same_frame_completes() {
+    w8_body::<TestPolicy>("W8");
+}
+
+#[test]
+fn fin_w8_poisoned_region_then_same_frame_completes() {
+    w8_body::<Fin<TestPolicy>>("fin W8");
 }
 
 /// Every done line of an entry the frame's current schedule PUBLISHED (`n_blocks ≥ 2`) ends at
@@ -272,26 +349,25 @@ fn assert_published_lines_end_at_their_counts(frame: &Frame, what: &str) {
 /// and never completes (the test bound). C must complete, every block exactly once — the intent,
 /// asserted first so that a stale count reds here — and then every line C published must end at
 /// exactly its entry's block count.
-#[test]
-fn w3_poisoned_then_smaller_then_larger_table_completes() {
+fn w3_body<P: RegionPolicy + 'static>(label: &str) {
     for &p in panic_participant_counts() {
         let pool = pool(p);
         let wide = (2 * p) as u16;
         let mut frame = Frame::new(4, p as usize, 4 * 16 * 8);
         // A: entry 2 is the in-flight one; participant 0 panics in its block 1 after counting
         // block 0, so its done line is left at r >= 1.
-        frame.set_table::<TestPolicy>(&[1, 1, wide], &[0, 2, 1, 2], p, 0);
-        let what = format!("W3 P{p}");
+        frame.set_table::<P>(&[1, 1, wide], &[0, 2, 1, 2], p, 0);
+        let what = format!("{label} P{p}");
         let inject = Inject { entry: 2, block: 1, who: Who::Orchestrator };
-        let (ran, base_a) = poisoned_run(&pool, frame, Kind::OrchestratorClaimed, p, inject);
+        let (ran, base_a) = poisoned_run::<P>(&pool, frame, Kind::OrchestratorClaimed, p, inject);
         assert_poisoned(&ran, p, base_a, Who::Orchestrator, &what);
         let mut frame = ran.frame;
         let stale = frame.done[2].word(0);
         assert_ne!(stale, 0, "{what}: precondition — A left entry 2's done line partial");
         // B: two entries (lines 0 and 1 only).
-        frame.set_table::<TestPolicy>(&[wide, 1], &[0, 1, 0], p, 0);
+        frame.set_table::<P>(&[wide, 1], &[0, 1, 0], p, 0);
         let stages = Arc::new(Stages::new(&frame));
-        let ran = run_region::<TestPolicy, false>(&pool, Route::External, frame, stages, p);
+        let ran = run_region::<P, false>(&pool, Route::External, frame, stages, p);
         if let Err(e) = &ran.result {
             panic!(
                 "{what}: region B panicked: {:?} / {:?}",
@@ -305,10 +381,10 @@ fn w3_poisoned_then_smaller_then_larger_table_completes() {
         // stale count, and only its own pre-publish reset stands between that count and C.
         assert_eq!(frame.done[2].word(0), stale, "{what}: B left A's stale count on line 2");
         // C: four entries again; entry 2 executes three times, first.
-        frame.set_table::<TestPolicy>(&[1, wide, wide + 1, 3], &[2, 0, 1, 2, 3, 2], p, 0);
+        frame.set_table::<P>(&[1, wide, wide + 1, 3], &[2, 0, 1, 2, 3, 2], p, 0);
         let hold = Rendezvous { entry: 2, hold: Duration::from_millis(50), sleep: true };
         let stages = Arc::new(Stages::new(&frame).with_rendezvous(hold));
-        let ran = run_region::<TestPolicy, false>(&pool, Route::Worker, frame, stages, p);
+        let ran = run_region::<P, false>(&pool, Route::Worker, frame, stages, p);
         if let Err(e) = &ran.result {
             panic!(
                 "{what}: region C panicked (a stale count that overshot never completes): {:?} / {:?}",
@@ -319,6 +395,17 @@ fn w3_poisoned_then_smaller_then_larger_table_completes() {
         ran.stages.assert_exactly_once(&ran.frame, &format!("{what} region C"));
         assert_published_lines_end_at_their_counts(&ran.frame, &format!("{what} region C"));
     }
+}
+
+#[test]
+fn w3_poisoned_then_smaller_then_larger_table_completes() {
+    w3_body::<TestPolicy>("W3");
+}
+
+/// W3 under the finisher: the stale count is reset by whichever participant publishes the item.
+#[test]
+fn fin_w3_poisoned_then_smaller_then_larger_table_completes() {
+    w3_body::<Fin<TestPolicy>>("fin W3");
 }
 
 // ---------------------------------------------------------------------------
@@ -427,8 +514,9 @@ fn payload_text(e: &(dyn Any + Send)) -> String {
     }
 }
 
-/// One `V2Policy` region of `frame` at P = 2 through the public entry, its panic caught.
-fn frame_b_region<S: RegionStages>(
+/// One region of `P` (`V2Policy`, or its finisher twin) of `frame` at P = 2 through the public
+/// entry, its panic caught.
+fn frame_b_region<S: RegionStages, P: RegionPolicy>(
     pool: &ThreadPool,
     frame: &mut Frame,
     stages: &S,
@@ -442,26 +530,26 @@ fn frame_b_region<S: RegionStages>(
                 // the sync line's CONTENTS (`RegionLine::ZERO`): the same storage, still this
                 // frame's alone, so the contract holds — and the state that leaves (a poisoned
                 // region's count on line 0, no poison to show for it) is the input this test feeds
-                // the region on purpose. The region below runs `V2Policy`, the policy
-                // `region_frame` checks the table's claim layout for.
-                let region_frame = unsafe { frame.region_frame::<V2Policy>(2) };
-                inner.region::<S, V2Policy, false>(region_frame, stages)
+                // the region on purpose. The region below runs `P`, the policy `region_frame`
+                // checks the table's claim layout for.
+                let region_frame = unsafe { frame.region_frame::<P>(2) };
+                inner.region::<S, P, false>(region_frame, stages)
             }))
         })
         .expect("test setup: install sets the active pool")
     })
 }
 
-/// One round: A poisoned with `done[0] == 1`, the sync line re-created, then B.
-fn frame_b_round() -> Result<(), String> {
+/// One round under `P`: A poisoned with `done[0] == 1`, the sync line re-created, then B.
+fn frame_b_round<P: RegionPolicy>() -> Result<(), String> {
     let p = 2;
     let pool = pool(p);
     let mut frame = Frame::new(2, p as usize, 2);
-    frame.set_table::<V2Policy>(&[2, 1], &[0], p, 0);
+    frame.set_table::<P>(&[2, 1], &[0], p, 0);
     let mut left = 0;
     for _ in 0..ATTEMPTS {
         let a = PoisonAfterAHelperCounted::default();
-        let r = frame_b_region(&pool, &mut frame, &a);
+        let r = frame_b_region::<_, P>(&pool, &mut frame, &a);
         left = frame.done[0].word(0);
         if r.is_err() && left == 1 {
             break;
@@ -473,9 +561,9 @@ fn frame_b_round() -> Result<(), String> {
     // The caller re-creates its sync line: the poison A left is gone, so B's open has no poison
     // to react to, and only the done line still says what A did.
     frame.sync = RegionLine::ZERO;
-    frame.set_table::<V2Policy>(&[2, 1], &[0, 1], p, 0);
+    frame.set_table::<P>(&[2, 1], &[0, 1], p, 0);
     let b = OverlapProbe::default();
-    if let Err(e) = frame_b_region(&pool, &mut frame, &b) {
+    if let Err(e) = frame_b_region::<_, P>(&pool, &mut frame, &b) {
         return Err(format!("region B panicked: {}", payload_text(&*e)));
     }
     if !b.b1_started.load(Ordering::Acquire) {
@@ -493,7 +581,10 @@ fn frame_b_round() -> Result<(), String> {
 
 /// F-FRAME failure B: a stale done line (a poisoned region's count) under a re-created sync line
 /// never completes an item early. Red before ruling 17 B1 in release (overlap) and debug (the
-/// open's done-line check); `V2Policy` is unbounded, so each round runs under a watchdog.
+/// open's done-line check); `V2Policy` is unbounded, so each round runs under a watchdog. The
+/// `Fin<V2Policy>` rounds (CR-F) hold B1 to "whichever participant advances": in B, participant
+/// 0 publishes item 0 at the region's start, and its own add is not the completing one (the stale
+/// count was reset), so it reaches item 1 only through its done-wait.
 #[test]
 #[cfg_attr(
     miri,
@@ -501,11 +592,83 @@ fn frame_b_round() -> Result<(), String> {
 )]
 fn frame_b_a_stale_done_line_never_completes_an_item_early() {
     for round in 0..FRAME_B_ROUNDS {
-        match within(FRAME_B_WATCHDOG, frame_b_round) {
+        match within(FRAME_B_WATCHDOG, frame_b_round::<V2Policy>) {
             Some(Ok(())) => {}
             Some(Err(e)) => panic!("F-FRAME B round {round}: {e}"),
             None => panic!("F-FRAME B round {round}: no verdict within {FRAME_B_WATCHDOG:?} (a hang)"),
         }
+    }
+    for round in 0..FRAME_B_ROUNDS {
+        match within(FRAME_B_WATCHDOG, frame_b_round::<Fin<V2Policy>>) {
+            Some(Ok(())) => {}
+            Some(Err(e)) => panic!("F-FRAME B fin round {round}: {e}"),
+            None => panic!("F-FRAME B fin round {round}: no verdict within {FRAME_B_WATCHDOG:?} (a hang)"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// G-CR-F-PANIC (CR-F): a helper panics while participant 0 waits for a publish
+// ---------------------------------------------------------------------------
+
+/// G-CR-F-PANIC's watchdog, per attempt.
+const GCRF_WATCHDOG: Duration = Duration::from_secs(10);
+/// How long the panicking helper holds block 1 before it panics: participant 0 has left block 0,
+/// swept the rest of the item and entered its publish wait well within it.
+const GCRF_LATE: Duration = Duration::from_millis(5);
+
+/// G-CR-F-PANIC: under the unbounded `Fin<V2Policy>`, at W = 2, 4, 8, entries `[2W, 2W]`, items
+/// `[0, 1]`. Entry 0's block 0 is participant 0's first claim and holds participant 0 until block 1
+/// has started (`Rendezvous`), so block 1 is claimed by a helper — participant 0 is inside block 0
+/// — and that helper panics [`GCRF_LATE`] later (`LatePanic`, helpers only), in stage entry 0, on
+/// the helper role entry (`run_helper_participant`'s finisher). Item 0 then never completes and no
+/// participant can publish an END but participant 0 itself, which by then waits in its publish
+/// wait: its poison poll there is its only way out. The region must re-raise the injected payload
+/// (the helper's) within the 10 s watchdog, with participant 0's receipt POISONED and exactly one
+/// PANICKED receipt, the helper's. An attempt whose rendezvous ran out (participant 0 then claims
+/// block 1 itself and the helper-only panic never fires) completes normally and is retried, up to
+/// [`ATTEMPTS`]; never firing is red (`fired` anti-vacuity).
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "miri-unsupported: a 10 s wall-clock watchdog over an unbounded policy and a 5 ms hold that places participant 0 in its publish wait, proportions Miri's interpreter does not keep"
+)]
+fn fin_helper_panic_while_participant0_waits() {
+    for w in [2u32, 4, 8] {
+        let pool = pool(w);
+        let mut frame = Frame::new(2, w as usize, 4 * w as usize);
+        frame.set_table::<Fin<V2Policy>>(&[(2 * w) as u16, (2 * w) as u16], &[0, 1], w, 0);
+        let mut fired = false;
+        for attempt in 0..ATTEMPTS {
+            let base = frame.epoch.max(1);
+            let stages = Stages::new(&frame)
+                .with_rendezvous(Rendezvous { entry: 0, hold: Duration::ZERO, sleep: false })
+                .with_late_helper_panic(LatePanic { entry: 0, block: 1, delay: GCRF_LATE });
+            let route = if attempt % 2 == 0 { Route::External } else { Route::Worker };
+            let on = Arc::clone(&pool);
+            let ran = within(GCRF_WATCHDOG, move || run_region::<Fin<V2Policy>, false>(&on, route, frame, Arc::new(stages), w))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "G-CR-F-PANIC W{w} attempt {attempt}: no verdict within {GCRF_WATCHDOG:?} (participant 0 never left its publish wait)"
+                    )
+                });
+            let what = format!("G-CR-F-PANIC W{w} attempt {attempt} ({route:?})");
+            let fired_now = ran.stages.fired.load(Ordering::Relaxed);
+            if ran.result.is_err() {
+                assert!(fired_now, "{what}: the region panicked but the injection did not fire");
+                assert_poisoned(&ran, w, base, Who::Helper, &what);
+                assert_eq!(
+                    ran.frame.receipts(w)[0].exit,
+                    Some(RegionExit::Poisoned),
+                    "{what}: participant 0 left through its poison poll"
+                );
+                fired = true;
+                break;
+            }
+            assert!(!fired_now, "{what}: the injection fired but the region returned normally");
+            frame = ran.frame;
+        }
+        assert!(fired, "G-CR-F-PANIC W{w}: the injection never fired in {ATTEMPTS} attempts");
     }
 }
 
@@ -514,12 +677,19 @@ fn frame_b_a_stale_done_line_never_completes_an_item_early() {
 #[cfg(miri)]
 #[test]
 fn threads_w8_and_w3_after_a_caught_poisoned_region() {
+    threads_w8_and_w3::<TestPolicy>("threads");
+    threads_w8_and_w3::<Fin<TestPolicy>>("threads fin");
+}
+
+/// The SB leg's body for one policy (the orchestrator's, and the finisher's twin).
+#[cfg(miri)]
+fn threads_w8_and_w3<P: RegionPolicy>(label: &str) {
     use region_common::run_threads;
-    fn poisoned(mut frame: Frame, p: u32, inject: Inject) -> (Ran, u64) {
+    fn poisoned<P: RegionPolicy>(mut frame: Frame, p: u32, inject: Inject) -> (Ran, u64) {
         for _ in 0..ATTEMPTS {
             let base = frame.epoch.max(1);
             let stages = Arc::new(Stages::new(&frame).with_inject(inject));
-            let ran = run_threads::<TestPolicy, false>(frame, stages, p);
+            let ran = run_threads::<P, false>(frame, stages, p);
             if ran.result.is_err() {
                 return (ran, base);
             }
@@ -532,14 +702,14 @@ fn threads_w8_and_w3_after_a_caught_poisoned_region() {
         for kind in [Kind::OrchestratorInline, Kind::OrchestratorClaimed] {
             let (blocks, order, inject) = table(kind, p);
             let mut frame = Frame::new(blocks.len(), p as usize, 64);
-            frame.set_table::<TestPolicy>(&blocks, &order, p, 0);
-            let what = format!("threads W8 {kind:?} P{p}");
-            let (ran, base_a) = poisoned(frame, p, inject);
+            frame.set_table::<P>(&blocks, &order, p, 0);
+            let what = format!("{label} W8 {kind:?} P{p}");
+            let (ran, base_a) = poisoned::<P>(frame, p, inject);
             assert_poisoned(&ran, p, base_a, Who::Orchestrator, &what);
             let frame = ran.frame;
             let len = frame.schedule.len() as u64;
             let stages = Arc::new(Stages::new(&frame));
-            let ran = run_threads::<TestPolicy, false>(frame, stages, p);
+            let ran = run_threads::<P, false>(frame, stages, p);
             let r = ran.result.as_ref().unwrap_or_else(|_| panic!("{what}: region B panicked"));
             assert_eq!(r.base, base_a + len + 1, "{what}: B.base");
             ran.stages.assert_exactly_once(&ran.frame, &format!("{what} region B"));
@@ -547,22 +717,22 @@ fn threads_w8_and_w3_after_a_caught_poisoned_region() {
         // W3: A poisoned with entry 2 partial, then two entries, then four.
         let wide = (2 * p) as u16;
         let mut frame = Frame::new(4, p as usize, 64);
-        frame.set_table::<TestPolicy>(&[1, 1, wide], &[0, 2, 1, 2], p, 0);
-        let what = format!("threads W3 P{p}");
-        let (ran, base_a) = poisoned(frame, p, Inject { entry: 2, block: 1, who: Who::Orchestrator });
+        frame.set_table::<P>(&[1, 1, wide], &[0, 2, 1, 2], p, 0);
+        let what = format!("{label} W3 P{p}");
+        let (ran, base_a) = poisoned::<P>(frame, p, Inject { entry: 2, block: 1, who: Who::Orchestrator });
         assert_poisoned(&ran, p, base_a, Who::Orchestrator, &what);
         let mut frame = ran.frame;
         let stale = frame.done[2].word(0);
         assert_ne!(stale, 0, "{what}: precondition");
-        frame.set_table::<TestPolicy>(&[wide, 1], &[0, 1, 0], p, 0);
+        frame.set_table::<P>(&[wide, 1], &[0, 1, 0], p, 0);
         let stages = Arc::new(Stages::new(&frame));
-        let ran = run_threads::<TestPolicy, false>(frame, stages, p);
+        let ran = run_threads::<P, false>(frame, stages, p);
         assert!(ran.result.is_ok(), "{what}: region B completes");
         let mut frame = ran.frame;
         assert_eq!(frame.done[2].word(0), stale, "{what}: B left A's stale count on line 2");
-        frame.set_table::<TestPolicy>(&[1, wide, wide + 1, 3], &[2, 0, 1, 2, 3, 2], p, 0);
+        frame.set_table::<P>(&[1, wide, wide + 1, 3], &[2, 0, 1, 2, 3, 2], p, 0);
         let stages = Arc::new(Stages::new(&frame));
-        let ran = run_threads::<TestPolicy, false>(frame, stages, p);
+        let ran = run_threads::<P, false>(frame, stages, p);
         assert!(ran.result.is_ok(), "{what}: region C completes");
         ran.stages.assert_exactly_once(&ran.frame, &format!("{what} region C"));
         assert_published_lines_end_at_their_counts(&ran.frame, &format!("{what} region C"));
