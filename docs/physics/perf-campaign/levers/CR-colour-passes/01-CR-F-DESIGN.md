@@ -14,7 +14,9 @@ The design's finding (ruling 26(a)) is that J-T already sits at its colouring lo
 Sources: the design `D:/tmp/phys-orch/cr/design_r2.md` (§4, §16) and its final critique
 `cr/critique_final.md`; the plan `phys-next/LEVERS-R2-PLAN.md` rev 2 (§2.1, §4.1, §6); the lane cut
 `cr-f/cut.md` and its review (with the implementation's addendum at its end), and the fix round
-`cr-f/fix_r1.md` (after `cr-f/test_r1.md` and `cr-f/triage_r1.md`). Code is cited by symbol at the
+`cr-f/fix_r1.md` (after `cr-f/test_r1.md` and `cr-f/triage_r1.md`), then `cr-f/test_r2.md`,
+`cr-f/triage_r2.md`, `cr-f/fix_r2.md` and the orchestrator's ruling 31
+(`phys-next/RULINGS-2026-10-01.md`, item 31; §4.1). Code is cited by symbol at the
 CR-F0 code tip `50d66aa0` on `u/phys-cr-f`, and at `08d522cd` for what fix r1 changed. This file is
 not in `tests/internal_docs_anchors.rs`'s `GATED_DOCS`; its anchors are not machine-checked.
 
@@ -203,6 +205,52 @@ identical body first, then by index.
   The pre-fix tip on the same extractor reads 12 hunks in the orchestrator and `vzeroupper` 0 → 12
   in the helper task (the method's red). The FIN set reads 0 yield references in participant 0's
   closure and 2 in the helper task (W-A in codegen).
+- **Test r2, tip `4097bc7a` against parent `b46cf0ec`** (`cr-f/test_r2.md` §6, an independent
+  re-take, asm byte-identical to the developer's): **RED on the two groups fix r1 left for the
+  ruling**, nothing else. 155 pairs, 9680 → 9736 instructions, 14 pairs with hunks; the orchestrator
+  263 → 263 with 0 hunks and the helper task 324 → 325 with `vzeroupper` 0 → 0, as fix r1 read them.
+  The two groups: the bench's result channel (9 `std` channel functions and 3 retargeted call sites,
+  after `t0.elapsed()`), and the v2 row closure (442 → 473, 11 hunks: the relocated count's two call
+  sites, `report`'s stride 96 → 104, the pool pointer and epoch spilled — about 2 stores and 3 loads
+  per region). The five receipt mutations it ran (the cut's r1 and r2, its own D, E and F) each
+  read RED.
+- **Triage r2** (`cr-f/triage_r2.md` F1, CONFIRMED) re-took the receipt under the window's timed
+  `parity` profile (fat LTO; `cr-f/triage2/out_parity/rcpt2_report.txt`). It is evidence for the
+  ruling, not a second gate. The orchestrator is again v2's body, the helper task 327 → 328 with no
+  `vzeroupper`, the row closure 492 → 519 with the same per-region character, the channel group the
+  same, plus five parity-only cold pairs. **Fix r2** (`cr-f/fix_r2.md` §1) found neither group
+  clearable by code inside the lane: the channel group needs `RegionReport`'s public fields shrunk or
+  ω_b's transport changed (outside the lock set), and the row closure needs participant 0's
+  orchestrated count to stop being recorded.
+
+### 4.1 Ruling 31: the residuals admitted as classes
+
+Orchestrator, 2026-10-08 (`phys-next/RULINGS-2026-10-01.md`, item 31; option R1 of `cr-f/fix_r2.md`
+§2). The cut's classes (a)–(g) gain (h) and (i). These two letters are the ruling's; test r1's
+finding labels (h) and (i) above are a different list.
+
+- **(h) ω_b's channel transport.** A consequence of (d)'s `RegionReport` +16 B (`advances`,
+  `helper_advances`) pushing ω_b's result message over the 384 → 448 B slot, outside ω_b's timed
+  interval: bench harness only, no engine path.
+- **(i) The v2 row closure's per-region register re-allocation around `orchestrate` →
+  `record_orchestrated_advances`.** (b) relocated to the role entry: per region, outside every
+  per-item and per-block loop, on both the bench and the fat-LTO `parity` profiles.
+- **Also admitted, on the `parity` profile only:** triage r2's five cold pairs — `crossbeam_epoch`
+  `Local::finalize`, `Arc<Global>::drop_slow`, `std::sys::stdio::windows::write`,
+  `core::panicking::assert_failed::<usize, usize>`, and `io::Error`'s `Display::fmt` (a renumbered
+  switch-table label). All are cold, panic or IO paths.
+- **R2 rejected.** It would change `RegionReport`'s public API, or weaken the receipt identity
+  (`Σ advances == published + 1`, §1.4, a correctness check), to save a few instructions per region.
+- **Backstop.** The record runs on the orchestrator (non-fin) arm only: a `+fin` participant 0
+  counts in `publish_next` and never calls `record_orchestrated_advances`. So window SR's CR-F1 bar
+  (1) (§5) carries the record's per-region cost on the non-fin side of each twin pair. **If window SR
+  shows the `v2epoch`/`Ra`..`Re` non-fin arms slower than the parent beyond noise, R2 reopens.**
+
+With the ruling, G-CR-F-RCPT on `4097bc7a` reads GREEN: every hunk of the V2 set falls in
+(a)–(i) (test r2 §6: "if both are ruled into the classes, this gate reads GREEN and nothing else is
+open"). The trunk sync `d2a065bd` (integ/unified `ea4daab0`) brings in two physics integration-test
+files only (`friction_manifold.rs`, `sleep_settles_box_piles.rs`), which the ω_b bench binary does
+not link; the receipt was not re-taken for it.
 
 ## 5. ω_b (`crates/boyko_physics/benches/omega_b_region.rs`) and window SR
 
