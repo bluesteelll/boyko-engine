@@ -1691,8 +1691,18 @@ fn publish_next<W: RegionWords>(w: &W, part: &mut Participant<'_, W>, j: usize) 
     g
 }
 
-/// A finisher's wait for a publish value other than `last`, on `P::ORCH_WAIT` for participant 0
-/// and `P::HELPER_WAIT` for a helper; `None` when `poison` is set first. Disarmed: no census.
+/// The ladder a finisher waits on for a publish: participant 0's [`RegionPolicy::ORCH_WAIT`], a
+/// helper's [`RegionPolicy::HELPER_WAIT`] (critique W-A). SR's waiter axes keep their meaning under
+/// the finisher only through this choice — R-d and R-d′ are the helpers' ladder, R-e participant
+/// 0's — and no run can tell the ladders apart (the finisher's wait is disarmed, and loom models
+/// PAUSE and yield alike), so it is a function of its own, gated by value in `region::tests`.
+const fn publish_wait_ladder<P: RegionPolicy, const P0: bool>() -> Ladder {
+    if P0 { P::ORCH_WAIT } else { P::HELPER_WAIT }
+}
+
+/// A finisher's wait for a publish value other than `last`, on [`publish_wait_ladder`]
+/// (`P::ORCH_WAIT` for participant 0, `P::HELPER_WAIT` for a helper); `None` when `poison` is set
+/// first. Disarmed: no census.
 #[inline]
 fn wait_publish_fin<W: RegionWords, P: RegionPolicy, const P0: bool>(
     w: &W,
@@ -1706,8 +1716,8 @@ fn wait_publish_fin<W: RegionWords, P: RegionPolicy, const P0: bool>(
     if v != last {
         return Some(v);
     }
-    let ladder = const { if P0 { P::ORCH_WAIT } else { P::HELPER_WAIT } };
-    let clock = const { needs_clock(if P0 { P::ORCH_WAIT } else { P::HELPER_WAIT }, P::BOUND_NS, false) };
+    let ladder = const { publish_wait_ladder::<P, P0>() };
+    let clock = const { needs_clock(publish_wait_ladder::<P, P0>(), P::BOUND_NS, false) };
     let poison = w.poison();
     let mut waiter = Waiter::start(clock);
     loop {
@@ -2030,6 +2040,7 @@ mod tests {
 
     use super::{
         Advance, Ladder, RegionPolicy, SchedItem, V2Policy, WithAdvance, claim_lines, hint_of, link_hints,
+        publish_wait_ladder,
     };
 
     /// A home-lines policy with every other axis and ladder off v2's, for (u1).
@@ -2080,6 +2091,26 @@ mod tests {
         assert_eq!(<WithAdvance<V2Policy, true>>::ADVANCE, Advance::Finisher);
         assert_eq!(<WithAdvance<WithAdvance<V2Policy, true>, false>>::ADVANCE, Advance::Finisher);
         assert_eq!(<WithAdvance<HomeLines, true>>::ADVANCE, Advance::Finisher);
+    }
+
+    /// (W-A) A finisher waits for a publish on its role's ladder: participant 0 on `ORCH_WAIT`, a
+    /// helper on `HELPER_WAIT`. Both policies here have two different ladders, so a swap, or one
+    /// ladder for both roles, is red. No run can see this choice (the finisher's wait is disarmed;
+    /// loom models PAUSE and yield alike), so this value check is its gate.
+    #[test]
+    fn a_finisher_waits_for_a_publish_on_its_roles_ladder() {
+        fn roles<P: RegionPolicy>(what: &str) {
+            assert_ne!(P::ORCH_WAIT, P::HELPER_WAIT, "{what}: the test needs two different ladders");
+            assert_eq!(publish_wait_ladder::<P, true>(), P::ORCH_WAIT, "{what}: participant 0's ladder");
+            assert_eq!(publish_wait_ladder::<P, false>(), P::HELPER_WAIT, "{what}: a helper's ladder");
+        }
+        roles::<WithAdvance<V2Policy, true>>("WithAdvance<V2Policy, true>");
+        roles::<WithAdvance<HomeLines, true>>("WithAdvance<HomeLines, true>");
+        assert_eq!(publish_wait_ladder::<WithAdvance<V2Policy, true>, true>(), Ladder::PureSpin);
+        assert_eq!(
+            publish_wait_ladder::<WithAdvance<V2Policy, true>, false>(),
+            Ladder::PauseThenYield { pauses: 5 }
+        );
     }
 
     /// `hint_of` is the epoch of the earlier item `prev_off − 1` when `1 ≤ prev_off ≤ i`, and 0 (no
