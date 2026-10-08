@@ -371,6 +371,38 @@ instructions, plus local labels, constant-pool labels and every memory displacem
 does not hide a real change and a crate built from another directory does not invent one. It writes a raw and a
 normalised diff per function and attributes nothing.
 
+**Re-taken after CR-F0** (the third trunk sync, `44f7870b`: `integ/unified` `b552824f`, whose `boyko_threadpool`
+region gained the advance policy axis, the role entries `orchestrate` / `run_finisher` and `RegionReport` +16 B).
+PARENT = `git merge-base HEAD integ/unified` = `b552824f`, TIP = `44f7870b` (tree `8ec09dfc`), both exported and
+built as above, each with its own target dir.
+
+- **PARENT is byte-identical to the C6 receipt's PARENT** (`775ea8c1`; md5 `248ce749…` both): between the two the
+  trunk changed `boyko_threadpool` only, and the trunk's physics never calls the region.
+- **W1 holds, every hunk in a declared class.** The symbol census of `solve_colored_inner` (280 → 269 references)
+  and `solve_all_colors` (29 → 12) equals C6's line for line, and so does `solve_all_colors`' normalised diff. In
+  `solve_colored_inner`'s diff, 8 TIP lines differ from C6's, inside hunks C6 already had, and all of them come
+  from `RegionReport`'s +16 B in the tuple `solve_region` returns: the frame +64 B (`subq $2744` → `$2808`), four
+  frame-relative array addresses +32 (`addq $1600` / `$1752` → `$1632` / `$1784`, off the realigned frame base
+  `%rbx`; they are immediates, which the normaliser leaves as they are) — class (g); and the copy of the returned
+  value after the `solve_region` call, which W1 never takes (`vmovups` ↔ `vmovaps` and the order of two moves) —
+  class (a). Against C6's own TIP, `solve_all_colors`, `warm_apply_scalar` and `warm_apply_avx2` are identical
+  after normalisation.
+- **Disarmed: PASS**, with C6's counts: from ARMED = false, 24 functions reachable and 0 clock reads; from
+  ARMED = true, 28 reachable and 11 clock reads; `run_block`, 14 reachable and 0 clock reads; `solve_region` calls
+  one ARMED = false and one ARMED = true orchestrator; the same 2 runtime-gated profiler sites. CR-F0's role entries
+  are inlined into `solve_region` as `PoolInner::region` was, with `run_orchestrator` still out of line. The one
+  symbol `solve_region` gained (175 → 179 references) is `Participant::record_orchestrated_advances`
+  (`#[inline(never)]`, 23 instructions, no clock read, inside the walk). Red-first: with `ARMED = true` on the
+  disarmed route, the receipt is RED (1 and 4). The export was reverted by content (md5 equal), and its rebuild
+  reproduces the TIP's asm byte for byte.
+- **A tool correction.** `fnasm.py` ran its `anon.<hash>.<n>` rule after the displacement rule. That rule had
+  already rewritten the `.<n>(%rip)` of every panic-location operand, so the hash stayed and the line showed as
+  changed whenever the two builds' `anon` hashes differ, as they did between every PARENT and TIP so far (C6's
+  included; the crate disambiguators were the same in all four builds here). The `anon` rule now runs first. On
+  C6's own inputs, `solve_colored_inner`'s diff becomes 130 hunks and 8,869 lines instead of 124 and 8,973; the
+  symbol census, which folds `anon.*`, is unaffected. The C6-era tool is kept as `fnasm_c6.py`. The logs are under
+  `D:/tmp/phys-orch/sr-b/logs/sync3/cg/`.
+
 ## 3. Pins
 
 Moved on purpose, all at the flip, each by `01-DESIGN.md` §6.10's counter rule: §2.8's table. Byte-identical on
@@ -397,7 +429,8 @@ the helper PAUSE-only vs PAUSE+yield axis of ruling Q6), SR-JOLT. Rows: `scratch
 
 Written for the tip of `u/phys-sr-b` after the flip; no row passes `--sr` (the flag is retired). TIP = the
 `u/phys-sr-b` tip, PARENT = `git merge-base u/phys-sr-b integ/unified` at prep (the trunk SR last synced to: S5's
-`775ea8c1`, then dyn-scenes' `b46cf0ec`). The poses must also equal the trunk's fixtures, which the pre-flight checks.
+`775ea8c1`, then dyn-scenes' `b46cf0ec`, FM C0's `ea4daab0` and CR-F0's `b552824f`; the region SR runs is CR-F0's,
+under `V2Policy`). The poses must also equal the trunk's fixtures, which the pre-flight checks.
 
 **Pre-flight, untimed** (the lane ran every row at C6; the window prep re-runs them on its binaries):
 1. The gate scripts are copies of the committed `docs/measurements/2026-09-30-v2-speculative/gate/**` with
