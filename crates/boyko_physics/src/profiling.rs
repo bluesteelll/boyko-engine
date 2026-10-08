@@ -228,6 +228,13 @@
 //! the calling thread each time it opens ARMED. It demonstrates a span gate's resolution: the
 //! smallest injected cost a window reads back. A disarmed zone never spins, because the check sits
 //! in the zone's admitted arm, so a build whose tier folds the zone folds the canary with it.
+//!
+//! Each zone of [`CANARY_ZONES`] has one holder ([`canary_holder`]): the colored solver holds the
+//! solve build's five, and the tree broadphase holds [`PHYS_BP_QUERY`] (S5 C3b,
+//! [`BroadphaseTree::set_zone_canary`](crate::broadphase_tree::BroadphaseTree::set_zone_canary)),
+//! which spins on the thread that runs the tree's step, once per opening: S5's dispatched query
+//! runs inside the zone and opens none of its own. Each holder refuses the other's zones, so a
+//! canary is never set where it cannot run.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -472,9 +479,45 @@ pub const fn hist_bin(slots: u32) -> Option<usize> {
 }
 
 /// The zones the in-zone canary may sit in (module docs, "The in-zone canary"): the solve build
-/// and its four sub-zones, the spans a W8S span gate reads.
-pub static CANARY_ZONES: [&ZoneHandle; 5] =
-    [&PHYS_SOLVE_BUILD, &PHYS_SB_BODIES, &PHYS_SB_PA, &PHYS_SB_PB, &PHYS_SB_PC];
+/// and its four sub-zones, the spans a W8S span gate reads, and the tree broadphase's query, S5's
+/// span (C3b). [`canary_holder`] names the instrument that holds each.
+pub static CANARY_ZONES: [&ZoneHandle; 6] =
+    [&PHYS_SOLVE_BUILD, &PHYS_SB_BODIES, &PHYS_SB_PA, &PHYS_SB_PB, &PHYS_SB_PC, &PHYS_BP_QUERY];
+
+/// The holder of each of [`CANARY_ZONES`], index for index.
+const CANARY_HOLDERS: [CanaryHolder; 6] = [
+    CanaryHolder::Solver,
+    CanaryHolder::Solver,
+    CanaryHolder::Solver,
+    CanaryHolder::Solver,
+    CanaryHolder::Solver,
+    CanaryHolder::Tree,
+];
+
+/// Which instrument holds the in-zone canary of a zone of [`CANARY_ZONES`] (module docs, "The
+/// in-zone canary"): the one whose code opens the zone, and the only one that accepts it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanaryHolder {
+    /// The colored solver
+    /// ([`set_zone_canary`](crate::solver::ColoredSoftStepSolver::set_zone_canary)):
+    /// [`PHYS_SOLVE_BUILD`] and its four `phys_sb_*` sub-zones.
+    Solver,
+    /// The tree broadphase
+    /// ([`set_zone_canary`](crate::broadphase_tree::BroadphaseTree::set_zone_canary)):
+    /// [`PHYS_BP_QUERY`] (S5 C3b).
+    Tree,
+}
+
+/// The holder of `zone`'s canary, or `None` when `zone` is not one of [`CANARY_ZONES`]. The
+/// parity runner routes `--canary-zone` by it.
+pub fn canary_holder(zone: &ZoneHandle) -> Option<CanaryHolder> {
+    canary_index(zone).map(|index| CANARY_HOLDERS[index])
+}
+
+/// `zone`'s index in [`CANARY_ZONES`].
+fn canary_index(zone: &ZoneHandle) -> Option<usize> {
+    CANARY_ZONES.iter().position(|&h| std::ptr::eq(h, zone))
+}
 
 /// Whether this build compiles the physics zones at all. Every zone is `Deep`, so one `const`
 /// answers for all sixty-seven; `false` under a profile whose tier ceiling is below `Deep`, where
@@ -784,10 +827,16 @@ pub(crate) struct ZoneCanary {
 }
 
 impl ZoneCanary {
-    /// The canary on `zone` for `ns` nanoseconds, or `None` when `zone` is not one of
-    /// [`CANARY_ZONES`]. `ns == 0` is no canary.
+    /// The colored solver's canary: [`held_by`](Self::held_by) [`CanaryHolder::Solver`].
     pub(crate) fn new(zone: &ZoneHandle, ns: u64) -> Option<Self> {
-        let index = CANARY_ZONES.iter().position(|&h| std::ptr::eq(h, zone))?;
+        Self::held_by(CanaryHolder::Solver, zone, ns)
+    }
+
+    /// `holder`'s canary on `zone` for `ns` nanoseconds, or `None` when `zone` is not one of
+    /// [`CANARY_ZONES`] or another instrument holds it ([`canary_holder`]). `ns == 0` is no
+    /// canary.
+    pub(crate) fn held_by(holder: CanaryHolder, zone: &ZoneHandle, ns: u64) -> Option<Self> {
+        let index = canary_index(zone).filter(|&i| CANARY_HOLDERS[i] == holder)?;
         Some(if ns == 0 {
             Self::default()
         } else {

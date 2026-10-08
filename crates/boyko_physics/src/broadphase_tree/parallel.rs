@@ -63,7 +63,8 @@
 //!   cells. The per-chunk slots are function-local arrays, and the stream grows only when a region
 //!   total passes every earlier step's length.
 //! * **Instruments:** no zone opens inside a task; the dispatched step stays inside
-//!   `phys_bp_query`.
+//!   `phys_bp_query`, so its in-zone canary (C3b) spins once per step, on the calling thread,
+//!   before the dispatch.
 
 use core::mem::MaybeUninit;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};

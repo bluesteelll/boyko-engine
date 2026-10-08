@@ -543,6 +543,17 @@ order. It stays its own stage.
 
 ### 6.5 S5: the parallel tree query
 
+**As built, C3b (`u/phys-s5-c3b`; ruling 19 Q4 (a), no waiver).** `phys_bp_query` is the sixth of
+`profiling::CANARY_ZONES`, and the tree broadphase holds its canary (`profiling::canary_holder`,
+`BroadphaseTree::set_zone_canary`), checked in the zone's admitted arm in `BroadphaseTree::run`. It spins once
+per armed opening on the thread that runs the tree's step; S5's dispatched query runs inside the zone and opens
+none of its own. Each holder refuses the other's zones. The parity runner routes `--canary-zone phys_bp_query`
+to the tree, with the solver canary's span and spin receipts and without `u`'s bounds (the zone is outside the
+solve), and refuses it on a row that does not resolve to the tree. Value-neutral; the disarmed path runs no
+instruction of the canary (release asm, both `run` monomorphs). Gate: `tests/profiling_bp_query_canary.rs`.
+Until S5's flip, `parallel_tree_query` is off by default, so a window row's `on` arm spells
+`--parallel-tree-query on`.
+
 This is the broadphase rev 2 D6 / C2 design: count per row, prefix sum, emit, in the shape of the Grid's
 `build_parallel`. Its bit identity is argued in the design and not re-derived here.
 

@@ -135,6 +135,7 @@
 
 use core::mem::MaybeUninit;
 
+use boyko_diag::profiling_abi::ZoneHandle;
 use boyko_diag::zone;
 use boyko_ecs::ecs::core::component::scratch::{ScratchBuildView, ScratchColumn};
 use boyko_macros::Resource;
@@ -142,8 +143,8 @@ use boyko_macros::Resource;
 use crate::manifold::BodyIndex;
 use crate::math::Vec3;
 use crate::profiling::{
-    PHYS_BP_ASSEMBLE, PHYS_BP_BUILD, PHYS_BP_MEMBERS, PHYS_BP_QUERIED, PHYS_BP_QUERY,
-    PHYS_BP_REBUILDS, PHYS_BP_VERIFY, counter,
+    CanaryHolder, PHYS_BP_ASSEMBLE, PHYS_BP_BUILD, PHYS_BP_MEMBERS, PHYS_BP_QUERIED,
+    PHYS_BP_QUERY, PHYS_BP_REBUILDS, PHYS_BP_VERIFY, ZoneCanary, counter,
 };
 use crate::resources::{BodyState, ContactPairs};
 use crate::row_identity::{NO_ROW, RemapCursor, RowIdentity, RowRemap};
@@ -506,6 +507,9 @@ pub struct BroadphaseTree {
     query_dispatches: u64,
     /// Active leaf nodes the calling thread answered after a dispatched step's join (S5's tail).
     query_tail_leaves: u64,
+    /// S5 C3b: the in-zone canary on `phys_bp_query`
+    /// ([`set_zone_canary`](Self::set_zone_canary)); spins nowhere by default.
+    canary: ZoneCanary,
     /// S5's unit-gate knobs and last-dispatch witness (test builds only).
     #[cfg(test)]
     s5_hooks: parallel::TestHooks,
@@ -576,6 +580,7 @@ impl BroadphaseTree {
             hist_entries: 0,
             query_dispatches: 0,
             query_tail_leaves: 0,
+            canary: ZoneCanary::default(),
             #[cfg(test)]
             s5_hooks: parallel::TestHooks::default(),
             #[cfg(test)]
@@ -666,6 +671,33 @@ impl BroadphaseTree {
     #[inline]
     pub fn query_tail_leaves(&self) -> u64 {
         self.query_tail_leaves
+    }
+
+    /// S5 C3b: the in-zone canary on the tree's query (the profiling module's docs, "The in-zone
+    /// canary"): from the next tree-path step on, `zone` busy-waits `ns` nanoseconds on the
+    /// thread that runs the step each time it opens armed — once per step, a dispatched query
+    /// included, which runs inside the zone. `zone` must be the tree's one of
+    /// [`crate::profiling::CANARY_ZONES`], `phys_bp_query`
+    /// ([`crate::profiling::canary_holder`]); any other is refused with `false` and changes
+    /// nothing. `ns == 0` removes the canary. A measurement instrument for the parity runner, not
+    /// an engine feature: it changes no value, and a disarmed zone never spins.
+    #[doc(hidden)]
+    pub fn set_zone_canary(&mut self, zone: &'static ZoneHandle, ns: u64) -> bool {
+        match ZoneCanary::held_by(CanaryHolder::Tree, zone, ns) {
+            Some(canary) => {
+                self.canary = canary;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// S5 C3b: the in-zone canary's busy-waits since [`set_zone_canary`](Self::set_zone_canary)
+    /// — one per armed opening of `phys_bp_query`. The parity runner compares it with the zone's
+    /// sample count, so a canary that never ran cannot pass as a query that was slow anyway.
+    #[doc(hidden)]
+    pub fn zone_canary_spins(&self) -> u64 {
+        self.canary.spins()
     }
 
     /// The leaf-list collection cap: `kernel::LEAF_LIST_CAP`, or the fallback gate's lowered
@@ -807,7 +839,8 @@ impl BroadphaseTree {
             self.build_active(n);
         }
         let queried = {
-            let _zone = zone!(PHYS_BP_QUERY);
+            let zone = zone!(PHYS_BP_QUERY);
+            self.canary.at(&PHYS_BP_QUERY, zone.is_some());
             self.query_all(n)
         };
         let entries = {

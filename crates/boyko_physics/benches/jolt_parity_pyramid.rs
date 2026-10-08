@@ -227,6 +227,15 @@
 //! the spans around it and the solve span alike — so `--canary-zone phys_sb_pc` at W ≥ 2 is the
 //! red-first witness that a region step's fill is subtracted from `u`.
 //!
+//! **`--canary-zone phys_bp_query` (S5 C3b)** is routed to the tree broadphase by the zone's
+//! holder (`boyko_physics::profiling::canary_holder`): `BroadphaseTree::set_zone_canary`, which
+//! spins N ns on the thread that runs the tree's step, once per armed opening, a dispatched
+//! query (`--parallel-tree-query on`) included. Refused (exit 2) without `--arm-profiler`, and on
+//! a row that does not resolve to the tree broadphase under Manual selection, where the zone never
+//! opens; any solver runs it. The span and spin receipts are the solver's, the spins read from
+//! `BroadphaseTree::zone_canary_spins`. The `u` bounds are not applied: the zone is the
+//! broadphase system's, outside the solve, so `u` neither holds nor subtracts it.
+//!
 //! # The query kernel (`--bp-kernel K`)
 //!
 //! Selects the tree broadphase's query kernel inside one binary (lever ruling 2026-09-24,
@@ -339,8 +348,9 @@
 //! --arm-profiler               the armed profile run
 //! --canary-frac F              with --canary-ref-ns T: the canary spins F*T ns (F > 0)
 //! --canary-ref-ns T
-//! --canary-zone Z              with --canary-ns N and --arm-profiler: zone Z (phys_solve_build
-//! --canary-ns N                or a phys_sb_* sub-zone) spins N ns each armed opening (W8S)
+//! --canary-zone Z              with --canary-ns N and --arm-profiler: zone Z (phys_solve_build,
+//! --canary-ns N                a phys_sb_* sub-zone, or phys_bp_query on the tree broadphase)
+//!                              spins N ns each armed opening (W8S; S5 C3b)
 //! --bp-kernel rowwalk|leaflist
 //!                              select the tree query kernel (with --broadphase tree); unset, the
 //!                              tree's default
@@ -544,7 +554,7 @@ use boyko_physics::profiling::{
     PHYS_SLEEP_BEGIN, PHYS_SLEEP_CLASSIFY, PHYS_SLEEP_END, PHYS_SLEEP_FREEZE, PHYS_SLEEP_HELD,
     PHYS_SLOTS_NARROW, PHYS_SLOTS_WIDE, PHYS_SOLVE_BUILD, PHYS_STORE, PHYS_WARM_APPLY,
     PHYS_WRITE_BACK, SETUP_MAX_TASKS, SPAN_ZONE_COUNT, SPAN_ZONES, WIDE_COLOR_MIN_SLOTS,
-    ZONES_COMPILED, hist_bin,
+    ZONES_COMPILED, CanaryHolder, canary_holder, hist_bin,
 };
 use boyko_physics::resources::{
     BroadphaseKind, BroadphaseSelectMode, ConstraintGraph, ContactPairs, IslandSleep, Manifolds,
@@ -1171,10 +1181,10 @@ fn validate(a: &Args) -> Result<(), String> {
     match (&a.canary_zone, a.canary_zone_ns) {
         (None, None) => {}
         (Some(z), Some(n)) => {
-            if canary_zone(z).is_none() {
+            let Some(holder) = canary_zone(z).and_then(canary_holder) else {
                 let names: Vec<&str> = CANARY_ZONES.iter().map(|h| h.desc.name).collect();
                 return Err(format!("--canary-zone {z:?}: expected one of {names:?}"));
-            }
+            };
             if n == 0 {
                 return Err("--canary-ns must be > 0".into());
             }
@@ -1185,8 +1195,27 @@ fn validate(a: &Args) -> Result<(), String> {
                         .into(),
                 );
             }
-            if a.solver != SolverKind::Colored {
-                return Err("--canary-zone names a zone of the colored solve".into());
+            match holder {
+                CanaryHolder::Solver => {
+                    if a.solver != SolverKind::Colored {
+                        return Err(format!("--canary-zone {z:?} names a zone of the colored solve"));
+                    }
+                }
+                CanaryHolder::Tree => {
+                    // The configuration the row will run, resolved as `build` resolves it.
+                    let mut cfg = PhysicsConfig::default();
+                    configure(&mut cfg, a);
+                    if cfg.broadphase != BroadphaseKind::Tree
+                        || cfg.broadphase_select != BroadphaseSelectMode::Manual
+                    {
+                        return Err(format!(
+                            "--canary-zone {z:?} names the tree broadphase's query, which opens only \
+                             under the tree broadphase with Manual selection; this row resolves to \
+                             {:?} / {:?}, so the canary would never run",
+                            cfg.broadphase, cfg.broadphase_select
+                        ));
+                    }
+                }
             }
         }
         _ => return Err("--canary-zone and --canary-ns go together".into()),
@@ -2469,13 +2498,18 @@ fn run(args: &Args) -> ExitCode {
     let traffic_before = ring_traffic();
     let mut rig = build(args, canary_ns);
     let colored = args.solver == SolverKind::Colored;
-    // W8S: the in-zone canary (validated: armed, colored, a known zone).
+    // W8S: the in-zone canary (validated: armed, a known zone, its holder's configuration), set
+    // on the zone's holder: the colored solver, or for `phys_bp_query` the tree (S5 C3b).
     let zone_canary = args.canary_zone.as_deref().and_then(canary_zone).zip(args.canary_zone_ns);
+    let canary_on_tree =
+        zone_canary.and_then(|(zone, _)| canary_holder(zone)) == Some(CanaryHolder::Tree);
     if let Some((zone, ns)) = zone_canary {
-        assert!(
-            rig.world.resource_mut::<ColoredSoftStepSolver>().set_zone_canary(zone, ns),
-            "invariant: validate() admitted only a zone of CANARY_ZONES"
-        );
+        let set = if canary_on_tree {
+            rig.world.resource_mut::<BroadphaseTree>().set_zone_canary(zone, ns)
+        } else {
+            rig.world.resource_mut::<ColoredSoftStepSolver>().set_zone_canary(zone, ns)
+        };
+        assert!(set, "invariant: validate() admitted only a zone of CANARY_ZONES, set on its holder");
     }
     // `--bp-kernel`: the tree is inserted at plugin setup, so it is here before step 0.
     if let Some(kernel) = args.bp_kernel {
@@ -2729,6 +2763,8 @@ fn run(args: &Args) -> ExitCode {
             // the spin, and `u` stays above −spin / 2, which a zone counted twice (the spin again,
             // at least) cannot. Load cannot red a correct row: a preemption lengthens the spans
             // around it and the solve span alike, so the spin stays inside its span and `u` ≥ 0.
+            // The tree's `phys_bp_query` (S5 C3b) is outside the solve, so `u`'s bounds do not
+            // apply to it.
             if let Some((zone, _)) = zone_canary {
                 canary_openings += counts[span(zone)];
             }
@@ -2737,7 +2773,7 @@ fn run(args: &Args) -> ExitCode {
             {
                 let (k, total) = (counts[span(zone)], ns(values[span(zone)]));
                 let spin = (canary * k) as f64;
-                let u = zones.solve.map(|s| ns(values[s]) - in_solve);
+                let u = zones.solve.filter(|_| !canary_on_tree).map(|s| ns(values[s]) - in_solve);
                 if k > 0 && total < spin {
                     verdict = Err(format!(
                         "the in-zone canary: `{}` read {total:.0} ns over {k} spans, below {canary} ns each",
@@ -2835,9 +2871,14 @@ fn run(args: &Args) -> ExitCode {
             });
         }
     }
-    // W8S: the in-zone canary spun once per armed opening of its zone, and at least once.
+    // W8S: the in-zone canary spun once per armed opening of its zone, and at least once; its
+    // holder counted the spins.
     if let Some((zone, _)) = zone_canary {
-        let spins = rig.world.resource::<ColoredSoftStepSolver>().zone_canary_spins();
+        let spins = if canary_on_tree {
+            rig.world.resource::<BroadphaseTree>().zone_canary_spins()
+        } else {
+            rig.world.resource::<ColoredSoftStepSolver>().zone_canary_spins()
+        };
         if spins != canary_openings || spins == 0 {
             void_steps += 1;
             first_void.get_or_insert_with(|| {
