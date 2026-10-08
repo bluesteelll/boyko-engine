@@ -5,22 +5,40 @@
 # G3's sleeping-on rows run under --sleep-skip {unset, off, sets} x --broadphase {unset, tree,
 # grid} in both arms. G4: window 6's 1000/800-step sleeping rows (item 1) in both arms and every
 # sleep-skip mode, and its Off' rows (explicit --contact-reuse on), which must not move.
-# usage: pose_gates_sync.sh <exe> <outdir>
+# usage: pose_gates_sync.sh [--root DIR] <exe> <outdir>   (fixtures from ROOT: the gate-root block)
 # Exit (docs/physics/perf-campaign/GATE-KIT.md): 0 = every row PASS, all EXPECT_RUNS rows ran and
 # both negative controls exited 4; 1 = red; 2 = could not run (usage, no exe, a fixture missing),
 # decided before the first row.
 set -u
 EXPECT_RUNS=264 # 2 W x (2 arms x (G1 4 + G2 5 + G3 1 + 3 x 3 x 5 + G4 6) + G4p 6 + G4f 4)
 ME=$(basename "$0")
-if [ $# -ne 2 ]; then echo "usage: $ME <exe> <outdir>" >&2; exit 2; fi
+# gate-root BEGIN (identical text in every gate script that reads fixtures; GATE-KIT.md, "Root rule")
+# ROOT = DIR when `--root DIR` comes first, else the git toplevel of this script's own checkout
+# (GIT_DIR and GIT_WORK_TREE ignored); in the mixed form D:/..., which the native runner reads.
+if [ "${1:-}" = --root ]; then
+  if [ $# -lt 2 ]; then echo "$(basename "$0"): --root needs a directory" >&2; exit 2; fi
+  ROOT=$2
+  shift 2
+else
+  HERE=$(cd "$(dirname "$0")" && pwd)
+  if command -v cygpath > /dev/null 2>&1; then HERE=$(cygpath -m "$HERE"); fi
+  if ! ROOT=$(unset GIT_DIR GIT_WORK_TREE; git -C "$HERE" rev-parse --show-toplevel 2> /dev/null); then
+    echo "$(basename "$0"): cannot resolve the repo root from $0; pass --root DIR" >&2; exit 2
+  fi
+fi
+if command -v cygpath > /dev/null 2>&1; then ROOT=$(cygpath -m "$ROOT" 2> /dev/null); fi
+case $ROOT in *' '*) echo "$(basename "$0"): the root '$ROOT' contains a space" >&2; exit 2 ;; esac
+if [ ! -d "$ROOT/docs/measurements" ]; then echo "$(basename "$0"): '$ROOT' is not a boyko-engine checkout (no docs/measurements)" >&2; exit 2; fi
+# gate-root END
+if [ $# -ne 2 ]; then echo "usage: $ME [--root DIR] <exe> <outdir>" >&2; exit 2; fi
 EXE=$1
 OUT=$2
 SON="--sleeping on"
-L9=D:/wt/merge/docs/measurements/2026-09-23-l9-contact-reuse/fixtures
-L9C4=D:/wt/merge/docs/measurements/2026-09-23-l9-contact-reuse/fixtures-c4
-L10=D:/wt/merge/docs/measurements/2026-09-23-l10-sleeping/fixtures
-L10OFF=D:/wt/merge/docs/measurements/2026-09-23-l10-sleeping/fixtures-reuse-off
-W6=D:/wt/merge/docs/measurements/2026-09-24-physics-window6/gate/fixtures
+L9=$ROOT/docs/measurements/2026-09-23-l9-contact-reuse/fixtures
+L9C4=$ROOT/docs/measurements/2026-09-23-l9-contact-reuse/fixtures-c4
+L10=$ROOT/docs/measurements/2026-09-23-l10-sleeping/fixtures
+L10OFF=$ROOT/docs/measurements/2026-09-23-l10-sleeping/fixtures-reuse-off
+W6=$ROOT/docs/measurements/2026-09-24-physics-window6/gate/fixtures
 if [ ! -f "$EXE" ]; then echo "$ME: no runner exe at $EXE" >&2; exit 2; fi
 missing=0
 need() { [ -f "$1" ] || { echo "$ME: missing fixture $1" >&2; missing=1; }; }

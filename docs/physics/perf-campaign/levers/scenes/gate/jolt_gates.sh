@@ -2,6 +2,7 @@
 # Dynamic parity scenes, C3: Jolt 5.6's dyn build (the parity patch v2), structural only - the timing
 # column of Jolt's stat line and of -f's CSV is never read.
 # usage: jolt_gates.sh <PerformanceTest.exe> <outdir> [<repo> [<9b stdout with the v1 banner>]]
+#   <repo> (whose patch G1 applies) defaults to the git toplevel of this script's own checkout.
 #   G1 the repo patch applies to clean v5.6.0 sources (e77f175 from D:/tmp/jolt/JoltPhysics)
 #   G3 the 9b build is untouched: 918fd2b7...
 #   G4 J-T on this exe: hash 0xb8522b4e3fc62cfe at -t=1 and -t=8, the v1 banner byte-identical to 9b's,
@@ -24,9 +25,17 @@ set -u
 if [ $# -lt 2 ] || [ $# -gt 4 ]; then echo "usage: jolt_gates.sh <PerformanceTest.exe> <outdir> [<repo> [<9b stdout with the v1 banner>]]" >&2; exit 2; fi
 EXE=$1
 OUT=$2
-REPO=${3:-D:/wt/merge}
-BANNER9B=${4:-D:/tmp/phys-orch/win9b/raw/V2-AB-p0_130001/001_r0_V2-jolt56_j56_W16/stdout.txt}
 G=$(cd "$(dirname "$0")" && pwd)
+if [ $# -ge 3 ]; then
+  REPO=$3
+else
+  HERE=$G
+  if command -v cygpath > /dev/null 2>&1; then HERE=$(cygpath -m "$HERE"); fi
+  if ! REPO=$(unset GIT_DIR GIT_WORK_TREE; git -C "$HERE" rev-parse --show-toplevel 2> /dev/null); then
+    echo "jolt_gates.sh: cannot resolve the repo root from $0; pass <repo> as the third argument" >&2; exit 2
+  fi
+fi
+BANNER9B=${4:-D:/tmp/phys-orch/win9b/raw/V2-AB-p0_130001/001_r0_V2-jolt56_j56_W16/stdout.txt}
 PATCH=$REPO/crates/boyko_physics/benches/jolt_parity/pyramid_scene.patch
 SRC=${JOLT_SRC:-D:/tmp/jolt/wt-v5.6.0-dyn/PerformanceTest/PerformanceTest.cpp}
 EXPECT_CHECKS=9 # G1 1 + G3 1 + G4 3 x 2 + G6 1, then 11 per program

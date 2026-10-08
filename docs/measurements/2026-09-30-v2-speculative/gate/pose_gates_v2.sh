@@ -3,20 +3,38 @@
 # scripts make_v2_scripts.py writes from l10/. Want: 264/264, both negatives exit 4, 26/26, 17/17
 # (the rest pile's reuse-on `Sets` rows exited VOID on the runner's L9 probe until its triage-r1
 # fix, which exempts a probe window that collided no box pair; see the README).
-# usage: pose_gates_v2.sh <exe> <outdir>
+# usage: pose_gates_v2.sh [--root DIR] <exe> <outdir>   (ROOT from the gate-root block, passed to every child)
 # Exit (docs/physics/perf-campaign/GATE-KIT.md): 2 if <exe> is missing or a child could not run
 # (exit 2; each child decides that before its first row, the other children still run); else 1 if
 # a child is red or OUT/all.txt lacks one of the five green lines in its child's section; else 0.
 # ALL_DONE is always the last line of all.txt: the wrapper ran to its end, not that it passed.
 G=$(cd "$(dirname "$0")" && pwd)
-if [ $# -ne 2 ]; then echo "usage: pose_gates_v2.sh <exe> <outdir>" >&2; exit 2; fi
+# gate-root BEGIN (identical text in every gate script that reads fixtures; GATE-KIT.md, "Root rule")
+# ROOT = DIR when `--root DIR` comes first, else the git toplevel of this script's own checkout
+# (GIT_DIR and GIT_WORK_TREE ignored); in the mixed form D:/..., which the native runner reads.
+if [ "${1:-}" = --root ]; then
+  if [ $# -lt 2 ]; then echo "$(basename "$0"): --root needs a directory" >&2; exit 2; fi
+  ROOT=$2
+  shift 2
+else
+  HERE=$(cd "$(dirname "$0")" && pwd)
+  if command -v cygpath > /dev/null 2>&1; then HERE=$(cygpath -m "$HERE"); fi
+  if ! ROOT=$(unset GIT_DIR GIT_WORK_TREE; git -C "$HERE" rev-parse --show-toplevel 2> /dev/null); then
+    echo "$(basename "$0"): cannot resolve the repo root from $0; pass --root DIR" >&2; exit 2
+  fi
+fi
+if command -v cygpath > /dev/null 2>&1; then ROOT=$(cygpath -m "$ROOT" 2> /dev/null); fi
+case $ROOT in *' '*) echo "$(basename "$0"): the root '$ROOT' contains a space" >&2; exit 2 ;; esac
+if [ ! -d "$ROOT/docs/measurements" ]; then echo "$(basename "$0"): '$ROOT' is not a boyko-engine checkout (no docs/measurements)" >&2; exit 2; fi
+# gate-root END
+if [ $# -ne 2 ]; then echo "usage: pose_gates_v2.sh [--root DIR] <exe> <outdir>" >&2; exit 2; fi
 EXE=$1
 OUT=$2
 if [ ! -f "$EXE" ]; then echo "pose_gates_v2.sh: no runner exe at $EXE" >&2; exit 2; fi
 mkdir -p "$OUT"
-echo "== pose gates (sync, V2 fixtures)" > "$OUT/all.txt"; bash "$G/pose_gates_sync_v2.sh" "$EXE" "$OUT/pose" >> "$OUT/all.txt" 2>&1; rc_sync=$?
-echo "== runner checks (c3c, V2 fixtures)" >> "$OUT/all.txt"; bash "$G/runner_checks_c3c_v2.sh" "$EXE" "$OUT/runner" >> "$OUT/all.txt" 2>&1; rc_c3c=$?
-echo "== runner checks (reuse-off, V2 fixtures)" >> "$OUT/all.txt"; bash "$G/runner_checks_off_v2.sh" "$EXE" "$OUT/runner_off" >> "$OUT/all.txt" 2>&1; rc_off=$?
+echo "== pose gates (sync, V2 fixtures)" > "$OUT/all.txt"; bash "$G/pose_gates_sync_v2.sh" --root "$ROOT" "$EXE" "$OUT/pose" >> "$OUT/all.txt" 2>&1; rc_sync=$?
+echo "== runner checks (c3c, V2 fixtures)" >> "$OUT/all.txt"; bash "$G/runner_checks_c3c_v2.sh" --root "$ROOT" "$EXE" "$OUT/runner" >> "$OUT/all.txt" 2>&1; rc_c3c=$?
+echo "== runner checks (reuse-off, V2 fixtures)" >> "$OUT/all.txt"; bash "$G/runner_checks_off_v2.sh" --root "$ROOT" "$EXE" "$OUT/runner_off" >> "$OUT/all.txt" 2>&1; rc_off=$?
 echo ALL_DONE >> "$OUT/all.txt"
 # The verifier: each green line, whole and fixed, inside the section its child wrote (so one child
 # cannot supply another's tally).
