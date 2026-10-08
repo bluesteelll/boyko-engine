@@ -288,7 +288,7 @@
         let graph = build_graph(&bodies, &manifolds);
 
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&bodies, &[], false);
+        solver.build_bodies(&bodies, &[]);
         solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
         let cols = &solver.columns;
 
@@ -451,7 +451,7 @@
         proptest!(ProptestConfig::with_cases(400), |(seed in any::<u64>())| {
             let (bodies, manifolds, graph) = random_scene(seed);
             let mut solver = ColoredSoftStepSolver::default();
-            solver.build_bodies(&bodies, &[], false);
+            solver.build_bodies(&bodies, &[]);
             solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
             let cols = &solver.columns;
 
@@ -935,14 +935,27 @@
         run_dense_in_pool_counted(n, steps, parallel_solve, workers).0
     }
 
-    /// [`run_dense_in_pool`], and the steps whose solve setup opened its scope (S4's
-    /// `setup_dispatches`), so a {1, N} gate can show it covered the parallel setup.
+    /// [`run_dense_in_pool`], and the steps whose substeps ran as one solve region (SR's
+    /// `region_dispatches`), so a {1, N} gate can show it covered the region.
     #[cfg(not(miri))]
     fn run_dense_in_pool_counted(
         n: usize,
         steps: usize,
         parallel_solve: bool,
         workers: usize,
+    ) -> (Vec<u32>, u64) {
+        run_dense_in_pool_region(n, steps, parallel_solve, workers, None)
+    }
+
+    /// [`run_dense_in_pool_counted`] with the solve region's grain set to `grain` (`None` keeps
+    /// the default).
+    #[cfg(not(miri))]
+    fn run_dense_in_pool_region(
+        n: usize,
+        steps: usize,
+        parallel_solve: bool,
+        workers: usize,
+        grain: Option<RegionGrain>,
     ) -> (Vec<u32>, u64) {
         use boyko_threadpool::ThreadPoolBuilder;
 
@@ -952,6 +965,9 @@
             ..PhysicsConfig::default()
         };
         let mut solver = ColoredSoftStepSolver::default();
+        if let Some(grain) = grain {
+            assert!(solver.set_region_grain(grain), "construction: a valid grain");
+        }
         let mut scratch = SolverScratch::with_capacity(n + 1);
         scratch.set_bodies(&dense_collision_scene(n));
         scratch.touched.reset(scratch.bodies().len());
@@ -965,7 +981,7 @@
                 solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
             }
         });
-        (snapshot_bits(&scratch), solver.setup_dispatches())
+        (snapshot_bits(&scratch), solver.region_dispatches())
     }
 
     /// One G3 run: the layout and record bytes after the last step, and the padding
@@ -975,8 +991,8 @@
         layout: Vec<u32>,
         records: Vec<u32>,
         padding: PaddingAudit,
-        /// S4: the steps whose setup opened its scope.
-        setup: u64,
+        /// SR: the steps whose substeps (and fill) ran as one solve region.
+        regions: u64,
     }
 
     /// Like [`run_dense_in_pool`] but over the churned stream, with `simd_solve` as
@@ -1014,7 +1030,7 @@
             layout: layout_snapshot(&solver.columns),
             records: records_snapshot(&solver),
             padding: audit_padding(&solver.columns),
-            setup: solver.setup_dispatches(),
+            regions: solver.region_dispatches(),
         }
     }
 
@@ -1067,17 +1083,17 @@
         // (b) Parallel == serial, byte for byte, across {1, 2, 4, 8, 16} workers, on
         // both kernels. Every worker writes the SAME bytes into the SAME lanes
         // regardless of worker count, and identical to the single-threaded reference.
-        assert_eq!(single_a.setup, 0, "S4: a serial run never opens the setup scope");
+        assert_eq!(single_a.regions, 0, "SR: a serial run never opens a solve region");
         for simd in [false, true] {
             for workers in [1usize, 2, 4, 8, 16] {
                 let run = run_layout_in_pool(n, 12, true, simd, workers);
-                // S4's non-vacuity: the {1, N} bytes below cover the parallel setup's ranges on
+                // SR's non-vacuity: the {1, N} bytes below cover the region's fill and sweeps on
                 // every multi-worker run (the scene crosses its gate on every step), and a
                 // one-worker pool takes the inline path (the gate's lanes term).
                 assert_eq!(
-                    run.setup,
+                    run.regions,
                     if workers >= 2 { 12 } else { 0 },
-                    "S4: the setup's dispatches over the 12 steps at {workers} workers (simd {simd})"
+                    "SR: the regions over the 12 steps at {workers} workers (simd {simd})"
                 );
                 assert_eq!(
                     single_a.layout, run.layout,
@@ -1179,7 +1195,7 @@
         let manifolds = dense_collision_manifolds(&bodies);
         let graph = build_graph(&bodies, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&bodies, &[], false);
+        solver.build_bodies(&bodies, &[]);
         solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
         let cols = &solver.columns;
         let n_colors = cols.color_offsets().len().saturating_sub(1);
@@ -1341,29 +1357,229 @@
     fn parallel_solve_bit_identical_across_workers_on_random_scenes() {
         // Worker spin-up dominates; keep the case count modest but the worker sweep
         // wide. Each case runs 6 worker configs × 8 steps over up to ~520 bodies.
-        // S4 (W8S lane, commit 4): the upper part of the range lays out enough points for the
-        // parallel setup to dispatch at 2 / 4 / 8 workers, and at one worker it never does; the
-        // count is summed over the cases so a run that never covered the setup cannot pass.
-        let setups = std::cell::Cell::new(0u64);
+        // SR: the upper part of the range has a colour wide enough for the solve region at
+        // 2 / 4 / 8 workers, and at one worker it never opens; the count is summed over the cases
+        // so a run that never covered the region cannot pass.
+        let regions = std::cell::Cell::new(0u64);
         proptest!(ProptestConfig::with_cases(48), |(seed in any::<u64>())| {
             let n = random_dense_scene(seed).len() - 1; // dyn count (last row = floor)
             let single = run_dense_in_pool(n, 8, false, 1);
-            let (p1, s1) = run_dense_in_pool_counted(n, 8, true, 1);
-            let (p2, s2) = run_dense_in_pool_counted(n, 8, true, 2);
-            let (p4, s4) = run_dense_in_pool_counted(n, 8, true, 4);
-            let (p8, s8) = run_dense_in_pool_counted(n, 8, true, 8);
-            prop_assert_eq!(s1, 0, "S4: one worker never dispatches the setup (seed {})", seed);
-            setups.set(setups.get() + s2 + s4 + s8);
+            let (p1, r1) = run_dense_in_pool_counted(n, 8, true, 1);
+            let (p2, r2) = run_dense_in_pool_counted(n, 8, true, 2);
+            let (p4, r4) = run_dense_in_pool_counted(n, 8, true, 4);
+            let (p8, r8) = run_dense_in_pool_counted(n, 8, true, 8);
+            prop_assert_eq!(r1, 0, "SR: one worker never opens a region (seed {})", seed);
+            regions.set(regions.get() + r2 + r4 + r8);
             prop_assert_eq!(&p1, &single, "parallel(1) == single-threaded (seed {})", seed);
             prop_assert_eq!(&p1, &p2, "parallel: 1 vs 2 workers bit-identical (seed {})", seed);
             prop_assert_eq!(&p1, &p4, "parallel: 1 vs 4 workers bit-identical (seed {})", seed);
             prop_assert_eq!(&p1, &p8, "parallel: 1 vs 8 workers bit-identical (seed {})", seed);
         });
         assert!(
-            setups.get() > 0,
-            "anti-vacuity: no case dispatched S4's parallel setup, so the {{1, N}} bits never \
-             covered it"
+            regions.get() > 0,
+            "anti-vacuity: no case opened a solve region, so the {{1, N}} bits never covered it"
         );
+    }
+
+    /// SR: every grain term at its floor, so every colour of two groups or more, every body range
+    /// of two 8-row groups or more and every colour of two cohorts or more is cut into blocks.
+    #[cfg(not(miri))]
+    const SR_LOWERED: RegionGrain =
+        RegionGrain { wide_floor: 1, colour_min_points: 1, max_bpp: 6, body_bpp: 8, body_rows: 8, fill_points: 1 };
+
+    /// SR: one of three random pile shapes from `seed`, its manifolds fixed for the run: a dense
+    /// line (a few colours), a hub (one body in every manifold: 64 colours or more of one group
+    /// each) or disjoint pairs on a floor (ONE colour).
+    #[cfg(not(miri))]
+    fn sr_random_pile(seed: u64) -> (Vec<BodyState>, Vec<Manifold>, &'static str) {
+        let mut rng = Lcg(seed ^ 0x5B00_0006_C2C2_A11E);
+        match rng.range(0, 3) {
+            0 => {
+                let bodies = dense_collision_scene(rng.range(4, 90) as usize);
+                let manifolds = dense_collision_manifolds(&bodies);
+                (bodies, manifolds, "line")
+            }
+            1 => {
+                // A hub with `k` spokes: every spoke's manifold shares the hub, so each is its own
+                // colour; the spokes also rest on the floor.
+                let k = rng.range(64, 80);
+                let mut bodies = vec![dyn_sphere(Vec3::ZERO, 1.0, 0.5, 0.0)];
+                for s in 0..k {
+                    let angle = s as f32 * 0.09;
+                    bodies.push(dyn_sphere(Vec3::new(1.9 * angle.cos(), 0.5, 1.9 * angle.sin()), 1.0, 0.5, 0.0));
+                }
+                bodies.push(static_body(Vec3::new(0.0, -1.0, 0.0)));
+                let floor = k + 1;
+                let mut manifolds = Vec::new();
+                for s in 1..=k {
+                    let p = bodies[s as usize].position;
+                    manifolds.push(manifold(0, s, p * p.length().recip(), -0.1, p * 0.5));
+                    manifolds.push(manifold(s, floor, Vec3::new(0.0, -1.0, 0.0), -0.05, p));
+                }
+                manifolds.sort_by_key(|m| (m.body_a.0, m.body_b.0));
+                (bodies, manifolds, "hub")
+            }
+            _ => {
+                let n = rng.range(2, 60);
+                let mut bodies: Vec<BodyState> =
+                    (0..n).map(|i| dyn_sphere(Vec3::new(i as f32 * 3.0, 0.9, 0.0), 1.0, 0.5, 0.0)).collect();
+                bodies.push(static_body(Vec3::new(0.0, -1.0, 0.0)));
+                let manifolds = (0..n)
+                    .map(|i| {
+                        box_manifold(i, n, Vec3::new(0.0, -1.0, 0.0), -0.1, Vec3::new(i as f32 * 3.0, 0.0, 0.0), 1 + (i % 4) as u8)
+                    })
+                    .collect();
+                (bodies, manifolds, "pairs")
+            }
+        }
+    }
+
+    /// SR: the pile's bits after `steps` steps, serially (`workers == 0`) or through the solve
+    /// region under `grain` on a `workers`-wide pool; also the regions opened.
+    #[cfg(not(miri))]
+    fn sr_run_pile(
+        bodies: &[BodyState],
+        manifolds: &[Manifold],
+        steps: usize,
+        workers: usize,
+        grain: RegionGrain,
+        simd_solve: bool,
+    ) -> (Vec<u32>, u64) {
+        use boyko_threadpool::ThreadPoolBuilder;
+
+        let graph = build_graph(bodies, manifolds);
+        let cfg = PhysicsConfig { dt: 1.0 / 60.0, parallel_solve: workers > 0, simd_solve, ..PhysicsConfig::default() };
+        let mut solver = ColoredSoftStepSolver::default();
+        assert!(solver.set_region_grain(grain), "construction: a valid grain");
+        let mut scratch = SolverScratch::with_capacity(bodies.len());
+        scratch.set_bodies(bodies);
+        let mut run = |scratch: &mut SolverScratch| {
+            for _ in 0..steps {
+                scratch.touched.reset(scratch.bodies().len());
+                solver.solve_colored(&cfg, manifolds, &graph, scratch);
+            }
+        };
+        if workers == 0 {
+            run(&mut scratch);
+        } else {
+            ThreadPoolBuilder::new().num_threads(workers).build().install(|_| run(&mut scratch));
+        }
+        (snapshot_bits(&scratch), solver.region_dispatches())
+    }
+
+    /// SR (the cut's C2): with every grain term lowered, the region's multi-block colour, warm-start
+    /// and body entries solve the serial bits on random piles — lines, hubs of 64 colours or more,
+    /// one-colour pairs — at 2, 3, 4 and 8 workers, `simd_solve` on and off. Each shape must be
+    /// drawn and every region must open.
+    #[test]
+    #[cfg(not(miri))]
+    fn region_lowered_grain_bit_identical_on_random_piles() {
+        // Which shapes were drawn: one bit each (line, hub, pairs).
+        let shapes = std::cell::Cell::new(0u8);
+        proptest!(ProptestConfig::with_cases(24), |(seed in any::<u64>())| {
+            let (bodies, manifolds, shape) = sr_random_pile(seed);
+            shapes.set(shapes.get() | match shape { "line" => 1, "hub" => 2, _ => 4 });
+            for simd_solve in [true, false] {
+                let (serial, _) = sr_run_pile(&bodies, &manifolds, 3, 0, SR_LOWERED, simd_solve);
+                for workers in [2, 3, 4, 8] {
+                    let (got, regions) = sr_run_pile(&bodies, &manifolds, 3, workers, SR_LOWERED, simd_solve);
+                    prop_assert_eq!(regions, 3, "{} seed {}: a region per step at W{}", shape, seed, workers);
+                    prop_assert_eq!(&got, &serial, "{} seed {} simd {}: W{} vs serial", shape, seed, simd_solve, workers);
+                }
+            }
+        });
+        assert_eq!(shapes.get(), 7, "anti-vacuity: every pile shape was drawn (bits {:03b})", shapes.get());
+    }
+
+    /// SR (tester r1, triage F2): `region_fits` is the one place that keeps a step's stage table
+    /// addressable by the `u16` entry indices of `StageEntry` / `SchedItem`; no test pinned its
+    /// edge. The largest colour count whose last entry index is still a `u16` is accepted, and one
+    /// colour more is not. Red-first: `+ 1` → `+ 10` in `region_fits` reds it.
+    #[test]
+    fn region_fits_accepts_the_largest_u16_table_and_refuses_one_colour_more() {
+        let max_colours = (usize::from(u16::MAX) + 1 - E_COLOURS) / 3;
+        assert!(region_fits(0) && region_fits(1), "small worlds fit");
+        assert!(region_fits(max_colours), "the largest table a u16 can index ({max_colours} colours) fits");
+        assert!(
+            u16::try_from(E_COLOURS + 3 * max_colours - 1).is_ok(),
+            "premise: the last entry index of the largest accepted table is a u16"
+        );
+        assert!(!region_fits(max_colours + 1), "one colour more does not fit");
+        assert!(
+            u16::try_from(E_COLOURS + 3 * (max_colours + 1) - 1).is_err(),
+            "premise: the last entry index of the first refused table is not a u16"
+        );
+        assert!(!region_fits(usize::from(u16::MAX)), "a world of 65535 colours does not fit");
+    }
+
+    /// SR (the cut's §2.6, Q3): the Stacked Borrows leg of the region's physics stages, on the
+    /// pool-free route (`RegionRoute::Threads`, `boyko_threadpool::region_on_threads`; the pool's
+    /// deque transport is not Stacked-Borrows clean). Twenty spheres on a floor, four carrying a
+    /// sphere, every grain term lowered and every restitution 0: the region's stages run on two
+    /// std threads, and the bits equal the serial solve's. The per-kind guard (critique W2) reads
+    /// first: a kind whose helpers ran no block, or whose entries were one block, would make the
+    /// leg vacuous for it. Run under both models:
+    ///
+    /// ```text
+    /// MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-ignore-leaks" cargo +nightly-x86_64-pc-windows-msvc \
+    ///   miri test -p boyko-physics --lib sr_region_ -- --test-threads=1
+    /// ```
+    /// and with `-Zmiri-tree-borrows` prepended.
+    #[test]
+    #[cfg(miri)]
+    fn sr_region_sb_route_runs_every_kind_on_both_threads() {
+        let mut bodies = Vec::new();
+        for i in 0..16u32 {
+            let mut b = dyn_sphere(Vec3::new(i as f32 * 3.0, 0.6, 0.0), 1.0, 0.5, 0.0);
+            b.linear_velocity = Vec3::new(0.0, -0.5, 0.1);
+            bodies.push(b);
+        }
+        for i in 0..4u32 {
+            let mut b = dyn_sphere(Vec3::new(i as f32 * 3.0, 2.4, 0.0), 1.0, 0.5, 0.0);
+            b.linear_velocity = Vec3::new(0.1, -0.5, 0.0);
+            bodies.push(b);
+        }
+        bodies.push(static_body(Vec3::new(0.0, -1.0, 0.0)));
+        let mut manifolds = Vec::new();
+        for i in 0..16u32 {
+            manifolds.push(box_manifold(i, 20, Vec3::new(0.0, -1.0, 0.0), -0.2, Vec3::new(i as f32 * 3.0, 0.0, 0.0), 1 + (i % 2) as u8));
+        }
+        for i in 0..4u32 {
+            manifolds.push(box_manifold(i, 16 + i, Vec3::new(0.0, 1.0, 0.0), -0.1, Vec3::new(i as f32 * 3.0, 1.5, 0.0), 2));
+        }
+        manifolds.sort_by_key(|m| (m.body_a.0, m.body_b.0));
+        let graph = build_graph(&bodies, &manifolds);
+        let lowered =
+            RegionGrain { wide_floor: 1, colour_min_points: 1, max_bpp: 6, body_bpp: 8, body_rows: 8, fill_points: 1 };
+        let run = |route: Option<RegionRoute>| {
+            let cfg = PhysicsConfig { dt: 1.0 / 60.0, parallel_solve: route.is_some(), simd_solve: false, ..PhysicsConfig::default() };
+            let mut solver = ColoredSoftStepSolver::default();
+            assert!(solver.set_region_grain(lowered));
+            if let Some(route) = route {
+                solver.region_route = route;
+            }
+            let mut scratch = SolverScratch::with_capacity(bodies.len());
+            scratch.set_bodies(&bodies);
+            for _ in 0..2 {
+                scratch.touched.reset(scratch.bodies().len());
+                solver.solve_colored(&cfg, &manifolds, &graph, &mut scratch);
+            }
+            (snapshot_bits(&scratch), solver)
+        };
+        let (serial, _) = run(None);
+        let (region, solver) = run(Some(RegionRoute::Threads(2)));
+        assert_eq!(solver.region_dispatches(), 2, "a region per step (the premise)");
+        let tally = solver.region_kind_tally();
+        for name in ["gravity", "gravity_first", "warm", "biased", "integrate", "relax", "fill", "store"] {
+            let k = tally.iter().find(|k| k.kind == name).expect("the tally names every kind it ran");
+            assert!(
+                k.max_blocks >= 2 && k.helper_blocks > 0,
+                "the per-kind guard: `{name}` had at most {} blocks and the helper ran {} of them",
+                k.max_blocks,
+                k.helper_blocks
+            );
+        }
+        assert_eq!(region, serial, "the region's bits are the serial solve's");
     }
 
     /// Gate 5 (extended to the PARALLEL multi-worker path over random scenes): every
@@ -1609,7 +1825,7 @@
 
             // ── Scalar arm ──────────────────────────────────────────────────
             let mut solver_scalar = ColoredSoftStepSolver::default();
-            solver_scalar.build_bodies(&bodies, &[], false);
+            solver_scalar.build_bodies(&bodies, &[]);
             solver_scalar.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
             let cols_scalar = &solver_scalar.columns;
             let n_colors = cols_scalar.color_offsets().len() - 1;
@@ -1634,7 +1850,7 @@
 
             // ── SIMD arm ─────────────────────────────────────────────────────
             let mut solver_simd = ColoredSoftStepSolver::default();
-            solver_simd.build_bodies(&bodies, &[], false);
+            solver_simd.build_bodies(&bodies, &[]);
             solver_simd.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
             let cols_simd = &solver_simd.columns;
             let bodies_simd = body_scratch_from(&pristine_bodies);
@@ -1913,7 +2129,7 @@
         }
         let graph = build_graph(&states, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&states, &[], false);
+        solver.build_bodies(&states, &[]);
         solver.build_columns(&manifolds, &graph, &states, None, RowRemap::Identity, None, false);
         assert_eq!(solver.columns.color_offsets().len(), 2, "body-disjoint specs form one color");
         assert_eq!(solver.columns.group_start().len(), groups.len() + 1, "one group per spec");
@@ -2596,7 +2812,7 @@
         // apply surfaces as an impulse-bit difference instead of being shared.
         let cols_scalar = clone_columns(cols);
         let bodies_scalar = body_scratch_from(bodies);
-        ColoredSoftStepSolver::warm_apply_scalar(&cols_scalar, bodies_scalar.solve_view());
+        ColoredSoftStepSolver::warm_apply_scalar(&cols_scalar, bodies_scalar.solve_view(), 0, cols.heads().len());
 
         let cols_simd = clone_columns(cols);
         let bodies_simd = body_scratch_from(bodies);
@@ -2604,7 +2820,9 @@
         //   running it supports AVX2; `cols_simd` is a deep copy of a fully built
         //   cohort table (every head's `rank_base + depth` within its blocks), and
         //   this thread is the only accessor of `bodies_simd`.
-        unsafe { ColoredSoftStepSolver::warm_apply_avx2(&cols_simd, bodies_simd.solve_view()) };
+        unsafe {
+            ColoredSoftStepSolver::warm_apply_avx2(&cols_simd, bodies_simd.solve_view(), 0, cols.heads().len())
+        };
 
         let (b_scalar, i_scalar) = body_impulse_bits(bodies_scalar.as_read_slice(), &cols_scalar);
         let (b_simd, i_simd) = body_impulse_bits(bodies_simd.as_read_slice(), &cols_simd);
@@ -2656,7 +2874,7 @@
         let (bodies, manifolds) = ragged_colored_scene(11);
         let graph = build_graph(&bodies, &manifolds);
         let mut solver = ColoredSoftStepSolver::default();
-        solver.build_bodies(&bodies, &[], false);
+        solver.build_bodies(&bodies, &[]);
         solver.build_columns(&manifolds, &graph, &bodies, None, RowRemap::Identity, None, false);
         let mut rng = SplitMix64(0x11C3_5EED_A1B2_C3D4);
         seed_live_lanes(&mut solver, &mut rng);
@@ -2693,6 +2911,67 @@
             corpus_moved > 0 && padded_cohorts > 0,
             "non-vacuity over the random corpus: the apply must move rows ({corpus_moved}) and \
              the corpus must contain padded cohorts ({padded_cohorts})"
+        );
+    }
+
+    /// SR (5): the warm apply over cohorts `[0, k)` then `[k, n)` is the whole apply, bit for bit,
+    /// at every cut `k` — for both kernels, over the warm-apply corpus. The solve region runs the
+    /// apply per colour on cohort ranges, so the range bound is the only thing it adds to the
+    /// kernels; this is the gate on it. Red-first: the range end taken one short skips a cohort,
+    /// so the bits differ at every interior cut whose skipped cohort moves a row.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[test]
+    fn warm_range_partition_equals_the_whole_apply() {
+        let mut rng = SplitMix64(0x5B05_C0B0_7A11_0005);
+        let mut cuts_checked = 0usize;
+        let mut interior_moving_cuts = 0usize;
+        for _ in 0..120 {
+            let (groups, bodies) = random_cohort_corpus(&mut rng, OBLIQUE_NORMAL);
+            let solver = build_cohort_solver(&groups, &bodies);
+            let cols = &solver.columns;
+            let n = cols.heads().len();
+            let whole_scalar = body_scratch_from(&bodies);
+            ColoredSoftStepSolver::warm_apply_scalar(cols, whole_scalar.solve_view(), 0, n);
+            let whole_simd = body_scratch_from(&bodies);
+            // SAFETY: the test target is `target_feature = "avx2"`-gated, so the host supports
+            //   AVX2; `cols` is a fully built cohort table and this thread is the only accessor
+            //   of `whole_simd`.
+            unsafe { ColoredSoftStepSolver::warm_apply_avx2(cols, whole_simd.solve_view(), 0, n) };
+            let whole: Vec<[u32; 6]> = whole_scalar.as_read_slice().iter().map(vel_bits).collect();
+            assert_eq!(
+                whole,
+                whole_simd.as_read_slice().iter().map(vel_bits).collect::<Vec<_>>(),
+                "the two whole applies must agree (the G4 differential)"
+            );
+            for k in 0..=n {
+                let split_scalar = body_scratch_from(&bodies);
+                ColoredSoftStepSolver::warm_apply_scalar(cols, split_scalar.solve_view(), 0, k);
+                ColoredSoftStepSolver::warm_apply_scalar(cols, split_scalar.solve_view(), k, n);
+                let split_simd = body_scratch_from(&bodies);
+                // SAFETY: as the whole apply above.
+                unsafe {
+                    ColoredSoftStepSolver::warm_apply_avx2(cols, split_simd.solve_view(), 0, k);
+                    ColoredSoftStepSolver::warm_apply_avx2(cols, split_simd.solve_view(), k, n);
+                }
+                for (name, got) in [("scalar", &split_scalar), ("avx2", &split_simd)] {
+                    let got: Vec<[u32; 6]> = got.as_read_slice().iter().map(vel_bits).collect();
+                    assert_eq!(got, whole, "{name}: [0, {k}) then [{k}, {n}) must equal the whole apply");
+                }
+                cuts_checked += 1;
+                if k > 0 && k < n {
+                    // The cut's left cohort moves a row: a skipped cohort would show here.
+                    let alone = body_scratch_from(&bodies);
+                    ColoredSoftStepSolver::warm_apply_scalar(cols, alone.solve_view(), k - 1, k);
+                    interior_moving_cuts += usize::from(
+                        alone.as_read_slice().iter().zip(&bodies).any(|(a, b)| vel_bits(a) != vel_bits(b)),
+                    );
+                }
+            }
+        }
+        eprintln!("warm range partition: cuts={cuts_checked} interior_moving={interior_moving_cuts}");
+        assert!(
+            interior_moving_cuts > 0,
+            "anti-vacuity: some interior cut must have a left cohort that moves a row ({interior_moving_cuts})"
         );
     }
 
@@ -2765,7 +3044,7 @@
         // And the `-0.0` row is byte-frozen on the ORACLE path too (the differential
         // above only pins the two paths to each other).
         let scalar = body_scratch_from(&bodies);
-        ColoredSoftStepSolver::warm_apply_scalar(&solver.columns, scalar.solve_view());
+        ColoredSoftStepSolver::warm_apply_scalar(&solver.columns, scalar.solve_view(), 0, solver.columns.heads().len());
         assert_eq!(
             vel_bits(&scalar.as_read_slice()[0]),
             vel_bits(&bodies[0]),
@@ -2909,7 +3188,7 @@
 
         // The oracle's answer for the lanes, computed with no writer in sight.
         let oracle = body_scratch_from(&bodies);
-        ColoredSoftStepSolver::warm_apply_scalar(&solver.columns, oracle.solve_view());
+        ColoredSoftStepSolver::warm_apply_scalar(&solver.columns, oracle.solve_view(), 0, solver.columns.heads().len());
 
         const WRITES: usize = 32;
         let simd = body_scratch_from(&bodies);
@@ -2927,7 +3206,7 @@
             //   supports AVX2; `solver.columns` is a fully built cohort table; the rows
             //   this apply touches are the cohort's two lanes' (rows 1..=4), disjoint
             //   from the writer's row 0.
-            unsafe { ColoredSoftStepSolver::warm_apply_avx2(&solver.columns, view) };
+            unsafe { ColoredSoftStepSolver::warm_apply_avx2(&solver.columns, view, 0, solver.columns.heads().len()) };
         });
 
         let applied = simd.as_read_slice();
@@ -5794,10 +6073,12 @@
             Parent,
             /// Shape F's fused search, one range here.
             SerialFused,
-            /// `tasks` ranges on a pool of `workers`.
-            Pool { workers: usize, tasks: usize },
             /// `tasks` ranges on scoped std threads.
             Threads(usize),
+            /// SR: `tasks` ranges as the solve region's stage 0 on a pool of `workers` —
+            /// `build_columns` hands its fill over, and the fill alone runs as a region
+            /// (`fill_in_region`).
+            Region { workers: usize, tasks: usize },
         }
 
         /// Everything a build writes, byte for byte, and what it counted.
@@ -5850,7 +6131,7 @@
             solver.setup_mode = match mode {
                 Mode::Parent => SetupMode::Auto,
                 Mode::SerialFused => SetupMode::SerialFused,
-                Mode::Pool { tasks, .. } => SetupMode::Pool(tasks),
+                Mode::Region { tasks, .. } => SetupMode::Pool(tasks),
                 Mode::Threads(t) => SetupMode::Threads(t),
             };
             let graph = build_graph(&frame.bodies, &frame.manifolds);
@@ -5865,9 +6146,14 @@
                 sleep
             });
             // The effective body rows the fill reads (the solve builds them before the columns).
-            solver.build_bodies(&frame.bodies, &[], false);
+            solver.build_bodies(&frame.bodies, &[]);
+            // SR: the region's fill reads the gather snapshot through its column (the W5 rule).
+            let mut scratch = SolverScratch::with_capacity(frame.bodies.len());
+            scratch.set_bodies(&frame.bodies);
+            // Whether a region published the fill (SR's region modes).
+            let mut region_published = 0u64;
             let mut go = || {
-                solver.build_columns(
+                let mut out = solver.build_columns(
                     &frame.manifolds,
                     &graph,
                     &frame.bodies,
@@ -5875,22 +6161,35 @@
                     frame.remap.remap(),
                     restore.as_ref(),
                     true,
-                )
+                );
+                if let Some(fill) = out.fill {
+                    let src = RegionSources { manifolds: &frame.manifolds, restore: restore.as_ref(), remap: frame.remap.remap() };
+                    let (report, counts) = solver.fill_in_region(&scratch, &fill, src);
+                    region_published = u64::from(report.published);
+                    (out.restore_searches, out.restore_hits) = (counts.restore_searches, counts.restore_hits);
+                }
+                out
             };
             let out = match mode {
-                Mode::Pool { workers, .. } => {
+                Mode::Region { workers, .. } => {
                     let pool = boyko_threadpool::ThreadPoolBuilder::new().num_threads(workers).build();
                     pool.install(|_| go())
                 }
                 _ => go(),
             };
+            assert!(
+                !matches!(mode, Mode::Region { .. }) || out.fill.is_some() || solver.columns.heads().is_empty(),
+                "SR: a region mode must hand its fill over (a layout with a cohort; a frame that lays \
+                 nothing out fills nothing)"
+            );
             let cols = &solver.columns;
             // Which range filled each laid-out manifold: the cuts `build_columns` took, rebuilt
             // from the final heads (the widths it cut by are the layout's).
             let mut owner = vec![None; frame.manifolds.len()];
             let mut restore_ranges = 0;
-            if let Mode::Pool { tasks, .. } | Mode::Threads(tasks) = mode
-                && solver.setup_dispatches() > 0
+            let dispatched = solver.counters.thread_fills + region_published;
+            if let Mode::Threads(tasks) | Mode::Region { tasks, .. } = mode
+                && dispatched > 0
             {
                 let points: usize = cols.heads().iter().map(|h| h.width.iter().map(|&w| usize::from(w)).sum::<usize>()).sum();
                 let mut cuts = [(0u32, 0u32); SETUP_MAX_TASKS];
@@ -5921,7 +6220,7 @@
                     restore: (out.restore_searches, out.restore_hits),
                 },
                 backward: c.backward_searches,
-                dispatched: solver.setup_dispatches(),
+                dispatched,
                 owner,
                 restore_ranges,
             }
@@ -5945,12 +6244,14 @@
             /// fell in two ranges or more.
             fused_restore_split: u64,
             adjacent_split: u64,
+            /// SR: region-mode builds whose Fill item was published (two ranges or more).
+            region_dispatched: u64,
         }
 
         /// Builds `frame` in every mode of `modes` and requires each equal to the parent path.
         fn compare(frame: &Frame, modes: &[Mode], tally: &mut Tally) {
             let parent = build(frame, Mode::Parent);
-            assert_eq!(parent.dispatched, 0, "the parent path never opens the setup scope");
+            assert_eq!(parent.dispatched, 0, "the parent path fills in one range on its own thread");
             for &mode in modes {
                 let run = build(frame, mode);
                 assert_eq!(
@@ -5959,6 +6260,7 @@
                 );
                 if run.dispatched > 0 {
                     tally.dispatched += 1;
+                    tally.region_dispatched += u64::from(matches!(mode, Mode::Region { .. }));
                     let fused = frame.warm && frame.read.2 && !matches!(frame.remap, RemapSpec::Reset);
                     tally.fused_descents += u64::from(fused && run.backward > 0);
                     tally.non_strict_dispatched += u64::from(!frame.read.2);
@@ -5983,9 +6285,9 @@
         fn s4_setup_matches_the_parent_path_on_random_frames() {
             let modes = [
                 Mode::SerialFused,
-                Mode::Pool { workers: 2, tasks: 2 },
-                Mode::Pool { workers: 4, tasks: 5 },
-                Mode::Pool { workers: 8, tasks: 16 },
+                Mode::Region { workers: 2, tasks: 2 },
+                Mode::Region { workers: 4, tasks: 5 },
+                Mode::Region { workers: 8, tasks: 16 },
             ];
             let acc = std::cell::Cell::new(Tally::default());
             proptest!(ProptestConfig::with_cases(96), |(seed in any::<u64>())| {
@@ -5998,6 +6300,7 @@
             let t = &tally;
             for (name, n) in [
                 ("dispatched builds", t.dispatched),
+                ("region-mode builds that published the fill", t.region_dispatched),
                 ("fused builds whose ranges searched below a cursor (a descent)", t.fused_descents),
                 ("frames with a restore hit", t.restore_hits),
                 ("shape F builds whose restore hits fell in two ranges", t.fused_restore_split),

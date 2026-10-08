@@ -74,6 +74,15 @@
 //! * **The event lane, change detection and the whole query path are free**:
 //!   +0.000 over an identical 4-system baseline. A `par_iter` fan-out is exactly
 //!   +1 scope and +1 chunk (BEFORE: +6).
+//! * **Since SR (phase B) a parallel physics step is `1 + region` scope frames and as many
+//!   chunks, on EVERY frame, exactly** (row D, asserted per frame at W = 2 / 4 / 8 and over
+//!   the pass sweep: `scope == 1 + region`, `chunk == scope`, every frame releasing what it
+//!   acquired), `region` read from the solver's own `region_dispatches` counter and derived
+//!   by the row's model from the step's public colours: the solve opens ONE solve region a
+//!   step, whose `P - 1` helper cells share the scope's first block, and the region's stages
+//!   are its blocks, never a scope of their own. SR retired S4's setup scope and the
+//!   per-colour scopes; the lane count now buys blocks per region item (at most `max_bpp x
+//!   P`, read from `last_region_report`), not chunks. Before SR, the paragraphs below:
 //! * **A parallel physics step is `1 + setup + passes x colours` scope frames, on
 //!   EVERY frame, exactly** (asserted per frame: `scope - 1 - setup` is a multiple of
 //!   `substeps x (1 + relax)`, and the quotient is the dispatched colour count —
@@ -2039,10 +2048,14 @@ impl Pile {
     fn np_dispatches(&self) -> u64 {
         self.world.resource::<Manifolds>().narrowphase_dispatches()
     }
-    /// S4's own count of steps whose solve setup opened its scope
-    /// (`ColoredSoftStepSolver::setup_dispatches`); 0 on the reference pipeline.
-    fn setup_dispatches(&self) -> u64 {
-        self.world.try_resource::<ColoredSoftStepSolver>().map_or(0, ColoredSoftStepSolver::setup_dispatches)
+    /// SR's own count of steps whose solve ran as one solve region
+    /// (`ColoredSoftStepSolver::region_dispatches`); 0 on the reference pipeline.
+    fn region_dispatches(&self) -> u64 {
+        self.world.try_resource::<ColoredSoftStepSolver>().map_or(0, ColoredSoftStepSolver::region_dispatches)
+    }
+    /// SR: the widest item of the last solve region (`ColoredSoftStepSolver::last_region_report`).
+    fn region_max_blocks(&self) -> u32 {
+        self.world.resource::<ColoredSoftStepSolver>().last_region_report().max_blocks
     }
     /// Both loop counts at once. `PhysicsConfig` is read at the top of every
     /// step, so this takes effect on the next `step()` without a rebuild.
@@ -2054,111 +2067,45 @@ impl Pile {
     fn contacts(&self) -> usize {
         self.world.resource::<Manifolds>().manifolds().len()
     }
-    /// Row D's derived expectation for the step just run on `lanes` workers: the colour scopes
-    /// one pass dispatches and, of those, the blocks past each one's first ([`colour_dispatch`]).
-    fn colour_dispatch(&self, lanes: usize, simd: bool) -> ColourDispatch {
-        colour_dispatch(
+    /// Row D's derived expectation for the step just run on `lanes` workers: whether its solve
+    /// opened a solve region ([`region_gate`]).
+    fn region_gate(&self, lanes: usize) -> bool {
+        region_gate(
             self.world.resource::<ConstraintGraph>(),
             self.world.resource::<Manifolds>().solver_manifolds(),
             lanes,
-            simd,
         )
     }
 }
 
-// ── Row D's model: the colour scopes a pass dispatches, and their blocks ──
+// ── Row D's model: whether a step opens its solve region ──
 //
 // The census's "Why not pin EXACTLY against the dispatched colour count" objects to a replica of
 // the dispatch decision: it drifts with the solver, and the gate then checks the replica. Row D
 // answers the objection by OBSERVING the replica, never trusting it: on every frame the replica's
-// dispatched-colour count must equal the one the scope counter shows (`scope - 1 - setup` over the
-// pass count), and its block count must equal the chunk counter exactly. A replica that drifted
-// reds on the first frame it disagrees on; it cannot pass by checking itself.
+// region decision must equal the solver's own counter, and the scope and chunk counters must
+// equal the structure that decision implies. A replica that drifted reds on the first frame it
+// disagrees on; it cannot pass by checking itself. (Before SR the model was the per-colour scopes
+// a pass dispatched and their blocks — ruling 10(d) of 2026-09-30; SR retired those scopes.)
 
-/// The colored solver's dispatch constants, as `solver/colored.rs` states them (private there):
-/// `MIN_PARALLEL_SLOTS_PER_COLOR`, `CHUNKS_PER_WORKER`, `MIN_SLOTS_PER_CHUNK` and the cohort width
-/// the SIMD cut walk snaps to.
+/// The colored solver's region gate's floor, as `solver/colored.rs` states it (private there):
+/// `MIN_PARALLEL_SLOTS_PER_COLOR`, the default region grain's `wide_floor`.
 const MODEL_MIN_PARALLEL_SLOTS_PER_COLOR: u32 = 256;
-const MODEL_CHUNKS_PER_WORKER: usize = 6;
-const MODEL_MIN_SLOTS_PER_CHUNK: usize = 64;
-const MODEL_COHORT: usize = 8;
-/// One colour task's scope cell: the 104 B `CohortSolveView` closure plus the 16 B cell header
-/// (L11 C2; the D4 comment).
-const COLOUR_TASK_CELL_BYTES: usize = 120;
+/// The region grain's default blocks per participant (`RegionGrain::DEFAULT.max_bpp`): the
+/// ceiling of any region item's blocks is it times the participants.
+const MODEL_MAX_BPP: u32 = 6;
 
-/// One pass's colour dispatch, as the model derives it from the step's colours.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct ColourDispatch {
-    /// Colours that open a `pool.scope`.
-    scopes: u64,
-    /// Blocks past the first, summed over those scopes.
-    extra_blocks: u64,
-    /// The largest task count of one dispatched colour.
-    max_tasks: u64,
-}
-
-/// The blocks a scope of `tasks` colour-task cells takes: a 4 KiB first block, each next one
-/// twice the last (the `ScopeBlock` chunk rule section A prices).
-fn scope_blocks(tasks: usize) -> u64 {
-    let (mut blocks, mut capacity, mut block_bytes) = (0u64, 0usize, CHUNK0);
-    while capacity < tasks {
-        capacity += block_bytes / COLOUR_TASK_CELL_BYTES;
-        block_bytes *= 2;
-        blocks += 1;
-    }
-    blocks
-}
-
-/// The colour scopes one pass of the colored solve dispatches for `graph`'s colours over
-/// `manifolds` (the stream it indexes) on `lanes` workers, and their blocks: the solve's own
-/// gates and cut walk (`solve_color_parallel`), restated over the public graph. A manifold is a
-/// group of its live points; a colour below the slot floor, or whose chunk count is under two,
-/// runs inline; the whole solve dispatches only on two or more lanes and a colour at the floor.
-fn colour_dispatch(graph: &ConstraintGraph, manifolds: &[Manifold], lanes: usize, simd: bool) -> ColourDispatch {
+/// Whether the colored solve opens its solve region for `graph`'s colours over `manifolds` (the
+/// stream it indexes) on `lanes` workers: the solve's own parallel gate (P2: two lanes or more
+/// and a colour of at least the floor's live points), restated over the public graph. The other
+/// terms of the solver's decision (a laid-out cohort, a table that fits the region's `u16`
+/// entries) hold on every pile here whenever a colour reaches the floor.
+fn region_gate(graph: &ConstraintGraph, manifolds: &[Manifold], lanes: usize) -> bool {
     let slots_of = |c: u32| -> u32 {
         graph.color(c).iter().map(|&mi| u32::from(manifolds[mi as usize].count)).sum()
     };
     let widest = (0..graph.n_colors()).map(slots_of).max().unwrap_or(0);
-    let mut out = ColourDispatch::default();
-    if lanes < 2 || widest < MODEL_MIN_PARALLEL_SLOTS_PER_COLOR {
-        return out;
-    }
-    for c in 0..graph.n_colors() {
-        let total = slots_of(c);
-        if total < MODEL_MIN_PARALLEL_SLOTS_PER_COLOR {
-            continue;
-        }
-        // The colour's groups: its solved manifolds' point counts, in colour order.
-        let groups = || graph.color(c).iter().map(|&mi| usize::from(manifolds[mi as usize].count)).filter(|&n| n > 0);
-        let n_groups = groups().count();
-        let by_lanes = lanes * MODEL_CHUNKS_PER_WORKER;
-        let by_work = (total as usize / MODEL_MIN_SLOTS_PER_CHUNK).max(1);
-        let n_chunks = by_lanes.min(by_work).clamp(1, n_groups);
-        if n_chunks < 2 {
-            continue;
-        }
-        let target = (total as usize).div_ceil(n_chunks).max(1);
-        let step = if simd { MODEL_COHORT } else { 1 };
-        // The cut walk: from a chunk's first group, whole steps of `step` groups until the run of
-        // points reaches `target` or the colour ends.
-        let mut tasks = 0usize;
-        let (mut g, mut run, mut in_chunk) = (0usize, 0usize, 0usize);
-        for points in groups() {
-            run += points;
-            g += 1;
-            in_chunk += 1;
-            let at_step_boundary = in_chunk.is_multiple_of(step);
-            if g == n_groups || (at_step_boundary && run >= target) {
-                tasks += 1;
-                run = 0;
-                in_chunk = 0;
-            }
-        }
-        out.scopes += 1;
-        out.extra_blocks += scope_blocks(tasks) - 1;
-        out.max_tasks = out.max_tasks.max(tasks as u64);
-    }
-    out
+    lanes >= 2 && widest >= MODEL_MIN_PARALLEL_SLOTS_PER_COLOR
 }
 
 
@@ -2201,14 +2148,19 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
     );
 
     // ── D1: parallel_solve, A/B/A on the same warmed world ──
-    pile.set_parallel_solve(false);
-    let off_a = window(4, PHYS_REPS, || pile.step());
-    pile.set_parallel_solve(true);
-    let on_a = window(4, PHYS_REPS, || pile.step());
-    pile.set_parallel_solve(false);
-    let off_b = window(4, PHYS_REPS, || pile.step());
-    pile.set_parallel_solve(true);
-    let on_b = window(4, PHYS_REPS, || pile.step());
+    //
+    // SR's counter moves on every ON frame and on no OFF frame (read around each window), so the
+    // delta is attributed to the region, not to two means that happened to differ.
+    let region_moved = |pile: &mut Pile, on: bool| {
+        pile.set_parallel_solve(on);
+        let before = pile.region_dispatches();
+        let m = window(4, PHYS_REPS, || pile.step());
+        (m, pile.region_dispatches() - before)
+    };
+    let (off_a, off_a_regions) = region_moved(&mut pile, false);
+    let (on_a, on_a_regions) = region_moved(&mut pile, true);
+    let (off_b, off_b_regions) = region_moved(&mut pile, false);
+    let (on_b, on_b_regions) = region_moved(&mut pile, true);
 
     let off_mean = (off_a.mean + off_b.mean) / 2.0;
     let on_mean = (on_a.mean + on_b.mean) / 2.0;
@@ -2240,11 +2192,25 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
          enough that the A/B delta is not attributable to the flag",
         (off_a.mean - off_b.mean).abs()
     );
+    // SR: the parallel solve costs ONE solve region a step — one scope frame and the one block
+    // its helper cells share — on every frame (before SR it cost a scope per wide colour per pass,
+    // more than 20x the serial step).
+    let frames_per_window = (4 + PHYS_REPS) as u64;
     assert!(
-        on_mean > off_mean * 20.0,
-        "D: parallel_solve ON ({on_mean:.1}) is not decisively above OFF ({off_mean:.1}) — \
-         either the dispatch never engaged or its cost has been removed; in the first case \
-         nothing below measures parallelism"
+        (on_a_regions, on_b_regions, off_a_regions, off_b_regions)
+            == (frames_per_window, frames_per_window, 0, 0),
+        "D: `region_dispatches` moved {on_a_regions} / {on_b_regions} over the two ON windows and \
+         {off_a_regions} / {off_b_regions} over the two OFF windows of {frames_per_window} frames; \
+         the region opens on every ON frame (this pile's widest colour is over the floor at W=4) \
+         and on no OFF frame"
+    );
+    let (on_scope, off_scope) = ((on_a.scope + on_b.scope) / 2.0, (off_a.scope + off_b.scope) / 2.0);
+    let (on_chunk, off_chunk) = ((on_a.chunk + on_b.chunk) / 2.0, (off_a.chunk + off_b.chunk) / 2.0);
+    assert!(
+        on_scope - off_scope == 1.0 && on_chunk - off_chunk == 1.0,
+        "D: parallel_solve ON opened {on_scope:.3} scope frames and {on_chunk:.3} chunks a step \
+         against OFF's {off_scope:.3} and {off_chunk:.3}; the solve region is exactly one scope \
+         frame and one block a step"
     );
 
     // ── D2: parallel_broadphase alone, same world ──
@@ -2351,6 +2317,11 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
 
     // ── D3: what UNIT the parallel budget is charged per ──
     //
+    // Since SR (phase B): per STEP. The solve region runs every pass of every substep as items
+    // of ONE region, so a step opens one scope frame whatever the pass count — asserted per frame
+    // over the sweep below, and the scope means of the five points are equal. Before SR it was
+    // charged per colour pass, and the paragraphs below are that history:
+    //
     // ⚠ The first form of this arm divided by `substeps + relax` and measured a
     // per-unit cost that DOUBLED between its cheapest and its dearest point, so
     // it failed its own model check. The model was wrong, not the tree: the
@@ -2369,60 +2340,46 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
     pile.set_parallel_solve(true);
     let sweep = [(4u32, 2u32), (4, 0), (2, 0), (1, 0), (4, 2)];
     let mut pass_points: Vec<(u32, f64)> = Vec::with_capacity(sweep.len());
+    let mut scope_means: Vec<f64> = Vec::with_capacity(sweep.len());
     for (substeps, relax) in sweep {
         pile.set_passes(substeps, relax);
-        // S4's counter after every step, read inside the closure (a resource read allocates
+        // SR's counter after every step, read inside the closure (a resource read allocates
         // nothing) into a log pre-sized for every step `frames` runs, so the push never
         // allocates inside a measured frame.
-        let mut setup_log: Vec<u64> = Vec::with_capacity(6 + PHYS_REPS);
+        let mut region_log: Vec<u64> = Vec::with_capacity(6 + PHYS_REPS);
         let per_frame = frames(6, PHYS_REPS, || {
             pile.step();
-            setup_log.push(pile.setup_dispatches());
+            region_log.push(pile.region_dispatches());
         });
         let m = summarise(&per_frame);
         let passes = passes_of(substeps, relax);
         pass_points.push((passes, m.mean));
-        // THE STRUCTURAL CLAIM, per frame and exact: a step opens ONE install
-        // frame, S4's setup scope when its gate held (its own counter says whether it
-        // did, at most once a step), plus one nested scope per DISPATCHED colour per
-        // pass, and every pass walks the same colours (the graph is built once per
-        // step). So `scope - 1 - setup` is a multiple of the pass count on EVERY frame,
-        // and the quotient is the number of colours wide enough to dispatch.
-        let mut colours: Vec<u64> = Vec::with_capacity(per_frame.len());
+        scope_means.push(m.scope);
+        // THE STRUCTURAL CLAIM, per frame and exact: a step opens ONE install frame and ONE
+        // solve region (its own counter says whether it did, at most once a step), whatever the
+        // pass count, and the region's helper cells share its first block.
         for (i, f) in per_frame.iter().enumerate() {
             let j = 6 + i;
-            // Frame i is step 6 + i; the warm-up's last step read setup_log[5].
-            let setup = setup_log[j] - setup_log[j - 1];
-            assert!(
-                setup <= 1,
-                "D: substeps={substeps} relax={relax}: frame {i} moved `setup_dispatches` by \
-                 {setup}; the solve builds once per step, so its setup dispatches at most once"
+            // Frame i is step 6 + i; the warm-up's last step read region_log[5].
+            let region = region_log[j] - region_log[j - 1];
+            assert_eq!(
+                region, 1,
+                "D: substeps={substeps} relax={relax}: frame {i} moved `region_dispatches` by \
+                 {region}; this pile's widest colour is over the floor at W=4, so every step \
+                 opens one region"
             );
             assert!(
-                f.scope > setup && (f.scope - 1 - setup).is_multiple_of(passes as u64),
-                "D: substeps={substeps} relax={relax}: frame {i} opened {} scope frames with {setup} \
-                 setup scope(s), and {} is not a multiple of the {passes} colour passes — the \
-                 solver no longer opens one scope per dispatched colour per pass",
+                f.scope == 1 + region && f.chunk == f.scope,
+                "D: substeps={substeps} relax={relax}: frame {i} opened {} scope frames on {} \
+                 chunks; a step is the install frame and its one solve region (1 + {region}), \
+                 one block each, whatever its {passes} passes",
                 f.scope,
-                f.scope.saturating_sub(1 + setup)
+                f.chunk
             );
-            assert!(
-                f.chunk >= f.scope,
-                "D: frame {i}: {} chunks for {} scope frames — a dispatched colour spawns at \
-                 least two chunks' worth of tasks by construction (a single-chunk colour runs \
-                 inline), so every scope must hold at least one chunk",
-                f.chunk,
-                f.scope
-            );
-            colours.push((f.scope - 1 - setup) / passes as u64);
         }
-        let (c_lo, c_hi) = (
-            colours.iter().min().copied().unwrap_or(0),
-            colours.iter().max().copied().unwrap_or(0),
-        );
         say!(
-            "  ⇒ substeps={substeps} relax={relax}: {passes} passes × {c_lo}..={c_hi} dispatched \
-             colour(s) + 1 install frame = {:.1} scope frames/step, {:.2} chunks per scope",
+            "  ⇒ substeps={substeps} relax={relax}: {passes} passes, one solve region + 1 install \
+             frame = {:.1} scope frames/step, {:.2} chunks per scope",
             m.scope,
             m.chunk / m.scope.max(1.0)
         );
@@ -2457,18 +2414,22 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
          attributable to its own configuration"
     );
 
-    let per_pass: Vec<f64> = pass_points.iter().map(|(p, m)| m / *p as f64).collect();
-    let lo = per_pass.iter().cloned().fold(f64::MAX, f64::min);
-    let hi = per_pass.iter().cloned().fold(0.0, f64::max);
-    say!("  ⇒ per-color-pass cost spans {lo:.1} … {hi:.1} across the sweep");
+    say!("  ⇒ scope frames a step across the sweep: {scope_means:?}");
     assert!(
-        hi < lo * 1.6,
-        "D: the per-COLOR-PASS cost spans {lo:.1}…{hi:.1} ({:.2}×) — the parallel budget is \
-         not charged per color pass and the model above is wrong",
-        hi / lo
+        scope_means.windows(2).all(|w| w[0] == w[1]),
+        "D: the scope frames a step moved with the pass count across the sweep ({scope_means:?}); \
+         the solve region charges the parallel budget per STEP, so the model above is wrong"
     );
 
     // ── D4: how it scales with worker count ──
+    //
+    // Since SR (phase B): it does not, in the heap. Every dispatching row (W = 2 / 4 / 8) opens
+    // the install frame and one solve region a step, each one block (`P - 1 <= 7` helper cells fit
+    // the region scope's first block), and releases both within the step — asserted per frame by
+    // `assert_row_d_frames` against the solver's counter and the model's gate. What the lanes buy
+    // is blocks per region item, at most `max_bpp x P`: the scalar pair below reads the widest
+    // item of the last region at W = 4 and W = 8 instead of chunks. The paragraphs below are the
+    // per-colour scopes' history:
     //
     // What the lane count buys is TASKS per colour scope, not chunks. A chunk is one
     // 4 KiB `ScopeBlock`, it holds `4096 / (closure + SCOPED_CELL_HEADER)` task
@@ -2538,7 +2499,7 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
             p.step();
         }
         p.set_parallel_solve(true);
-        let (per_frame, logs) = model_frames(&mut p, w, true);
+        let (per_frame, logs) = model_frames(&mut p, w);
         let m = summarise(&per_frame);
         lane_points.push((w, m));
         push(
@@ -2561,8 +2522,8 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
         );
     }
     say!(
-        "acquisitions a step; every dispatching frame's chunks are its scopes plus the model's \
-         blocks past each scope's first, and it releases every scope frame and block it acquired"
+        "acquisitions a step; every dispatching frame is the install frame and one solve region, \
+         one block each, and it releases every scope frame and block it acquired"
     );
     let (two, four, eight) = (lane_points[1].1, lane_points[2].1, lane_points[3].1);
     assert!(
@@ -2581,6 +2542,7 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
     // on the default kernel (bit-identical, so the pile is the same pile) and flipped
     // before the window, as the 2026-09-21 measurement was taken.
     let mut scalar_points: Vec<(usize, Meas)> = Vec::with_capacity(2);
+    let mut scalar_blocks: Vec<u32> = Vec::with_capacity(2);
     for w in [4usize, 8] {
         let mut p = build_pile(w, true, 4, 2);
         for _ in 0..PHYS_WARM {
@@ -2588,8 +2550,16 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
         }
         p.set_parallel_solve(true);
         p.set_simd_solve(false);
-        let (per_frame, logs) = model_frames(&mut p, w, false);
+        let (per_frame, logs) = model_frames(&mut p, w);
         assert_row_d_frames(&format!("W={w}, simd_solve OFF"), &per_frame, &logs);
+        let blocks = p.region_max_blocks();
+        assert!(
+            (2..=MODEL_MAX_BPP * w as u32).contains(&blocks),
+            "D: W={w}, simd_solve OFF: the last region's widest item had {blocks} blocks, outside \
+             2..={} (max_bpp x P)",
+            MODEL_MAX_BPP * w as u32
+        );
+        scalar_blocks.push(blocks);
         let m = summarise(&per_frame);
         scalar_points.push((w, m));
         push(
@@ -2602,12 +2572,15 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
     }
     let (four_scalar, eight_scalar) = (scalar_points[0].1, scalar_points[1].1);
     say!(
-        "  ⇒ scalar cut walk (simd_solve OFF): 4 → {:.3} ({:.3} chunks per scope), 8 → {:.3} \
-         ({:.3} chunks per scope) acquisitions a step",
+        "  ⇒ scalar cut walk (simd_solve OFF): 4 → {:.3} ({:.3} chunks per scope, widest region \
+         item {} blocks), 8 → {:.3} ({:.3} chunks per scope, widest region item {} blocks) \
+         acquisitions a step",
         four_scalar.mean,
         four_scalar.chunk / four_scalar.scope.max(1.0),
+        scalar_blocks[0],
         eight_scalar.mean,
-        eight_scalar.chunk / eight_scalar.scope.max(1.0)
+        eight_scalar.chunk / eight_scalar.scope.max(1.0),
+        scalar_blocks[1]
     );
     assert!(
         four_scalar.scope == eight_scalar.scope && four_scalar.scope == four.scope,
@@ -2619,98 +2592,81 @@ fn d_physics_deltas(rows: &mut Vec<Row>) -> (f64, f64) {
         eight_scalar.scope,
         four.scope
     );
+    assert!(
+        eight_scalar.chunk == four_scalar.chunk,
+        "D: eight workers on the scalar kernel took {:.3} chunks a step against four's {:.3}; \
+         since SR the lanes buy blocks per region item, never a chunk (the D4 comment)",
+        eight_scalar.chunk,
+        four_scalar.chunk
+    );
     if cfg!(debug_assertions) {
+        // Debug builds the height-10 pile, whose colours are work-bound below the 4-worker lane
+        // term: the widest item can be the same at both lane counts.
         assert!(
-            eight_scalar.chunk >= four_scalar.chunk,
-            "D: eight workers on the scalar kernel ({:.3} chunks a step) took fewer chunks than \
-             four ({:.3}); in debug every colour is work-bound below the 2-worker lane term, so \
-             both rows should spawn the same tasks and take the same chunks (the strict form is \
-             gated in release only)",
-            eight_scalar.chunk,
-            four_scalar.chunk
+            scalar_blocks[1] >= scalar_blocks[0],
+            "D: the widest region item had {} blocks at W=8 against {} at W=4",
+            scalar_blocks[1],
+            scalar_blocks[0]
         );
     } else {
         assert!(
-            eight_scalar.chunk > four_scalar.chunk,
-            "D: eight workers on the scalar kernel ({:.3} chunks a step) did not take more \
-             chunks than four ({:.3}) over the same scopes; the single-group cut walk gives the \
-             widest colours 35..=38 tasks at W=8 against at most 24 at W=4, past the 34 cells a \
-             first block holds, so the per-chunk cell model predicts a second chunk on those \
-             scopes at W=8 and none at W=4 — fan-out no longer grows with lanes once a scope \
-             exceeds one chunk (see the D4 comment)",
-            eight_scalar.chunk,
-            four_scalar.chunk
+            scalar_blocks[1] > scalar_blocks[0],
+            "D: the widest region item had {} blocks at W=8 against {} at W=4; on the height-15 \
+             pile the widest colour's lane term binds at W=4 (`max_bpp x 4` = 24 blocks), so W=8 \
+             cuts it finer — the lanes no longer reach the region's grain",
+            scalar_blocks[1],
+            scalar_blocks[0]
         );
     }
 
     (off_mean, on_mean)
 }
 
-/// Per-frame logs a row D window keeps beside its counter readings: the solve setup's counter
-/// after every step, and the model's dispatch for every step ([`colour_dispatch`]). Pre-sized
-/// for every step [`frames`] runs, so a push never allocates inside a measured frame.
+/// Per-frame logs a row D window keeps beside its counter readings: the solve region's counter
+/// after every step, and the model's region gate for every step ([`region_gate`]). Pre-sized for
+/// every step [`frames`] runs, so a push never allocates inside a measured frame.
 struct ModelLogs {
-    setup: Vec<u64>,
-    model: Vec<ColourDispatch>,
-    passes: u64,
+    region: Vec<u64>,
+    model: Vec<bool>,
 }
 
-/// Runs one row D window (4 warm-up steps, then [`PHYS_REPS`] measured) on `p`, logging S4's
-/// counter and the model's dispatch after every step (a resource read allocates nothing).
-fn model_frames(p: &mut Pile, lanes: usize, simd: bool) -> (Vec<Snap>, ModelLogs) {
-    let passes = {
-        let cfg = p.world.resource::<PhysicsConfig>();
-        u64::from(cfg.substeps * (1 + cfg.relax_iterations))
-    };
-    let mut setup: Vec<u64> = Vec::with_capacity(5 + PHYS_REPS);
-    let mut model: Vec<ColourDispatch> = Vec::with_capacity(4 + PHYS_REPS);
-    setup.push(p.setup_dispatches());
+/// Runs one row D window (4 warm-up steps, then [`PHYS_REPS`] measured) on `p`, logging SR's
+/// counter and the model's gate after every step (a resource read allocates nothing).
+fn model_frames(p: &mut Pile, lanes: usize) -> (Vec<Snap>, ModelLogs) {
+    let mut region: Vec<u64> = Vec::with_capacity(5 + PHYS_REPS);
+    let mut model: Vec<bool> = Vec::with_capacity(4 + PHYS_REPS);
+    region.push(p.region_dispatches());
     let per_frame = frames(4, PHYS_REPS, || {
         p.step();
-        setup.push(p.setup_dispatches());
-        model.push(p.colour_dispatch(lanes, simd));
+        region.push(p.region_dispatches());
+        model.push(p.region_gate(lanes));
     });
-    (per_frame, ModelLogs { setup, model, passes })
+    (per_frame, ModelLogs { region, model })
 }
 
 /// Row D's per-frame derivation (the D4 comment): on every frame of a dispatching window the
-/// scope count is the install frame, S4's setup scope when it ran, and one scope per pass per
-/// colour the model dispatches; the chunk count is one per scope plus the model's blocks past
-/// each scope's first; and every scope frame and block acquired is released within the frame.
+/// solver's region counter moves exactly when the model's gate holds; the scope count is the
+/// install frame and the region; every scope holds one block (the region's `P - 1` helper cells
+/// share its first); and every scope frame and block acquired is released within the frame.
 fn assert_row_d_frames(what: &str, per_frame: &[Snap], logs: &ModelLogs) {
-    let mut over_frames = 0usize;
-    let mut max_tasks = 0u64;
+    let mut regions = 0u64;
     for (i, f) in per_frame.iter().enumerate() {
-        // Frame i is step 4 + i; `setup[k]` is the counter after step k (`setup[0]` before any).
-        let setup = logs.setup[5 + i] - logs.setup[4 + i];
+        // Frame i is step 4 + i; `region[k]` is the counter after step k (`region[0]` before any).
+        let region = logs.region[5 + i] - logs.region[4 + i];
         let model = logs.model[4 + i];
+        assert_eq!(
+            region,
+            u64::from(model),
+            "D ({what}): frame {i} moved `region_dispatches` by {region}, the model's gate says \
+             {model} — the model's region gate no longer describes the solve's"
+        );
         assert!(
-            setup <= 1,
-            "D ({what}): frame {i} moved `setup_dispatches` by {setup}; the solve builds once per step"
-        );
-        assert_eq!(
+            f.scope == 1 + region && f.chunk == f.scope,
+            "D ({what}): frame {i} opened {} scope frames on {} chunks, against 1 install + \
+             {region} solve region, one block each — a scope was added or lost, or the region's \
+             helper cells outgrew its first block",
             f.scope,
-            1 + setup + logs.passes * model.scopes,
-            "D ({what}): frame {i} opened {} scope frames, against 1 install + {setup} setup + {} \
-             passes x {} colour scope(s) the model dispatches — the model's colour gates no longer \
-             describe the solve's (or a scope was added or lost)",
-            f.scope,
-            logs.passes,
-            model.scopes
-        );
-        assert_eq!(
-            f.chunk,
-            f.scope + logs.passes * model.extra_blocks,
-            "D ({what}): frame {i}: {} chunks for {} scope frames, against one block per scope plus \
-             {} passes x {} block(s) past the first the model derives (widest colour {} tasks, \
-             {COLOUR_TASK_CELL_BYTES} B cells, {} to a first block) — the colour task's cell grew \
-             past {COLOUR_TASK_CELL_BYTES} B, or a colour cut into more tasks than the model's walk",
-            f.chunk,
-            f.scope,
-            logs.passes,
-            model.extra_blocks,
-            model.max_tasks,
-            CHUNK0 / COLOUR_TASK_CELL_BYTES
+            f.chunk
         );
         assert!(
             f.scope_freed == f.scope && f.chunk_freed == f.chunk,
@@ -2721,15 +2677,17 @@ fn assert_row_d_frames(what: &str, per_frame: &[Snap], logs: &ModelLogs) {
             f.chunk_freed,
             f.chunk
         );
-        over_frames += usize::from(model.extra_blocks > 0);
-        max_tasks = max_tasks.max(model.max_tasks);
+        regions += region;
     }
+    assert!(
+        regions > 0,
+        "D ({what}): no frame of the window opened a solve region, so the structure above was \
+         only checked on the serial step"
+    );
     say!(
-        "  ⇒ D ({what}): chunk == scope + passes x blocks past the first on all {} frames; {over_frames} \
-         frame(s) with a second block (widest colour {max_tasks} tasks against {} cells to a first \
-         block); every scope frame and block released inside its frame",
-        per_frame.len(),
-        CHUNK0 / COLOUR_TASK_CELL_BYTES
+        "  ⇒ D ({what}): scope == chunk == 1 + region on all {} frames ({regions} regions); every \
+         scope frame and block released inside its frame",
+        per_frame.len()
     );
 }
 

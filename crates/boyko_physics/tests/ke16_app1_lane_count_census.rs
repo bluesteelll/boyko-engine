@@ -21,6 +21,14 @@
 //!   alike. Re-adding the `+ 1` does not red it.
 //! * Wall-clock cannot see one chunk in 96.
 //!
+//! Since SR's flip (phase B, 2026-10-07) the rigid colored solver opens no per-colour `pool.scope`,
+//! so its site no longer binds `let lanes = pool.num_threads();` inside a dispatch closure: it reads
+//! the lane count once per step in `build_columns` (P2's lanes term, and the solve region's fill
+//! block count), `let lanes = try_with_active_pool(|pool| pool.num_threads()).unwrap_or(0);`, and
+//! again in `solve_region` (the region's participants), `let p = try_with_active_pool(|pool|
+//! pool.num_threads());`. Those two are that site's required bindings ([`APP1_SITES`]); the other
+//! two sites still spell `let lanes = pool.num_threads();`.
+//!
 //! So a reintroduced `+ 1` — the single most likely regression of this item, because the old
 //! rationale reads plausibly and three sites must agree — would ship green. A source census is
 //! what the repo already uses for exactly this class (`tests/isa_baseline_census.rs` and
@@ -42,15 +50,23 @@
 use std::fs;
 use std::path::PathBuf;
 
-/// The three sites App-1 names, relative to this crate's manifest directory.
-const APP1_SITES: [&str; 3] = [
-    "src/solver/colored.rs",
-    "src/soft/colored.rs",
-    "src/resources.rs",
+/// The three sites App-1 names, relative to this crate's manifest directory, each with the
+/// lane-count bindings it must spell (whitespace-removed). Since SR's flip the rigid colored
+/// solver's are its two per-step probes (this file's header).
+const APP1_SITES: [(&str, &[&str]); 3] = [
+    ("src/solver/colored.rs", &[REGION_LANES_BINDING, REGION_PARTICIPANTS_BINDING]),
+    ("src/soft/colored.rs", &[LANE_BINDING]),
+    ("src/resources.rs", &[LANE_BINDING]),
 ];
 
-/// The lane-count binding every App-1 site must spell, whitespace-removed.
+/// The lane-count binding of a site that dispatches its own `pool.scope`, whitespace-removed.
 const LANE_BINDING: &str = "letlanes=pool.num_threads();";
+
+/// The rigid colored solver's P2 lanes term (`build_columns`), whitespace-removed.
+const REGION_LANES_BINDING: &str = "letlanes=try_with_active_pool(|pool|pool.num_threads()).unwrap_or(0);";
+
+/// The rigid colored solver's region participants (`solve_region`), whitespace-removed.
+const REGION_PARTICIPANTS_BINDING: &str = "letp=try_with_active_pool(|pool|pool.num_threads());";
 
 /// The retired spelling, whitespace-removed.
 const RETIRED_PLUS_ONE: &str = "num_threads()+1";
@@ -108,19 +124,21 @@ fn strip_comments(text: &str) -> String {
 #[test]
 fn every_app1_site_binds_the_lane_count_from_num_threads() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for site in APP1_SITES {
+    for (site, bindings) in APP1_SITES {
         let path = root.join(site);
         let text = fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("invariant: the App-1 site {site} must exist ({e})"));
         let code = strip_comments(&text);
-        assert!(
-            code.contains(LANE_BINDING),
-            "{site} no longer contains `let lanes = pool.num_threads();`. KE16 App-1 fixes the \
-             lane count of all THREE physics dispatch sites at `num_threads()`; a site that binds \
-             it differently is either the retired `+ 1` returning or a site that stopped asking \
-             the pool, and no bit-identity oracle or allocation bound in this crate can see either \
-             (see this file's header)"
-        );
+        for binding in bindings {
+            assert!(
+                code.contains(binding),
+                "{site} no longer contains `{binding}` (whitespace removed). KE16 App-1 fixes the \
+                 lane count of all THREE physics dispatch sites at `num_threads()`; a site that binds \
+                 it differently is either the retired `+ 1` returning or a site that stopped asking \
+                 the pool, and no bit-identity oracle or allocation bound in this crate can see \
+                 either (see this file's header)"
+            );
+        }
     }
 }
 
@@ -176,5 +194,20 @@ fn the_census_predicate_reports_an_injected_plus_one_and_ignores_prose() {
     assert!(
         strip_comments(binding).contains(LANE_BINDING),
         "the scan cannot see the lane binding it requires — the site test above is vacuous"
+    );
+
+    // SR: the rigid solver's two probes, as rustfmt may wrap them, and their `+ 1` forms.
+    let region = "        let lanes =\n            try_with_active_pool(|pool| pool.num_threads()).unwrap_or(0);\n        \
+                  let p = try_with_active_pool(|pool| pool.num_threads());\n";
+    let code = strip_comments(region);
+    assert!(
+        code.contains(REGION_LANES_BINDING) && code.contains(REGION_PARTICIPANTS_BINDING),
+        "the scan cannot see the rigid solver's lane bindings — its site test above is vacuous"
+    );
+    let region_plus_one = "        let p = try_with_active_pool(|pool| pool.num_threads() + 1);\n";
+    let code = strip_comments(region_plus_one);
+    assert!(
+        code.contains(RETIRED_PLUS_ONE) && !code.contains(REGION_PARTICIPANTS_BINDING),
+        "the scan cannot tell the region's `+ 1` participants from its binding"
     );
 }
