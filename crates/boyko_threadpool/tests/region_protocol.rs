@@ -29,8 +29,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use boyko_threadpool::{
-    Ladder, REGION_MAX_BLOCKS_PER_PARTICIPANT, RegionExit, RegionPolicy, RegionReport,
-    RegionStages, RegionWaitBound, SchedItem, V2Policy,
+    Advance, Ladder, REGION_MAX_BLOCKS_PER_PARTICIPANT, RegionExit, RegionPolicy, RegionReport,
+    RegionStages, RegionWaitBound, SchedItem, V2Policy, WithAdvance, claim_lines,
 };
 
 use region_common::{
@@ -38,6 +38,15 @@ use region_common::{
     Route, Stages, TestPolicy, TtasPolicy, hold_workers, participant_counts, pool,
     run_region, within,
 };
+
+/// `P` under the finisher advance (CR-F).
+type Fin<P> = WithAdvance<P, true>;
+
+/// Whether a region of `P` and `ARMED` runs the finisher path at P ≥ 2 (an armed region runs the
+/// orchestrator twin, design Q7).
+const fn runs_fin<P: RegionPolicy, const ARMED: bool>() -> bool {
+    matches!(P::ADVANCE, Advance::Finisher) && !ARMED
+}
 
 /// A random table for `participants`: `(blocks per entry, schedule)`.
 fn random_table(rng: &mut Rng, participants: u32, shape: u32) -> (Vec<u16>, Vec<u16>) {
@@ -65,8 +74,9 @@ fn random_table(rng: &mut Rng, participants: u32, shape: u32) -> (Vec<u16>, Vec<
     }
 }
 
-/// The report's formulas against the table and the receipts (T3's checks, run on every region).
-fn check_report(ran: &Ran, participants: u32, what: &str) {
+/// The report's formulas against the table and the receipts (T3's checks, run on every region),
+/// and the identity on `RegionReport::advances` for the policy and arming the region ran.
+fn check_report<P: RegionPolicy, const ARMED: bool>(ran: &Ran, participants: u32, what: &str) {
     let r: RegionReport = match &ran.result {
         Ok(r) => *r,
         Err(e) => panic!("{what}: the region panicked: {:?}", e.downcast_ref::<RegionWaitBound>()),
@@ -86,6 +96,17 @@ fn check_report(ran: &Ran, participants: u32, what: &str) {
         assert_eq!(rc.region, r.base, "{what}: participant {p}'s receipt tag");
         assert_eq!(rc.exit, Some(RegionExit::End), "{what}: participant {p}'s exit");
     }
+    // The identity on `RegionReport::advances`, in release too.
+    assert_eq!(r.advances, u64::from(r.published) + 1, "{what}: Σ advances == published + 1");
+    let advances: u64 = receipts.iter().map(|rc| rc.advances).sum();
+    assert_eq!(advances, r.advances, "{what}: Σ receipt advances == report.advances");
+    let helper_advances: u64 = receipts[1..].iter().map(|rc| rc.advances).sum();
+    assert_eq!(r.helper_advances, helper_advances, "{what}: helper_advances == Σ over participants 1..");
+    if !runs_fin::<P, ARMED>() {
+        // The orchestrator (an armed finisher policy included) makes every publish itself: a
+        // helper advance is a defect, and the finisher twins' "> 0" below rests on this premise.
+        assert_eq!(r.helper_advances, 0, "{what}: helpers never advance under the orchestrator");
+    }
 }
 
 /// T1 + T2 + T3 for one policy and arming over the random-table matrix.
@@ -98,6 +119,9 @@ fn exactly_once_matrix<P: RegionPolicy + 'static, const ARMED: bool>(label: &str
         // Anti-vacuity: at P >= 2 the helpers must have run blocks somewhere in the matrix, or the
         // claims above were only ever exercised by participant 0.
         let mut helper_blocks = 0u64;
+        // Finisher twins (native LF4): at P >= 2 a helper must have advanced somewhere, or the
+        // matrix never ran the finisher's completer path.
+        let mut helper_advances = 0u64;
         for &route in routes {
             for seed in 0..seeds {
                 for &shape in shapes {
@@ -120,9 +144,10 @@ fn exactly_once_matrix<P: RegionPolicy + 'static, const ARMED: bool>(label: &str
                     let stages = Arc::new(stages);
                     let what = format!("{label} P{p} {route:?} seed {seed} shape {shape} blocks {blocks:?} order {order:?}");
                     let ran = run_region::<P, ARMED>(&pool, route, frame, stages, p);
-                    check_report(&ran, p, &what);
+                    check_report::<P, ARMED>(&ran, p, &what);
                     ran.stages.assert_exactly_once(&ran.frame, &what);
                     helper_blocks += ran.result.as_ref().map_or(0, |r| r.helper_blocks);
+                    helper_advances += ran.result.as_ref().map_or(0, |r| r.helper_advances);
                     if ARMED {
                         for (i, it) in ran.frame.schedule.iter().enumerate() {
                             for b in 0..usize::from(ran.frame.entries[usize::from(it.entry)].n_blocks) {
@@ -134,6 +159,9 @@ fn exactly_once_matrix<P: RegionPolicy + 'static, const ARMED: bool>(label: &str
             }
         }
         assert!(p < 2 || helper_blocks > 0, "{label} P{p}: no helper ran a block anywhere in the matrix");
+        if runs_fin::<P, ARMED>() && p >= 2 && !cfg!(miri) {
+            assert!(helper_advances > 0, "{label} P{p}: no helper advance anywhere in the matrix");
+        }
     }
 }
 
@@ -172,10 +200,51 @@ fn t1_t2_exactly_once_and_visibility_pure_spin_helpers() {
     exactly_once_matrix::<PureSpinHelpersPolicy, false>("R-d' pure-spin helpers");
 }
 
+// G-CR-F-PROTO: T1 + T2 + T3 under the finisher advance, for every bounded policy of
+// `region_common`. A defect that leaves an item without a completer (N-FIN-LASTADD) reds as the
+// policy's `RegionWaitBound`, never as a hang.
+
+#[test]
+fn fin_t1_t2_exactly_once_and_visibility_v2() {
+    exactly_once_matrix::<Fin<TestPolicy>, false>("fin v2");
+}
+
+#[test]
+fn fin_t1_t2_exactly_once_and_visibility_batched_completion() {
+    exactly_once_matrix::<Fin<BatchedPolicy>, false>("fin R-a batched");
+}
+
+#[test]
+fn fin_t1_t2_exactly_once_and_visibility_home_lines() {
+    exactly_once_matrix::<Fin<HomePolicy>, false>("fin R-b home lines");
+}
+
+#[test]
+fn fin_t1_t2_exactly_once_and_visibility_ttas() {
+    exactly_once_matrix::<Fin<TtasPolicy>, false>("fin R-c TTAS");
+}
+
+#[test]
+fn fin_t1_t2_exactly_once_and_visibility_pure_spin_helpers() {
+    exactly_once_matrix::<Fin<PureSpinHelpersPolicy>, false>("fin R-d' pure-spin helpers");
+}
+
+#[test]
+fn fin_t1_t2_exactly_once_and_visibility_all_axes() {
+    exactly_once_matrix::<Fin<AllAxesPolicy>, false>("fin all axes");
+}
+
+/// Design Q7: an `ARMED` region under a finisher policy runs the orchestrator twin (the per-item
+/// hooks are participant 0's) — every region reads `helper_advances == 0` (`check_report`) and the
+/// armed per-item counts hold.
+#[test]
+fn fin_armed_runs_the_orchestrator_twin() {
+    exactly_once_matrix::<Fin<AllAxesPolicy>, true>("fin all axes armed (orchestrator twin)");
+}
+
 /// T3 on a fixed table whose numbers are written out: 2 inline items, 3 published items of
 /// widths 3, 2·P and 3.
-#[test]
-fn t3_report_formulas_on_a_fixed_table() {
+fn t3_body<P: RegionPolicy + 'static>(label: &str) {
     for &p in participant_counts() {
         if p < 2 {
             continue;
@@ -184,23 +253,35 @@ fn t3_report_formulas_on_a_fixed_table() {
         let blocks = [1u16, 3, (2 * p) as u16];
         let order = [0u16, 1, 2, 0, 1];
         let mut frame = Frame::new(3, p as usize, 64);
-        frame.set_table::<TestPolicy>(&blocks, &order, p, 0);
+        frame.set_table::<P>(&blocks, &order, p, 0);
         let stages = Arc::new(Stages::new(&frame));
-        let ran = run_region::<TestPolicy, false>(&pool, Route::External, frame, stages, p);
-        let what = format!("T3 P{p}");
-        check_report(&ran, p, &what);
+        let ran = run_region::<P, false>(&pool, Route::External, frame, stages, p);
+        let what = format!("{label} P{p}");
+        check_report::<P, false>(&ran, p, &what);
         let r = ran.result.as_ref().expect("T3: the region completes");
         assert_eq!((r.published, r.inline, r.max_blocks), (3, 2, 2 * p), "{what}: the written-out numbers");
+        assert_eq!(r.advances, 4, "{what}: three epochs and the END");
         assert_eq!(ran.frame.expected_blocks(), 2 + 3 + u64::from(2 * p) + 3, "{what}");
         assert_eq!(r.base, 1, "{what}: a fresh counter's first region is based at 1 (O1)");
     }
 }
 
+#[test]
+fn t3_report_formulas_on_a_fixed_table() {
+    t3_body::<TestPolicy>("T3");
+}
+
+/// T3 under the finisher: `published`, `inline` and `max_blocks` are the table walk, and the
+/// advance identity (`check_report`) is what witnesses that the schedule ran.
+#[test]
+fn fin_t3_report_formulas_on_a_fixed_table() {
+    t3_body::<Fin<TestPolicy>>("fin T3");
+}
+
 /// T4: work conservation. Every worker is held by a gated task until the region returns, so the
 /// orchestrator (the dispatcher) completes every item alone; the helpers run late, at the scope's
 /// join, read END with this region's tag, and run nothing.
-#[test]
-fn t4_the_region_completes_alone_and_late_helpers_read_its_end() {
+fn t4_body<P: RegionPolicy + 'static>(label: &str) {
     let counts: &[u32] = if cfg!(miri) { &[2] } else { &[2, 4, 8] };
     for &p in counts {
         let pool = pool(p);
@@ -208,24 +289,41 @@ fn t4_the_region_completes_alone_and_late_helpers_read_its_end() {
         let blocks = [3u16, 1, (2 * p) as u16];
         let order = [0u16, 1, 2, 2, 0];
         let mut frame = Frame::new(3, p as usize, 64);
-        frame.set_table::<TestPolicy>(&blocks, &order, p, 0);
+        frame.set_table::<P>(&blocks, &order, p, 0);
         let stages = Arc::new(Stages::new(&frame));
-        let ran = run_region::<TestPolicy, false>(&pool, Route::External, frame, stages, p);
+        let ran = run_region::<P, false>(&pool, Route::External, frame, stages, p);
         release.store(true, Ordering::Release);
-        let what = format!("T4 P{p}");
-        check_report(&ran, p, &what);
+        let what = format!("{label} P{p}");
+        check_report::<P, false>(&ran, p, &what);
         ran.stages.assert_exactly_once(&ran.frame, &what);
         let r = ran.result.as_ref().expect("T4: the region completes");
         assert_eq!(r.helper_blocks, 0, "{what}: no helper could run while every worker was held");
         assert_eq!(ran.frame.receipts(p)[0].blocks, ran.frame.expected_blocks(), "{what}: participant 0 ran all");
+        assert_eq!(r.helper_advances, 0, "{what}: no helper could advance while every worker was held");
+        assert_eq!(
+            ran.frame.receipts(p)[0].advances,
+            u64::from(r.published) + 1,
+            "{what}: participant 0 made every publish"
+        );
     }
+}
+
+#[test]
+fn t4_the_region_completes_alone_and_late_helpers_read_its_end() {
+    t4_body::<TestPolicy>("T4");
+}
+
+/// T4 under the finisher, its work-conservation gate: participant 0 completes every item through
+/// its own completion adds and advances each boundary itself.
+#[test]
+fn fin_t4_the_region_completes_alone_and_late_helpers_read_its_end() {
+    t4_body::<Fin<TestPolicy>>("fin T4");
 }
 
 /// T5: two regions with different tables over one frame. The second maps the first's claim words
 /// to other entries and blocks and has more entries, so its first executions take the retry path
 /// on words holding the first region's epochs. The bases follow `base' = base + len + 1`.
-#[test]
-fn t5_two_tables_over_one_frame_take_the_retry_path() {
+fn t5_body<P: RegionPolicy + 'static>(label: &str) {
     for &p in participant_counts() {
         if p < 2 {
             continue;
@@ -233,11 +331,11 @@ fn t5_two_tables_over_one_frame_take_the_retry_path() {
         let pool = pool(p);
         let mut frame = Frame::new(6, p as usize, 256);
         let (blocks_a, order_a) = (vec![3u16, (2 * p) as u16], vec![0u16, 1, 1, 0]);
-        frame.set_table::<TestPolicy>(&blocks_a, &order_a, p, 0);
+        frame.set_table::<P>(&blocks_a, &order_a, p, 0);
         let stages = Arc::new(Stages::new(&frame));
-        let ran = run_region::<TestPolicy, false>(&pool, Route::Worker, frame, stages, p);
-        let what = format!("T5 P{p} region A");
-        check_report(&ran, p, &what);
+        let ran = run_region::<P, false>(&pool, Route::Worker, frame, stages, p);
+        let what = format!("{label} P{p} region A");
+        check_report::<P, false>(&ran, p, &what);
         ran.stages.assert_exactly_once(&ran.frame, &what);
         let base_a = ran.result.as_ref().expect("T5: A completes").base;
         assert_eq!(base_a, 1, "{what}: O1, the first base is 1");
@@ -250,15 +348,26 @@ fn t5_two_tables_over_one_frame_take_the_retry_path() {
         // (mutation M-OPEN, red on the END-tag debug assertion).
         let blocks_b = vec![(2 * p) as u16, 1, 4, 3, (p + 1) as u16];
         let order_b = vec![1u16, 2, 0, 1, 3, 4, 0, 2, 4];
-        frame.set_table::<TestPolicy>(&blocks_b, &order_b, p, 1);
+        frame.set_table::<P>(&blocks_b, &order_b, p, 1);
         let stages = Arc::new(Stages::new(&frame).with_slow(1, Duration::from_millis(2)));
-        let ran = run_region::<TestPolicy, false>(&pool, Route::External, frame, stages, p);
-        let what = format!("T5 P{p} region B");
-        check_report(&ran, p, &what);
+        let ran = run_region::<P, false>(&pool, Route::External, frame, stages, p);
+        let what = format!("{label} P{p} region B");
+        check_report::<P, false>(&ran, p, &what);
         ran.stages.assert_exactly_once(&ran.frame, &what);
         let base_b = ran.result.as_ref().expect("T5: B completes").base;
         assert_eq!(base_b, base_a + order_a.len() as u64 + 1, "{what}: B's base");
     }
+}
+
+#[test]
+fn t5_two_tables_over_one_frame_take_the_retry_path() {
+    t5_body::<TestPolicy>("T5");
+}
+
+/// T5 under the finisher: the retry path and the base sequence, whoever advances.
+#[test]
+fn fin_t5_two_tables_over_one_frame_take_the_retry_path() {
+    t5_body::<Fin<TestPolicy>>("fin T5");
 }
 
 /// A policy whose both ladders are `$l`, bounded at 50 ms.
@@ -312,7 +421,9 @@ fn bound_payload<P: RegionPolicy + 'static>(role_helper: bool) -> Option<Result<
 }
 
 /// T6: the wait bound fires in every ladder (both roles), as a `RegionWaitBound` within 1 s — a
-/// ladder phase that never reads the clock reads red (`None`), not hung.
+/// ladder phase that never reads the clock reads red (`None`), not hung. The finisher legs fire
+/// participant 0's bound in its publish wait (on `ORCH_WAIT`) and the helper's in its publish wait
+/// (on `HELPER_WAIT`); the payload participants are the same.
 #[test]
 #[cfg_attr(
     miri,
@@ -332,6 +443,9 @@ fn t6_ladder_bound_fires_in_every_phase() {
     one::<BoundPause>("PauseThenYield{5}");
     one::<BoundSpin>("PureSpin");
     one::<BoundBudget>("BudgetThenYield{1 µs}");
+    one::<Fin<BoundPause>>("fin PauseThenYield{5}");
+    one::<Fin<BoundSpin>>("fin PureSpin");
+    one::<Fin<BoundBudget>>("fin BudgetThenYield{1 µs}");
 }
 
 /// T7: the census is compiled out when disarmed and counts a stall when armed. The block a helper
@@ -340,26 +454,26 @@ fn t6_ladder_bound_fires_in_every_phase() {
 /// threshold — so 50 µs could not show the census counting.
 #[test]
 fn t7_the_stall_census_is_armed_only() {
-    let run = |armed: bool| -> RegionReport {
+    fn run<P: RegionPolicy + 'static, const ARMED: bool>() -> RegionReport {
         let pool = pool(2);
         let mut frame = Frame::new(1, 2, 8);
-        frame.set_table::<TestPolicy>(&[2], &[0], 2, 0);
+        frame.set_table::<P>(&[2], &[0], 2, 0);
         let stages = Arc::new(Stages::new(&frame).with_rendezvous(Rendezvous {
             entry: 0,
             hold: Duration::from_micros(200),
             sleep: false,
         }));
-        let ran = if armed {
-            run_region::<TestPolicy, true>(&pool, Route::External, frame, stages, 2)
-        } else {
-            run_region::<TestPolicy, false>(&pool, Route::External, frame, stages, 2)
-        };
+        let ran = run_region::<P, ARMED>(&pool, Route::External, frame, stages, 2);
         assert_eq!(ran.stages.runs(0, 1), 1, "T7: block 1 ran");
         ran.result.expect("T7: the region completes")
-    };
-    let off = run(false);
+    }
+    let off = run::<TestPolicy, false>();
     assert_eq!((off.stalls, off.max_wait_ns), (0, 0), "T7: a disarmed region records no census");
-    let on = run(true);
+    // The finisher is disarmed by construction: its participant 0 waits ~200 µs in its publish
+    // wait here, and records nothing.
+    let fin_off = run::<Fin<TestPolicy>, false>();
+    assert_eq!((fin_off.stalls, fin_off.max_wait_ns), (0, 0), "T7: a disarmed finisher region records no census");
+    let on = run::<TestPolicy, true>();
     if !cfg!(miri) {
         assert!(on.stalls >= 1, "T7: the orchestrator's ~200 µs done-wait is a stall when armed: {on:?}");
         assert!(on.max_wait_ns >= 20_000, "T7: the longest wait is recorded when armed: {on:?}");
@@ -506,8 +620,7 @@ fn hint_regions<P: RegionPolicy>(p: u32, hint: Hint, regions: u32) -> Result<u64
 /// reads a hang as red; after one hang a hint's later `V2Policy` legs are skipped, so a red run
 /// leaves one spinning region behind per hint, not one per P). Every leg must also have had a
 /// helper run blocks, or no hint was ever contended.
-#[test]
-fn t8_a_hint_that_names_no_earlier_item_is_no_hint() {
+fn t8_body<Pb: RegionPolicy + 'static, Pu: RegionPolicy + 'static>(bounded: &str, unbounded: &str) {
     let counts: &[u32] = if cfg!(miri) { &[2] } else { &[2, 4, 8] };
     let regions = if cfg!(miri) { 1 } else { 24 };
     let limit = Duration::from_secs(60);
@@ -518,13 +631,13 @@ fn t8_a_hint_that_names_no_earlier_item_is_no_hint() {
         for &p in counts {
             let mut legs = Vec::new();
             if cfg!(miri) {
-                legs.push(("TestPolicy", Some(hint_regions::<TestPolicy>(p, hint, regions))));
+                legs.push((bounded, Some(hint_regions::<Pb>(p, hint, regions))));
             } else {
-                legs.push(("TestPolicy", within(limit, move || hint_regions::<TestPolicy>(p, hint, regions))));
+                legs.push((bounded, within(limit, move || hint_regions::<Pb>(p, hint, regions))));
                 if !v2_hung {
-                    let r = within(limit, move || hint_regions::<V2Policy>(p, hint, regions));
+                    let r = within(limit, move || hint_regions::<Pu>(p, hint, regions));
                     v2_hung = r.is_none();
-                    legs.push(("V2Policy", r));
+                    legs.push((unbounded, r));
                 }
             }
             for (policy, r) in legs {
@@ -542,6 +655,195 @@ fn t8_a_hint_that_names_no_earlier_item_is_no_hint() {
         }
     }
     assert!(failures.is_empty(), "T8: {} failing legs:\n{}", failures.len(), failures.join("\n"));
+}
+
+#[test]
+fn t8_a_hint_that_names_no_earlier_item_is_no_hint() {
+    t8_body::<TestPolicy, V2Policy>("TestPolicy", "V2Policy");
+}
+
+/// T8 under the finisher: the bounded `Fin<TestPolicy>` and the shipped-shape unbounded
+/// `Fin<V2Policy>` on the watchdog route.
+#[test]
+fn fin_t8_a_hint_that_names_no_earlier_item_is_no_hint() {
+    t8_body::<Fin<TestPolicy>, Fin<V2Policy>>("Fin<TestPolicy>", "Fin<V2Policy>");
+}
+
+// ---------------------------------------------------------------------------
+// G-CR-F-PROTO: the finisher's own properties
+// ---------------------------------------------------------------------------
+
+/// A helper advances (the finisher's anti-vacuity, native LF4).
+///
+/// (i) Deterministic: P = 2, entries `[2, 2]`, items `[0, 1]`. Participant 0's block 0 of item 0
+/// waits until a helper starts block 1 (the helper's start, `1·2/2`), which then holds 20 ms; so
+/// participant 0's add lands first, the helper's add completes item 0, and the helper publishes
+/// item 1. Every region must show the helper in block 1 and `helper_advances >= 1`.
+/// (ii) P = 4, one entry of 8 blocks run 64 times, 10 regions: Σ `helper_advances` > 0.
+#[test]
+fn fin_a_helper_advances() {
+    let regions = if cfg!(miri) { 2 } else { 20 };
+    let pool2 = pool(2);
+    let mut frame = Frame::new(2, 2, 8);
+    frame.set_table::<Fin<TestPolicy>>(&[2, 2], &[0, 1], 2, 0);
+    for r in 0..regions {
+        let stages = Arc::new(Stages::new(&frame).with_rendezvous(Rendezvous {
+            entry: 0,
+            hold: Duration::from_millis(20),
+            sleep: false,
+        }));
+        let ran = run_region::<Fin<TestPolicy>, false>(&pool2, Route::External, frame, stages, 2);
+        let what = format!("fin_a_helper_advances (i) region {r}");
+        check_report::<Fin<TestPolicy>, false>(&ran, 2, &what);
+        ran.stages.assert_exactly_once(&ran.frame, &what);
+        assert!(ran.stages.rendezvous_b1_by_helper(), "{what}: no helper started block 1 (the rendezvous ran out)");
+        let advances = ran.result.as_ref().map_or(0, |rep| rep.helper_advances);
+        assert!(advances >= 1, "{what}: helper_advances {advances} in region {r}");
+        frame = ran.frame;
+    }
+    let pool4 = pool(4);
+    let mut frame = Frame::new(1, 4, 8);
+    let items = if cfg!(miri) { 4 } else { 64 };
+    frame.set_table::<Fin<TestPolicy>>(&[8], &vec![0u16; items], 4, 0);
+    let mut sum = 0u64;
+    for r in 0..if cfg!(miri) { 1 } else { 10 } {
+        let stages = Arc::new(Stages::new(&frame).with_work(Duration::from_micros(2)));
+        let ran = run_region::<Fin<TestPolicy>, false>(&pool4, Route::Worker, frame, stages, 4);
+        let what = format!("fin_a_helper_advances (ii) region {r}");
+        check_report::<Fin<TestPolicy>, false>(&ran, 4, &what);
+        ran.stages.assert_exactly_once(&ran.frame, &what);
+        sum += ran.result.as_ref().map_or(0, |rep| rep.helper_advances);
+        frame = ran.frame;
+    }
+    if !cfg!(miri) {
+        assert!(sum > 0, "fin_a_helper_advances (ii): no helper advance in 10 regions of 64 items at P4");
+    }
+}
+
+/// Inline items never leave participant 0 under the finisher (W4), with inline items at the
+/// start, in the middle and at the end, both routes, P 2/4/8: `inline_off_p0 == 0` (checked by
+/// `assert_exactly_once`), Σ receipt blocks == Σ n_blocks with the inline blocks included, and the
+/// advance identity (`check_report`).
+///
+/// Anti-vacuity (review O3): the first part makes a HELPER the completer of an item followed by an
+/// inline item, deterministically — P = 2, entries `[2, 1]`, items `[0, 1]`, participant 0's block
+/// 0 held until a helper starts block 1, which then holds 20 ms — so a completer that ran the next
+/// inline item itself (N-FIN-INLINE) is red in every region, not only when the timing allows.
+#[test]
+fn fin_inline_runs_stay_on_participant_0() {
+    let regions = if cfg!(miri) { 2 } else { 20 };
+    let pool2 = pool(2);
+    let mut frame = Frame::new(2, 2, 8);
+    frame.set_table::<Fin<TestPolicy>>(&[2, 1], &[0, 1], 2, 0);
+    for r in 0..regions {
+        let stages = Arc::new(Stages::new(&frame).with_rendezvous(Rendezvous {
+            entry: 0,
+            hold: Duration::from_millis(20),
+            sleep: false,
+        }));
+        let ran = run_region::<Fin<TestPolicy>, false>(&pool2, Route::External, frame, stages, 2);
+        let what = format!("fin inline (helper completer) region {r}");
+        check_report::<Fin<TestPolicy>, false>(&ran, 2, &what);
+        ran.stages.assert_exactly_once(&ran.frame, &what);
+        assert!(ran.stages.rendezvous_b1_by_helper(), "{what}: no helper started block 1 (the rendezvous ran out)");
+        frame = ran.frame;
+    }
+    let counts: &[u32] = if cfg!(miri) { &[2] } else { &[2, 4, 8] };
+    let per = if cfg!(miri) { 1 } else { 6 };
+    for &p in counts {
+        let pool = pool(p);
+        let blocks = [1u16, (2 * p) as u16, 1, 3, 1];
+        let order = [0u16, 1, 2, 3, 1, 4];
+        for route in [Route::External, Route::Worker] {
+            let mut frame = Frame::new(blocks.len(), p as usize, 64);
+            frame.set_table::<Fin<TestPolicy>>(&blocks, &order, p, 0);
+            for r in 0..per {
+                let stages = Arc::new(Stages::new(&frame).with_work(Duration::from_micros(2)));
+                let ran = run_region::<Fin<TestPolicy>, false>(&pool, route, frame, stages, p);
+                let what = format!("fin inline P{p} {route:?} region {r}");
+                check_report::<Fin<TestPolicy>, false>(&ran, p, &what);
+                ran.stages.assert_exactly_once(&ran.frame, &what);
+                assert_eq!(
+                    ran.frame.receipts(p).iter().map(|rc| rc.blocks).sum::<u64>(),
+                    ran.frame.expected_blocks(),
+                    "{what}: Σ receipt blocks (the inline blocks included)"
+                );
+                frame = ran.frame;
+            }
+        }
+    }
+}
+
+/// Every claim word of each published entry holds that entry's last epoch of the region based at
+/// `base` (the omega bench's receipt rule, `Frame3::check`), counted per policy `P`'s layout.
+fn assert_claim_words_at_last_epoch<P: RegionPolicy>(frame: &Frame, base: u64, participants: u32, what: &str) {
+    for (e, entry) in frame.entries.iter().enumerate() {
+        if entry.n_blocks < 2 {
+            continue;
+        }
+        let Some(last) = frame.schedule.iter().rposition(|it| usize::from(it.entry) == e) else { continue };
+        let want = base + 1 + last as u64;
+        let first = entry.first_claim as usize;
+        let lines = &frame.claims[first..first + claim_lines::<P>(entry.n_blocks, participants) as usize];
+        let at: usize = if P::HOME_LINES {
+            lines.iter().map(|l| (0..8).filter(|&k| l.word(k) == want).count()).sum()
+        } else {
+            lines.iter().filter(|l| l.word(0) == want).count()
+        };
+        assert_eq!(at, usize::from(entry.n_blocks), "{what}: entry {e}'s claim words at its last epoch {want}");
+    }
+}
+
+/// One region of `Q` over the ALT frame (laid out once for the base policy), checked.
+fn alt_region<Q: RegionPolicy + 'static, Base: RegionPolicy>(
+    pool: &Arc<boyko_threadpool::ThreadPool>,
+    route: Route,
+    frame: Frame,
+    what: &str,
+) -> Frame {
+    let stages = Arc::new(Stages::new(&frame));
+    let ran = run_region::<Q, false>(pool, route, frame, stages, 4);
+    check_report::<Q, false>(&ran, 4, what);
+    ran.stages.assert_exactly_once(&ran.frame, what);
+    let base = ran.result.as_ref().map_or(0, |r| r.base);
+    // The layout is the base policy's: `WithAdvance` copies `HOME_LINES` (unit test u1).
+    assert_claim_words_at_last_epoch::<Base>(&ran.frame, base, 4, what);
+    ran.frame
+}
+
+/// The ALT leg for one base policy: consecutive regions over ONE frame, alternating `P` and
+/// `Fin<P>`, the table laid out once for `P`.
+fn alt_leg<P: RegionPolicy + 'static>(pool: &Arc<boyko_threadpool::ThreadPool>, name: &str, regions: u32) {
+    let mut frame = Frame::new(3, 4, 16);
+    // Review O6's pinned shape: a non-home layout puts the first claims at 0, 2, 8, a home layout
+    // (4 lines per entry at P4) at 0, 4, 8, so a `WithAdvance` that changed `HOME_LINES` overlaps
+    // two entries in either direction, and the column of 16 keeps the column clause from deciding.
+    frame.set_table::<P>(&[2, 6, 3], &[0, 1, 2, 1, 0, 2], 4, 0);
+    for r in 0..regions {
+        let route = if (r / 2) % 2 == 0 { Route::External } else { Route::Worker };
+        let what = format!("G-CR-F-ALT {name} region {r} ({route:?})");
+        frame = if r % 2 == 0 {
+            alt_region::<P, P>(pool, route, frame, &what)
+        } else {
+            alt_region::<Fin<P>, P>(pool, route, frame, &what)
+        };
+    }
+}
+
+/// G-CR-F-ALT: frames of `P` and `WithAdvance<P, true>` alternate over one claim column — each
+/// region exactly once, the identity, every claim word at its entry's last epoch, and (debug) the
+/// region's open check that every claim epoch is at most `base`. Each region's frame is borrowed
+/// through `region_frame::<Q>` for the policy that region runs, whose layout check passes because
+/// `claim_lines::<Fin<P>> == claim_lines::<P>` (u1).
+#[test]
+fn fin_alternating_advance_over_one_frame() {
+    let regions = if cfg!(miri) { 4 } else { 200 };
+    let pool = pool(4);
+    alt_leg::<TestPolicy>(&pool, "TestPolicy", regions);
+    alt_leg::<BatchedPolicy>(&pool, "BatchedPolicy", regions);
+    alt_leg::<HomePolicy>(&pool, "HomePolicy", regions);
+    alt_leg::<TtasPolicy>(&pool, "TtasPolicy", regions);
+    alt_leg::<AllAxesPolicy>(&pool, "AllAxesPolicy", regions);
 }
 
 /// Miri's Stacked Borrows leg: T1/T2/T3 on the pool-free twin (`region_on_threads`), because the
@@ -562,18 +864,37 @@ fn threads_t1_t2_exactly_once_and_visibility() {
         for shape in [2u32, 3] {
             let mut rng = Rng(0x5EED ^ (u64::from(p) * 131 + u64::from(shape)));
             let (blocks, order) = random_table(&mut rng, p, shape);
-            for armed in [false, true] {
-                let what = format!("threads P{p} shape {shape} armed {armed} blocks {blocks:?} order {order:?}");
+            for leg_kind in 0..4 {
+                let what = format!("threads P{p} shape {shape} leg {leg_kind} blocks {blocks:?} order {order:?}");
                 // Each leg lays its table out for the policy it runs: `AllAxesPolicy` (home lines,
-                // one claim line per participant) and `TestPolicy` (one per block) differ.
-                let ran = if armed {
-                    leg::<AllAxesPolicy, true>(&blocks, &order, p)
-                } else {
-                    leg::<TestPolicy, false>(&blocks, &order, p)
-                };
-                check_report(&ran, p, &what);
-                ran.stages.assert_exactly_once(&ran.frame, &what);
-                helper_blocks += ran.result.as_ref().map_or(0, |r| r.helper_blocks);
+                // one claim line per participant) and `TestPolicy` (one per block) differ. Legs 2
+                // and 3 are the finisher's (CR-F), disarmed.
+                match leg_kind {
+                    0 => {
+                        let ran = leg::<TestPolicy, false>(&blocks, &order, p);
+                        check_report::<TestPolicy, false>(&ran, p, &what);
+                        ran.stages.assert_exactly_once(&ran.frame, &what);
+                        helper_blocks += ran.result.as_ref().map_or(0, |r| r.helper_blocks);
+                    }
+                    1 => {
+                        let ran = leg::<AllAxesPolicy, true>(&blocks, &order, p);
+                        check_report::<AllAxesPolicy, true>(&ran, p, &what);
+                        ran.stages.assert_exactly_once(&ran.frame, &what);
+                        helper_blocks += ran.result.as_ref().map_or(0, |r| r.helper_blocks);
+                    }
+                    2 => {
+                        let ran = leg::<Fin<TestPolicy>, false>(&blocks, &order, p);
+                        check_report::<Fin<TestPolicy>, false>(&ran, p, &what);
+                        ran.stages.assert_exactly_once(&ran.frame, &what);
+                        helper_blocks += ran.result.as_ref().map_or(0, |r| r.helper_blocks);
+                    }
+                    _ => {
+                        let ran = leg::<Fin<AllAxesPolicy>, false>(&blocks, &order, p);
+                        check_report::<Fin<AllAxesPolicy>, false>(&ran, p, &what);
+                        ran.stages.assert_exactly_once(&ran.frame, &what);
+                        helper_blocks += ran.result.as_ref().map_or(0, |r| r.helper_blocks);
+                    }
+                }
             }
         }
     }

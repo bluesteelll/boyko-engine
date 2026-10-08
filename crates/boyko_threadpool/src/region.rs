@@ -42,6 +42,32 @@
 //! * **Helpers spin** (the owner's value, 2026-09-29): a waiting helper PAUSEs and yields, it
 //!   never sleeps or parks inside a region. The orchestrator's wait is pure PAUSE by default.
 //!
+//! ## The advance axis (CR-F)
+//!
+//! Under [`Advance::Finisher`] — a disarmed region of at least two participants; an `ARMED`
+//! region and a one-participant region run the orchestrator above — every participant runs one
+//! loop, and each item boundary has exactly one advancer:
+//!
+//! * **Into a published item, or into the END:** the participant whose completion add made the
+//!   item's count exact. Its add is `AcqRel`, so it acquires every earlier add of the item (one
+//!   release sequence per done line), and with them every write of the item. It checks `poison`
+//!   (Acquire), resets the next item's done line and publishes its epoch (Release), or stores the
+//!   normal END after the last item. Ruling 17 B1 holds for whichever participant advances: the
+//!   reset precedes the publish in its program order, and every add of the entry's previous
+//!   execution precedes the reset by the chain of completions and publishes since.
+//! * **Into an inline item:** participant 0, as under the orchestrator. Its own add completed the
+//!   item, or its Acquire done-wait (which polls `poison`) read the exact count; it runs the inline
+//!   items in order, then resets and publishes the next published item, or the END. Inline items
+//!   never leave participant 0. The region's start is such a boundary.
+//! * **Waiting** for a publish, every participant also loads `poison` (Acquire) on every
+//!   iteration. After a helper's panic no END is certain (only participant 0's guard publishes
+//!   one), so this poll is every survivor's exit. `poison` is word 1 of the sync line whose word
+//!   0 the wait already spins on, so the poll adds no line traffic. Participant 0 waits on
+//!   [`RegionPolicy::ORCH_WAIT`], the helpers on [`RegionPolicy::HELPER_WAIT`].
+//! * The report's `published`, `inline` and `max_blocks` are a walk of the table under this
+//!   axis, because participant 0 no longer sees every item; the identity on
+//!   [`RegionReport::advances`] is then the witness that the schedule ran.
+//!
 //! ## Storage is the caller's (Principle 0)
 //!
 //! The frame — the sync line, the done lines, the receipts, the claim lines — is plain
@@ -53,10 +79,13 @@
 //!
 //! ## Every knob is a compile-time policy
 //!
-//! [`RegionPolicy`] carries the waiter ladders, the test-only wait bound and the three protocol
-//! axes (R-a batched completion, R-b home claim lines, R-c TTAS) as associated consts, so every
+//! [`RegionPolicy`] carries the waiter ladders, the test-only wait bound, the three protocol
+//! axes (R-a batched completion, R-b home claim lines, R-c TTAS) and the advance axis
+//! ([`RegionPolicy::ADVANCE`], CR-F: who publishes the next item) as associated consts, so every
 //! branch on them folds after monomorphisation. The `ARMED` const parameter compiles the stall
 //! census and the per-item hooks in; the disarmed [`V2Policy`] monomorph reads no clock at all.
+//! [`WithAdvance`] replaces a policy's advance axis and copies every other const, so the claim
+//! encoding of `P` and `WithAdvance<P, _>` is the same by construction.
 
 use std::time::Instant;
 
@@ -98,9 +127,11 @@ const R_BLOCKS: usize = 1;
 const R_EXIT: usize = 2;
 const R_STALLS: usize = 3;
 const R_MAX_WAIT: usize = 4;
+/// The publishes this participant made (an epoch or the normal END; see [`RegionReport::advances`]).
+const R_ADVANCES: usize = 5;
 /// Words of a receipt line that carry data.
 #[cfg(loom)]
-const RECEIPT_WORDS: usize = 5;
+const RECEIPT_WORDS: usize = 6;
 
 // =========================================================================
 // The caller-owned frame types
@@ -117,7 +148,8 @@ const RECEIPT_WORDS: usize = 5;
 /// * **done line:** `w[0]` the completion count of one entry (reset to 0 just before each publish
 ///   of the entry; between items it holds the entry's last count);
 /// * **receipt line:** `w[0]` the region tag (`base`), `w[1]` blocks run, `w[2]` the
-///   [`RegionExit`], `w[3]` stalls, `w[4]` the longest wait in ns;
+///   [`RegionExit`], `w[3]` stalls, `w[4]` the longest wait in ns, `w[5]` the publishes this
+///   participant made ([`RegionReceipt::advances`]);
 /// * **claim line:** `w[0]` the epoch of the block's last claim; under
 ///   [`RegionPolicy::HOME_LINES`], `w[0..8]` hold one participant's home blocks of one entry.
 #[repr(C, align(64))]
@@ -278,7 +310,8 @@ pub enum Ladder {
 pub trait RegionPolicy {
     /// How a helper waits for the next publish.
     const HELPER_WAIT: Ladder;
-    /// How the orchestrator waits for an item's completion.
+    /// How participant 0 waits: for an item's completion, and under [`Advance::Finisher`] also for
+    /// the next publish.
     const ORCH_WAIT: Ladder;
     /// A wait longer than this panics with [`RegionWaitBound`]; 0 = unbounded (shipped). Checked on
     /// every yield and every 64 PAUSEs of every ladder.
@@ -289,6 +322,10 @@ pub trait RegionPolicy {
     const HOME_LINES: bool;
     /// R-c: load the claim word first and skip it without a CAS when it already holds `≥ g`.
     const TTAS: bool;
+    /// CR-F: who publishes the next item. Defaulted, so no policy that predates the axis changes;
+    /// a wrapper that forwards a policy's consts must forward this one too, or it silently runs
+    /// the orchestrator.
+    const ADVANCE: Advance = Advance::Orchestrator;
 }
 
 /// The shipped policy: the benched v2 protocol and waits, unbounded, every axis off.
@@ -302,6 +339,38 @@ impl RegionPolicy for V2Policy {
     const DONE_BATCHED: bool = false;
     const HOME_LINES: bool = false;
     const TTAS: bool = false;
+}
+
+/// Who publishes a region's next item (the advance axis, CR-F). Used only as a const of a
+/// [`RegionPolicy`], so every match on it folds away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Advance {
+    /// Participant 0 waits for each published item's exact count and publishes the next item
+    /// (the v2 protocol).
+    Orchestrator,
+    /// The participant whose completion add makes an item's count exact publishes the next
+    /// published item, or the END after the last one (Jolt 5.6 `LargeIslandSplitter`, Rapier 0.36
+    /// `staged_island_solver`). A boundary into an inline item stays participant 0's, and inline
+    /// items run on participant 0 only. Disarmed monomorphs with at least two participants only:
+    /// an `ARMED` region, and a region of one participant, run the orchestrator.
+    Finisher,
+}
+
+/// `P` with its advance axis replaced: [`Advance::Finisher`] when `FIN`, `P`'s own otherwise.
+///
+/// Every other const is `P`'s, so the claim encoding, [`claim_lines`] and every ladder of
+/// `WithAdvance<P, FIN>` are `P`'s by construction, and frames of `P` and `WithAdvance<P, _>` may
+/// alternate over one claim column.
+pub struct WithAdvance<P, const FIN: bool>(core::marker::PhantomData<P>);
+
+impl<P: RegionPolicy, const FIN: bool> RegionPolicy for WithAdvance<P, FIN> {
+    const HELPER_WAIT: Ladder = P::HELPER_WAIT;
+    const ORCH_WAIT: Ladder = P::ORCH_WAIT;
+    const BOUND_NS: u64 = P::BOUND_NS;
+    const DONE_BATCHED: bool = P::DONE_BATCHED;
+    const HOME_LINES: bool = P::HOME_LINES;
+    const TTAS: bool = P::TTAS;
+    const ADVANCE: Advance = if FIN { Advance::Finisher } else { P::ADVANCE };
 }
 
 /// The work of a region, block by block.
@@ -372,6 +441,9 @@ pub struct RegionReceipt {
     pub stalls: u64,
     /// Armed only: its longest wait, in ns.
     pub max_wait_ns: u64,
+    /// The publishes this participant made: epochs and the normal END, poisoned ENDs excluded
+    /// (the identity they sum to is stated on [`RegionReport::advances`]).
+    pub advances: u64,
 }
 
 impl RegionReceipt {
@@ -385,6 +457,7 @@ impl RegionReceipt {
             exit: RegionExit::from_word(line.w[R_EXIT]),
             stalls: line.w[R_STALLS],
             max_wait_ns: line.w[R_MAX_WAIT],
+            advances: line.w[R_ADVANCES],
         }
     }
 }
@@ -406,6 +479,19 @@ pub struct RegionReport {
     pub max_wait_ns: u64,
     /// The largest `n_blocks` of a published item (0 if none was published).
     pub max_blocks: u32,
+    /// Every publish of the region, summed over the participants' receipts
+    /// ([`RegionReceipt::advances`]): each published item's epoch once, plus the normal END once.
+    ///
+    /// **The identity** (CR-F, stated here and only cited elsewhere): on every region that
+    /// returns, `Σ_p receipt(p).advances == advances == published + 1`, the `+ 1` being the END.
+    /// A poisoned END is no schedule advance and is not counted, and a poisoned region never
+    /// returns a report. Debug builds assert it on every region; the region tests and the ω_b
+    /// bench assert it in release too.
+    pub advances: u64,
+    /// The part of [`advances`](Self::advances) the helpers (participants 1..) made: 0 whenever
+    /// participant 0 advances every item ([`Advance::Orchestrator`], an `ARMED` region, one
+    /// participant).
+    pub helper_advances: u64,
 }
 
 /// The panic payload of a waiter that passed [`RegionPolicy::BOUND_NS`].
@@ -586,6 +672,9 @@ impl<'f> RegionFrame<'f> {
     /// * **Sized for its schedule.** At least one done line per entry, one receipt line per
     ///   participant, and [`claim_lines`] claim lines for every published entry from its
     ///   `first_claim`, laid out for the policy and the participant count this frame runs with.
+    ///   The claim column's layout and encoding depend on [`RegionPolicy::HOME_LINES`] alone,
+    ///   never on [`RegionPolicy::ADVANCE`] (nor on the ladders, R-a or R-c), so a column laid
+    ///   out for `P` serves `WithAdvance<P, _>` too, and frames of the two may alternate over it.
     /// * **The counter is the claim column's own.** `epoch` only grows, and it is at or above every
     ///   epoch the claim lines hold. A fresh counter over fresh zero lines satisfies it; keep the
     ///   counter and the claim column together.
@@ -746,22 +835,32 @@ fn run_block<S: RegionStages>(stages: &S, entry: u32, block: u32, participant: u
 /// armed (an unwind) it stores the receipt (PANICKED, or BOUND if the wait bound fired), then
 /// `poison = 1`, and — on participant 0 — publishes the tagged END, so no helper can be left
 /// waiting for a publish that will never come.
+///
+/// `repr(C)` in this order, because the layout reaches the hot loops' code (CR-F fix r1, from the
+/// G-CR-F-RCPT asm): `advances` sits apart from the three tallies zeroed at creation. Four adjacent
+/// zeroed `u64`s are one 32-byte store — a ymm store under the x86-64-v3 baseline — after which
+/// LLVM puts a `vzeroupper` before every call of the function, the stage call in the v2 helper's
+/// per-block loop among them; three are a 16-byte and an 8-byte store, as before the field
+/// existed. Every field before `advances` keeps the offset it had then.
+#[repr(C)]
 pub(crate) struct Participant<'a, W: RegionWords> {
-    w: &'a W,
     base: u64,
-    index: u32,
     blocks: u64,
     stalls: u64,
     max_wait_ns: u64,
+    w: &'a W,
+    index: u32,
     bound: bool,
     armed: bool,
+    /// Publishes this participant made (the receipt's `R_ADVANCES` word).
+    advances: u64,
 }
 
 impl<'a, W: RegionWords> Participant<'a, W> {
     /// Participant `index` of the region based at `base`, armed.
     #[inline]
     pub(crate) fn new(w: &'a W, base: u64, index: u32) -> Self {
-        Self { w, base, index, blocks: 0, stalls: 0, max_wait_ns: 0, bound: false, armed: true }
+        Self { base, blocks: 0, stalls: 0, max_wait_ns: 0, w, index, bound: false, armed: true, advances: 0 }
     }
 
     /// The base of this participant's region.
@@ -781,6 +880,7 @@ impl<'a, W: RegionWords> Participant<'a, W> {
         self.w.receipt_word(p, R_EXIT).store(exit as u64, Ordering::Relaxed);
         self.w.receipt_word(p, R_STALLS).store(self.stalls, Ordering::Relaxed);
         self.w.receipt_word(p, R_MAX_WAIT).store(self.max_wait_ns, Ordering::Relaxed);
+        self.w.receipt_word(p, R_ADVANCES).store(self.advances, Ordering::Relaxed);
     }
 
     /// A normal exit: the receipt, then disarm.
@@ -788,6 +888,30 @@ impl<'a, W: RegionWords> Participant<'a, W> {
     fn exit(&mut self, exit: RegionExit) {
         self.store_receipt(exit);
         self.armed = false;
+    }
+
+    /// Participant 0 after [`run_orchestrator`] returned: if it left by the END, it made every
+    /// publish of its region — each of the `published` items' epochs and the END (the identity on
+    /// [`RegionReport::advances`]) — and its receipt's advance word is set to that count, once.
+    /// After a poisoned exit the word stays 0 (a poisoned END is no advance).
+    ///
+    /// Placed on measurement (CR-F fix r1, triage N1; the G-CR-F-RCPT asm). The same count written
+    /// at `run_orchestrator`'s END exit — inline, or as an out-of-line call there — re-allocated
+    /// registers across the whole item loop of the v2 monomorph: the sync line's pointer spilled,
+    /// a stack reload on every `poison` poll and publish; or, as a call, the entry-bound compare
+    /// read from the stack. Recorded after it returns, `run_orchestrator` stays v2's, and the
+    /// cost is per-region code in the caller. Out of line because that caller code is the smaller
+    /// for it: ω_b's v2 row closure is 473 instructions with the call, 498 inlined (v2's: 442).
+    #[inline(never)]
+    fn record_orchestrated_advances(&mut self, published: u32) {
+        let p = self.index as usize;
+        // Relaxed: participant 0's own receipt stores, just made by this thread (no other thread
+        // writes this line in the region), so program order alone shows the exit it stored.
+        if self.w.receipt_word(p, R_EXIT).load(Ordering::Relaxed) == RegionExit::End as u64 {
+            self.advances = u64::from(published) + 1;
+            // Relaxed: as every receipt store; read after the scope's join.
+            self.w.receipt_word(p, R_ADVANCES).store(self.advances, Ordering::Relaxed);
+        }
     }
 
     /// The unwind body: the receipt (PANICKED or BOUND), `poison = 1`, and on participant 0 the
@@ -990,14 +1114,20 @@ fn claim<W: RegionWords, P: RegionPolicy>(w: &W, x: &Exec, b: u32, participants:
 }
 
 /// Claims and runs blocks of `x` from `start`, sweeping the ring once.
+///
+/// `FIN` (the finisher path, CR-F) changes only the completion add: `AcqRel` instead of `Release`,
+/// and the sweep returns true, and stops, when this participant's add made the count exactly
+/// `n_blocks` — every block is then claimed and run, so no claim is left to try. Under `FIN =
+/// false` it returns false and is the v2 sweep. One body for both, so a later fix to the claim
+/// loop cannot land in one copy only.
 #[inline]
-fn claim_sweep<W: RegionWords, S: RegionStages, P: RegionPolicy>(
+fn claim_sweep<W: RegionWords, S: RegionStages, P: RegionPolicy, const FIN: bool>(
     w: &W,
     stages: &S,
     x: &Exec,
     start: u32,
     part: &mut Participant<'_, W>,
-) {
+) -> bool {
     let n = u32::from(x.entry.n_blocks);
     let participants = w.participants();
     let poison = w.poison();
@@ -1014,9 +1144,20 @@ fn claim_sweep<W: RegionWords, S: RegionStages, P: RegionPolicy>(
             part.blocks += 1;
             k += 1;
             if !P::DONE_BATCHED {
-                // Release: this block's writes happen-before the orchestrator's Acquire load of a
-                // count that includes this add (every later add is an RMW in its release sequence).
-                done.fetch_add(1, Ordering::Release);
+                if FIN {
+                    // AcqRel: Release as below; and the add that makes the count `n` reads from
+                    // the release sequence of every earlier add of this item (each an RMW on one
+                    // line), so every block's writes happen-before this participant's reset and
+                    // publish of the next item.
+                    if done.fetch_add(1, Ordering::AcqRel) + 1 == u64::from(n) {
+                        return true;
+                    }
+                } else {
+                    // Release: this block's writes happen-before the orchestrator's Acquire load
+                    // of a count that includes this add (every later add is an RMW in its release
+                    // sequence).
+                    done.fetch_add(1, Ordering::Release);
+                }
             }
         }
         b += 1;
@@ -1025,9 +1166,27 @@ fn claim_sweep<W: RegionWords, S: RegionStages, P: RegionPolicy>(
         }
     }
     if P::DONE_BATCHED && k > 0 {
+        if FIN {
+            // AcqRel: as for the per-block add above, for all k blocks at once (R-a).
+            return done.fetch_add(k, Ordering::AcqRel) + k == u64::from(n);
+        }
         // Release: as above, for all k blocks at once (R-a).
         done.fetch_add(k, Ordering::Release);
     }
+    false
+}
+
+/// The finisher's sweep: [`claim_sweep`] with the `AcqRel` completion add; true when this
+/// participant completed the item.
+#[inline]
+fn sweep_fin<W: RegionWords, S: RegionStages, P: RegionPolicy>(
+    w: &W,
+    stages: &S,
+    x: &Exec,
+    start: u32,
+    part: &mut Participant<'_, W>,
+) -> bool {
+    claim_sweep::<W, S, P, true>(w, stages, x, start, part)
 }
 
 /// The orchestrator's poisoned exit: its receipt, then the tagged END.
@@ -1148,7 +1307,7 @@ pub(crate) fn run_orchestrator<W: RegionWords, S: RegionStages, P: RegionPolicy,
             // Release: every earlier item's writes (acquired by this thread's done-waits) and the
             // done reset above happen-before a helper's Acquire load of this epoch.
             publish.store(x.g, Ordering::Release);
-            claim_sweep::<W, S, P>(w, stages, &x, 0, part);
+            claim_sweep::<W, S, P, false>(w, stages, &x, 0, part);
             let want = u64::from(n);
             // Acquire: pairs with every block's Release add (one release sequence per line).
             // EXACT equality: a count that overshot must not read as complete.
@@ -1163,6 +1322,9 @@ pub(crate) fn run_orchestrator<W: RegionWords, S: RegionStages, P: RegionPolicy,
             stages.item_end(i as u32);
         }
     }
+    // Participant 0 made every publish of this region, each published item's epoch and the END
+    // below; `orchestrate` records the count after this returns (why there:
+    // `Participant::record_orchestrated_advances`).
     part.exit(RegionExit::End);
     // Relaxed: no reader depends on an edge from this store (tester r3 N4). A helper that loads
     // END runs no block and reads nothing participant 0 wrote: it checks the tag, loads `poison`
@@ -1273,8 +1435,304 @@ pub(crate) fn run_helper<W: RegionWords, S: RegionStages, P: RegionPolicy, const
         let e = u32::from(item.entry);
         let entry = w.entry(e as usize);
         let start = h * u32::from(entry.n_blocks) / participants;
-        claim_sweep::<W, S, P>(w, stages, &Exec { e, entry, g: v, hint: hint_of(item, base, i) }, start, part);
+        claim_sweep::<W, S, P, false>(w, stages, &Exec { e, entry, g: v, hint: hint_of(item, base, i) }, start, part);
         last = v;
+    }
+}
+
+// -------------------------------------------------------------------------
+// The finisher path (CR-F, `Advance::Finisher`)
+// -------------------------------------------------------------------------
+
+/// Whether a monomorph runs the finisher path: [`Advance::Finisher`] and disarmed (the armed hooks
+/// are participant 0's, so an `ARMED` region runs the orchestrator). Folded per monomorph.
+const fn fin<P: RegionPolicy, const ARMED: bool>() -> bool {
+    matches!(P::ADVANCE, Advance::Finisher) && !ARMED
+}
+
+/// Participant 0's role entry: the finisher path under [`fin`], the orchestrator otherwise. The
+/// choice is a const, so each monomorph holds exactly one of the two.
+#[inline]
+pub(crate) fn run_participant0<W: RegionWords, S: RegionStages, P: RegionPolicy, const ARMED: bool>(
+    w: &W,
+    stages: &S,
+    part: &mut Participant<'_, W>,
+) -> OrchStats {
+    if const { fin::<P, ARMED>() } {
+        run_finisher::<W, S, P, true>(w, stages, part);
+        table_stats(w)
+    } else {
+        orchestrate::<W, S, P, ARMED>(w, stages, part)
+    }
+}
+
+/// [`run_orchestrator`], then participant 0's advance count
+/// ([`Participant::record_orchestrated_advances`]): every caller of the orchestrator goes through
+/// here, so the count is recorded on every path that runs it, one participant included.
+#[inline]
+fn orchestrate<W: RegionWords, S: RegionStages, P: RegionPolicy, const ARMED: bool>(
+    w: &W,
+    stages: &S,
+    part: &mut Participant<'_, W>,
+) -> OrchStats {
+    let stats = run_orchestrator::<W, S, P, ARMED>(w, stages, part);
+    part.record_orchestrated_advances(stats.published);
+    stats
+}
+
+/// A helper's role entry: the finisher path under [`fin`], the v2 helper otherwise (a const
+/// choice, as in [`run_participant0`]).
+#[inline]
+pub(crate) fn run_helper_participant<W: RegionWords, S: RegionStages, P: RegionPolicy, const ARMED: bool>(
+    w: &W,
+    stages: &S,
+    part: &mut Participant<'_, W>,
+) {
+    if const { fin::<P, ARMED>() } {
+        run_finisher::<W, S, P, false>(w, stages, part);
+    } else {
+        run_helper::<W, S, P, ARMED>(w, stages, part);
+    }
+}
+
+/// The schedule's counts, from the table alone: under the finisher participant 0 does not see
+/// every item, so `report`'s `published`, `inline` and `max_blocks` are this walk (no allocation;
+/// one entry read per item).
+fn table_stats<W: RegionWords>(w: &W) -> OrchStats {
+    let mut s = OrchStats::default();
+    for i in 0..w.len() {
+        let n = u32::from(w.entry(usize::from(w.item(i).entry)).n_blocks);
+        if n <= 1 {
+            s.inline += 1;
+        } else {
+            s.published += 1;
+            s.max_blocks = s.max_blocks.max(n);
+        }
+    }
+    s
+}
+
+/// A finisher's poisoned exit: participant 0 also publishes the tagged END (`poisoned_exit`), a
+/// helper only stores its receipt (every other survivor's wait polls `poison`).
+#[inline]
+fn fin_poisoned<W: RegionWords, const P0: bool>(w: &W, part: &mut Participant<'_, W>) {
+    if P0 {
+        poisoned_exit(w, part);
+    } else {
+        part.exit(RegionExit::Poisoned);
+    }
+}
+
+/// Every participant's loop under the finisher; `P0` is participant 0's role (const, so its
+/// inline handling is not compiled into helpers).
+///
+/// Each item boundary has one advancer (module docs, "The advance axis"): the completer of a
+/// published item publishes the next published item or the END; participant 0 owns every
+/// boundary into an inline item and the region's start.
+fn run_finisher<W: RegionWords, S: RegionStages, P: RegionPolicy, const P0: bool>(
+    w: &W,
+    stages: &S,
+    part: &mut Participant<'_, W>,
+) {
+    let base = part.base;
+    let len = w.len();
+    let participants = w.participants();
+    let poison = w.poison();
+    let mut last = base;
+    let mut own = None;
+    if P0 {
+        // The region's start is participant 0's boundary: leading inline items, then the first
+        // publish (or the END).
+        match p0_boundary::<W, S>(w, stages, part, 0) {
+            Some(v) => own = Some(v),
+            None => return,
+        }
+    }
+    loop {
+        // The value this participant just published itself needs no wait.
+        let v = match own.take() {
+            Some(v) => v,
+            None => match wait_publish_fin::<W, P, P0>(w, last, part) {
+                Some(v) => v,
+                None => {
+                    fin_poisoned::<W, P0>(w, part);
+                    return;
+                }
+            },
+        };
+        if v & END_BIT != 0 {
+            debug_assert_eq!(
+                v & !END_BIT,
+                base,
+                "region: a participant read another region's END (the open reset did not store OPEN)"
+            );
+            // Relaxed: as in `run_helper` — a poisoned END was published (Release) after the
+            // poison store that caused it; a normal END has no poison store to show.
+            let exit = if poison.load(Ordering::Relaxed) != 0 {
+                RegionExit::Poisoned
+            } else {
+                RegionExit::End
+            };
+            part.exit(exit);
+            return;
+        }
+        let i = v.wrapping_sub(base + 1);
+        debug_assert!(i < len as u64, "region: publish value {v} is not an epoch of the region based at {base}");
+        let item = w.item(i as usize);
+        let e = u32::from(item.entry);
+        let entry = w.entry(e as usize);
+        let n = u32::from(entry.n_blocks);
+        let start = part.index * n / participants;
+        let x = Exec { e, entry, g: v, hint: hint_of(item, base, i) };
+        let completed = sweep_fin::<W, S, P>(w, stages, &x, start, part);
+        last = v;
+        let next = i as usize + 1;
+        let inline_next = next < len && w.entry(usize::from(w.item(next).entry)).n_blocks <= 1;
+        if completed && !inline_next {
+            // Acquire: pairs with a guard's Release store of `poison` (as before each orchestrator
+            // item). A poisoning that lands after this check races the publish below exactly as
+            // the orchestrator's check-then-publish does; the survivors' polls end the region.
+            if poison.load(Ordering::Acquire) != 0 {
+                fin_poisoned::<W, P0>(w, part);
+                return;
+            }
+            own = Some(publish_next(w, part, next));
+        } else if P0 && inline_next {
+            // The boundary into an inline item is participant 0's. Its own add completed item `i`
+            // (AcqRel), or this Acquire load / done-wait reads the exact count: either way every
+            // write of item `i` happens-before the inline block. A helper that completed `i`
+            // publishes nothing here, so `publish` stays at `g_i` until participant 0 advances.
+            let done = w.done(e as usize);
+            if !completed && done.load(Ordering::Acquire) != u64::from(n) && !wait_done::<W, P, false>(w, done, u64::from(n), part, v) {
+                poisoned_exit(w, part);
+                return;
+            }
+            match p0_boundary::<W, S>(w, stages, part, next) {
+                Some(v) => own = Some(v),
+                None => return,
+            }
+        }
+    }
+}
+
+/// Participant 0 at a boundary into item `j`: runs the inline items from `j` in order (each after
+/// a `poison` check), then publishes the next published item or the END. `None` after a poisoned
+/// exit. The orchestrator's inline handling, unchanged; the block runs with `part.index`, which is
+/// 0 on every path that reaches here.
+fn p0_boundary<W: RegionWords, S: RegionStages>(
+    w: &W,
+    stages: &S,
+    part: &mut Participant<'_, W>,
+    mut j: usize,
+) -> Option<u64> {
+    let poison = w.poison();
+    while j < w.len() {
+        let e = u32::from(w.item(j).entry);
+        let n = w.entry(e as usize).n_blocks;
+        if n > 1 {
+            break;
+        }
+        // Acquire: pairs with a guard's Release store of `poison`.
+        if poison.load(Ordering::Acquire) != 0 {
+            poisoned_exit(w, part);
+            return None;
+        }
+        if n == 1 {
+            run_block(stages, e, 0, part.index);
+            part.blocks += 1;
+        }
+        j += 1;
+    }
+    // Acquire: as above.
+    if poison.load(Ordering::Acquire) != 0 {
+        poisoned_exit(w, part);
+        return None;
+    }
+    Some(publish_next(w, part, j))
+}
+
+/// Publishes item `j` (its done line reset first, ruling 17 B1), or the normal END when `j` is the
+/// schedule's length; counts the advance and returns the value stored. Both finisher publishers.
+#[inline]
+fn publish_next<W: RegionWords>(w: &W, part: &mut Participant<'_, W>, j: usize) -> u64 {
+    part.advances += 1;
+    if j == w.len() {
+        let v = END_BIT | part.base;
+        // Relaxed: stored once, after the last item completed (by its completer, or by participant
+        // 0 after a trailing inline item), and no reader of a normal END reads data: it checks the
+        // tag, loads `poison` and stores its receipt (`run_orchestrator`'s END). What the caller
+        // reads afterwards is ordered by the scope's join — the edge that, when a helper completes
+        // the last item, replaces the orchestrator's done-acquire.
+        w.publish().store(v, Ordering::Relaxed);
+        return v;
+    }
+    let item = w.item(j);
+    let e = u32::from(item.entry);
+    let n = u32::from(w.entry(e as usize).n_blocks);
+    let participants = w.participants();
+    debug_assert!(
+        n <= REGION_MAX_BLOCKS_PER_PARTICIPANT * participants,
+        "region: entry {e} has {n} blocks, more than {REGION_MAX_BLOCKS_PER_PARTICIPANT} per \
+         participant ({participants} participants)"
+    );
+    let g = part.base + 1 + j as u64;
+    // The reset comes BEFORE the publish (ruling 17 B1), whoever advances. Every add of the
+    // entry's previous execution in this region happens-before this store: that execution
+    // completed, and the chain of completer adds (AcqRel), publishes (Release / Acquire) and
+    // participant 0's done-acquires since then reaches this thread; so the reset follows them in
+    // the line's modification order. A previous region's adds are ordered by its join. Relaxed:
+    // the Release publish below orders the reset before every Acquire load of `g`, hence before
+    // every add of this item.
+    w.done(e as usize).store(0, Ordering::Relaxed);
+    // Release: every write of the items before `j` (acquired by this thread's completing add,
+    // done-acquire or its own blocks) and the reset above happen-before a participant's Acquire
+    // load of this epoch.
+    w.publish().store(g, Ordering::Release);
+    g
+}
+
+/// The ladder a finisher waits on for a publish: participant 0's [`RegionPolicy::ORCH_WAIT`], a
+/// helper's [`RegionPolicy::HELPER_WAIT`] (critique W-A). SR's waiter axes keep their meaning under
+/// the finisher only through this choice — R-d and R-d′ are the helpers' ladder, R-e participant
+/// 0's — and no run can tell the ladders apart (the finisher's wait is disarmed, and loom models
+/// PAUSE and yield alike), so it is a function of its own, gated by value in `region::tests`.
+const fn publish_wait_ladder<P: RegionPolicy, const P0: bool>() -> Ladder {
+    if P0 { P::ORCH_WAIT } else { P::HELPER_WAIT }
+}
+
+/// A finisher's wait for a publish value other than `last`, on [`publish_wait_ladder`]
+/// (`P::ORCH_WAIT` for participant 0, `P::HELPER_WAIT` for a helper); `None` when `poison` is set
+/// first. Disarmed: no census.
+#[inline]
+fn wait_publish_fin<W: RegionWords, P: RegionPolicy, const P0: bool>(
+    w: &W,
+    last: u64,
+    part: &mut Participant<'_, W>,
+) -> Option<u64> {
+    let publish = w.publish();
+    // Acquire: pairs with a completer's or participant 0's Release publish of an epoch, and with
+    // a poisoned END (the normal END is Relaxed: nothing after it reads data).
+    let v = publish.load(Ordering::Acquire);
+    if v != last {
+        return Some(v);
+    }
+    let ladder = const { publish_wait_ladder::<P, P0>() };
+    let clock = const { needs_clock(publish_wait_ladder::<P, P0>(), P::BOUND_NS, false) };
+    let poison = w.poison();
+    let mut waiter = Waiter::start(clock);
+    loop {
+        // Acquire: pairs with a guard's Release store of `poison`. After a helper's panic nothing
+        // is certain to publish an END, so this poll is every survivor's exit. `poison` is the
+        // next word of the line this loop already spins on, so the load adds no line traffic.
+        if poison.load(Ordering::Acquire) != 0 {
+            return None;
+        }
+        waiter.step::<P, W>(ladder, clock, part, last);
+        // Acquire: as above.
+        let v = publish.load(Ordering::Acquire);
+        if v != last {
+            return Some(v);
+        }
     }
 }
 
@@ -1295,10 +1753,17 @@ fn report<W: RegionWords>(w: &W, base: u64, stats: OrchStats) -> RegionReport {
         debug_assert_eq!(word(R_EXIT), RegionExit::End as u64, "region: participant {p} did not read END");
         if p > 0 {
             r.helper_blocks += word(R_BLOCKS);
+            r.helper_advances += word(R_ADVANCES);
         }
+        r.advances += word(R_ADVANCES);
         r.stalls += word(R_STALLS);
         r.max_wait_ns = r.max_wait_ns.max(word(R_MAX_WAIT));
     }
+    debug_assert_eq!(
+        r.advances,
+        u64::from(r.published) + 1,
+        "region: Σ receipt advances is not published + 1 (the identity on RegionReport::advances)"
+    );
     r
 }
 
@@ -1312,9 +1777,12 @@ impl PoolInner {
     /// `participants − 1` helper tasks are spawned into one [`scope`](Self::scope).
     ///
     /// Work-conserving: participant 0 alone can complete every item, so the region finishes even if
-    /// no helper ever runs. A panic in any participant poisons the region, ends it, and is re-raised
-    /// here at the join; no schedule item after it runs. The caller's epoch counter is advanced by
-    /// the schedule's length + 1 before anything else happens, on every path.
+    /// no helper ever runs (under either [`Advance`]). A panic in any participant poisons the
+    /// region, ends it, and is re-raised here at the join; no item after the poisoned one is
+    /// published, except in the check-then-publish window every advancer has (a `poison` check,
+    /// then the publish), whose item the survivors' poison filters and polls then end. The
+    /// caller's epoch counter is advanced by the schedule's length + 1 before anything else
+    /// happens, on every path.
     ///
     /// `ARMED` compiles in the stall census and [`RegionStages::item_begin`]/`item_end`; pick the
     /// monomorph once per region. Must be called inside an [`install`](Self::install) frame (as
@@ -1331,7 +1799,7 @@ impl PoolInner {
         let participants = words.participants;
         let stats = if participants <= 1 {
             let mut orch = Participant::new(&words, base, 0);
-            run_orchestrator::<_, S, P, ARMED>(&words, stages, &mut orch)
+            orchestrate::<_, S, P, ARMED>(&words, stages, &mut orch)
         } else {
             let words = &words;
             self.scope(|s| {
@@ -1341,10 +1809,10 @@ impl PoolInner {
                 for h in 1..participants {
                     s.spawn(move || {
                         let mut part = Participant::new(words, base, h);
-                        run_helper::<_, S, P, ARMED>(words, stages, &mut part);
+                        run_helper_participant::<_, S, P, ARMED>(words, stages, &mut part);
                     });
                 }
-                run_orchestrator::<_, S, P, ARMED>(words, stages, &mut orch)
+                run_participant0::<_, S, P, ARMED>(words, stages, &mut orch)
             })
         };
         report(&words, base, stats)
@@ -1388,10 +1856,10 @@ pub fn region_on_threads<S: RegionStages, P: RegionPolicy, const ARMED: bool>(
             for h in 1..participants {
                 s.spawn(move || {
                     let mut part = Participant::new(words, base, h);
-                    run_helper::<_, S, P, ARMED>(words, stages, &mut part);
+                    run_helper_participant::<_, S, P, ARMED>(words, stages, &mut part);
                 });
             }
-            run_orchestrator::<_, S, P, ARMED>(words, stages, &mut orch)
+            run_participant0::<_, S, P, ARMED>(words, stages, &mut orch)
         })
     };
     report(&words, base, stats)
@@ -1426,8 +1894,9 @@ fn debug_table_checks<P: RegionPolicy>(w: &FrameWords<'_>) {
 // =========================================================================
 
 /// The loom frame view: model-owned loom atomics and a loom-tracked table, so the models drive the
-/// production protocol core ([`open`], [`run_orchestrator`], [`run_helper`], the guards) over
-/// atomics loom can see. `cfg(loom)` only; re-exported through `loom_exports::region`.
+/// production protocol core ([`open`], the role entries [`run_participant0`] and
+/// [`run_helper_participant`], the guards) over atomics loom can see. `cfg(loom)` only;
+/// re-exported through `loom_exports::region`.
 #[cfg(loom)]
 pub struct LoomRegionWords {
     sync: [AtomicU64; 2],
@@ -1495,6 +1964,7 @@ impl LoomRegionWords {
             exit: RegionExit::from_word(word(R_EXIT)),
             stalls: word(R_STALLS),
             max_wait_ns: word(R_MAX_WAIT),
+            advances: word(R_ADVANCES),
         }
     }
 
@@ -1568,7 +2038,80 @@ mod tests {
     //! CAS retry per first-claimed block, which no count-free gate can see. These live here because
     //! `hint_of` is private to the protocol core.
 
-    use super::{SchedItem, hint_of, link_hints};
+    use super::{
+        Advance, Ladder, RegionPolicy, SchedItem, V2Policy, WithAdvance, claim_lines, hint_of, link_hints,
+        publish_wait_ladder,
+    };
+
+    /// A home-lines policy with every other axis and ladder off v2's, for (u1).
+    struct HomeLines;
+
+    impl RegionPolicy for HomeLines {
+        const HELPER_WAIT: Ladder = Ladder::BudgetThenYield { spin_ns: 2_000 };
+        const ORCH_WAIT: Ladder = Ladder::BudgetThenYield { spin_ns: 20_000 };
+        const BOUND_NS: u64 = 7;
+        const DONE_BATCHED: bool = true;
+        const HOME_LINES: bool = true;
+        const TTAS: bool = true;
+    }
+
+    /// `Y` is `X` on every claim and ladder const, and lays out every entry's claim lines as `X`
+    /// does at every block count up to 128 and every participant count up to 16.
+    fn same_claim_axes<X: RegionPolicy, Y: RegionPolicy>(what: &str) {
+        for p in 1..=16u32 {
+            for n in 0..=128u16 {
+                assert_eq!(claim_lines::<Y>(n, p), claim_lines::<X>(n, p), "{what}: claim_lines({n}, {p})");
+            }
+        }
+        assert_eq!(Y::HELPER_WAIT, X::HELPER_WAIT, "{what}: HELPER_WAIT");
+        assert_eq!(Y::ORCH_WAIT, X::ORCH_WAIT, "{what}: ORCH_WAIT");
+        assert_eq!(Y::BOUND_NS, X::BOUND_NS, "{what}: BOUND_NS");
+        assert_eq!(Y::DONE_BATCHED, X::DONE_BATCHED, "{what}: DONE_BATCHED");
+        assert_eq!(Y::HOME_LINES, X::HOME_LINES, "{what}: HOME_LINES");
+        assert_eq!(Y::TTAS, X::TTAS, "{what}: TTAS");
+    }
+
+    /// (u1) `WithAdvance<X, FIN>` copies every claim and ladder const of `X`, so a claim column
+    /// laid out for `X` is laid out for it too (`RegionFrame::new`'s Safety sentence on
+    /// alternating frames rests on this).
+    #[test]
+    fn with_advance_copies_every_claim_and_ladder_const() {
+        same_claim_axes::<V2Policy, WithAdvance<V2Policy, false>>("V2Policy, FIN = false");
+        same_claim_axes::<V2Policy, WithAdvance<V2Policy, true>>("V2Policy, FIN = true");
+        same_claim_axes::<HomeLines, WithAdvance<HomeLines, false>>("HomeLines, FIN = false");
+        same_claim_axes::<HomeLines, WithAdvance<HomeLines, true>>("HomeLines, FIN = true");
+    }
+
+    /// (u2) The advance axis: defaulted to the orchestrator, replaced by `WithAdvance` only when
+    /// `FIN`, and otherwise the wrapped policy's own.
+    #[test]
+    fn with_advance_sets_only_the_advance_axis() {
+        assert_eq!(V2Policy::ADVANCE, Advance::Orchestrator);
+        assert_eq!(<WithAdvance<V2Policy, false>>::ADVANCE, Advance::Orchestrator);
+        assert_eq!(<WithAdvance<V2Policy, true>>::ADVANCE, Advance::Finisher);
+        assert_eq!(<WithAdvance<WithAdvance<V2Policy, true>, false>>::ADVANCE, Advance::Finisher);
+        assert_eq!(<WithAdvance<HomeLines, true>>::ADVANCE, Advance::Finisher);
+    }
+
+    /// (W-A) A finisher waits for a publish on its role's ladder: participant 0 on `ORCH_WAIT`, a
+    /// helper on `HELPER_WAIT`. Both policies here have two different ladders, so a swap, or one
+    /// ladder for both roles, is red. No run can see this choice (the finisher's wait is disarmed;
+    /// loom models PAUSE and yield alike), so this value check is its gate.
+    #[test]
+    fn a_finisher_waits_for_a_publish_on_its_roles_ladder() {
+        fn roles<P: RegionPolicy>(what: &str) {
+            assert_ne!(P::ORCH_WAIT, P::HELPER_WAIT, "{what}: the test needs two different ladders");
+            assert_eq!(publish_wait_ladder::<P, true>(), P::ORCH_WAIT, "{what}: participant 0's ladder");
+            assert_eq!(publish_wait_ladder::<P, false>(), P::HELPER_WAIT, "{what}: a helper's ladder");
+        }
+        roles::<WithAdvance<V2Policy, true>>("WithAdvance<V2Policy, true>");
+        roles::<WithAdvance<HomeLines, true>>("WithAdvance<HomeLines, true>");
+        assert_eq!(publish_wait_ladder::<WithAdvance<V2Policy, true>, true>(), Ladder::PureSpin);
+        assert_eq!(
+            publish_wait_ladder::<WithAdvance<V2Policy, true>, false>(),
+            Ladder::PauseThenYield { pauses: 5 }
+        );
+    }
 
     /// `hint_of` is the epoch of the earlier item `prev_off − 1` when `1 ≤ prev_off ≤ i`, and 0 (no
     /// hint) otherwise; either way it is below the item's own epoch `base + 1 + i`.
