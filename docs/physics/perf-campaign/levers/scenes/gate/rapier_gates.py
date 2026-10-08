@@ -2,7 +2,9 @@
 """Dynamic parity scenes, C4: the Rapier 0.36 dyn/ arms, structural only (no timing column is read).
 
 usage: rapier_gates.py OUTDIR [--gate 1|2|3|all] [--rows ID,ID,...] [--exe-dir DIR] [--frozen-exe-dir DIR]
-                              [--write-fixtures] [--lock PATH] [--sums PATH] [--pins PATH]
+                              [--write-fixtures] [--lock PATH] [--sums PATH] [--pins PATH] [--root DIR]
+--root DIR: the checkout whose copies, dyn_spec.rs and pins.json G1-G3 read (validated with git); the default
+is this script's own checkout (pose_pin.REPO, the root every pin check of pose_pin already uses).
 
 G1  the freeze is intact: every file sha256 FROZEN-9b section 1 pins (frozen9b.json `files`), the frozen exes
     against gate/bin/SHA256SUMS(.block), and dyn/Cargo.toml, dyn/Cargo.lock byte-identical to the frozen
@@ -27,6 +29,11 @@ G3  the dynamic programs on the ruling-22 rows (9b's 7-row R-CLAIM union plus si
     for the red-first); and, with --write-fixtures (after that check), dyn/fixtures/<arm>/<row>_<program>.pose
     and its sha256 into OUTDIR/rapier_pins.json.
 Writes OUTDIR/gates.tsv and prints it.
+
+Exit (docs/physics/perf-campaign/GATE-KIT.md): 0 = at least one check ran and none FAILed; 1 = red (a FAIL,
+no check at all, or a G2 whose --rows selected no row); 2 = could not run (an argparse error, or an input
+the selected gates read is missing: the Rapier tree, frozen9b.json, the dyn or frozen exe directory),
+decided before the first check. An uncaught exception stays Python's 1.
 """
 import argparse
 import hashlib
@@ -38,7 +45,7 @@ import sys
 
 RP = 'D:/tmp/rapier-parity'
 FROZEN = RP + '/sweep/frozen9b.json'
-REPO = 'D:/wt/merge'
+REPO = None  # main(): --root, else pose_pin.REPO (this script's own checkout)
 SPEC_BLOB = 'crates/boyko_physics/benches/jolt_parity_pyramid/dyn_spec.rs'
 COPIES = 'docs/physics/perf-campaign/levers/scenes/rapier/'
 # The repository's copy of each dyn source, by the name dyn/bin/SOURCES.sha256 gives it. The copies are
@@ -54,6 +61,8 @@ Q1_ROWS = ['simd8/s1p7q2pd0+roff', 'simd8/s1p8q2pd0+roff', 'simd8/s1p9q2', 'simd
 STEPS = {'none': 500, 'kick': 800, 'shoot': 800, 'slide': 500}
 WINDOW = {'none': (100, 500), 'kick': (200, 800), 'shoot': (200, 800), 'slide': (0, 500)}
 TIMING = {'window_mean_ns', 'window_steps_per_s', 'args', 'source_fnv1a64', 'label'}
+# git reads the checkout it is pointed at, never one an inherited GIT_DIR / GIT_WORK_TREE names.
+GIT_ENV = {k: v for k, v in os.environ.items() if k not in ('GIT_DIR', 'GIT_WORK_TREE')}
 
 T = []
 
@@ -102,7 +111,7 @@ def gate1_sources(sums_path):
         if not os.path.exists(live) or sha256(live) != want:
             bad.append('%s live' % name)
         if name in SOURCE_COPIES:
-            blob = subprocess.run(['git', '-C', REPO, 'show', 'HEAD:' + SOURCE_COPIES[name]], capture_output=True).stdout
+            blob = subprocess.run(['git', '-C', REPO, 'show', 'HEAD:' + SOURCE_COPIES[name]], capture_output=True, env=GIT_ENV).stdout
             if hashlib.sha256(blob).hexdigest() != want:
                 bad.append('%s repo copy %s' % (name, SOURCE_COPIES[name].rsplit('/', 1)[-1]))
     check('G1 dyn sources = SOURCES.sha256, live and the repo copies (%d files, %d copies)' % (len(pinned), len(SOURCE_COPIES)),
@@ -142,7 +151,7 @@ def gate1(out, lock, sums, pins_path):
     same = lambda a, b: open(a, 'rb').read() == open(b, 'rb').read()
     check('G1 dyn/Cargo.toml = Cargo.toml', same(RP + '/dyn/Cargo.toml', RP + '/Cargo.toml'))
     check('G1 dyn/Cargo.lock = Cargo.lock', same(lock or RP + '/dyn/Cargo.lock', RP + '/Cargo.lock'), lock or '')
-    blob = subprocess.run(['git', '-C', REPO, 'show', 'HEAD:' + SPEC_BLOB], capture_output=True).stdout
+    blob = subprocess.run(['git', '-C', REPO, 'show', 'HEAD:' + SPEC_BLOB], capture_output=True, env=GIT_ENV).stdout
     check('G1 dyn/src/spec.rs = boyko dyn_spec.rs (HEAD blob)', open(RP + '/dyn/src/spec.rs', 'rb').read() == blob,
           hashlib.sha256(blob).hexdigest()[:16])
 
@@ -163,8 +172,9 @@ def gate2(out, exe_dir, frozen_dir, only):
                 fails.append('%s W%d rc %d %s' % (r['id'], w, rc, s and s.get('expect_pose')))
             if w == 1 and r['arm'] not in first:
                 first[r['arm']] = (r, s)
-    check('G2 frozen rows on the dyn exes, W1 and W8 (%d rows, %d runs)' % (len(rows), 2 * len(rows)), not fails,
-          '; '.join(fails[:5]) or 'all exit 0, expect_pose match, pose_hash = frozen9b')
+    # A G2 that selected no row checked nothing: that is a FAIL, never a vacuous PASS.
+    check('G2 frozen rows on the dyn exes, W1 and W8 (%d rows, %d runs)' % (len(rows), 2 * len(rows)), bool(rows) and not fails,
+          '; '.join(fails[:5]) or ('all exit 0, expect_pose match, pose_hash = frozen9b' if rows else 'no rows selected'))
     for arm, (r, s_dyn) in sorted(first.items()):
         p = os.path.join(out, 'g2', r['id'].replace('/', '__') + '_W1_frozen')
         rc, s_fro = run(os.path.join(frozen_dir, 'rapier-parity-%s.exe' % arm), row_args(r, 1, p), p)
@@ -251,7 +261,7 @@ def gate3(out, exe_dir, only, write_fixtures, pins_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('out')
-    ap.add_argument('--gate', default='all')
+    ap.add_argument('--gate', default='all', choices=['1', '2', '3', 'all'])
     ap.add_argument('--rows')
     ap.add_argument('--exe-dir', default=RP + '/dyn/bin')
     ap.add_argument('--frozen-exe-dir', default=RP + '/gate/bin')
@@ -259,7 +269,27 @@ def main():
     ap.add_argument('--lock')
     ap.add_argument('--sums')
     ap.add_argument('--pins')
+    ap.add_argument('--root')
     a = ap.parse_args()
+    global REPO
+    if a.root is None:
+        REPO = pose_pin.REPO
+    else:
+        r = subprocess.run(['git', '-C', a.root, 'rev-parse', '--show-toplevel'], capture_output=True, text=True, env=GIT_ENV)
+        if r.returncode != 0:
+            print('rapier_gates.py: --root %s is not a git checkout' % a.root, file=sys.stderr)
+            return 2
+        REPO = r.stdout.strip()
+    a.pins = a.pins or os.path.join(REPO, 'docs', 'physics', 'perf-campaign', 'levers', 'scenes', 'pins.json')
+    need = [RP, FROZEN, a.pins]
+    if a.gate in ('2', '3', 'all'):
+        need.append(a.exe_dir)
+    if a.gate in ('2', 'all'):
+        need.append(a.frozen_exe_dir)
+    missing = [p for p in need if not os.path.exists(p)]
+    if missing:
+        print('rapier_gates.py: missing input %s' % ', '.join(missing), file=sys.stderr)
+        return 2
     os.makedirs(a.out, exist_ok=True)
     only = a.rows.split(',') if a.rows else None
     if a.gate in ('1', 'all'):
@@ -272,7 +302,7 @@ def main():
         f.write('\n'.join(T) + '\n')
     n_fail = sum(1 for t in T if '\tFAIL\t' in t)
     print('checks %d, fail %d' % (len(T), n_fail))
-    return 0 if n_fail == 0 else 1
+    return 0 if n_fail == 0 and T else 1
 
 
 if __name__ == '__main__':

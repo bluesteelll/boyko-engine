@@ -5,16 +5,49 @@
 # G3's sleeping-on rows run under --sleep-skip {unset, off, sets} x --broadphase {unset, tree,
 # grid} in both arms. G4: window 6's 1000/800-step sleeping rows (item 1) in both arms and every
 # sleep-skip mode, and its Off' rows (explicit --contact-reuse on), which must not move.
-# usage: pose_gates_sync.sh <exe> <outdir>
+# usage: pose_gates_sync.sh [--root DIR] <exe> <outdir>   (fixtures from ROOT: the gate-root block)
+# Exit (docs/physics/perf-campaign/GATE-KIT.md): 0 = every row PASS, all EXPECT_RUNS rows ran and
+# both negative controls exited 4; 1 = red; 2 = could not run (usage, no exe, a fixture missing),
+# decided before the first row.
 set -u
+EXPECT_RUNS=264 # 2 W x (2 arms x (G1 4 + G2 5 + G3 1 + 3 x 3 x 5 + G4 6) + G4p 6 + G4f 4)
+ME=$(basename "$0")
+# gate-root BEGIN (identical text in every gate script that reads fixtures; GATE-KIT.md, "Root rule")
+# ROOT = DIR when `--root DIR` comes first, else the git toplevel of this script's own checkout
+# (GIT_DIR and GIT_WORK_TREE ignored); in the mixed form D:/..., which the native runner reads.
+if [ "${1:-}" = --root ]; then
+  if [ $# -lt 2 ]; then echo "$(basename "$0"): --root needs a directory" >&2; exit 2; fi
+  ROOT=$2
+  shift 2
+else
+  HERE=$(cd "$(dirname "$0")" && pwd)
+  if command -v cygpath > /dev/null 2>&1; then HERE=$(cygpath -m "$HERE"); fi
+  if ! ROOT=$(unset GIT_DIR GIT_WORK_TREE; git -C "$HERE" rev-parse --show-toplevel 2> /dev/null); then
+    echo "$(basename "$0"): cannot resolve the repo root from $0; pass --root DIR" >&2; exit 2
+  fi
+fi
+if command -v cygpath > /dev/null 2>&1; then ROOT=$(cygpath -m "$ROOT" 2> /dev/null); fi
+case $ROOT in *' '*) echo "$(basename "$0"): the root '$ROOT' contains a space" >&2; exit 2 ;; esac
+if [ ! -d "$ROOT/docs/measurements" ]; then echo "$(basename "$0"): '$ROOT' is not a boyko-engine checkout (no docs/measurements)" >&2; exit 2; fi
+# gate-root END
+if [ $# -ne 2 ]; then echo "usage: $ME [--root DIR] <exe> <outdir>" >&2; exit 2; fi
 EXE=$1
 OUT=$2
 SON="--sleeping on"
-L9=D:/wt/merge/docs/measurements/2026-09-23-l9-contact-reuse/fixtures
-L9C4=D:/wt/merge/docs/measurements/2026-09-23-l9-contact-reuse/fixtures-c4
-L10=D:/wt/merge/docs/measurements/2026-09-23-l10-sleeping/fixtures
-L10OFF=D:/wt/merge/docs/measurements/2026-09-23-l10-sleeping/fixtures-reuse-off
-W6=D:/wt/merge/docs/measurements/2026-09-24-physics-window6/gate/fixtures
+L9=$ROOT/docs/measurements/2026-09-23-l9-contact-reuse/fixtures
+L9C4=$ROOT/docs/measurements/2026-09-23-l9-contact-reuse/fixtures-c4
+L10=$ROOT/docs/measurements/2026-09-23-l10-sleeping/fixtures
+L10OFF=$ROOT/docs/measurements/2026-09-23-l10-sleeping/fixtures-reuse-off
+W6=$ROOT/docs/measurements/2026-09-24-physics-window6/gate/fixtures
+if [ ! -f "$EXE" ]; then echo "$ME: no runner exe at $EXE" >&2; exit 2; fi
+missing=0
+need() { [ -f "$1" ] || { echo "$ME: missing fixture $1" >&2; missing=1; }; }
+for w in 1 8; do
+  for d in "$L9" "$L9C4"; do for n in J-A J-D R R-S J-Son; do need "$d/${n}_W$w.pose"; done; done
+  for d in "$L10" "$L10OFF"; do for n in R R-S J-Son J-A-on R-on J-D-on; do need "$d/${n}_W$w.pose"; done; done
+done
+for n in Offp-J1000 RSOffp800 Son-J1000 RS800; do need "$W6/$n.pose"; done
+if [ "$missing" != 0 ]; then exit 2; fi
 mkdir -p "$OUT"
 T="$OUT/pose_gates.tsv"
 : > "$T"
@@ -77,6 +110,10 @@ for w in 1 8; do
   chk G4f_off_RS800 "$w" 0x2a2b7926a48aab00 --scene rest --sleeping --steps 800 --contact-reuse off --expect-pose $W6/RS800.pose
 done
 # Negative controls: the flagless row against its reuse-off file, and the reverse, must exit 4.
-"$EXE" --scene rest --sleeping --workers 1 --steps 600 --expect-pose $L10OFF/R-S_W1.pose > "$OUT/neg_flagless_vs_off.out" 2>&1; echo "neg flagless R-S W1 vs fixtures-reuse-off: exit=$? (want 4)" | tee "$OUT/neg.txt"
-"$EXE" --scene rest --sleeping --contact-reuse off --workers 1 --steps 600 --expect-pose $L10/R-S_W1.pose > "$OUT/neg_off_vs_flagless.out" 2>&1; echo "neg reuse-off R-S W1 vs fixtures: exit=$? (want 4)" | tee -a "$OUT/neg.txt"
-echo "runs $(wc -l < "$T"), pass $(grep -c 'PASS' "$T"), fail $(grep -c 'FAIL' "$T")"
+"$EXE" --scene rest --sleeping --workers 1 --steps 600 --expect-pose $L10OFF/R-S_W1.pose > "$OUT/neg_flagless_vs_off.out" 2>&1; neg1=$?
+echo "neg flagless R-S W1 vs fixtures-reuse-off: exit=$neg1 (want 4)" | tee "$OUT/neg.txt"
+"$EXE" --scene rest --sleeping --contact-reuse off --workers 1 --steps 600 --expect-pose $L10/R-S_W1.pose > "$OUT/neg_off_vs_flagless.out" 2>&1; neg2=$?
+echo "neg reuse-off R-S W1 vs fixtures: exit=$neg2 (want 4)" | tee -a "$OUT/neg.txt"
+runs=$(wc -l < "$T"); pass=$(grep -c 'PASS' "$T"); fail=$(grep -c 'FAIL' "$T")
+echo "runs $runs, pass $pass, fail $fail"
+[ "$runs" = "$EXPECT_RUNS" ] && [ "$pass" = "$EXPECT_RUNS" ] && [ "$fail" = 0 ] && [ "$neg1" = 4 ] && [ "$neg2" = 4 ] || exit 1

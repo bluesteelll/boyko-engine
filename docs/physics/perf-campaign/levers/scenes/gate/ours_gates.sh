@@ -16,14 +16,25 @@
 # Writes OUT/gates.tsv (one line per check, PASS/FAIL) and OUT/<P>/ (every process's output).
 # A scorer's verdict is its exit code (the first cut piped it through `head`, whose status `$?` read:
 # that gate could not fail, which red-first (a) of C3 exposed).
+# Exit (docs/physics/perf-campaign/GATE-KIT.md): 0 = every check PASS and the tally complete (12 per
+# program, +1 for kick's prefix); 1 = red (a missing pin fixture is a FAIL row, so 1); 2 = could not
+# run (usage, no exe, an unknown program, dyn_spec_ref.py failed), decided before the first check.
 set -u
+if [ $# -lt 2 ]; then echo "usage: ours_gates.sh <runner exe> <outdir> [programs...]" >&2; exit 2; fi
 EXE=$1
 OUT=$2
 shift 2
 PROGRAMS=${*:-none kick shoot slide}
 G=$(cd "$(dirname "$0")" && pwd)
+if [ ! -f "$EXE" ]; then echo "ours_gates.sh: no runner exe at $EXE" >&2; exit 2; fi
+EXPECT_CHECKS=0
+for P in $PROGRAMS; do
+  case $P in none | kick | shoot | slide) ;; *) echo "ours_gates.sh: unknown program '$P' (none kick shoot slide)" >&2; exit 2 ;; esac
+  EXPECT_CHECKS=$((EXPECT_CHECKS + 12))
+  if [ "$P" = kick ]; then EXPECT_CHECKS=$((EXPECT_CHECKS + 1)); fi
+done
 mkdir -p "$OUT/canon"
-python "$G/dyn_spec_ref.py" --write "$OUT/canon" > "$OUT/canon/fnv.txt"
+if ! python "$G/dyn_spec_ref.py" --write "$OUT/canon" > "$OUT/canon/fnv.txt"; then echo "ours_gates.sh: dyn_spec_ref.py failed" >&2; exit 2; fi
 T="$OUT/gates.tsv"
 : > "$T"
 check() { # name verdict detail
@@ -85,4 +96,6 @@ for P in $PROGRAMS; do
   fi
 done
 cat "$T"
-echo "checks $(wc -l < "$T"), pass $(grep -c "	PASS	" "$T"), fail $(grep -c "	FAIL	" "$T")"
+checks=$(wc -l < "$T"); pass=$(grep -c "	PASS	" "$T"); fail=$(grep -c "	FAIL	" "$T")
+echo "checks $checks, pass $pass, fail $fail"
+[ "$checks" = "$EXPECT_CHECKS" ] && [ "$pass" = "$EXPECT_CHECKS" ] && [ "$fail" = 0 ] || exit 1
