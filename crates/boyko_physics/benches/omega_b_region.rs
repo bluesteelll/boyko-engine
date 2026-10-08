@@ -149,11 +149,16 @@
 //! (`docs/physics/perf-campaign/levers/scaling/02-SR-DESIGN.md` §1.4): `Ra` batched completion,
 //! `Rb` home claim lines, `Rc` TTAS claims, `Rd` helpers PAUSE for 50 µs before yielding, `Rd2`
 //! helpers PAUSE only (ruling 2026-09-30 Q6's "PAUSE-only vs PAUSE+yield" axis), `Re` the
-//! orchestrator yields after `REGION_STALL_NS`, and `all`. v2's own arm (`--mode omega-b2`) is the
-//! reference and is unchanged. Each block runs v2's calibrated work on its own payload line, and
+//! orchestrator yields after `REGION_STALL_NS`, and `all`. Each of these eight arms also has a
+//! `+fin` twin (`v2epoch+fin`, `Ra+fin`, …, `all+fin`; CR-F, `levers/CR-colour-passes/
+//! 01-CR-F-DESIGN.md`): the same policy under `WithAdvance<_, true>`, where the participant whose
+//! completion add makes an item's count exact publishes the next item, every other const being the
+//! arm's own (participant 0 still waits on the arm's orchestrator ladder, helpers on its helper
+//! ladder). v2's own arm (`--mode omega-b2`) is the reference and is unchanged. Each block runs v2's calibrated work on its own payload line, and
 //! `--gap-us` puts an inline item of that length before every stage. The receipt of every region —
-//! exactly once, every participant's END and tag, every claim word at its entry's last epoch — is
-//! checked outside the timing, timed rows included.
+//! exactly once, every participant's END and tag, every claim word at its entry's last epoch, and
+//! the advance identity (`RegionReport::advances`: Σ receipt advances == published + 1, no helper
+//! advance under the orchestrator) — is checked outside the timing, timed rows included.
 //!
 //! **The schedule's shape (`--entries`).** By default (`--entries stages`) every item is its own
 //! entry: `--stages S` distinct stages, each run once per region, which is v2's timed shape (its rows
@@ -170,6 +175,16 @@
 //!     --participants 2,4,8,16 --stages 36,72 --blocks-per-participant 1,2,4,6 --route worker
 //! ```
 //!
+//! With the finisher twins (window SR's SR-OMB3 block with CR's `+fin` arms, 512 cells):
+//!
+//! ```text
+//! omega_b_region.exe --bench --mode region \
+//!     --policy v2epoch,Ra,Rb,Rc,Rd,Rd2,Re,all,v2epoch+fin,Ra+fin,Rb+fin,Rc+fin,Rd+fin,Rd2+fin,Re+fin,all+fin \
+//!     --participants 2,4,8,16 --stages 36,72 --blocks-per-participant 1,2,4,6 --route worker
+//! ```
+//!
+//! `--policy` defaults to the eight arms without `+fin`, so a row that omits it is unchanged.
+//!
 //! Optional: `--regions R` (1000), `--stages S,..` (36), `--entries stages|E` (stages),
 //! `--work-ns N` (700), `--gap-us G,..` (0); `--bpp` is `--blocks-per-participant`. One `CALIBRATION`
 //! line, then one `SUMMARY {json}` line per (participants, stages, blocks per participant, policy,
@@ -177,12 +192,16 @@
 //! to a row's arguments times nothing: it parses them, prints one `PLAN {json}` line per cell the row
 //! would run (in the same order, with the same identifying fields) and `PLAN_CELLS n`, and exits 0 —
 //! no calibration, no pool. A window's pre-flight runs each v3 row that way, so an argument the
-//! parser rejects stops the pre-flight, not the timed block.
+//! parser rejects stops the pre-flight, not the timed block. Every v3 SUMMARY also carries
+//! `"helper_advances_median"` and `"helper_advanced_regions"` (the regions in which a helper made a
+//! publish): a `+fin` row at two or more participants that reads 0 there never ran the finisher.
 //!
-//! v3's self-check (the bare run, after v1's and v2's) runs every policy, bounded, at 2, 4, 8 and 16
-//! participants, 1 and 6 blocks per participant, both routes, with and without a 20 µs gap, 12 items
-//! over 3 entries and over 12 (one entry per item, the comparator's shape), three regions over one
-//! frame each, and asserts the receipt above plus that helpers ran blocks somewhere.
+//! v3's self-check (the bare run, after v1's and v2's) runs every policy (all sixteen arms), bounded,
+//! at 2, 4, 8 and 16 participants, 1 and 6 blocks per participant, both routes, with and without a
+//! 20 µs gap, 12 items over 3 entries and over 12 (one entry per item, the comparator's shape),
+//! three regions over one frame each, and asserts the receipt above plus that helpers ran blocks
+//! somewhere and that every `+fin` arm had a helper advance in some region (its bounded twin
+//! `Bounded<WithAdvance<…>>` must forward `ADVANCE`, or it would run the orchestrator).
 
 use std::hint::spin_loop;
 use std::process::ExitCode;
@@ -192,10 +211,10 @@ use std::thread::Thread;
 use std::time::{Duration, Instant};
 
 use boyko_threadpool::{
-    Ladder, PoolInner, REGION_MAX_BLOCKS_PER_PARTICIPANT, REGION_STALL_NS, RegionFrame, RegionLine,
-    RegionLines, RegionPolicy, RegionReceipt, RegionReport, RegionStages, SchedItem, StageEntry,
-    ThreadPool, ThreadPoolBuilder, V2Policy, WORKER_ID_DISPATCHER, claim_lines, current_worker_id,
-    link_hints, try_with_active_pool,
+    Advance, Ladder, PoolInner, REGION_MAX_BLOCKS_PER_PARTICIPANT, REGION_STALL_NS, RegionFrame,
+    RegionLine, RegionLines, RegionPolicy, RegionReceipt, RegionReport, RegionStages, SchedItem,
+    StageEntry, ThreadPool, ThreadPoolBuilder, V2Policy, WORKER_ID_DISPATCHER, WithAdvance,
+    claim_lines, current_worker_id, link_hints, try_with_active_pool,
 };
 
 /// `PAUSE`s a helper spins before it yields (Box2D: `spinCount > 5`).
@@ -1499,8 +1518,10 @@ v3_policy!(
     V3All, helper = Ladder::BudgetThenYield { spin_ns: V3_RD_SPIN_NS }, orch = Ladder::BudgetThenYield { spin_ns: REGION_STALL_NS }, batched = true, home = true, ttas = true
 );
 
-/// The self-check's twin of any policy: the same ladders and axes, with a 2 s wait bound, so a
-/// broken protocol fails rather than hangs.
+/// The self-check's twin of any policy: the same ladders, axes and advance, with a 2 s wait bound,
+/// so a broken protocol fails rather than hangs. `ADVANCE` is forwarded explicitly: the trait
+/// defaults it to the orchestrator, so a wrapper that lists only the other consts would silently
+/// self-check a `+fin` arm as the orchestrator (review O2).
 struct Bounded<P>(std::marker::PhantomData<P>);
 
 impl<P: RegionPolicy> RegionPolicy for Bounded<P> {
@@ -1510,6 +1531,7 @@ impl<P: RegionPolicy> RegionPolicy for Bounded<P> {
     const DONE_BATCHED: bool = P::DONE_BATCHED;
     const HOME_LINES: bool = P::HOME_LINES;
     const TTAS: bool = P::TTAS;
+    const ADVANCE: Advance = P::ADVANCE;
 }
 
 /// The v3 policies by name (`--policy`).
@@ -1542,23 +1564,79 @@ impl V3Policy {
         }
     }
 
+}
+
+/// One v3 arm (`--policy`): an axis policy, and whether it runs under the finisher advance
+/// (`<axis>+fin`, `WithAdvance<_, true>`; CR-F).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct V3Arm {
+    axis: V3Policy,
+    fin: bool,
+}
+
+impl V3Arm {
+    /// The eight orchestrator arms: `--policy`'s default, SR-OMB3's own grid.
+    const ALL8: [Self; 8] = Self::arms(false);
+    /// Every arm: the eight orchestrator arms, then their eight `+fin` twins.
+    const ALL16: [Self; 16] = {
+        let (a, b) = (Self::arms(false), Self::arms(true));
+        [a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]
+    };
+
+    const fn arms(fin: bool) -> [Self; 8] {
+        let p = V3Policy::ALL;
+        [
+            Self { axis: p[0], fin },
+            Self { axis: p[1], fin },
+            Self { axis: p[2], fin },
+            Self { axis: p[3], fin },
+            Self { axis: p[4], fin },
+            Self { axis: p[5], fin },
+            Self { axis: p[6], fin },
+            Self { axis: p[7], fin },
+        ]
+    }
+
+    fn name(self) -> &'static str {
+        match (self.axis, self.fin) {
+            (axis, false) => axis.name(),
+            (V3Policy::V2Epoch, true) => "v2epoch+fin",
+            (V3Policy::Ra, true) => "Ra+fin",
+            (V3Policy::Rb, true) => "Rb+fin",
+            (V3Policy::Rc, true) => "Rc+fin",
+            (V3Policy::Rd, true) => "Rd+fin",
+            (V3Policy::Rd2, true) => "Rd2+fin",
+            (V3Policy::Re, true) => "Re+fin",
+            (V3Policy::All, true) => "all+fin",
+        }
+    }
+
     fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|p| p.name() == s)
+        Self::ALL16.into_iter().find(|a| a.name() == s)
     }
 }
 
-/// Dispatches `$f::<Policy>($args)` on a [`V3Policy`], optionally wrapped in [`Bounded`].
+/// Dispatches `$f::<Policy>($args)` on a [`V3Arm`], optionally wrapped in [`Bounded`]. A `+fin` arm
+/// runs `WithAdvance<axis policy, true>`, so under [`Plain`] the timed rows run exactly that type.
 macro_rules! with_v3_policy {
     ($p:expr, $wrap:ident, $f:ident ( $($a:expr),* )) => {
-        match $p {
-            V3Policy::V2Epoch => $f::<$wrap<V2Policy>>($($a),*),
-            V3Policy::Ra => $f::<$wrap<V3Ra>>($($a),*),
-            V3Policy::Rb => $f::<$wrap<V3Rb>>($($a),*),
-            V3Policy::Rc => $f::<$wrap<V3Rc>>($($a),*),
-            V3Policy::Rd => $f::<$wrap<V3Rd>>($($a),*),
-            V3Policy::Rd2 => $f::<$wrap<V3Rd2>>($($a),*),
-            V3Policy::Re => $f::<$wrap<V3Re>>($($a),*),
-            V3Policy::All => $f::<$wrap<V3All>>($($a),*),
+        match ($p.axis, $p.fin) {
+            (V3Policy::V2Epoch, false) => $f::<$wrap<V2Policy>>($($a),*),
+            (V3Policy::Ra, false) => $f::<$wrap<V3Ra>>($($a),*),
+            (V3Policy::Rb, false) => $f::<$wrap<V3Rb>>($($a),*),
+            (V3Policy::Rc, false) => $f::<$wrap<V3Rc>>($($a),*),
+            (V3Policy::Rd, false) => $f::<$wrap<V3Rd>>($($a),*),
+            (V3Policy::Rd2, false) => $f::<$wrap<V3Rd2>>($($a),*),
+            (V3Policy::Re, false) => $f::<$wrap<V3Re>>($($a),*),
+            (V3Policy::All, false) => $f::<$wrap<V3All>>($($a),*),
+            (V3Policy::V2Epoch, true) => $f::<$wrap<WithAdvance<V2Policy, true>>>($($a),*),
+            (V3Policy::Ra, true) => $f::<$wrap<WithAdvance<V3Ra, true>>>($($a),*),
+            (V3Policy::Rb, true) => $f::<$wrap<WithAdvance<V3Rb, true>>>($($a),*),
+            (V3Policy::Rc, true) => $f::<$wrap<WithAdvance<V3Rc, true>>>($($a),*),
+            (V3Policy::Rd, true) => $f::<$wrap<WithAdvance<V3Rd, true>>>($($a),*),
+            (V3Policy::Rd2, true) => $f::<$wrap<WithAdvance<V3Rd2, true>>>($($a),*),
+            (V3Policy::Re, true) => $f::<$wrap<WithAdvance<V3Re, true>>>($($a),*),
+            (V3Policy::All, true) => $f::<$wrap<WithAdvance<V3All, true>>>($($a),*),
         }
     };
 }
@@ -1712,6 +1790,17 @@ impl Frame3 {
                 "v3 receipt: {what}: participant {q}"
             );
         }
+        // The identity on `RegionReport::advances` (in release too): every published item's epoch
+        // and the END were each published once. Under the finisher `published` is a table walk, so
+        // this is what witnesses that the schedule ran.
+        let advances: u64 = receipts.iter().map(|rc| rc.advances).sum();
+        assert_eq!(advances, r.advances, "v3 advances: {what}: Σ receipt advances == report.advances");
+        assert_eq!(r.advances, u64::from(r.published) + 1, "v3 advances: {what}: Σ advances == published + 1");
+        let helper_advances: u64 = receipts.iter().skip(1).map(|rc| rc.advances).sum();
+        assert_eq!(r.helper_advances, helper_advances, "v3 advances: {what}: helper_advances == Σ over participants 1..");
+        if P::ADVANCE == Advance::Orchestrator {
+            assert_eq!(r.helper_advances, 0, "v3 advances: {what}: a helper advanced under the orchestrator");
+        }
         for (e, entry) in self.entries.iter().enumerate() {
             if entry.n_blocks < 2 {
                 continue;
@@ -1767,7 +1856,7 @@ struct ArgsV3 {
     stages: Vec<u32>,
     entries: Entries,
     blocks_per_participant: Vec<u32>,
-    policies: Vec<V3Policy>,
+    policies: Vec<V3Arm>,
     work_ns: u64,
     gaps_us: Vec<u64>,
     /// `--plan`: print the cells, run nothing.
@@ -1787,7 +1876,7 @@ fn parse_args_v3(raw: &[String]) -> Result<ArgsV3, String> {
         stages: vec![36],
         entries: Entries::PerItem,
         blocks_per_participant: vec![1, 2, 4, 6],
-        policies: V3Policy::ALL.to_vec(),
+        policies: V3Arm::ALL8.to_vec(),
         work_ns: 700,
         gaps_us: vec![0],
         plan: false,
@@ -1821,7 +1910,11 @@ fn parse_args_v3(raw: &[String]) -> Result<ArgsV3, String> {
                 let names: Vec<String> = parse_list("--policy", it.next())?;
                 a.policies = names
                     .iter()
-                    .map(|n| V3Policy::parse(n).ok_or_else(|| format!("--policy: unknown {n:?} (v2epoch|Ra|Rb|Rc|Rd|Rd2|Re|all)")))
+                    .map(|n| {
+                        V3Arm::parse(n).ok_or_else(|| {
+                            format!("--policy: unknown {n:?} (v2epoch|Ra|Rb|Rc|Rd|Rd2|Re|all, each optionally +fin)")
+                        })
+                    })
                     .collect::<Result<_, _>>()?;
             }
             "--work-ns" => a.work_ns = parse_one("--work-ns", it.next())?,
@@ -1897,7 +1990,7 @@ fn omega_b3_row<P: RegionPolicy + 'static>(
     pool: &ThreadPool,
     a: &ArgsV3,
     s: Shape3,
-    policy: V3Policy,
+    policy: V3Arm,
     bpp: u32,
     gap_us: u64,
     work_ns_calibrated: f64,
@@ -1906,6 +1999,7 @@ fn omega_b3_row<P: RegionPolicy + 'static>(
     let stages = Arc::new(stages);
     let n = a.regions as usize;
     let (mut walls, mut helper_blocks) = (Vec::with_capacity(n), Vec::with_capacity(n));
+    let mut helper_advances = Vec::with_capacity(n);
     let mut frame = Some(frame);
     for _ in 0..a.regions {
         let (mut f, st) = (frame.take().expect("invariant: the frame returns each region"), Arc::clone(&stages));
@@ -1919,17 +2013,19 @@ fn omega_b3_row<P: RegionPolicy + 'static>(
         f.check::<P>(&r, s.participants, "a timed row");
         walls.push(wall);
         helper_blocks.push(r.helper_blocks);
+        helper_advances.push(r.helper_advances);
         frame = Some(f);
     }
     let mean = walls.iter().sum::<u64>() as f64 / walls.len() as f64;
     let wall_median = median(&mut walls).unwrap_or(0);
     let helped = helper_blocks.iter().filter(|&&b| b > 0).count();
+    let advanced = helper_advances.iter().filter(|&&v| v > 0).count();
     println!(
         "SUMMARY {{\"bench\":\"omega_b3\",\"version\":3,\"route\":\"{}\",\"policy\":\"{}\",\"participants\":{},\
          \"stages\":{},\"entries\":{},\"blocks\":{},\"blocks_per_participant\":{bpp},\"gap_us\":{gap_us},\
          \"regions\":{},\"work_iters\":{},\"work_ns_calibrated\":{work_ns_calibrated:.1},\
          \"region_ns_median\":{wall_median},\"region_ns_mean\":{mean},\"stage_ns_median\":{},\"exactly_once\":true,\
-         \"helped_regions\":{helped},\"helper_blocks_median\":{}}}",
+         \"helped_regions\":{helped},\"helper_blocks_median\":{},\"helper_advanced_regions\":{advanced},\"helper_advances_median\":{}}}",
         a.route.name(),
         policy.name(),
         s.participants,
@@ -1940,6 +2036,7 @@ fn omega_b3_row<P: RegionPolicy + 'static>(
         s.work_iters,
         wall_median as f64 / f64::from(s.stages),
         median(&mut helper_blocks).unwrap_or(0),
+        median(&mut helper_advances).unwrap_or(0),
     );
 }
 
@@ -1951,10 +2048,12 @@ fn omega_b3_row<P: RegionPolicy + 'static>(
 fn self_check_v3() {
     println!("omega_b_region: v3 (region.rs) self-check");
     let mut helped = 0usize;
+    // Per arm (in `V3Arm::ALL16` order): regions in which a helper made a publish.
+    let mut advanced = [0usize; 16];
     for route in [Route::External, Route::Worker] {
         for participants in [2u32, 4, 8, 16] {
             let pool = ThreadPoolBuilder::new().num_threads(participants as usize).build();
-            for policy in V3Policy::ALL {
+            for (k, policy) in V3Arm::ALL16.into_iter().enumerate() {
                 for bpp in [1u32, 6] {
                     for gap in [Duration::ZERO, Duration::from_micros(20)] {
                         for entries in [3u32, 12] {
@@ -1966,23 +2065,45 @@ fn self_check_v3() {
                                 work_iters: SELF_CHECK_WORK_ITERS,
                                 gap,
                             };
-                            helped +=
+                            let (h, adv) =
                                 with_v3_policy!(policy, Bounded, self_check_v3_shape(&pool, route, shape, policy));
+                            helped += h;
+                            advanced[k] += adv;
                         }
                     }
                 }
             }
-            println!("  v3 region: {participants} participants, {} route, every policy: ok", route.name());
+            println!("  v3 region: {participants} participants, {} route, every policy (16 arms): ok", route.name());
         }
     }
     // Anti-vacuity: the helpers took part somewhere, or "exactly once" was only participant 0's.
     assert!(helped > 0, "v3: no helper ran a block in the whole self-check");
     println!("  v3: {helped} regions with helper blocks");
+    // Every `+fin` arm ran the finisher: a helper advanced in some region of its cells (a
+    // `Bounded` that dropped `ADVANCE` would run them all as the orchestrator, and read 0 here).
+    for (k, arm) in V3Arm::ALL16.into_iter().enumerate() {
+        if arm.fin {
+            assert!(advanced[k] > 0, "v3: no region of {} had a helper advance", arm.name());
+        } else {
+            assert_eq!(advanced[k], 0, "v3: {} (the orchestrator) had a helper advance", arm.name());
+        }
+    }
+    println!(
+        "  v3: regions with a helper advance per +fin arm: {}",
+        V3Arm::ALL16
+            .into_iter()
+            .enumerate()
+            .filter(|(_, a)| a.fin)
+            .map(|(k, a)| format!("{} {}", a.name(), advanced[k]))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     println!("omega_b_region v3 self-check: ok");
 }
 
-/// Three regions of one shape and policy; returns how many had helper blocks.
-fn self_check_v3_shape<P: RegionPolicy + 'static>(pool: &ThreadPool, route: Route, s: Shape3, policy: V3Policy) -> usize {
+/// Three regions of one shape and policy; returns how many had helper blocks and how many had a
+/// helper advance.
+fn self_check_v3_shape<P: RegionPolicy + 'static>(pool: &ThreadPool, route: Route, s: Shape3, policy: V3Arm) -> (usize, usize) {
     let (frame, stages) = Frame3::new::<P>(s);
     let stages = Arc::new(stages);
     let what = format!(
@@ -1996,7 +2117,7 @@ fn self_check_v3_shape<P: RegionPolicy + 'static>(pool: &ThreadPool, route: Rout
         s.gap
     );
     let mut frame = Some(frame);
-    let mut helped = 0;
+    let (mut helped, mut advanced) = (0, 0);
     for _ in 0..3 {
         let (mut f, st) = (frame.take().expect("invariant: the frame returns each region"), Arc::clone(&stages));
         let ((f, r), id) = on_route(pool, route, move |inner| {
@@ -2006,7 +2127,8 @@ fn self_check_v3_shape<P: RegionPolicy + 'static>(pool: &ThreadPool, route: Rout
         assert_route(route, id, s.participants as usize);
         f.check::<P>(&r, s.participants, &what);
         helped += usize::from(r.helper_blocks > 0);
+        advanced += usize::from(r.helper_advances > 0);
         frame = Some(f);
     }
-    helped
+    (helped, advanced)
 }

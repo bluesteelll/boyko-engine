@@ -281,6 +281,17 @@ pub struct Injected {
     pub participant: u32,
 }
 
+/// A late helper panic (G-CR-F-PANIC): the first run of `(entry, block)` on a participant other
+/// than 0 spins `delay`, then panics with [`Injected`]. With a [`Rendezvous`] on the same entry
+/// and block 1, participant 0 has left block 0, swept the rest of the item and entered its publish
+/// wait by the time the panic lands.
+#[derive(Clone, Copy, Debug)]
+pub struct LatePanic {
+    pub entry: u32,
+    pub block: u32,
+    pub delay: Duration,
+}
+
 /// A rendezvous: block 0 of `entry` (always participant 0's first claim) waits, bounded, until
 /// some helper has started block 1; block 1 then holds for `hold`.
 #[derive(Clone, Copy, Debug)]
@@ -312,9 +323,15 @@ pub struct Stages {
     /// Every block spins this long (so helpers have blocks left to claim when they arrive).
     work: Duration,
     inject: Option<Inject>,
+    late_panic: Option<LatePanic>,
     pub fired: AtomicBool,
     rendezvous: Option<Rendezvous>,
     started_b1: AtomicBool,
+    /// Block 1 of the rendezvous entry was started by a participant other than 0.
+    b1_by_helper: AtomicBool,
+    /// Runs of a one-block (inline) entry on a participant other than 0 (CR-F: inline items never
+    /// leave participant 0); asserted 0 by [`Stages::assert_exactly_once`].
+    inline_off_p0: AtomicU32,
     /// Participant 0's block 0 of this entry waits (bounded) until a helper has started a block of it.
     await_helper: Option<u32>,
     helper_started: AtomicBool,
@@ -339,9 +356,12 @@ impl Stages {
             slow: None,
             work: Duration::ZERO,
             inject: None,
+            late_panic: None,
             fired: AtomicBool::new(false),
             rendezvous: None,
             started_b1: AtomicBool::new(false),
+            b1_by_helper: AtomicBool::new(false),
+            inline_off_p0: AtomicU32::new(0),
             await_helper: None,
             helper_started: AtomicBool::new(false),
             nested_scope_entry: None,
@@ -367,10 +387,33 @@ impl Stages {
         self
     }
 
+    /// A one-shot late helper panic (shares [`Stages::fired`] with [`Stages::with_inject`]).
+    pub fn with_late_helper_panic(mut self, p: LatePanic) -> Self {
+        self.late_panic = Some(p);
+        self
+    }
+
     /// A rendezvous on `r.entry`.
     pub fn with_rendezvous(mut self, r: Rendezvous) -> Self {
         self.rendezvous = Some(r);
         self
+    }
+
+    /// Whether block 1 of the rendezvous entry started (by any participant).
+    pub fn rendezvous_met(&self) -> bool {
+        self.started_b1.load(Ordering::Acquire)
+    }
+
+    /// Whether block 1 of the rendezvous entry was started by a helper (participant ≠ 0): with
+    /// participant 0 held in block 0 until block 1 starts, only a helper can start it, unless
+    /// participant 0's bounded wait ran out.
+    pub fn rendezvous_b1_by_helper(&self) -> bool {
+        self.b1_by_helper.load(Ordering::Relaxed)
+    }
+
+    /// Runs of a one-block entry on a participant other than 0.
+    pub fn inline_off_p0(&self) -> u32 {
+        self.inline_off_p0.load(Ordering::Relaxed)
     }
 
     /// Participant 0's block 0 of `entry` waits (bounded, 1 s) until a helper has started a block
@@ -408,6 +451,7 @@ impl Stages {
     /// Asserts every block of every execution ran exactly once and every slot holds `items`.
     pub fn assert_exactly_once(&self, frame: &Frame, what: &str) {
         assert_eq!(self.mismatches.load(Ordering::Relaxed), 0, "{what}: generation mismatches");
+        assert_eq!(self.inline_off_p0(), 0, "{what}: an inline item ran on a participant other than 0");
         for (e, &n) in self.blocks.iter().enumerate() {
             let execs = frame.execs(e);
             for b in 0..usize::from(n) {
@@ -485,6 +529,9 @@ impl RegionStages for Stages {
                     std::hint::spin_loop();
                 }
             } else if block == 1 {
+                if participant != 0 {
+                    self.b1_by_helper.store(true, Ordering::Relaxed);
+                }
                 self.started_b1.store(true, Ordering::Release);
                 if r.sleep {
                     std::thread::sleep(r.hold);
@@ -492,6 +539,18 @@ impl RegionStages for Stages {
                     spin_for(r.hold);
                 }
             }
+        }
+        if let Some(lp) = self.late_panic
+            && lp.entry == entry
+            && lp.block == block
+            && participant != 0
+            && self.fired.compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+        {
+            spin_for(lp.delay);
+            std::panic::panic_any(Injected { participant });
+        }
+        if self.blocks[entry as usize] <= 1 && participant != 0 {
+            self.inline_off_p0.fetch_add(1, Ordering::Relaxed);
         }
         if let Some((e, d)) = self.slow
             && e == entry
