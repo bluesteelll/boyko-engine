@@ -2,10 +2,21 @@
 # L10 C3c runner checks (untimed): C3b's fourteen, plus the tree seam's armed rows (every step's
 # structure checked, void steps must be 0) and its TreeDiag receipts.
 # usage: runner_checks_c3c.sh <exe> <outdir>
+# Exit (docs/physics/perf-campaign/GATE-KIT.md): 0 = every check PASS and all EXPECT_CHECKS ran;
+# 1 = red; 2 = could not run (usage, no exe, a fixture missing), decided before the first check.
 set -u
+EXPECT_CHECKS=26 # C3b's 14 + 2 W x 6
+ME=$(basename "$0")
+if [ $# -ne 2 ]; then echo "usage: $ME <exe> <outdir>" >&2; exit 2; fi
 EXE=$1
 OUT=$2
 L10=D:/wt/merge/docs/measurements/2026-09-23-l10-sleeping/fixtures
+if [ ! -f "$EXE" ]; then echo "$ME: no runner exe at $EXE" >&2; exit 2; fi
+missing=0
+for w in 1 8; do for n in R-S J-Son J-D-on; do
+  [ -f "$L10/${n}_W$w.pose" ] || { echo "$ME: missing fixture $L10/${n}_W$w.pose" >&2; missing=1; }
+done; done
+if [ "$missing" != 0 ]; then exit 2; fi
 mkdir -p "$OUT"
 T="$OUT/runner_checks.tsv"
 : > "$T"
@@ -45,4 +56,6 @@ for w in 1 8; do
   # The receipt with sleeping off on the tree: sleeper_rebuilds 0 (design 04 T(W) row, untimed).
   run J-A_sleep_off_tree_W$w 0 --scene jolt --gap 0.5 --cfg a --broadphase tree --steps 600 --workers $w
 done
-echo "checks $(wc -l < "$T"), pass $(grep -c 'PASS' "$T"), fail $(grep -c 'FAIL' "$T")"
+checks=$(wc -l < "$T"); pass=$(grep -c 'PASS' "$T"); fail=$(grep -c 'FAIL' "$T")
+echo "checks $checks, pass $pass, fail $fail"
+[ "$checks" = "$EXPECT_CHECKS" ] && [ "$pass" = "$EXPECT_CHECKS" ] && [ "$fail" = 0 ] || exit 1

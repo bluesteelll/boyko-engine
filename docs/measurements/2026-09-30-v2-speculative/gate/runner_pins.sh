@@ -3,9 +3,14 @@
 # J500, J500 --contact-reuse off, R1100. Flagless they read V2's recordings (the fixture directory's
 # w8/J500, w8/J500off, w6/R1100); with both overlap-only flags they must read the pre-V2 trunk
 # pins exactly. usage: runner_pins.sh <exe> <outdir>
+# Exit (docs/physics/perf-campaign/GATE-KIT.md): 0 = every row PASS and all EXPECT_ROWS rows ran;
+# 1 = red (a FAIL row or a short tally); 2 = could not run (usage, or no exe), before the first row.
 set -u
+EXPECT_ROWS=12 # 2 W x 6 rows
+if [ $# -ne 2 ]; then echo "usage: runner_pins.sh <exe> <outdir>" >&2; exit 2; fi
 EXE=$1
 OUT=$2
+if [ ! -f "$EXE" ]; then echo "runner_pins.sh: no runner exe at $EXE" >&2; exit 2; fi
 mkdir -p "$OUT"
 T="$OUT/pins.tsv"
 : > "$T"
@@ -30,4 +35,6 @@ for w in 1 8; do
   row R1100_d0 $w 0xc8bbe34cf6a8afc6 --scene rest --solver colored --steps 1100 $D0
 done
 cat "$T"
-echo "rows $(wc -l < "$T"), pass $(grep -c PASS "$T"), fail $(grep -c FAIL "$T")"
+rows=$(wc -l < "$T"); pass=$(grep -c PASS "$T"); fail=$(grep -c FAIL "$T")
+echo "rows $rows, pass $pass, fail $fail"
+[ "$rows" = "$EXPECT_ROWS" ] && [ "$pass" = "$EXPECT_ROWS" ] && [ "$fail" = 0 ] || exit 1

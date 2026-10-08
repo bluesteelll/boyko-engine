@@ -4,10 +4,21 @@
 # The reuse-off arm of the lane's runner_checks_c3c.sh armed rows (untimed): each armed
 # expect-pose row with --contact-reuse off against the pre-C4 fixtures; void steps must be 0.
 # usage: runner_checks_off.sh <exe> <outdir>
+# Exit (docs/physics/perf-campaign/GATE-KIT.md): 0 = every check PASS and all EXPECT_CHECKS ran;
+# 1 = red; 2 = could not run (usage, no exe, a fixture missing), decided before the first check.
 set -u
+EXPECT_CHECKS=17 # 7 + 2 W x 5
+ME=$(basename "$0")
+if [ $# -ne 2 ]; then echo "usage: $ME <exe> <outdir>" >&2; exit 2; fi
 EXE=$1
 OUT=$2
 L10OFF=D:/wt/merge/docs/measurements/2026-09-30-v2-speculative/l10-reuse-off
+if [ ! -f "$EXE" ]; then echo "$ME: no runner exe at $EXE" >&2; exit 2; fi
+missing=0
+for w in 1 8; do for n in R-S J-Son J-D-on; do
+  [ -f "$L10OFF/${n}_W$w.pose" ] || { echo "$ME: missing fixture $L10OFF/${n}_W$w.pose" >&2; missing=1; }
+done; done
+if [ "$missing" != 0 ]; then exit 2; fi
 mkdir -p "$OUT"
 T="$OUT/runner_checks_off.tsv"
 : > "$T"
@@ -36,4 +47,6 @@ for w in 1 8; do
   run off_armed_J-D-on_tree_sets_W$w 0 --scene jolt --gap 0.5 --cfg default --sleeping on --broadphase tree $RU --arm-profiler --steps 600 --workers $w --expect-pose $L10OFF/J-D-on_W$w.pose
   run off_armed_R-S_grid_sets_W$w 0 --scene rest --sleeping on --broadphase grid $RU --arm-profiler --steps 600 --workers $w --expect-pose $L10OFF/R-S_W$w.pose
 done
-echo "checks $(wc -l < "$T"), pass $(grep -c 'PASS' "$T"), fail $(grep -c 'FAIL' "$T")"
+checks=$(wc -l < "$T"); pass=$(grep -c 'PASS' "$T"); fail=$(grep -c 'FAIL' "$T")
+echo "checks $checks, pass $pass, fail $fail"
+[ "$checks" = "$EXPECT_CHECKS" ] && [ "$pass" = "$EXPECT_CHECKS" ] && [ "$fail" = 0 ] || exit 1

@@ -27,6 +27,11 @@ G3  the dynamic programs on the ruling-22 rows (9b's 7-row R-CLAIM union plus si
     for the red-first); and, with --write-fixtures (after that check), dyn/fixtures/<arm>/<row>_<program>.pose
     and its sha256 into OUTDIR/rapier_pins.json.
 Writes OUTDIR/gates.tsv and prints it.
+
+Exit (docs/physics/perf-campaign/GATE-KIT.md): 0 = at least one check ran and none FAILed; 1 = red (a FAIL,
+no check at all, or a G2 whose --rows selected no row); 2 = could not run (an argparse error, or an input
+the selected gates read is missing: the Rapier tree, frozen9b.json, the dyn or frozen exe directory),
+decided before the first check. An uncaught exception stays Python's 1.
 """
 import argparse
 import hashlib
@@ -163,8 +168,9 @@ def gate2(out, exe_dir, frozen_dir, only):
                 fails.append('%s W%d rc %d %s' % (r['id'], w, rc, s and s.get('expect_pose')))
             if w == 1 and r['arm'] not in first:
                 first[r['arm']] = (r, s)
-    check('G2 frozen rows on the dyn exes, W1 and W8 (%d rows, %d runs)' % (len(rows), 2 * len(rows)), not fails,
-          '; '.join(fails[:5]) or 'all exit 0, expect_pose match, pose_hash = frozen9b')
+    # A G2 that selected no row checked nothing: that is a FAIL, never a vacuous PASS.
+    check('G2 frozen rows on the dyn exes, W1 and W8 (%d rows, %d runs)' % (len(rows), 2 * len(rows)), bool(rows) and not fails,
+          '; '.join(fails[:5]) or ('all exit 0, expect_pose match, pose_hash = frozen9b' if rows else 'no rows selected'))
     for arm, (r, s_dyn) in sorted(first.items()):
         p = os.path.join(out, 'g2', r['id'].replace('/', '__') + '_W1_frozen')
         rc, s_fro = run(os.path.join(frozen_dir, 'rapier-parity-%s.exe' % arm), row_args(r, 1, p), p)
@@ -251,7 +257,7 @@ def gate3(out, exe_dir, only, write_fixtures, pins_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('out')
-    ap.add_argument('--gate', default='all')
+    ap.add_argument('--gate', default='all', choices=['1', '2', '3', 'all'])
     ap.add_argument('--rows')
     ap.add_argument('--exe-dir', default=RP + '/dyn/bin')
     ap.add_argument('--frozen-exe-dir', default=RP + '/gate/bin')
@@ -260,6 +266,15 @@ def main():
     ap.add_argument('--sums')
     ap.add_argument('--pins')
     a = ap.parse_args()
+    need = [RP, FROZEN]
+    if a.gate in ('2', '3', 'all'):
+        need.append(a.exe_dir)
+    if a.gate in ('2', 'all'):
+        need.append(a.frozen_exe_dir)
+    missing = [p for p in need if not os.path.exists(p)]
+    if missing:
+        print('rapier_gates.py: missing input %s' % ', '.join(missing), file=sys.stderr)
+        return 2
     os.makedirs(a.out, exist_ok=True)
     only = a.rows.split(',') if a.rows else None
     if a.gate in ('1', 'all'):
@@ -272,7 +287,7 @@ def main():
         f.write('\n'.join(T) + '\n')
     n_fail = sum(1 for t in T if '\tFAIL\t' in t)
     print('checks %d, fail %d' % (len(T), n_fail))
-    return 0 if n_fail == 0 else 1
+    return 0 if n_fail == 0 and T else 1
 
 
 if __name__ == '__main__':

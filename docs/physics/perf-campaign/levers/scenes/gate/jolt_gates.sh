@@ -16,15 +16,32 @@
 #   G6 ApplyEvents is called before clock_start inside the step loop (the patched source)
 # The manifest receipt (G2: driver.py's source_is_repo_patch) is run by the caller at the lane head.
 # Env: PROGRAMS (default "none kick shoot slide") narrows G5; JOLT_SRC points G6 at another source.
+# Exit (docs/physics/perf-campaign/GATE-KIT.md): 0 = no FAIL and the tally complete (9 + 11 per
+# program; the cross-W receipts read SAME/DIFFERS and never fail); 1 = red; 2 = could not run
+# (usage, an unknown program, an input missing: the exe, the patch, the clean v5.6.0 repository, the
+# 9b exe, the 9b banner, the G6 source; dyn_spec_ref.py failed), decided before the first check.
 set -u
+if [ $# -lt 2 ] || [ $# -gt 4 ]; then echo "usage: jolt_gates.sh <PerformanceTest.exe> <outdir> [<repo> [<9b stdout with the v1 banner>]]" >&2; exit 2; fi
 EXE=$1
 OUT=$2
 REPO=${3:-D:/wt/merge}
 BANNER9B=${4:-D:/tmp/phys-orch/win9b/raw/V2-AB-p0_130001/001_r0_V2-jolt56_j56_W16/stdout.txt}
 G=$(cd "$(dirname "$0")" && pwd)
 PATCH=$REPO/crates/boyko_physics/benches/jolt_parity/pyramid_scene.patch
+SRC=${JOLT_SRC:-D:/tmp/jolt/wt-v5.6.0-dyn/PerformanceTest/PerformanceTest.cpp}
+EXPECT_CHECKS=9 # G1 1 + G3 1 + G4 3 x 2 + G6 1, then 11 per program
+for P in ${PROGRAMS:-none kick shoot slide}; do
+  case $P in none | kick | shoot | slide) ;; *) echo "jolt_gates.sh: unknown program '$P' (none kick shoot slide)" >&2; exit 2 ;; esac
+  EXPECT_CHECKS=$((EXPECT_CHECKS + 11))
+done
+missing=0
+for f in "$EXE" "$PATCH" D:/tmp/jolt/build-v5.6.0-dist/PerformanceTest.exe "$BANNER9B" "$SRC"; do
+  [ -f "$f" ] || { echo "jolt_gates.sh: missing input $f" >&2; missing=1; }
+done
+[ -d D:/tmp/jolt/JoltPhysics ] || { echo "jolt_gates.sh: missing input D:/tmp/jolt/JoltPhysics (the clean v5.6.0 repository)" >&2; missing=1; }
+if [ "$missing" != 0 ]; then exit 2; fi
 mkdir -p "$OUT/canon"
-python "$G/dyn_spec_ref.py" --write "$OUT/canon" > "$OUT/canon/fnv.txt"
+if ! python "$G/dyn_spec_ref.py" --write "$OUT/canon" > "$OUT/canon/fnv.txt"; then echo "jolt_gates.sh: dyn_spec_ref.py failed" >&2; exit 2; fi
 T="$OUT/gates.tsv"
 : > "$T"
 check() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$T"; }
@@ -91,7 +108,6 @@ for P in ${PROGRAMS:-none kick shoot slide}; do
   [ $rc = 0 ] && check "G5 $P -t=1 pose = pin (pins.json)" PASS "$r" || check "G5 $P -t=1 pose = pin (pins.json)" FAIL "$r"
 done
 # G6
-SRC=${JOLT_SRC:-D:/tmp/jolt/wt-v5.6.0-dyn/PerformanceTest/PerformanceTest.cpp}
 python - "$SRC" > "$OUT/g6.txt" <<'PY'
 import sys
 lines = open(sys.argv[1], encoding='utf-8').read().replace('\r\n', '\n').split('\n')
@@ -104,4 +120,7 @@ print('%s loop %d ApplyEvents %d clock_start %d clock_end %d' % ('PASS' if ok el
 PY
 r=$(cat "$OUT/g6.txt"); case $r in PASS*) check "G6 ApplyEvents before clock_start" PASS "$r" ;; *) check "G6 ApplyEvents before clock_start" FAIL "$r" ;; esac
 cat "$T"
-echo "checks $(wc -l < "$T"), pass $(grep -c "	PASS	" "$T"), fail $(grep -c "	FAIL	" "$T")"
+checks=$(wc -l < "$T"); pass=$(grep -c "	PASS	" "$T"); fail=$(grep -c "	FAIL	" "$T")
+echo "checks $checks, pass $pass, fail $fail"
+receipts=$(grep -c -e "	SAME	" -e "	DIFFERS	" "$T")
+[ "$checks" = "$EXPECT_CHECKS" ] && [ "$fail" = 0 ] && [ $((pass + receipts)) = "$checks" ] || exit 1
