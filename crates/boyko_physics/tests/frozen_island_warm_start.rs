@@ -1122,9 +1122,9 @@ struct CrowdObservation {
     /// The statistics of the last held step before the wake, and of the wake step.
     last_held: WarmSeedStats,
     wake: WarmSeedStats,
-    /// Per compared world, in `CROWD_WORKERS` order: the steps whose solve setup opened its
-    /// scope (S4's `ColoredSoftStepSolver::setup_dispatches`, W8S lane commit 4).
-    setup_dispatches: Vec<u64>,
+    /// Per compared world, in `CROWD_WORKERS` order: the steps whose solve ran as one solve
+    /// region (SR's `ColoredSoftStepSolver::region_dispatches`).
+    region_dispatches: Vec<u64>,
 }
 
 /// Steps every world once and asserts each is bit-identical to the first: every box's full
@@ -1244,9 +1244,9 @@ fn run_crowd() -> CrowdObservation {
         steps_with_carry_misses,
         last_held,
         wake,
-        setup_dispatches: worlds
+        region_dispatches: worlds
             .iter()
-            .map(|w| w.world.resource::<ColoredSoftStepSolver>().setup_dispatches())
+            .map(|w| w.world.resource::<ColoredSoftStepSolver>().region_dispatches())
             .collect(),
     }
 }
@@ -1283,20 +1283,26 @@ fn frozen_islands_carried_beside_a_parallel_solve_are_bit_identical_across_worke
          dispatch floor of {MIN_PARALLEL_SLOTS_PER_COLOR} slots, so the worker counts were never \
          compared on a carry beside a parallel solve ({obs:?})"
     );
-    // S4 (W8S lane, commit 4): this crowd cannot cross the parallel setup's gate. Its widest
-    // pushed colour reaches the colour floor, but its laid-out points stay under two setup tasks'
-    // worth (the wake step lays out 352), so the setup runs inline in every world and the carry
-    // is compared beside parallel colours only. Asserted, so a crowd grown past the gate says so
-    // here rather than silently changing what this test covers; the parallel setup's {1, N}
-    // gates are the colored solver's own (`colored_tests.rs`, G3 and S4's G4-A).
-    assert!(
-        obs.setup_dispatches.iter().all(|&s| s == 0),
-        "S4: the setup dispatched {:?} times per world ({:?} workers); this crowd lays out under \
-         two setup tasks' worth of points, so no world should — update the comment above and \
-         assert the dispatch instead",
-        obs.setup_dispatches,
-        obs.pool_threads
-    );
+    // SR (phase B; the premise flipped at SR's flip, cut B-F5): S4's setup scope stayed inline on
+    // this crowd, whose laid-out points stay under two setup tasks' worth (the wake step lays out
+    // 352), but the solve region needs only the parallel gate — its widest pushed colour at the
+    // floor and two workers or more — so the multi-worker world runs every such step as one
+    // region (its fill one inline block), and the carry is compared beside the region. Asserted:
+    // the one-worker world never opens a region, and the multi-worker world opened one on at
+    // least every tallied step that carried while a pushed colour reached the floor.
+    let regions = obs.region_dispatches.iter().zip(&obs.pool_threads);
+    for (&r, &threads) in regions {
+        if threads < 2 {
+            assert_eq!(r, 0, "SR: a one-worker world never opens a solve region ({obs:?})");
+        } else {
+            assert!(
+                r >= obs.carried_while_dispatching as u64,
+                "SR: the {threads}-worker world opened {r} solve regions, fewer than the {} steps \
+                 that carried while a pushed colour reached the floor ({obs:?})",
+                obs.carried_while_dispatching
+            );
+        }
+    }
     assert!(
         obs.last_held.carry_hits > 0 && obs.wake.point_hits == obs.last_held.carry_hits,
         "anti-vacuity: the wake step must read exactly the entries the last held step carried, \
