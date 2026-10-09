@@ -381,7 +381,14 @@ mod property {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig { cases: 200, ..ProptestConfig::default() })]
+        #![proptest_config(ProptestConfig {
+            cases: 200,
+            // No failure file under Miri: proptest finds it through the cwd, which Miri's
+            // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+            #[cfg(miri)]
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
 
         #[test]
         fn random_op_sequence_preserves_invariant(ops in proptest::collection::vec(op_strategy(), 0..80)) {

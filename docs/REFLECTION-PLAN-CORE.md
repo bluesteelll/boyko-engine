@@ -86,7 +86,7 @@ finds one false stops and escalates rather than working around it.
 | F15 | `clippy.toml` bans `HashMap`/`HashSet`/`Mutex`/`RwLock`/`Rc`/`RefCell` at **deny** via `[workspace.lints.clippy] disallowed_types = "deny"`; `OnceLock` is **not** banned; exceptions carry `#[allow(clippy::disallowed_types)]` + a rationale | `clippy.toml`, root `Cargo.toml` |
 | F16 | The root is **also a package**, so `default-members` names every member **plus `"."`** — *"there is no non-workspace-wide root build any more"* | root [`Cargo.toml`](../Cargo.toml):1-40 |
 | F17 | **`grep -c hwrt .github/workflows/ci.yml` = 6.** <!-- measure: lines-in .github/workflows/ci.yml hwrt = 6 --> ⚠️ **This row read `= 0` and *"compiled by no CI leg"* on the reflection lane, and the A6 merge REFUTED it**: the line carries a feature-matrix job whose rows include `boyko-render/hwrt` and `boyko-app/hwrt`, so those bodies are compiled (the `boyko-app` row is skipped off Windows, with its reason recorded beside it). The point the row was making survives — a feature-gated body is invisible to the DEFAULT gate — but it now holds because a matrix was built for it, not because nothing compiles it | `.github/workflows/ci.yml` |
-| F18 | CI's Miri step is a **hand-listed package allowlist** (`-p boyko-ecs -p boyko-utils -p boyko-threadpool -p boyko-serialize -p boyko-math -p boyko_sdf_math -p boyko_image`), required, not `continue-on-error`; `MIRIFLAGS=-Zmiri-tree-borrows` is workspace-wide | `.github/workflows/ci.yml:215-248`, `.cargo/config.toml` |
+| F18 | CI's Miri step is a **hand-listed package allowlist** (`-p boyko-ecs -p boyko-utils -p boyko-threadpool -p boyko-serialize -p boyko-math -p boyko_sdf_math -p boyko_image`), required, not `continue-on-error`; `MIRIFLAGS=-Zmiri-tree-borrows` is workspace-wide | `.github/workflows/ci.yml:245-278`, `.cargo/config.toml` |
 | F19 | Features unify **per package**, and the tree has recorded the consequence: *"a `#[cfg]`'d field on a struct `boyko_app` constructs appears or vanishes for that crate depending on a flag none of its own source names"* | `crates/boyko_rhi_vulkan/Cargo.toml:21~-25` |
 | F20 | A counting-global-allocator **delta** harness with baseline subtraction is the tree's established zero-allocation instrument | `crates/boyko_ui/tests/p4_bind_zero_alloc.rs:1~-20` |
 | F21 | 220 hand-written `impl Component for` sites exist; of the 40 files sampled, **every one is a bench, an integration test, or a `#[cfg(test)]` module** — none is production source | `crates/boyko_ecs/{benches,tests}/*`, `…/src/**/mod tests` |
@@ -933,7 +933,7 @@ That decides the corpus's home, because C9 gate 1 as written named
   `-D warnings`.
 
 The home is `reflect-fixture`: the only package that has `boyko-macros`, the `reflect` feature, and a
-CI leg that builds it (`.github/workflows/ci.yml:196-216`). `boyko_reflect` is excluded for the same
+CI leg that builds it (`.github/workflows/ci.yml:224-246`). `boyko_reflect` is excluded for the same
 `cfg` reason **plus** GATES D4's *"NO `[features]` table, now or ever"* and its lack of a
 `boyko-macros` edge — the trap C7's gate 1 fell into, recorded at D23.
 
@@ -3585,7 +3585,7 @@ is `#[cfg(not(debug_assertions))]` and **its invocation is part of it** —
 `cargo test -p boyko-reflect --release`, output read for a non-vacuous `running [1-9]`, exactly the
 discipline `crates/boyko_reflect/src/registry.rs:141~`'s own note already states for the release
 halves beside it. **RED:** delete the assert; the gate reds. *(The CI leg exists: `reflect-on` runs a
-`profile: [debug, release]` matrix, `.github/workflows/ci.yml:196-216`.)*
+`profile: [debug, release]` matrix, `.github/workflows/ci.yml:224-246`.)*
 
 **`storage = "dense"` is NOT refused** — a dense component has real per-row bytes at a stable
 address, and it is the one non-table kind that is fully readable. Its *enumeration* problem is

@@ -131,7 +131,14 @@ proptest! {
     // Keep the case count modest: every case spins up a fresh EcsMaster + an
     // apply window per op (each op is a full schedule drain), so this is heavier
     // than a pure-CPU property.
-    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 256,
+        // No failure file under Miri: proptest finds it through the cwd, which Miri's
+        // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+        #[cfg(miri)]
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// Random op sequence; the invariant must hold after EVERY drain.
     #[test]

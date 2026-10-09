@@ -3053,7 +3053,14 @@ mod tests {
         }
 
         proptest! {
-            #![proptest_config(ProptestConfig::with_cases(64))]
+            #![proptest_config(ProptestConfig {
+                cases: 64,
+                // No failure file under Miri: proptest finds it through the cwd, which Miri's
+                // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+                #[cfg(miri)]
+                failure_persistence: None,
+                ..ProptestConfig::default()
+            })]
             #[test]
             fn pool_matches_vec_oracle(ops in proptest::collection::vec(op_strategy(), 1..200)) {
                 // Force registration before pool construction.
@@ -3253,7 +3260,14 @@ mod tests {
         }
 
         proptest! {
-            #![proptest_config(ProptestConfig::with_cases(64))]
+            #![proptest_config(ProptestConfig {
+                cases: 64,
+                // No failure file under Miri: proptest finds it through the cwd, which Miri's
+                // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+                #[cfg(miri)]
+                failure_persistence: None,
+                ..ProptestConfig::default()
+            })]
             #[test]
             fn proptest_pool_vs_vec_oracle(
                 ops in proptest::collection::vec(op_strategy(), 1..200)

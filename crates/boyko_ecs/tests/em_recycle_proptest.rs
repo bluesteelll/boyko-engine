@@ -109,7 +109,14 @@ fn check(world: &mut EcsMaster, m: &Model, step: usize, op: &Op) -> Result<(), T
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 256,
+        // No failure file under Miri: proptest finds it through the cwd, which Miri's
+        // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+        #[cfg(miri)]
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn id_life_cycle_conserves_ids_across_both_routes(ops in prop::collection::vec(op(), 1..96)) {

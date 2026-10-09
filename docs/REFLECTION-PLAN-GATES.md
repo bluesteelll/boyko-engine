@@ -30,7 +30,7 @@ is not abstract:
   reported success while every engine crate went unchecked (root `Cargo.toml`'s `default-members`
   comment records the measurement: 0 errors where `--workspace` found 4);
 * a Miri job that is a **hand-listed allowlist**, so a new package is not covered until it is named
-  (`.github/workflows/ci.yml:566-572`).
+  (`.github/workflows/ci.yml:600-606`).
 
 Each of those four lands directly on this plan, and each has a rung.
 
@@ -107,8 +107,8 @@ compiles.
 **Reason.** §2's `game_app` / `editor_app` do not exist; the analysis says so itself. What exists:
 `crates/boyko_demo` is the only game-shaped `[[bin]]` member (`crates/boyko_demo/Cargo.toml:7`), and the
 workspace root is also a package (`boyko-engine`, `src/main.rs`). But `boyko_demo` is **excluded from
-every CI leg** — `--exclude boyko_demo` appears on `.github/workflows/ci.yml:84, :109, :111, :151, :260,
-:493, :511` — and it pulls eframe/egui/winit/wgpu. A gate whose artifact takes minutes to link is a
+every CI leg** — `--exclude boyko_demo` appears on `.github/workflows/ci.yml:84, :131, :133, :173, :290,
+:523, :541` — and it pulls eframe/egui/winit/wgpu. A gate whose artifact takes minutes to link is a
 gate that gets moved to a nightly and then to nowhere.
 
 **`boyko_app` is NOT a ship target and must not be named as one.** `docs/REFLECTION-PLAN-CORE.md`'s
@@ -122,7 +122,7 @@ So the two roles split. **`boyko_demo` and `boyko-engine` are the ship targets f
 cheap manifest/resolver reads and can name every member). **A fixture package is the artifact for
 P-C/P-D** (G3/G6/G7), following the precedent verbatim: `crates/profile_fixture` builds its own two
 legs rather than consuming other jobs' artifacts, *"explicitly so it is runnable locally — a gate
-only CI can run is a gate whose RED nobody has seen"* (`.github/workflows/ci.yml:159-161`).
+only CI can run is a gate whose RED nobody has seen"* (`.github/workflows/ci.yml:181-183`).
 
 **Rejected:** (a) gating the demo binary directly — cost, plus it is excluded from CI, so the gate
 would run in no leg that exists; (b) inventing the `game_app` the analysis names — it does not exist
@@ -261,7 +261,7 @@ other, which is how a census acquires a subject that can vanish while the check 
 ### D6 — Tool absence is a **RED**, never a SKIP.
 
 Inherited verbatim: *"a gate that passes on every machine lacking its tool is a gate that passes"*
-(`.github/workflows/ci.yml:163-165`; the panicking resolver at
+(`.github/workflows/ci.yml:185-187`; the panicking resolver at
 `crates/profile_fixture/tests/profile_axis_census.rs:509`). `components: llvm-tools` on the new job,
 and the `llvm-nm` / `llvm-size` resolution copied from
 `crates/profile_fixture/tests/profile_axis_census.rs:564` — **copied, not shared**, for the reason that
@@ -279,7 +279,7 @@ under census.
   the legitimate `--release --features reflect` editor build compiles `debug_assert!` out, which is
   exactly where the kind-check's load-bearing `-> bool` return is the only remaining guard. A
   debug-only ON leg never exercises the configuration the gap is about. The existing `test` job is
-  already `matrix: profile: [debug, release]` (`.github/workflows/ci.yml:100-101`); the ON job mirrors it.
+  already `matrix: profile: [debug, release]` (`.github/workflows/ci.yml:120-121`); the ON job mirrors it.
 
 Net: **four cells** — `{off, on} × {debug, release}` — of which two already exist.
 
@@ -1103,8 +1103,8 @@ defect this campaign keeps finding:
    ambiguous across selected packages and is the form that silently selects nothing.
 2. **`components: llvm-tools`** on a `reflect-census` job running
    `cargo test -p reflect-fixture --test reflect_absence_census`, mirroring `profile-census`
-   (`.github/workflows/ci.yml:166-175`).
-3. **Miri allowlist** — `.github/workflows/ci.yml:566-572` grows **two rows with different
+   (`.github/workflows/ci.yml:188-197`).
+3. **Miri allowlist** — `.github/workflows/ci.yml:600-606` grows **two rows with different
    shapes**, and the difference is the whole point (D4):
 
    ```
@@ -1485,7 +1485,7 @@ registration is real cold cost and *"must not be mistaken for a hot-path regress
 **steady-state** query/spawn inner loop is the subject. So the registration happens outside the timed
 block, and a second, explicitly-labelled reading reports the first-touch cost on its own.
 
-**It must compile with the feature OFF.** `.github/workflows/ci.yml:493` runs
+**It must compile with the feature OFF.** `.github/workflows/ci.yml:523` runs
 `cargo bench --workspace --no-run`, so a bench that only compiles with a feature reds a job that has
 nothing to do with reflection. Feature off, `main()` prints `NOT BUILT (feature off)` and returns —
 and the `reflect-on` job asserts the *printed verdict token* is present, so the vacuous form cannot
@@ -1681,10 +1681,10 @@ Verified against the tree at **2026-08-21**, branch `feat/reflection`. This file
 | `crates/profile_fixture/tests/profile_axis_census.rs` | the measured census template: the LTO finding, the present control, the RED-not-SKIP tool rule, the self-building legs |
 | `crates/profile_fixture/tests/profile_axis_census.rs:170` | `ZONE_EMIT_SYMBOL = "mint_cold"` — the plain-fn symbol class D5 mirrors |
 | `crates/profile_fixture/Cargo.toml` | *"Adding any second dependency here … destroys the gate's ARGUMENT"* — G0's fixture rule |
-| `.github/workflows/ci.yml:84, :109, :111, :151, :260, :493, :511` | the `--exclude boyko_demo` legs — D2's reason |
-| `.github/workflows/ci.yml:100-101` | the existing `[debug, release]` matrix the ON leg mirrors (D7) |
-| `.github/workflows/ci.yml:166-175` | the `profile-census` job + `components: llvm-tools` (D6) |
-| `.github/workflows/ci.yml:566-572` | the hand-listed Miri sweep — B.9's allowlist, G4's row |
+| `.github/workflows/ci.yml:84, :131, :133, :173, :290, :523, :541` | the `--exclude boyko_demo` legs — D2's reason |
+| `.github/workflows/ci.yml:120-121` | the existing `[debug, release]` matrix the ON leg mirrors (D7) |
+| `.github/workflows/ci.yml:188-197` | the `profile-census` job + `components: llvm-tools` (D6) |
+| `.github/workflows/ci.yml:600-606` | the hand-listed Miri sweep — B.9's allowlist, G4's row |
 | `crates/boyko_ecs/Cargo.toml` | the `profiling-analysis` measurement: unification defeated `--no-default-features` (D3, G2) |
 | `crates/boyko_ecs/benches/gj1_flag_cost.rs` | the ABBA/twin/verdict idiom; the cross-build refusal at `:22-29~` (D8) |
 | `crates/boyko_log/benches/log_gate_cost.rs:42-46~` | *"a zero control whose expected value is exactly zero measures DRIFT"* (D10) |
