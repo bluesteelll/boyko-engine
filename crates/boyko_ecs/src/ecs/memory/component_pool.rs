@@ -879,7 +879,7 @@ impl ComponentPool {
     /// The OS-truth tests (`commit_floor_tests`) hold this model to the pages
     /// the kernel actually reports, so a model that merely restates the
     /// arithmetic cannot pass them.
-    #[cfg(test)]
+    #[cfg(all(test, not(miri)))]
     pub(crate) fn committed_bytes(&self) -> usize {
         let layout = pool_byte_layout(
             self.reserve_rows,
