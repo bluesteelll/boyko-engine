@@ -1,0 +1,4666 @@
+{
+  "schema_version": "1.0",
+  "generated": "2026-10-10",
+  "document": "docs/BENCHMARKS.md",
+  "commit": "68ec9312968e737730690ebad9077cbb5bd9ffb5",
+  "commit_short": "68ec9312",
+  "hardware": {
+    "machines": 1,
+    "form_factor": "laptop",
+    "cpu": "AMD Ryzen 9 5900HS",
+    "cores": 8,
+    "threads": 16,
+    "memory": "16 GiB, 3200 MT/s",
+    "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU, plus the CPU's integrated AMD Radeon Graphics (no printed result uses either)",
+    "os": "Windows 11 Home Single Language, build 26200",
+    "power": "Windows High performance power scheme, logged before every pass; the AC state during the window was not logged"
+  },
+  "toolchains": {
+    "rust": "rustc 1.98.1 (48a229cea 2026-09-01), stable-x86_64-pc-windows-msvc",
+    "rust_nightly_g6": "rustc 1.100.0-nightly (a36d05efa 2026-09-09), nightly-x86_64-pc-windows-msvc, both engines (g6 / g6b only)",
+    "boyko_physics_runner": "jolt_parity_pyramid, cargo --profile parity (= [profile.release]: fat LTO), target-cpu x86-64-v3; built from d8320451, whose code equals 68ec9312",
+    "boyko_benches": "cargo bench --profile bench-shipped (= [profile.release]: fat LTO, default codegen units, opt-level 3), target-cpu x86-64-v3; flags proven from the rustc command lines",
+    "boyko_diagnostics_profile": "dev (BOYKO_PROFILE unset; profiling zones compiled in)",
+    "jolt": "Jolt Physics 5.6.0 (e77f175) + the parity patch v2 in crates/boyko_physics/benches/jolt_parity/pyramid_scene.patch; MinGW-w64 g++ 16.1.0, CMake Distribution, LTO, AVX2/FMA/F16C/LZCNT/TZCNT",
+    "rapier": "rapier3d 0.36.0 (--locked), arms simd8 (8 SIMD lanes) and block (block-solver), rustc 1.98.1 msvc, x86-64-v3; harness kept outside this repository",
+    "bevy_ecs": "0.18.1 (Cargo.lock), built with the same compiler, profile and flags as boyko_ecs",
+    "criterion": "0.5.1"
+  },
+  "protocol": {
+    "summary": "Quiet-machine window. Each process is one sample. K = 9 = 3 passes x 3 rounds (pass 0 reversed, pass 1 forward, pass 2 reversed); the arms of a comparison run adjacent. A sample counts only if the machine was at most 5 % busy before and after it, other processes used at most 2 % during it, and no build ran; unclean samples are re-run at the end of the pass (up to 4 waves). A pass in which an arm has fewer than 3 clean samples gates nothing. CLAIMED = the IQR test and the SE test both pass in every pass and pooled, with one sign; STRONG = the min-max test passes too; otherwise NOT RESOLVED with the demonstrated resolution. A claim reads one launch only.",
+    "k_per_cell": 9,
+    "k_micro": 3,
+    "claim_rule": "per cell: median, i = IQR/median, s = 1.2533*SD/sqrt(K)/median, r = (max-min)/median; a test flags when |ours/other - 1| > 2*sqrt(x_ours^2 + x_other^2); CLAIMED iff i and s flag in every pass and pooled with one sign; STRONG iff r flags too",
+    "print_rule": "r = ours cell / other cell; a CLAIMED comparison prints \"X.XX x faster\" (r < 1) or \"X.XX x slower\" (r > 1) with X.XX = max(r, 1/r) rounded to 2 decimals; the subject is always boyko; a NOT RESOLVED comparison prints only \"no measurable difference at this resolution (X %)\", X rounded up to one decimal",
+    "ratio_field": "ratio.factor is the print-rule factor (never below 1) and ratio.word its sign word; ratio is null for NOT_RESOLVED and DESCRIPTIVE entries",
+    "not_resolved_cells": "NOT_RESOLVED entries carry no values (ours and other.value are null), so no ratio can be read from them",
+    "one_launch": "every printed entry comes from launch 2 (run tag 195316, 2026-10-09 19:53-23:26 UTC+03:00); nothing from launch 1 is printed",
+    "validity": "every process: executable sha256 equal to its pin; every physics process: final pose byte-equal to its pinned fixture (Jolt: its state hash); 0 mismatches"
+  },
+  "window": {
+    "date": "2026-10-09",
+    "launches": [
+      {
+        "launch": 1,
+        "run_tag": "141610",
+        "local_time": "14:16-16:12 (UTC+03:00)",
+        "printed": false,
+        "why": "the Claude desktop app was active; most samples were unclean; Windows hung at about 16:11"
+      },
+      {
+        "launch": 2,
+        "run_tag": "195316",
+        "local_time": "19:53-23:26 (UTC+03:00)",
+        "printed": true
+      }
+    ]
+  },
+  "notes": [
+    "Slowdown regime: a machine-wide slowdown co-occurs with the Claude desktop app being active and passes the CPU-load guard. In launch 1 clean samples ran 8.9 % (boyko), 6.5 % (Jolt) and 32-39 % (Rapier) slower than in launch 2, while in launch 1's quiet minutes (16:05-16:12) boyko and Jolt matched launch 2 within 1 %. The most likely cause is the laptop's shared CPU/GPU power budget. In launch 2 the app was idle until about 22:50; the second micro-benchmark set's third process, the GPU block and the sleeping block ran after that.",
+    "Drift: the same boyko and Jolt executables took 2.5-12.0 % (boyko) and 8.5-21.3 % (Jolt) less time per step on the dynamic scenes in this window than in an earlier window on the same machine (early 2026-10-09). The factors are a dated snapshot of one machine state.",
+    "Diagnostics profile: no boyko binary was built with BOYKO_PROFILE set, so the diagnostics profile is the default dev (profiling zones compiled in); the physics runner reports profile_name dev and zones_compiled true in every process. \"Shipped configuration\" in the labels means the Cargo codegen (fat LTO, x86-64-v3). The setting adds work on boyko's side only.",
+    "Rapier labels: an earlier window (9b, 2026-10-05) screened a frozen set of 70 Rapier configurations on the resting pile; \"9b's J-T rank-1 row\" is the fastest configuration that keeps the pile standing at that worker count. It was not re-screened on these scenes, so it is never called \"Rapier's fastest on this scene\". s1p9q2 is the only Rapier configuration that holds the 88-run fidelity ensemble."
+  ],
+  "headlines": [
+    {
+      "text": "boyko physics is 1.08 x to 1.18 x faster than Jolt 5.6 in 13 of 15 comparisons on three dynamic scenes (kick, shoot, slide) at 1-16 worker threads, sleeping off in both engines (all claimed, 8 claimed STRONG); slide at W8 and W16 shows no measurable difference at this resolution (5.6 % and 5.2 %).",
+      "entries": [
+        "dyn-kick-w1-jolt56",
+        "dyn-kick-w2-jolt56",
+        "dyn-kick-w4-jolt56",
+        "dyn-kick-w8-jolt56",
+        "dyn-kick-w16-jolt56",
+        "dyn-shoot-w1-jolt56",
+        "dyn-shoot-w2-jolt56",
+        "dyn-shoot-w4-jolt56",
+        "dyn-shoot-w8-jolt56",
+        "dyn-shoot-w16-jolt56",
+        "dyn-slide-w1-jolt56",
+        "dyn-slide-w2-jolt56",
+        "dyn-slide-w4-jolt56",
+        "dyn-slide-w8-jolt56",
+        "dyn-slide-w16-jolt56"
+      ]
+    },
+    {
+      "text": "boyko physics is 1.39 x to 2.31 x slower than Rapier 0.36 in all 30 comparisons on the same scenes (all claimed, 27 claimed STRONG).",
+      "entries": [
+        "dyn-kick-w1-rapier-rank1",
+        "dyn-kick-w1-rapier-s1p9q2",
+        "dyn-kick-w2-rapier-rank1",
+        "dyn-kick-w2-rapier-s1p9q2",
+        "dyn-kick-w4-rapier-rank1",
+        "dyn-kick-w4-rapier-s1p9q2",
+        "dyn-kick-w8-rapier-rank1",
+        "dyn-kick-w8-rapier-s1p9q2",
+        "dyn-kick-w16-rapier-rank1",
+        "dyn-kick-w16-rapier-s1p9q2",
+        "dyn-shoot-w1-rapier-rank1",
+        "dyn-shoot-w1-rapier-s1p9q2",
+        "dyn-shoot-w2-rapier-rank1",
+        "dyn-shoot-w2-rapier-s1p9q2",
+        "dyn-shoot-w4-rapier-rank1",
+        "dyn-shoot-w4-rapier-s1p9q2",
+        "dyn-shoot-w8-rapier-rank1",
+        "dyn-shoot-w8-rapier-s1p9q2",
+        "dyn-shoot-w16-rapier-rank1",
+        "dyn-shoot-w16-rapier-s1p9q2",
+        "dyn-slide-w1-rapier-rank1",
+        "dyn-slide-w1-rapier-s1p9q2",
+        "dyn-slide-w2-rapier-rank1",
+        "dyn-slide-w2-rapier-s1p9q2",
+        "dyn-slide-w4-rapier-rank1",
+        "dyn-slide-w4-rapier-s1p9q2",
+        "dyn-slide-w8-rapier-rank1",
+        "dyn-slide-w8-rapier-s1p9q2",
+        "dyn-slide-w16-rapier-rank1",
+        "dyn-slide-w16-rapier-s1p9q2"
+      ]
+    },
+    {
+      "text": "vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap: boyko_ecs is 2.86 x faster on 50 empty systems, 2.70 x faster growing one archetype to 1 M entities (Bevy not pre-reserved) and 1.95 x faster growing 16 archetypes to 960k entities (claimed STRONG); it is 1.67 x slower on direct 10k-row query iteration (claimed STRONG), 1.17 x slower on spawn_batch of 10k (claimed), and 5.89 x slower on a 10k-row query through a system the harness rebuilds every iteration (claimed STRONG; a harness artifact).",
+      "entries": [
+        "bevy-g1",
+        "bevy-g8-total",
+        "bevy-g7-total",
+        "bevy-g2b",
+        "bevy-g5",
+        "bevy-g2"
+      ]
+    }
+  ],
+  "entries": [
+    {
+      "id": "dyn-kick-w1-jolt56",
+      "category": "physics_vs_jolt",
+      "title": "boyko physics vs Jolt 5.6, kick, W1",
+      "workload": "kick: the settled 1,240-box pile; from step 200, every 25 steps, 62 boxes get a 1-5 m/s velocity change",
+      "workers": 1,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 7.8528,
+      "ours_range": [
+        7.8088,
+        7.972
+      ],
+      "other": {
+        "engine": "Jolt Physics",
+        "version": "5.6.0",
+        "config": "PerformanceTest -s=Pyramid -dyn=kick, allow_sleep=0 (sleeping off), parity patch v2",
+        "value": 9.2719,
+        "range": [
+          9.1975,
+          9.3433
+        ]
+      },
+      "ratio": {
+        "factor": 1.18,
+        "word": "faster",
+        "display": "1.18 x faster"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.18 x faster than Jolt 5.6 (allow_sleep=0) (claimed STRONG; W1; kick [200,800))",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/kick/W1/Jolt 5.6\""
+    },
+    {
+      "id": "dyn-kick-w1-rapier-rank1",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (rank-1 row), kick, W1",
+      "workload": "kick: the settled 1,240-box pile; from step 200, every 25 steps, 62 boxes get a 1-5 m/s velocity change",
+      "workers": 1,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 7.8528,
+      "ours_range": [
+        7.8088,
+        7.972
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p7q2pd0+roff: window 9b's J-T rank-1 row for W1 (a member of ruling 22's set), can_sleep false",
+        "value": 4.5727,
+        "range": [
+          4.4878,
+          4.9305
+        ]
+      },
+      "ratio": {
+        "factor": 1.72,
+        "word": "slower",
+        "display": "1.72 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.72 x slower than Rapier 0.36 against 9b's J-T rank-1 row (simd8/s1p7q2pd0+roff; a member of ruling 22's set) (claimed STRONG; W1; kick [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/kick/W1/Rapier rank-1\""
+    },
+    {
+      "id": "dyn-kick-w1-rapier-s1p9q2",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (s1p9q2 row), kick, W1",
+      "workload": "kick: the settled 1,240-box pile; from step 200, every 25 steps, 62 boxes get a 1-5 m/s velocity change",
+      "workers": 1,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 7.8528,
+      "ours_range": [
+        7.8088,
+        7.972
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p9q2: Rapier's s1p9q2 row, can_sleep false",
+        "value": 3.8742,
+        "range": [
+          3.7063,
+          4.2144
+        ]
+      },
+      "ratio": {
+        "factor": 2.03,
+        "word": "slower",
+        "display": "2.03 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 2.03 x slower than Rapier 0.36 against Rapier's s1p9q2 row (claimed STRONG; W1; kick [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/kick/W1/Rapier s1p9q2\""
+    },
+    {
+      "id": "dyn-kick-w2-jolt56",
+      "category": "physics_vs_jolt",
+      "title": "boyko physics vs Jolt 5.6, kick, W2",
+      "workload": "kick: the settled 1,240-box pile; from step 200, every 25 steps, 62 boxes get a 1-5 m/s velocity change",
+      "workers": 2,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 4.6937,
+      "ours_range": [
+        4.6446,
+        4.8383
+      ],
+      "other": {
+        "engine": "Jolt Physics",
+        "version": "5.6.0",
+        "config": "PerformanceTest -s=Pyramid -dyn=kick, allow_sleep=0 (sleeping off), parity patch v2",
+        "value": 5.5069,
+        "range": [
+          5.4677,
+          5.5597
+        ]
+      },
+      "ratio": {
+        "factor": 1.17,
+        "word": "faster",
+        "display": "1.17 x faster"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.17 x faster than Jolt 5.6 (allow_sleep=0) (claimed STRONG; W2; kick [200,800))",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/kick/W2/Jolt 5.6\""
+    },
+    {
+      "id": "dyn-kick-w2-rapier-rank1",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (rank-1 row), kick, W2",
+      "workload": "kick: the settled 1,240-box pile; from step 200, every 25 steps, 62 boxes get a 1-5 m/s velocity change",
+      "workers": 2,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 4.6937,
+      "ours_range": [
+        4.6446,
+        4.8383
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "block/s1p4q3pd0+roff: window 9b's J-T rank-1 row for W2 (a member of ruling 22's set), can_sleep false",
+        "value": 2.8282,
+        "range": [
+          2.7252,
+          3.0051
+        ]
+      },
+      "ratio": {
+        "factor": 1.66,
+        "word": "slower",
+        "display": "1.66 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.66 x slower than Rapier 0.36 against 9b's J-T rank-1 row (block/s1p4q3pd0+roff; a member of ruling 22's set) (claimed STRONG; W2; kick [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/kick/W2/Rapier rank-1\""
+    },
+    {
+      "id": "dyn-kick-w2-rapier-s1p9q2",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (s1p9q2 row), kick, W2",
+      "workload": "kick: the settled 1,240-box pile; from step 200, every 25 steps, 62 boxes get a 1-5 m/s velocity change",
+      "workers": 2,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 4.6937,
+      "ours_range": [
+        4.6446,
+        4.8383
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p9q2: Rapier's s1p9q2 row, can_sleep false",
+        "value": 2.4369,
+        "range": [
+          2.3768,
+          2.4733
+        ]
+      },
+      "ratio": {
+        "factor": 1.93,
+        "word": "slower",
+        "display": "1.93 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.93 x slower than Rapier 0.36 against Rapier's s1p9q2 row (claimed STRONG; W2; kick [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/kick/W2/Rapier s1p9q2\""
+    },
+    {
+      "id": "dyn-kick-w4-jolt56",
+      "category": "physics_vs_jolt",
+      "title": "boyko physics vs Jolt 5.6, kick, W4",
+      "workload": "kick: the settled 1,240-box pile; from step 200, every 25 steps, 62 boxes get a 1-5 m/s velocity change",
+      "workers": 4,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.9119,
+      "ours_range": [
+        2.9013,
+        2.9239
+      ],
+      "other": {
+        "engine": "Jolt Physics",
+        "version": "5.6.0",
+        "config": "PerformanceTest -s=Pyramid -dyn=kick, allow_sleep=0 (sleeping off), parity patch v2",
+        "value": 3.4159,
+        "range": [
+          3.4056,
+          3.4845
+        ]
+      },
+      "ratio": {
+        "factor": 1.17,
+        "word": "faster",
+        "display": "1.17 x faster"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.17 x faster than Jolt 5.6 (allow_sleep=0) (claimed STRONG; W4; kick [200,800))",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/kick/W4/Jolt 5.6\""
+    },
+    {
+      "id": "dyn-kick-w4-rapier-rank1",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (rank-1 row), kick, W4",
+      "workload": "kick: the settled 1,240-box pile; from step 200, every 25 steps, 62 boxes get a 1-5 m/s velocity change",
+      "workers": 4,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.9119,
+      "ours_range": [
+        2.9013,
+        2.9239
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "block/s1p4q3pd0+roff: window 9b's J-T rank-1 row for W4 (a member of ruling 22's set), can_sleep false",
+        "value": 1.8475,
+        "range": [
+          1.7296,
+          2.2617
+        ]
+      },
+      "ratio": {
+        "factor": 1.58,
+        "word": "slower",
+        "display": "1.58 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.58 x slower than Rapier 0.36 against 9b's J-T rank-1 row (block/s1p4q3pd0+roff; a member of ruling 22's set) (claimed; W4; kick [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": false,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/kick/W4/Rapier rank-1\""
+    },
+    {
+      "id": "dyn-kick-w4-rapier-s1p9q2",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (s1p9q2 row), kick, W4",
+      "workload": "kick: the settled 1,240-box pile; from step 200, every 25 steps, 62 boxes get a 1-5 m/s velocity change",
+      "workers": 4,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.9119,
+      "ours_range": [
+        2.9013,
+        2.9239
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p9q2: Rapier's s1p9q2 row, can_sleep false",
+        "value": 1.6739,
+        "range": [
+          1.5847,
+          2.1781
+        ]
+      },
+      "ratio": {
+        "factor": 1.74,
+        "word": "slower",
+        "display": "1.74 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.74 x slower than Rapier 0.36 against Rapier's s1p9q2 row (claimed STRONG; W4; kick [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/kick/W4/Rapier s1p9q2\""
+    },
+    {
+      "id": "dyn-kick-w8-jolt56",
+      "category": "physics_vs_jolt",
+      "title": "boyko physics vs Jolt 5.6, kick, W8",
+      "workload": "kick: the settled 1,240-box pile; from step 200, every 25 steps, 62 boxes get a 1-5 m/s velocity change",
+      "workers": 8,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.0695,
+      "ours_range": [
+        2.0551,
+        2.0855
+      ],
+      "other": {
+        "engine": "Jolt Physics",
+        "version": "5.6.0",
+        "config": "PerformanceTest -s=Pyramid -dyn=kick, allow_sleep=0 (sleeping off), parity patch v2",
+        "value": 2.3866,
+        "range": [
+          2.376,
+          2.4956
+        ]
+      },
+      "ratio": {
+        "factor": 1.15,
+        "word": "faster",
+        "display": "1.15 x faster"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.15 x faster than Jolt 5.6 (allow_sleep=0) (claimed STRONG; W8; kick [200,800))",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/kick/W8/Jolt 5.6\""
+    },
+    {
+      "id": "dyn-kick-w8-rapier-rank1",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (rank-1 row), kick, W8",
+      "workload": "kick: the settled 1,240-box pile; from step 200, every 25 steps, 62 boxes get a 1-5 m/s velocity change",
+      "workers": 8,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.0695,
+      "ours_range": [
+        2.0551,
+        2.0855
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "block/s1p5q2pd0+roff: window 9b's J-T rank-1 row for W8 (a member of ruling 22's set), can_sleep false",
+        "value": 1.1715,
+        "range": [
+          1.123,
+          1.3566
+        ]
+      },
+      "ratio": {
+        "factor": 1.77,
+        "word": "slower",
+        "display": "1.77 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.77 x slower than Rapier 0.36 against 9b's J-T rank-1 row (block/s1p5q2pd0+roff; a member of ruling 22's set) (claimed STRONG; W8; kick [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/kick/W8/Rapier rank-1\""
+    },
+    {
+      "id": "dyn-kick-w8-rapier-s1p9q2",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (s1p9q2 row), kick, W8",
+      "workload": "kick: the settled 1,240-box pile; from step 200, every 25 steps, 62 boxes get a 1-5 m/s velocity change",
+      "workers": 8,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.0695,
+      "ours_range": [
+        2.0551,
+        2.0855
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p9q2: Rapier's s1p9q2 row, can_sleep false",
+        "value": 1.2149,
+        "range": [
+          1.1484,
+          1.3914
+        ]
+      },
+      "ratio": {
+        "factor": 1.7,
+        "word": "slower",
+        "display": "1.70 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.70 x slower than Rapier 0.36 against Rapier's s1p9q2 row (claimed STRONG; W8; kick [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/kick/W8/Rapier s1p9q2\""
+    },
+    {
+      "id": "dyn-kick-w16-jolt56",
+      "category": "physics_vs_jolt",
+      "title": "boyko physics vs Jolt 5.6, kick, W16",
+      "workload": "kick: the settled 1,240-box pile; from step 200, every 25 steps, 62 boxes get a 1-5 m/s velocity change",
+      "workers": 16,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.1406,
+      "ours_range": [
+        2.1057,
+        2.1667
+      ],
+      "other": {
+        "engine": "Jolt Physics",
+        "version": "5.6.0",
+        "config": "PerformanceTest -s=Pyramid -dyn=kick, allow_sleep=0 (sleeping off), parity patch v2",
+        "value": 2.3335,
+        "range": [
+          2.2909,
+          2.4123
+        ]
+      },
+      "ratio": {
+        "factor": 1.09,
+        "word": "faster",
+        "display": "1.09 x faster"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.09 x faster than Jolt 5.6 (allow_sleep=0) (claimed; W16; kick [200,800))",
+      "verdict": "CLAIMED_FASTER",
+      "strong": false,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/kick/W16/Jolt 5.6\""
+    },
+    {
+      "id": "dyn-kick-w16-rapier-rank1",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (rank-1 row), kick, W16",
+      "workload": "kick: the settled 1,240-box pile; from step 200, every 25 steps, 62 boxes get a 1-5 m/s velocity change",
+      "workers": 16,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.1406,
+      "ours_range": [
+        2.1057,
+        2.1667
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "block/s1p5q2pd0+roff: window 9b's J-T rank-1 row for W16 (a member of ruling 22's set), can_sleep false",
+        "value": 1.1866,
+        "range": [
+          1.1545,
+          1.2682
+        ]
+      },
+      "ratio": {
+        "factor": 1.8,
+        "word": "slower",
+        "display": "1.80 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.80 x slower than Rapier 0.36 against 9b's J-T rank-1 row (block/s1p5q2pd0+roff; a member of ruling 22's set) (claimed STRONG; W16; kick [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/kick/W16/Rapier rank-1\""
+    },
+    {
+      "id": "dyn-kick-w16-rapier-s1p9q2",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (s1p9q2 row), kick, W16",
+      "workload": "kick: the settled 1,240-box pile; from step 200, every 25 steps, 62 boxes get a 1-5 m/s velocity change",
+      "workers": 16,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.1406,
+      "ours_range": [
+        2.1057,
+        2.1667
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p9q2: Rapier's s1p9q2 row, can_sleep false",
+        "value": 1.3318,
+        "range": [
+          1.224,
+          1.7718
+        ]
+      },
+      "ratio": {
+        "factor": 1.61,
+        "word": "slower",
+        "display": "1.61 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.61 x slower than Rapier 0.36 against Rapier's s1p9q2 row (claimed; W16; kick [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": false,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/kick/W16/Rapier s1p9q2\""
+    },
+    {
+      "id": "dyn-shoot-w1-jolt56",
+      "category": "physics_vs_jolt",
+      "title": "boyko physics vs Jolt 5.6, shoot, W1",
+      "workload": "shoot: the pile in a closed arena; from step 200, a box is launched into it every 10 steps (60 launches)",
+      "workers": 1,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 9.1867,
+      "ours_range": [
+        9.1603,
+        9.3392
+      ],
+      "other": {
+        "engine": "Jolt Physics",
+        "version": "5.6.0",
+        "config": "PerformanceTest -s=Pyramid -dyn=shoot, allow_sleep=0 (sleeping off), parity patch v2",
+        "value": 10.2065,
+        "range": [
+          10.044,
+          10.3011
+        ]
+      },
+      "ratio": {
+        "factor": 1.11,
+        "word": "faster",
+        "display": "1.11 x faster"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.11 x faster than Jolt 5.6 (allow_sleep=0) (claimed STRONG; W1; shoot [200,800))",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/shoot/W1/Jolt 5.6\""
+    },
+    {
+      "id": "dyn-shoot-w1-rapier-rank1",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (rank-1 row), shoot, W1",
+      "workload": "shoot: the pile in a closed arena; from step 200, a box is launched into it every 10 steps (60 launches)",
+      "workers": 1,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 9.1867,
+      "ours_range": [
+        9.1603,
+        9.3392
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p7q2pd0+roff: window 9b's J-T rank-1 row for W1 (a member of ruling 22's set), can_sleep false",
+        "value": 4.933,
+        "range": [
+          4.756,
+          5.2152
+        ]
+      },
+      "ratio": {
+        "factor": 1.86,
+        "word": "slower",
+        "display": "1.86 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.86 x slower than Rapier 0.36 against 9b's J-T rank-1 row (simd8/s1p7q2pd0+roff; a member of ruling 22's set) (claimed STRONG; W1; shoot [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/shoot/W1/Rapier rank-1\""
+    },
+    {
+      "id": "dyn-shoot-w1-rapier-s1p9q2",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (s1p9q2 row), shoot, W1",
+      "workload": "shoot: the pile in a closed arena; from step 200, a box is launched into it every 10 steps (60 launches)",
+      "workers": 1,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 9.1867,
+      "ours_range": [
+        9.1603,
+        9.3392
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p9q2: Rapier's s1p9q2 row, can_sleep false",
+        "value": 4.4859,
+        "range": [
+          4.356,
+          4.9528
+        ]
+      },
+      "ratio": {
+        "factor": 2.05,
+        "word": "slower",
+        "display": "2.05 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 2.05 x slower than Rapier 0.36 against Rapier's s1p9q2 row (claimed STRONG; W1; shoot [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/shoot/W1/Rapier s1p9q2\""
+    },
+    {
+      "id": "dyn-shoot-w2-jolt56",
+      "category": "physics_vs_jolt",
+      "title": "boyko physics vs Jolt 5.6, shoot, W2",
+      "workload": "shoot: the pile in a closed arena; from step 200, a box is launched into it every 10 steps (60 launches)",
+      "workers": 2,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 5.3559,
+      "ours_range": [
+        5.3085,
+        5.6009
+      ],
+      "other": {
+        "engine": "Jolt Physics",
+        "version": "5.6.0",
+        "config": "PerformanceTest -s=Pyramid -dyn=shoot, allow_sleep=0 (sleeping off), parity patch v2",
+        "value": 6.0549,
+        "range": [
+          5.9677,
+          6.3947
+        ]
+      },
+      "ratio": {
+        "factor": 1.13,
+        "word": "faster",
+        "display": "1.13 x faster"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.13 x faster than Jolt 5.6 (allow_sleep=0) (claimed; W2; shoot [200,800))",
+      "verdict": "CLAIMED_FASTER",
+      "strong": false,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/shoot/W2/Jolt 5.6\""
+    },
+    {
+      "id": "dyn-shoot-w2-rapier-rank1",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (rank-1 row), shoot, W2",
+      "workload": "shoot: the pile in a closed arena; from step 200, a box is launched into it every 10 steps (60 launches)",
+      "workers": 2,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 5.3559,
+      "ours_range": [
+        5.3085,
+        5.6009
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "block/s1p4q3pd0+roff: window 9b's J-T rank-1 row for W2 (a member of ruling 22's set), can_sleep false",
+        "value": 3.0568,
+        "range": [
+          2.8991,
+          3.6936
+        ]
+      },
+      "ratio": {
+        "factor": 1.75,
+        "word": "slower",
+        "display": "1.75 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.75 x slower than Rapier 0.36 against 9b's J-T rank-1 row (block/s1p4q3pd0+roff; a member of ruling 22's set) (claimed STRONG; W2; shoot [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/shoot/W2/Rapier rank-1\""
+    },
+    {
+      "id": "dyn-shoot-w2-rapier-s1p9q2",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (s1p9q2 row), shoot, W2",
+      "workload": "shoot: the pile in a closed arena; from step 200, a box is launched into it every 10 steps (60 launches)",
+      "workers": 2,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 5.3559,
+      "ours_range": [
+        5.3085,
+        5.6009
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p9q2: Rapier's s1p9q2 row, can_sleep false",
+        "value": 2.8844,
+        "range": [
+          2.7499,
+          3.6913
+        ]
+      },
+      "ratio": {
+        "factor": 1.86,
+        "word": "slower",
+        "display": "1.86 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.86 x slower than Rapier 0.36 against Rapier's s1p9q2 row (claimed STRONG; W2; shoot [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/shoot/W2/Rapier s1p9q2\""
+    },
+    {
+      "id": "dyn-shoot-w4-jolt56",
+      "category": "physics_vs_jolt",
+      "title": "boyko physics vs Jolt 5.6, shoot, W4",
+      "workload": "shoot: the pile in a closed arena; from step 200, a box is launched into it every 10 steps (60 launches)",
+      "workers": 4,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 3.3537,
+      "ours_range": [
+        3.2953,
+        3.4985
+      ],
+      "other": {
+        "engine": "Jolt Physics",
+        "version": "5.6.0",
+        "config": "PerformanceTest -s=Pyramid -dyn=shoot, allow_sleep=0 (sleeping off), parity patch v2",
+        "value": 3.7546,
+        "range": [
+          3.7276,
+          4.0178
+        ]
+      },
+      "ratio": {
+        "factor": 1.12,
+        "word": "faster",
+        "display": "1.12 x faster"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.12 x faster than Jolt 5.6 (allow_sleep=0) (claimed; W4; shoot [200,800))",
+      "verdict": "CLAIMED_FASTER",
+      "strong": false,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/shoot/W4/Jolt 5.6\""
+    },
+    {
+      "id": "dyn-shoot-w4-rapier-rank1",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (rank-1 row), shoot, W4",
+      "workload": "shoot: the pile in a closed arena; from step 200, a box is launched into it every 10 steps (60 launches)",
+      "workers": 4,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 3.3537,
+      "ours_range": [
+        3.2953,
+        3.4985
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "block/s1p4q3pd0+roff: window 9b's J-T rank-1 row for W4 (a member of ruling 22's set), can_sleep false",
+        "value": 2.0357,
+        "range": [
+          1.8232,
+          2.3711
+        ]
+      },
+      "ratio": {
+        "factor": 1.65,
+        "word": "slower",
+        "display": "1.65 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.65 x slower than Rapier 0.36 against 9b's J-T rank-1 row (block/s1p4q3pd0+roff; a member of ruling 22's set) (claimed STRONG; W4; shoot [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/shoot/W4/Rapier rank-1\""
+    },
+    {
+      "id": "dyn-shoot-w4-rapier-s1p9q2",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (s1p9q2 row), shoot, W4",
+      "workload": "shoot: the pile in a closed arena; from step 200, a box is launched into it every 10 steps (60 launches)",
+      "workers": 4,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 3.3537,
+      "ours_range": [
+        3.2953,
+        3.4985
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p9q2: Rapier's s1p9q2 row, can_sleep false",
+        "value": 2.0785,
+        "range": [
+          1.9877,
+          2.2331
+        ]
+      },
+      "ratio": {
+        "factor": 1.61,
+        "word": "slower",
+        "display": "1.61 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.61 x slower than Rapier 0.36 against Rapier's s1p9q2 row (claimed STRONG; W4; shoot [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/shoot/W4/Rapier s1p9q2\""
+    },
+    {
+      "id": "dyn-shoot-w8-jolt56",
+      "category": "physics_vs_jolt",
+      "title": "boyko physics vs Jolt 5.6, shoot, W8",
+      "workload": "shoot: the pile in a closed arena; from step 200, a box is launched into it every 10 steps (60 launches)",
+      "workers": 8,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.3215,
+      "ours_range": [
+        2.305,
+        2.4361
+      ],
+      "other": {
+        "engine": "Jolt Physics",
+        "version": "5.6.0",
+        "config": "PerformanceTest -s=Pyramid -dyn=shoot, allow_sleep=0 (sleeping off), parity patch v2",
+        "value": 2.6349,
+        "range": [
+          2.6204,
+          2.7645
+        ]
+      },
+      "ratio": {
+        "factor": 1.14,
+        "word": "faster",
+        "display": "1.14 x faster"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.14 x faster than Jolt 5.6 (allow_sleep=0) (claimed; W8; shoot [200,800))",
+      "verdict": "CLAIMED_FASTER",
+      "strong": false,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/shoot/W8/Jolt 5.6\""
+    },
+    {
+      "id": "dyn-shoot-w8-rapier-rank1",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (rank-1 row), shoot, W8",
+      "workload": "shoot: the pile in a closed arena; from step 200, a box is launched into it every 10 steps (60 launches)",
+      "workers": 8,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.3215,
+      "ours_range": [
+        2.305,
+        2.4361
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "block/s1p5q2pd0+roff: window 9b's J-T rank-1 row for W8 (a member of ruling 22's set), can_sleep false",
+        "value": 1.2589,
+        "range": [
+          1.2205,
+          1.3833
+        ]
+      },
+      "ratio": {
+        "factor": 1.84,
+        "word": "slower",
+        "display": "1.84 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.84 x slower than Rapier 0.36 against 9b's J-T rank-1 row (block/s1p5q2pd0+roff; a member of ruling 22's set) (claimed STRONG; W8; shoot [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/shoot/W8/Rapier rank-1\""
+    },
+    {
+      "id": "dyn-shoot-w8-rapier-s1p9q2",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (s1p9q2 row), shoot, W8",
+      "workload": "shoot: the pile in a closed arena; from step 200, a box is launched into it every 10 steps (60 launches)",
+      "workers": 8,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.3215,
+      "ours_range": [
+        2.305,
+        2.4361
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p9q2: Rapier's s1p9q2 row, can_sleep false",
+        "value": 1.5899,
+        "range": [
+          1.4621,
+          1.7687
+        ]
+      },
+      "ratio": {
+        "factor": 1.46,
+        "word": "slower",
+        "display": "1.46 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.46 x slower than Rapier 0.36 against Rapier's s1p9q2 row (claimed STRONG; W8; shoot [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/shoot/W8/Rapier s1p9q2\""
+    },
+    {
+      "id": "dyn-shoot-w16-jolt56",
+      "category": "physics_vs_jolt",
+      "title": "boyko physics vs Jolt 5.6, shoot, W16",
+      "workload": "shoot: the pile in a closed arena; from step 200, a box is launched into it every 10 steps (60 launches)",
+      "workers": 16,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.3542,
+      "ours_range": [
+        2.2999,
+        2.3796
+      ],
+      "other": {
+        "engine": "Jolt Physics",
+        "version": "5.6.0",
+        "config": "PerformanceTest -s=Pyramid -dyn=shoot, allow_sleep=0 (sleeping off), parity patch v2",
+        "value": 2.5504,
+        "range": [
+          2.5143,
+          2.5886
+        ]
+      },
+      "ratio": {
+        "factor": 1.08,
+        "word": "faster",
+        "display": "1.08 x faster"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.08 x faster than Jolt 5.6 (allow_sleep=0) (claimed; W16; shoot [200,800))",
+      "verdict": "CLAIMED_FASTER",
+      "strong": false,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/shoot/W16/Jolt 5.6\""
+    },
+    {
+      "id": "dyn-shoot-w16-rapier-rank1",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (rank-1 row), shoot, W16",
+      "workload": "shoot: the pile in a closed arena; from step 200, a box is launched into it every 10 steps (60 launches)",
+      "workers": 16,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.3542,
+      "ours_range": [
+        2.2999,
+        2.3796
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "block/s1p5q2pd0+roff: window 9b's J-T rank-1 row for W16 (a member of ruling 22's set), can_sleep false",
+        "value": 1.2574,
+        "range": [
+          1.2177,
+          1.4389
+        ]
+      },
+      "ratio": {
+        "factor": 1.87,
+        "word": "slower",
+        "display": "1.87 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.87 x slower than Rapier 0.36 against 9b's J-T rank-1 row (block/s1p5q2pd0+roff; a member of ruling 22's set) (claimed STRONG; W16; shoot [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/shoot/W16/Rapier rank-1\""
+    },
+    {
+      "id": "dyn-shoot-w16-rapier-s1p9q2",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (s1p9q2 row), shoot, W16",
+      "workload": "shoot: the pile in a closed arena; from step 200, a box is launched into it every 10 steps (60 launches)",
+      "workers": 16,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.3542,
+      "ours_range": [
+        2.2999,
+        2.3796
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p9q2: Rapier's s1p9q2 row, can_sleep false",
+        "value": 1.693,
+        "range": [
+          1.5787,
+          2.016
+        ]
+      },
+      "ratio": {
+        "factor": 1.39,
+        "word": "slower",
+        "display": "1.39 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.39 x slower than Rapier 0.36 against Rapier's s1p9q2 row (claimed; W16; shoot [200,800))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": false,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[200,800)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/shoot/W16/Rapier s1p9q2\""
+    },
+    {
+      "id": "dyn-slide-w1-jolt56",
+      "category": "physics_vs_jolt",
+      "title": "boyko physics vs Jolt 5.6, slide, W1",
+      "workload": "slide: the pile on an effective 26.57 degree slope, sliding into a wall",
+      "workers": 1,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 8.7228,
+      "ours_range": [
+        8.6112,
+        8.8026
+      ],
+      "other": {
+        "engine": "Jolt Physics",
+        "version": "5.6.0",
+        "config": "PerformanceTest -s=Pyramid -dyn=slide, allow_sleep=0 (sleeping off), parity patch v2",
+        "value": 10.0546,
+        "range": [
+          10.0089,
+          10.2254
+        ]
+      },
+      "ratio": {
+        "factor": 1.15,
+        "word": "faster",
+        "display": "1.15 x faster"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.15 x faster than Jolt 5.6 (allow_sleep=0) (claimed STRONG; W1; slide [0,500))",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[0,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/slide/W1/Jolt 5.6\""
+    },
+    {
+      "id": "dyn-slide-w1-rapier-rank1",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (rank-1 row), slide, W1",
+      "workload": "slide: the pile on an effective 26.57 degree slope, sliding into a wall",
+      "workers": 1,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 8.7228,
+      "ours_range": [
+        8.6112,
+        8.8026
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p7q2pd0+roff: window 9b's J-T rank-1 row for W1 (a member of ruling 22's set), can_sleep false",
+        "value": 5.5806,
+        "range": [
+          5.3948,
+          5.9129
+        ]
+      },
+      "ratio": {
+        "factor": 1.56,
+        "word": "slower",
+        "display": "1.56 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.56 x slower than Rapier 0.36 against 9b's J-T rank-1 row (simd8/s1p7q2pd0+roff; a member of ruling 22's set) (claimed STRONG; W1; slide [0,500))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[0,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/slide/W1/Rapier rank-1\""
+    },
+    {
+      "id": "dyn-slide-w1-rapier-s1p9q2",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (s1p9q2 row), slide, W1",
+      "workload": "slide: the pile on an effective 26.57 degree slope, sliding into a wall",
+      "workers": 1,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 8.7228,
+      "ours_range": [
+        8.6112,
+        8.8026
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p9q2: Rapier's s1p9q2 row, can_sleep false",
+        "value": 3.7762,
+        "range": [
+          3.6246,
+          3.9319
+        ]
+      },
+      "ratio": {
+        "factor": 2.31,
+        "word": "slower",
+        "display": "2.31 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 2.31 x slower than Rapier 0.36 against Rapier's s1p9q2 row (claimed STRONG; W1; slide [0,500))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[0,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/slide/W1/Rapier s1p9q2\""
+    },
+    {
+      "id": "dyn-slide-w2-jolt56",
+      "category": "physics_vs_jolt",
+      "title": "boyko physics vs Jolt 5.6, slide, W2",
+      "workload": "slide: the pile on an effective 26.57 degree slope, sliding into a wall",
+      "workers": 2,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 5.1644,
+      "ours_range": [
+        5.1043,
+        5.3012
+      ],
+      "other": {
+        "engine": "Jolt Physics",
+        "version": "5.6.0",
+        "config": "PerformanceTest -s=Pyramid -dyn=slide, allow_sleep=0 (sleeping off), parity patch v2",
+        "value": 5.8229,
+        "range": [
+          5.7818,
+          5.865
+        ]
+      },
+      "ratio": {
+        "factor": 1.13,
+        "word": "faster",
+        "display": "1.13 x faster"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.13 x faster than Jolt 5.6 (allow_sleep=0) (claimed STRONG; W2; slide [0,500))",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[0,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/slide/W2/Jolt 5.6\""
+    },
+    {
+      "id": "dyn-slide-w2-rapier-rank1",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (rank-1 row), slide, W2",
+      "workload": "slide: the pile on an effective 26.57 degree slope, sliding into a wall",
+      "workers": 2,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 5.1644,
+      "ours_range": [
+        5.1043,
+        5.3012
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "block/s1p4q3pd0+roff: window 9b's J-T rank-1 row for W2 (a member of ruling 22's set), can_sleep false",
+        "value": 3.3806,
+        "range": [
+          3.2759,
+          3.844
+        ]
+      },
+      "ratio": {
+        "factor": 1.53,
+        "word": "slower",
+        "display": "1.53 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.53 x slower than Rapier 0.36 against 9b's J-T rank-1 row (block/s1p4q3pd0+roff; a member of ruling 22's set) (claimed STRONG; W2; slide [0,500))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[0,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/slide/W2/Rapier rank-1\""
+    },
+    {
+      "id": "dyn-slide-w2-rapier-s1p9q2",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (s1p9q2 row), slide, W2",
+      "workload": "slide: the pile on an effective 26.57 degree slope, sliding into a wall",
+      "workers": 2,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 5.1644,
+      "ours_range": [
+        5.1043,
+        5.3012
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p9q2: Rapier's s1p9q2 row, can_sleep false",
+        "value": 2.4152,
+        "range": [
+          2.3501,
+          3.3779
+        ]
+      },
+      "ratio": {
+        "factor": 2.14,
+        "word": "slower",
+        "display": "2.14 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 2.14 x slower than Rapier 0.36 against Rapier's s1p9q2 row (claimed STRONG; W2; slide [0,500))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[0,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/slide/W2/Rapier s1p9q2\""
+    },
+    {
+      "id": "dyn-slide-w4-jolt56",
+      "category": "physics_vs_jolt",
+      "title": "boyko physics vs Jolt 5.6, slide, W4",
+      "workload": "slide: the pile on an effective 26.57 degree slope, sliding into a wall",
+      "workers": 4,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 3.1959,
+      "ours_range": [
+        3.1582,
+        3.2547
+      ],
+      "other": {
+        "engine": "Jolt Physics",
+        "version": "5.6.0",
+        "config": "PerformanceTest -s=Pyramid -dyn=slide, allow_sleep=0 (sleeping off), parity patch v2",
+        "value": 3.5514,
+        "range": [
+          3.5074,
+          3.6101
+        ]
+      },
+      "ratio": {
+        "factor": 1.11,
+        "word": "faster",
+        "display": "1.11 x faster"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.11 x faster than Jolt 5.6 (allow_sleep=0) (claimed STRONG; W4; slide [0,500))",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[0,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/slide/W4/Jolt 5.6\""
+    },
+    {
+      "id": "dyn-slide-w4-rapier-rank1",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (rank-1 row), slide, W4",
+      "workload": "slide: the pile on an effective 26.57 degree slope, sliding into a wall",
+      "workers": 4,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 3.1959,
+      "ours_range": [
+        3.1582,
+        3.2547
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "block/s1p4q3pd0+roff: window 9b's J-T rank-1 row for W4 (a member of ruling 22's set), can_sleep false",
+        "value": 2.1975,
+        "range": [
+          2.0572,
+          2.4231
+        ]
+      },
+      "ratio": {
+        "factor": 1.45,
+        "word": "slower",
+        "display": "1.45 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.45 x slower than Rapier 0.36 against 9b's J-T rank-1 row (block/s1p4q3pd0+roff; a member of ruling 22's set) (claimed STRONG; W4; slide [0,500))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[0,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/slide/W4/Rapier rank-1\""
+    },
+    {
+      "id": "dyn-slide-w4-rapier-s1p9q2",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (s1p9q2 row), slide, W4",
+      "workload": "slide: the pile on an effective 26.57 degree slope, sliding into a wall",
+      "workers": 4,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 3.1959,
+      "ours_range": [
+        3.1582,
+        3.2547
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p9q2: Rapier's s1p9q2 row, can_sleep false",
+        "value": 1.7345,
+        "range": [
+          1.6572,
+          1.8768
+        ]
+      },
+      "ratio": {
+        "factor": 1.84,
+        "word": "slower",
+        "display": "1.84 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.84 x slower than Rapier 0.36 against Rapier's s1p9q2 row (claimed STRONG; W4; slide [0,500))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[0,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/slide/W4/Rapier s1p9q2\""
+    },
+    {
+      "id": "dyn-slide-w8-jolt56",
+      "category": "physics_vs_jolt",
+      "title": "boyko physics vs Jolt 5.6, slide, W8",
+      "workload": "slide: the pile on an effective 26.57 degree slope, sliding into a wall",
+      "workers": 8,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": null,
+      "ours_range": null,
+      "other": {
+        "engine": "Jolt Physics",
+        "version": "5.6.0",
+        "config": "PerformanceTest -s=Pyramid -dyn=slide, allow_sleep=0 (sleeping off), parity patch v2",
+        "value": null,
+        "range": null
+      },
+      "ratio": null,
+      "printed": "boyko physics (trunk 68ec9312) vs Jolt 5.6 (allow_sleep=0) (W8; slide [0,500)): no measurable difference at this resolution (5.6 %)",
+      "verdict": "NOT_RESOLVED",
+      "strong": null,
+      "k": 9,
+      "resolution_pct": 5.6,
+      "window": "[0,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/slide/W8/Jolt 5.6\"",
+      "notes": [
+        "NOT RESOLVED: the cells are omitted on purpose, so no ratio can be read from them; this is not parity - a difference below the stated resolution may exist"
+      ]
+    },
+    {
+      "id": "dyn-slide-w8-rapier-rank1",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (rank-1 row), slide, W8",
+      "workload": "slide: the pile on an effective 26.57 degree slope, sliding into a wall",
+      "workers": 8,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.2476,
+      "ours_range": [
+        2.2227,
+        2.3464
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "block/s1p5q2pd0+roff: window 9b's J-T rank-1 row for W8 (a member of ruling 22's set), can_sleep false",
+        "value": 1.3461,
+        "range": [
+          1.3221,
+          1.5196
+        ]
+      },
+      "ratio": {
+        "factor": 1.67,
+        "word": "slower",
+        "display": "1.67 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.67 x slower than Rapier 0.36 against 9b's J-T rank-1 row (block/s1p5q2pd0+roff; a member of ruling 22's set) (claimed STRONG; W8; slide [0,500))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[0,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/slide/W8/Rapier rank-1\""
+    },
+    {
+      "id": "dyn-slide-w8-rapier-s1p9q2",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (s1p9q2 row), slide, W8",
+      "workload": "slide: the pile on an effective 26.57 degree slope, sliding into a wall",
+      "workers": 8,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.2476,
+      "ours_range": [
+        2.2227,
+        2.3464
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p9q2: Rapier's s1p9q2 row, can_sleep false",
+        "value": 1.272,
+        "range": [
+          1.203,
+          1.4051
+        ]
+      },
+      "ratio": {
+        "factor": 1.77,
+        "word": "slower",
+        "display": "1.77 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.77 x slower than Rapier 0.36 against Rapier's s1p9q2 row (claimed STRONG; W8; slide [0,500))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[0,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/slide/W8/Rapier s1p9q2\""
+    },
+    {
+      "id": "dyn-slide-w16-jolt56",
+      "category": "physics_vs_jolt",
+      "title": "boyko physics vs Jolt 5.6, slide, W16",
+      "workload": "slide: the pile on an effective 26.57 degree slope, sliding into a wall",
+      "workers": 16,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": null,
+      "ours_range": null,
+      "other": {
+        "engine": "Jolt Physics",
+        "version": "5.6.0",
+        "config": "PerformanceTest -s=Pyramid -dyn=slide, allow_sleep=0 (sleeping off), parity patch v2",
+        "value": null,
+        "range": null
+      },
+      "ratio": null,
+      "printed": "boyko physics (trunk 68ec9312) vs Jolt 5.6 (allow_sleep=0) (W16; slide [0,500)): no measurable difference at this resolution (5.2 %)",
+      "verdict": "NOT_RESOLVED",
+      "strong": null,
+      "k": 9,
+      "resolution_pct": 5.2,
+      "window": "[0,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/slide/W16/Jolt 5.6\"",
+      "notes": [
+        "NOT RESOLVED: the cells are omitted on purpose, so no ratio can be read from them; this is not parity - a difference below the stated resolution may exist"
+      ]
+    },
+    {
+      "id": "dyn-slide-w16-rapier-rank1",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (rank-1 row), slide, W16",
+      "workload": "slide: the pile on an effective 26.57 degree slope, sliding into a wall",
+      "workers": 16,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.2678,
+      "ours_range": [
+        2.2394,
+        2.3217
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "block/s1p5q2pd0+roff: window 9b's J-T rank-1 row for W16 (a member of ruling 22's set), can_sleep false",
+        "value": 1.3425,
+        "range": [
+          1.3039,
+          1.4403
+        ]
+      },
+      "ratio": {
+        "factor": 1.69,
+        "word": "slower",
+        "display": "1.69 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.69 x slower than Rapier 0.36 against 9b's J-T rank-1 row (block/s1p5q2pd0+roff; a member of ruling 22's set) (claimed STRONG; W16; slide [0,500))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[0,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/slide/W16/Rapier rank-1\""
+    },
+    {
+      "id": "dyn-slide-w16-rapier-s1p9q2",
+      "category": "physics_vs_rapier",
+      "title": "boyko physics vs Rapier 0.36 (s1p9q2 row), slide, W16",
+      "workload": "slide: the pile on an effective 26.57 degree slope, sliding into a wall",
+      "workers": 16,
+      "metric": "mean wall time per physics step over the metric window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 2.2678,
+      "ours_range": [
+        2.2394,
+        2.3217
+      ],
+      "other": {
+        "engine": "Rapier (rapier3d)",
+        "version": "0.36.0",
+        "config": "simd8/s1p9q2: Rapier's s1p9q2 row, can_sleep false",
+        "value": 1.3879,
+        "range": [
+          1.3319,
+          1.5956
+        ]
+      },
+      "ratio": {
+        "factor": 1.63,
+        "word": "slower",
+        "display": "1.63 x slower"
+      },
+      "printed": "boyko physics (trunk 68ec9312) is 1.63 x slower than Rapier 0.36 against Rapier's s1p9q2 row (claimed STRONG; W16; slide [0,500))",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[0,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "19:58-20:58 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-DYN, statement \"LAND-DYN/slide/W16/Rapier s1p9q2\""
+    },
+    {
+      "id": "bevy-g1",
+      "category": "ecs_vs_bevy",
+      "title": "boyko_ecs vs bevy_ecs 0.18.1, g1",
+      "workload": "Schedule::run of 50 empty systems, 8-thread pool, multi-threaded executor on both sides",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 8238.23,
+      "ours_range": [
+        8024.07,
+        8640.96
+      ],
+      "ours_display": "8.238 µs",
+      "other": {
+        "engine": "bevy_ecs",
+        "version": "0.18.1",
+        "config": "same process as boyko, boyko id first; stable toolchain, fat LTO, x86-64-v3, Windows system heap",
+        "value": 23548.5,
+        "range": [
+          21731.3,
+          23958.7
+        ],
+        "display": "23.55 µs"
+      },
+      "ratio": {
+        "factor": 2.86,
+        "word": "faster",
+        "display": "2.86 x faster"
+      },
+      "printed": "boyko_ecs is 2.86 x faster than bevy_ecs 0.18.1 (claimed STRONG; g1 50 empty systems; vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap)",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:01-21:33 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-BEVY, statement \"LAND-BEVY/g1\"",
+      "labels": [
+        "vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap",
+        "every process runs the boyko id before the bevy id; an in-process order effect is not measured"
+      ]
+    },
+    {
+      "id": "bevy-g2",
+      "category": "ecs_vs_bevy",
+      "title": "boyko_ecs vs bevy_ecs 0.18.1, g2",
+      "workload": "a 10k-row read-only query run through world.run_system inside the timed loop, which rebuilds the boyko system every iteration; bevy iterates a pre-built QueryState",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 39449.7,
+      "ours_range": [
+        39351.6,
+        39470.8
+      ],
+      "ours_display": "39.45 µs",
+      "other": {
+        "engine": "bevy_ecs",
+        "version": "0.18.1",
+        "config": "same process as boyko, boyko id first; stable toolchain, fat LTO, x86-64-v3, Windows system heap",
+        "value": 6696.99,
+        "range": [
+          6587.2,
+          6714.34
+        ],
+        "display": "6.697 µs"
+      },
+      "ratio": {
+        "factor": 5.89,
+        "word": "slower",
+        "display": "5.89 x slower"
+      },
+      "printed": "boyko_ecs is 5.89 x slower than bevy_ecs 0.18.1 (claimed STRONG; g2 query over 10k rows through world.run_system, which rebuilds the boyko system in every timed iteration, against a pre-built bevy QueryState; vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap)",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:01-21:33 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-BEVY, statement \"LAND-BEVY/g2\"",
+      "labels": [
+        "vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap",
+        "every process runs the boyko id before the bevy id; an in-process order effect is not measured"
+      ],
+      "notes": [
+        "Harness artifact: the boyko side calls world.run_system inside the timed loop, which rebuilds the system every iteration; the bench source calls this \"a harness artifact, not a steady-state cost\" (crates/bench_bevy_vs_boyko/benches/comparison_v2.rs:164-172 at 68ec9312). The cached-system variant g2c was not measured in this window. g2b is the direct-iteration comparison."
+      ]
+    },
+    {
+      "id": "bevy-g2b",
+      "category": "ecs_vs_bevy",
+      "title": "boyko_ecs vs bevy_ecs 0.18.1, g2b",
+      "workload": "a 10k-row read-only query through the direct API (boyko EcsMaster::query, bevy QueryState::iter)",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 11239.9,
+      "ours_range": [
+        11072.4,
+        12575.2
+      ],
+      "ours_display": "11.24 µs",
+      "other": {
+        "engine": "bevy_ecs",
+        "version": "0.18.1",
+        "config": "same process as boyko, boyko id first; stable toolchain, fat LTO, x86-64-v3, Windows system heap",
+        "value": 6712.55,
+        "range": [
+          6695.45,
+          6728.86
+        ],
+        "display": "6.713 µs"
+      },
+      "ratio": {
+        "factor": 1.67,
+        "word": "slower",
+        "display": "1.67 x slower"
+      },
+      "printed": "boyko_ecs is 1.67 x slower than bevy_ecs 0.18.1 (claimed STRONG; g2b query_iter 10k direct; vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap)",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:01-21:33 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-BEVY, statement \"LAND-BEVY/g2b\"",
+      "labels": [
+        "vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap",
+        "every process runs the boyko id before the bevy id; an in-process order effect is not measured"
+      ]
+    },
+    {
+      "id": "bevy-g3",
+      "category": "ecs_vs_bevy",
+      "title": "boyko_ecs vs bevy_ecs 0.18.1, g3",
+      "workload": "par_iter over 10k rows, 8 threads",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": null,
+      "ours_range": null,
+      "ours_display": null,
+      "other": {
+        "engine": "bevy_ecs",
+        "version": "0.18.1",
+        "config": "same process as boyko, boyko id first; stable toolchain, fat LTO, x86-64-v3, Windows system heap",
+        "value": null,
+        "range": null,
+        "display": null
+      },
+      "ratio": null,
+      "printed": "boyko_ecs vs bevy_ecs 0.18.1 (g3 par_iter 10k; vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap): no measurable difference at this resolution (1.0 %)",
+      "verdict": "NOT_RESOLVED",
+      "strong": null,
+      "k": 9,
+      "resolution_pct": 1.0,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:01-21:33 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-BEVY, statement \"LAND-BEVY/g3\"",
+      "labels": [
+        "vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap",
+        "every process runs the boyko id before the bevy id; an in-process order effect is not measured"
+      ],
+      "notes": [
+        "NOT RESOLVED: the cells are omitted on purpose, so no ratio can be read from them; not parity"
+      ]
+    },
+    {
+      "id": "bevy-g4",
+      "category": "ecs_vs_bevy",
+      "title": "boyko_ecs vs bevy_ecs 0.18.1, g4",
+      "workload": "Commands::spawn x 10k, apply included",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": null,
+      "ours_range": null,
+      "ours_display": null,
+      "other": {
+        "engine": "bevy_ecs",
+        "version": "0.18.1",
+        "config": "same process as boyko, boyko id first; stable toolchain, fat LTO, x86-64-v3, Windows system heap",
+        "value": null,
+        "range": null,
+        "display": null
+      },
+      "ratio": null,
+      "printed": "boyko_ecs vs bevy_ecs 0.18.1 (g4 commands spawn 10k; vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap): no measurable difference at this resolution (8.1 %)",
+      "verdict": "NOT_RESOLVED",
+      "strong": null,
+      "k": 9,
+      "resolution_pct": 8.1,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:01-21:33 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-BEVY, statement \"LAND-BEVY/g4\"",
+      "labels": [
+        "vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap",
+        "every process runs the boyko id before the bevy id; an in-process order effect is not measured"
+      ],
+      "notes": [
+        "NOT RESOLVED: the cells are omitted on purpose, so no ratio can be read from them; not parity"
+      ]
+    },
+    {
+      "id": "bevy-g5",
+      "category": "ecs_vs_bevy",
+      "title": "boyko_ecs vs bevy_ecs 0.18.1, g5",
+      "workload": "Commands::spawn_batch of 10k",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 206664.0,
+      "ours_range": [
+        194636.0,
+        210981.0
+      ],
+      "ours_display": "206.7 µs",
+      "other": {
+        "engine": "bevy_ecs",
+        "version": "0.18.1",
+        "config": "same process as boyko, boyko id first; stable toolchain, fat LTO, x86-64-v3, Windows system heap",
+        "value": 177126.0,
+        "range": [
+          170115.0,
+          181775.0
+        ],
+        "display": "177.1 µs"
+      },
+      "ratio": {
+        "factor": 1.17,
+        "word": "slower",
+        "display": "1.17 x slower"
+      },
+      "printed": "boyko_ecs is 1.17 x slower than bevy_ecs 0.18.1 (claimed; g5 commands spawn_batch 10k; vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap)",
+      "verdict": "CLAIMED_SLOWER",
+      "strong": false,
+      "k": 9,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:01-21:33 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-BEVY, statement \"LAND-BEVY/g5\"",
+      "labels": [
+        "vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap",
+        "every process runs the boyko id before the bevy id; an in-process order effect is not measured"
+      ]
+    },
+    {
+      "id": "bevy-g8-total",
+      "category": "ecs_vs_bevy",
+      "title": "boyko_ecs vs bevy_ecs 0.18.1, g8 total",
+      "workload": "1,000,000 entities into one archetype (3 x 192 B components) in 100 sub-batches of 10k, cold world, total time; Bevy not pre-reserved",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 116335000.0,
+      "ours_range": [
+        115445000.0,
+        118357000.0
+      ],
+      "ours_display": "116.3 ms",
+      "other": {
+        "engine": "bevy_ecs",
+        "version": "0.18.1",
+        "config": "same process as boyko, boyko id first; stable toolchain, fat LTO, x86-64-v3, Windows system heap",
+        "value": 314020000.0,
+        "range": [
+          306442000.0,
+          320213000.0
+        ],
+        "display": "314 ms"
+      },
+      "ratio": {
+        "factor": 2.7,
+        "word": "faster",
+        "display": "2.70 x faster"
+      },
+      "printed": "boyko_ecs is 2.70 x faster than bevy_ecs 0.18.1 (claimed STRONG; g8 growth total (1 M entities, one archetype); Bevy not pre-reserved; vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap)",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:01-21:33 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-BEVY, statement \"LAND-BEVY/g8\"",
+      "labels": [
+        "vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap",
+        "every process runs the boyko id before the bevy id; an in-process order effect is not measured",
+        "Bevy not pre-reserved"
+      ]
+    },
+    {
+      "id": "bevy-g8-spike",
+      "category": "ecs_vs_bevy",
+      "title": "boyko_ecs vs bevy_ecs 0.18.1, g8 spike",
+      "workload": "the same run: the worst sub-batch minus the median sub-batch, median over iterations",
+      "workers": null,
+      "metric": "the harness's median-of-iteration-spikes line per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 1552500.0,
+      "ours_range": [
+        1501400.0,
+        1620400.0
+      ],
+      "ours_display": "1.552 ms",
+      "other": {
+        "engine": "bevy_ecs",
+        "version": "0.18.1",
+        "config": "same process as boyko, boyko id first; stable toolchain, fat LTO, x86-64-v3, Windows system heap",
+        "value": 76024400.0,
+        "range": [
+          75766700.0,
+          78004300.0
+        ],
+        "display": "76.02 ms"
+      },
+      "ratio": {
+        "factor": 48.97,
+        "word": "faster",
+        "display": "48.97 x faster"
+      },
+      "printed": "boyko_ecs is 48.97 x faster than bevy_ecs 0.18.1 (claimed STRONG; g8 worst-sub-batch spike (median-of-iteration-spikes); Bevy not pre-reserved; vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap)",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:01-21:33 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-BEVY, statement \"LAND-BEVY/g8 spike\"",
+      "labels": [
+        "vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap",
+        "every process runs the boyko id before the bevy id; an in-process order effect is not measured",
+        "Bevy not pre-reserved"
+      ]
+    },
+    {
+      "id": "bevy-g7-total",
+      "category": "ecs_vs_bevy",
+      "title": "boyko_ecs vs bevy_ecs 0.18.1, g7 total",
+      "workload": "960,000 entities into 16 archetypes (3 x 192 B components), total time",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 148714000.0,
+      "ours_range": [
+        146938000.0,
+        151388000.0
+      ],
+      "ours_display": "148.7 ms",
+      "other": {
+        "engine": "bevy_ecs",
+        "version": "0.18.1",
+        "config": "same process as boyko, boyko id first; stable toolchain, fat LTO, x86-64-v3, Windows system heap",
+        "value": 289306000.0,
+        "range": [
+          286430000.0,
+          302355000.0
+        ],
+        "display": "289.3 ms"
+      },
+      "ratio": {
+        "factor": 1.95,
+        "word": "faster",
+        "display": "1.95 x faster"
+      },
+      "printed": "boyko_ecs is 1.95 x faster than bevy_ecs 0.18.1 (claimed STRONG; g7 growth total (960k entities, 16 archetypes); vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap)",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:03-22:33 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-BEVY+, statement \"LAND-BEVY+/g7\"",
+      "labels": [
+        "vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap",
+        "every process runs the boyko id before the bevy id; an in-process order effect is not measured"
+      ]
+    },
+    {
+      "id": "bevy-g7-spike",
+      "category": "ecs_vs_bevy",
+      "title": "boyko_ecs vs bevy_ecs 0.18.1, g7 spike",
+      "workload": "the same run: the worst sub-batch spike, median over iterations",
+      "workers": null,
+      "metric": "the harness's median-of-iteration-spikes line per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 449300.0,
+      "ours_range": [
+        419700.0,
+        538300.0
+      ],
+      "ours_display": "449.3 µs",
+      "other": {
+        "engine": "bevy_ecs",
+        "version": "0.18.1",
+        "config": "same process as boyko, boyko id first; stable toolchain, fat LTO, x86-64-v3, Windows system heap",
+        "value": 8427600.0,
+        "range": [
+          8357900.0,
+          8647900.0
+        ],
+        "display": "8.428 ms"
+      },
+      "ratio": {
+        "factor": 18.76,
+        "word": "faster",
+        "display": "18.76 x faster"
+      },
+      "printed": "boyko_ecs is 18.76 x faster than bevy_ecs 0.18.1 (claimed STRONG; g7 worst-sub-batch spike (median-of-iteration-spikes); vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap)",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:03-22:33 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-BEVY+, statement \"LAND-BEVY+/g7 spike\"",
+      "labels": [
+        "vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap",
+        "every process runs the boyko id before the bevy id; an in-process order effect is not measured"
+      ]
+    },
+    {
+      "id": "bevy-g6",
+      "category": "ecs_vs_bevy",
+      "title": "boyko_ecs vs bevy_ecs 0.18.1, g6",
+      "workload": "sum of one f32 field over 10k rows: boyko for_each_chunk vs bevy iter().fold, algebraic float add (nightly toolchain, both engines)",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": null,
+      "ours_range": null,
+      "ours_display": null,
+      "other": {
+        "engine": "bevy_ecs",
+        "version": "0.18.1",
+        "config": "same process as boyko, boyko id first; nightly toolchain, fat LTO, x86-64-v3, Windows system heap",
+        "value": null,
+        "range": null,
+        "display": null
+      },
+      "ratio": null,
+      "printed": "boyko_ecs vs bevy_ecs 0.18.1 (g6 algebraic sum 10k (boyko for_each_chunk vs bevy iter fold); g6: nightly toolchain, both engines; vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap): no measurable difference at this resolution (3.4 %)",
+      "verdict": "NOT_RESOLVED",
+      "strong": null,
+      "k": 9,
+      "resolution_pct": 3.4,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:03-22:33 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-BEVY+, statement \"LAND-BEVY+/g6\"",
+      "labels": [
+        "vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap",
+        "every process runs the boyko id before the bevy id; an in-process order effect is not measured",
+        "nightly toolchain, both engines"
+      ],
+      "notes": [
+        "NOT RESOLVED: the cells are omitted on purpose, so no ratio can be read from them; not parity"
+      ]
+    },
+    {
+      "id": "bevy-g6b-idx",
+      "category": "ecs_vs_bevy",
+      "title": "boyko_ecs vs bevy_ecs 0.18.1, g6b idx",
+      "workload": "a three-component reduction over 10k rows: boyko for_each_chunk (indexed) vs bevy iter().fold (nightly toolchain, both engines)",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 871.664,
+      "ours_range": [
+        862.387,
+        875.53
+      ],
+      "ours_display": "871.7 ns",
+      "other": {
+        "engine": "bevy_ecs",
+        "version": "0.18.1",
+        "config": "same process as boyko, boyko id first; nightly toolchain, fat LTO, x86-64-v3, Windows system heap",
+        "value": 1244.1,
+        "range": [
+          1236.45,
+          1247.22
+        ],
+        "display": "1.244 µs"
+      },
+      "ratio": {
+        "factor": 1.43,
+        "word": "faster",
+        "display": "1.43 x faster"
+      },
+      "printed": "boyko_ecs is 1.43 x faster than bevy_ecs 0.18.1 (claimed STRONG; g6b triple 10k (boyko for_each_chunk idx vs bevy iter fold); g6: nightly toolchain, both engines; vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap)",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:03-22:33 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-BEVY+, statement \"LAND-BEVY+/g6b idx\"",
+      "labels": [
+        "vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap",
+        "every process runs the boyko id before the bevy id; an in-process order effect is not measured",
+        "nightly toolchain, both engines"
+      ]
+    },
+    {
+      "id": "bevy-g6b-zip",
+      "category": "ecs_vs_bevy",
+      "title": "boyko_ecs vs bevy_ecs 0.18.1, g6b zip",
+      "workload": "the same reduction: boyko for_each_chunk (zipped) vs bevy iter().fold (nightly toolchain, both engines)",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": null,
+      "ours_range": null,
+      "ours_display": null,
+      "other": {
+        "engine": "bevy_ecs",
+        "version": "0.18.1",
+        "config": "same process as boyko, boyko id first; nightly toolchain, fat LTO, x86-64-v3, Windows system heap",
+        "value": null,
+        "range": null,
+        "display": null
+      },
+      "ratio": null,
+      "printed": "boyko_ecs vs bevy_ecs 0.18.1 (g6b triple 10k (boyko for_each_chunk zip vs bevy iter fold); g6: nightly toolchain, both engines; vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap): no measurable difference at this resolution (1.4 %)",
+      "verdict": "NOT_RESOLVED",
+      "strong": null,
+      "k": 9,
+      "resolution_pct": 1.4,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:03-22:33 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-BEVY+, statement \"LAND-BEVY+/g6b zip\"",
+      "labels": [
+        "vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3), Windows system heap",
+        "every process runs the boyko id before the bevy id; an in-process order effect is not measured",
+        "nightly toolchain, both engines"
+      ],
+      "notes": [
+        "NOT RESOLVED: the cells are omitted on purpose, so no ratio can be read from them; not parity"
+      ]
+    },
+    {
+      "id": "sleep-w1-0-100",
+      "category": "physics_sleeping",
+      "title": "boyko physics, sleeping ON vs OFF, W1, steps [0,100)",
+      "workload": "the J-T pile (Jolt PyramidScene: 1,240 boxes, gap 0.5 m), 500 steps; every body is asleep from step 147 when sleeping is on",
+      "workers": 1,
+      "metric": "mean wall time per physics step over the window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": null,
+      "ours_range": null,
+      "other": {
+        "engine": "boyko physics",
+        "version": "68ec9312",
+        "config": "the same engine with sleeping OFF",
+        "value": null,
+        "range": null
+      },
+      "ratio": null,
+      "printed": "boyko physics with sleeping ON vs the same engine with sleeping OFF (W1; [0,100)): no measurable difference at this resolution (5.9 %)",
+      "verdict": "NOT_RESOLVED",
+      "strong": null,
+      "k": 9,
+      "resolution_pct": 5.9,
+      "window": "[0,100)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "23:19-23:26 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-SLEEP, statement \"LAND-SLEEP/W1/[0,100)\"",
+      "labels": [
+        "not compared with Jolt or Rapier: both ran with sleeping off",
+        "the physics comparisons with Jolt and Rapier run sleeping OFF on every engine"
+      ],
+      "notes": [
+        "Measured 23:19-23:26 local time, inside the machine-wide slowdown that the protocol guard cannot see (section 1.5). Both arms ran adjacent in the same block, so the direction and the size of the effect are robust; the two-decimal factors carry a bias that could not be quantified, and the absolute ms/step cells were measured inside the slowdown too. A re-confirm is owed (section 4).",
+        "NOT RESOLVED: the cells are omitted on purpose, so no ratio can be read from them; not parity"
+      ]
+    },
+    {
+      "id": "sleep-w1-100-500",
+      "category": "physics_sleeping",
+      "title": "boyko physics, sleeping ON vs OFF, W1, steps [100,500)",
+      "workload": "the J-T pile (Jolt PyramidScene: 1,240 boxes, gap 0.5 m), 500 steps; every body is asleep from step 147 when sleeping is on",
+      "workers": 1,
+      "metric": "mean wall time per physics step over the window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 1.1093,
+      "ours_range": [
+        1.0836,
+        1.1449
+      ],
+      "other": {
+        "engine": "boyko physics",
+        "version": "68ec9312",
+        "config": "the same engine with sleeping OFF",
+        "value": 8.5165,
+        "range": [
+          8.4681,
+          8.6245
+        ]
+      },
+      "ratio": {
+        "factor": 7.68,
+        "word": "faster",
+        "display": "7.68 x faster"
+      },
+      "printed": "boyko physics with sleeping ON is 7.68 x faster than the same engine with sleeping OFF (claimed STRONG; W1; [100,500))",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[100,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "23:19-23:26 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-SLEEP, statement \"LAND-SLEEP/W1/[100,500)\"",
+      "labels": [
+        "not compared with Jolt or Rapier: both ran with sleeping off",
+        "the physics comparisons with Jolt and Rapier run sleeping OFF on every engine"
+      ],
+      "notes": [
+        "Measured 23:19-23:26 local time, inside the machine-wide slowdown that the protocol guard cannot see (section 1.5). Both arms ran adjacent in the same block, so the direction and the size of the effect are robust; the two-decimal factors carry a bias that could not be quantified, and the absolute ms/step cells were measured inside the slowdown too. A re-confirm is owed (section 4)."
+      ]
+    },
+    {
+      "id": "sleep-w1-147-500",
+      "category": "physics_sleeping",
+      "title": "boyko physics, sleeping ON vs OFF, W1, steps [147,500)",
+      "workload": "the J-T pile (Jolt PyramidScene: 1,240 boxes, gap 0.5 m), 500 steps; every body is asleep from step 147 when sleeping is on",
+      "workers": 1,
+      "metric": "mean wall time per physics step over the window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 0.1292,
+      "ours_range": [
+        0.1199,
+        0.1315
+      ],
+      "other": {
+        "engine": "boyko physics",
+        "version": "68ec9312",
+        "config": "the same engine with sleeping OFF",
+        "value": 8.5222,
+        "range": [
+          8.4637,
+          8.6464
+        ]
+      },
+      "ratio": {
+        "factor": 65.96,
+        "word": "faster",
+        "display": "65.96 x faster"
+      },
+      "printed": "boyko physics with sleeping ON is 65.96 x faster than the same engine with sleeping OFF (claimed STRONG; W1; [147,500) frozen tail)",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[147,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "23:19-23:26 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-SLEEP, statement \"LAND-SLEEP/W1/[147,500) frozen tail\"",
+      "labels": [
+        "not compared with Jolt or Rapier: both ran with sleeping off",
+        "the physics comparisons with Jolt and Rapier run sleeping OFF on every engine"
+      ],
+      "notes": [
+        "Measured 23:19-23:26 local time, inside the machine-wide slowdown that the protocol guard cannot see (section 1.5). Both arms ran adjacent in the same block, so the direction and the size of the effect are robust; the two-decimal factors carry a bias that could not be quantified, and the absolute ms/step cells were measured inside the slowdown too. A re-confirm is owed (section 4)."
+      ]
+    },
+    {
+      "id": "sleep-w8-0-100",
+      "category": "physics_sleeping",
+      "title": "boyko physics, sleeping ON vs OFF, W8, steps [0,100)",
+      "workload": "the J-T pile (Jolt PyramidScene: 1,240 boxes, gap 0.5 m), 500 steps; every body is asleep from step 147 when sleeping is on",
+      "workers": 8,
+      "metric": "mean wall time per physics step over the window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": null,
+      "ours_range": null,
+      "other": {
+        "engine": "boyko physics",
+        "version": "68ec9312",
+        "config": "the same engine with sleeping OFF",
+        "value": null,
+        "range": null
+      },
+      "ratio": null,
+      "printed": "boyko physics with sleeping ON vs the same engine with sleeping OFF (W8; [0,100)): no measurable difference at this resolution (16.3 %)",
+      "verdict": "NOT_RESOLVED",
+      "strong": null,
+      "k": 9,
+      "resolution_pct": 16.3,
+      "window": "[0,100)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "23:19-23:26 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-SLEEP, statement \"LAND-SLEEP/W8/[0,100)\"",
+      "labels": [
+        "not compared with Jolt or Rapier: both ran with sleeping off",
+        "the physics comparisons with Jolt and Rapier run sleeping OFF on every engine"
+      ],
+      "notes": [
+        "Measured 23:19-23:26 local time, inside the machine-wide slowdown that the protocol guard cannot see (section 1.5). Both arms ran adjacent in the same block, so the direction and the size of the effect are robust; the two-decimal factors carry a bias that could not be quantified, and the absolute ms/step cells were measured inside the slowdown too. A re-confirm is owed (section 4).",
+        "NOT RESOLVED: the cells are omitted on purpose, so no ratio can be read from them; not parity"
+      ]
+    },
+    {
+      "id": "sleep-w8-100-500",
+      "category": "physics_sleeping",
+      "title": "boyko physics, sleeping ON vs OFF, W8, steps [100,500)",
+      "workload": "the J-T pile (Jolt PyramidScene: 1,240 boxes, gap 0.5 m), 500 steps; every body is asleep from step 147 when sleeping is on",
+      "workers": 8,
+      "metric": "mean wall time per physics step over the window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 0.4014,
+      "ours_range": [
+        0.3658,
+        0.4056
+      ],
+      "other": {
+        "engine": "boyko physics",
+        "version": "68ec9312",
+        "config": "the same engine with sleeping OFF",
+        "value": 2.3052,
+        "range": [
+          2.2443,
+          2.4792
+        ]
+      },
+      "ratio": {
+        "factor": 5.74,
+        "word": "faster",
+        "display": "5.74 x faster"
+      },
+      "printed": "boyko physics with sleeping ON is 5.74 x faster than the same engine with sleeping OFF (claimed STRONG; W8; [100,500))",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[100,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "23:19-23:26 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-SLEEP, statement \"LAND-SLEEP/W8/[100,500)\"",
+      "labels": [
+        "not compared with Jolt or Rapier: both ran with sleeping off",
+        "the physics comparisons with Jolt and Rapier run sleeping OFF on every engine"
+      ],
+      "notes": [
+        "Measured 23:19-23:26 local time, inside the machine-wide slowdown that the protocol guard cannot see (section 1.5). Both arms ran adjacent in the same block, so the direction and the size of the effect are robust; the two-decimal factors carry a bias that could not be quantified, and the absolute ms/step cells were measured inside the slowdown too. A re-confirm is owed (section 4)."
+      ]
+    },
+    {
+      "id": "sleep-w8-147-500",
+      "category": "physics_sleeping",
+      "title": "boyko physics, sleeping ON vs OFF, W8, steps [147,500)",
+      "workload": "the J-T pile (Jolt PyramidScene: 1,240 boxes, gap 0.5 m), 500 steps; every body is asleep from step 147 when sleeping is on",
+      "workers": 8,
+      "metric": "mean wall time per physics step over the window, per process; cell = median over K processes",
+      "unit": "ms/step",
+      "ours": 0.1335,
+      "ours_range": [
+        0.1232,
+        0.1363
+      ],
+      "other": {
+        "engine": "boyko physics",
+        "version": "68ec9312",
+        "config": "the same engine with sleeping OFF",
+        "value": 2.3013,
+        "range": [
+          2.2484,
+          2.4884
+        ]
+      },
+      "ratio": {
+        "factor": 17.24,
+        "word": "faster",
+        "display": "17.24 x faster"
+      },
+      "printed": "boyko physics with sleeping ON is 17.24 x faster than the same engine with sleeping OFF (claimed STRONG; W8; [147,500) frozen tail)",
+      "verdict": "CLAIMED_FASTER",
+      "strong": true,
+      "k": 9,
+      "resolution_pct": null,
+      "window": "[147,500)",
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "23:19-23:26 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-SLEEP, statement \"LAND-SLEEP/W8/[147,500) frozen tail\"",
+      "labels": [
+        "not compared with Jolt or Rapier: both ran with sleeping off",
+        "the physics comparisons with Jolt and Rapier run sleeping OFF on every engine"
+      ],
+      "notes": [
+        "Measured 23:19-23:26 local time, inside the machine-wide slowdown that the protocol guard cannot see (section 1.5). Both arms ran adjacent in the same block, so the direction and the size of the effect are robust; the two-decimal factors carry a bias that could not be quantified, and the absolute ms/step cells were measured inside the slowdown too. A re-confirm is owed (section 4)."
+      ]
+    },
+    {
+      "id": "micro-phase9_schedule_run_empty",
+      "category": "ecs_micro",
+      "title": "phase9_schedule_run_empty",
+      "workload": "boyko_ecs bench phase9_scheduler: schedule runs - an empty schedule, 50 exclusive systems, par_iter over 4,096 entities, two disjoint systems, one exclusive system",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 6.57888,
+      "ours_range": [
+        6.57838,
+        6.59934
+      ],
+      "ours_display": "6.579 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "phase9_schedule_run_empty: 6.579 ns (min-max 6.578 ns - 6.599 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-sched/phase9_schedule_run_empty\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-phase9_schedule_run_50_exclusive_systems",
+      "category": "ecs_micro",
+      "title": "phase9_schedule_run_50_exclusive_systems",
+      "workload": "boyko_ecs bench phase9_scheduler: schedule runs - an empty schedule, 50 exclusive systems, par_iter over 4,096 entities, two disjoint systems, one exclusive system",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 1975.42,
+      "ours_range": [
+        1974.54,
+        1977.56
+      ],
+      "ours_display": "1.975 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "phase9_schedule_run_50_exclusive_systems: 1.975 µs (min-max 1.975 µs - 1.978 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-sched/phase9_schedule_run_50_exclusive_systems\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-phase9_par_iter_4096_entities",
+      "category": "ecs_micro",
+      "title": "phase9_par_iter_4096_entities",
+      "workload": "boyko_ecs bench phase9_scheduler: schedule runs - an empty schedule, 50 exclusive systems, par_iter over 4,096 entities, two disjoint systems, one exclusive system",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 37304.1,
+      "ours_range": [
+        37097.0,
+        37785.3
+      ],
+      "ours_display": "37.3 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "phase9_par_iter_4096_entities: 37.3 µs (min-max 37.1 µs - 37.79 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-sched/phase9_par_iter_4096_entities\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-phase9_schedule_run_two_disjoint",
+      "category": "ecs_micro",
+      "title": "phase9_schedule_run_two_disjoint",
+      "workload": "boyko_ecs bench phase9_scheduler: schedule runs - an empty schedule, 50 exclusive systems, par_iter over 4,096 entities, two disjoint systems, one exclusive system",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 876.633,
+      "ours_range": [
+        853.931,
+        952.192
+      ],
+      "ours_display": "876.6 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "phase9_schedule_run_two_disjoint: 876.6 ns (min-max 853.9 ns - 952.2 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-sched/phase9_schedule_run_two_disjoint\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-phase9_schedule_run_one_exclusive",
+      "category": "ecs_micro",
+      "title": "phase9_schedule_run_one_exclusive",
+      "workload": "boyko_ecs bench phase9_scheduler: schedule runs - an empty schedule, 50 exclusive systems, par_iter over 4,096 entities, two disjoint systems, one exclusive system",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 82.8701,
+      "ours_range": [
+        82.5179,
+        83.0583
+      ],
+      "ours_display": "82.87 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "phase9_schedule_run_one_exclusive: 82.87 ns (min-max 82.52 ns - 83.06 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-sched/phase9_schedule_run_one_exclusive\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-app_overhead-empty_main",
+      "category": "ecs_micro",
+      "title": "app_overhead/empty_main",
+      "workload": "boyko_ecs bench app_overhead: the App driver, per frame and per fixed substep",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 22.1244,
+      "ours_range": [
+        22.0831,
+        22.1571
+      ],
+      "ours_display": "22.12 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "app_overhead/empty_main: 22.12 ns (min-max 22.08 ns - 22.16 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-app/app_overhead/empty_main\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-app_overhead-fixed_loop_1_substep",
+      "category": "ecs_micro",
+      "title": "app_overhead/fixed_loop_1_substep",
+      "workload": "boyko_ecs bench app_overhead: the App driver, per frame and per fixed substep",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 32.927,
+      "ours_range": [
+        32.8757,
+        33.4623
+      ],
+      "ours_display": "32.93 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "app_overhead/fixed_loop_1_substep: 32.93 ns (min-max 32.88 ns - 33.46 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-app/app_overhead/fixed_loop_1_substep\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-app_overhead-bare_empty_schedule_run",
+      "category": "ecs_micro",
+      "title": "app_overhead/bare_empty_schedule_run",
+      "workload": "boyko_ecs bench app_overhead: the App driver, per frame and per fixed substep",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 6.77373,
+      "ours_range": [
+        6.76893,
+        6.80129
+      ],
+      "ours_display": "6.774 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "app_overhead/bare_empty_schedule_run: 6.774 ns (min-max 6.769 ns - 6.801 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-app/app_overhead/bare_empty_schedule_run\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-ecs_master_new-ecsmaster-new",
+      "category": "ecs_micro",
+      "title": "ecs_master_new/EcsMaster::new",
+      "workload": "boyko_ecs bench ecs_master_new: constructing a world",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 4411.02,
+      "ours_range": [
+        4335.38,
+        4487.83
+      ],
+      "ours_display": "4.411 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "ecs_master_new/EcsMaster::new: 4.411 µs (min-max 4.335 µs - 4.488 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-world/ecs_master_new/EcsMaster::new\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-query_state_iter-1000",
+      "category": "ecs_micro",
+      "title": "query_state_iter/1000",
+      "workload": "boyko_ecs bench query_iter, time per call: query_state_iter walks a cached QueryState's matching archetypes and sums their entity counts; query_find_into runs one archetype-registry scan. The id's number is n: the world holds n entities in each of two archetypes. Neither call reads a component row",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes; time per call of the timed body (an archetype walk or one registry scan; no component row is read)",
+      "unit": "ns",
+      "ours": 1.51751,
+      "ours_range": [
+        1.5159,
+        1.52275
+      ],
+      "ours_display": "1.518 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "query_state_iter/1000: 1.518 ns (min-max 1.516 ns - 1.523 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-query/query_state_iter/1000\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-query_state_iter-10000",
+      "category": "ecs_micro",
+      "title": "query_state_iter/10000",
+      "workload": "boyko_ecs bench query_iter, time per call: query_state_iter walks a cached QueryState's matching archetypes and sums their entity counts; query_find_into runs one archetype-registry scan. The id's number is n: the world holds n entities in each of two archetypes. Neither call reads a component row",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes; time per call of the timed body (an archetype walk or one registry scan; no component row is read)",
+      "unit": "ns",
+      "ours": 1.51289,
+      "ours_range": [
+        1.51127,
+        1.51985
+      ],
+      "ours_display": "1.513 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "query_state_iter/10000: 1.513 ns (min-max 1.511 ns - 1.52 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-query/query_state_iter/10000\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-query_state_iter-100000",
+      "category": "ecs_micro",
+      "title": "query_state_iter/100000",
+      "workload": "boyko_ecs bench query_iter, time per call: query_state_iter walks a cached QueryState's matching archetypes and sums their entity counts; query_find_into runs one archetype-registry scan. The id's number is n: the world holds n entities in each of two archetypes. Neither call reads a component row",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes; time per call of the timed body (an archetype walk or one registry scan; no component row is read)",
+      "unit": "ns",
+      "ours": 1.5168,
+      "ours_range": [
+        1.51251,
+        1.51802
+      ],
+      "ours_display": "1.517 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "query_state_iter/100000: 1.517 ns (min-max 1.513 ns - 1.518 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-query/query_state_iter/100000\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-query_find_into-1000",
+      "category": "ecs_micro",
+      "title": "query_find_into/1000",
+      "workload": "boyko_ecs bench query_iter, time per call: query_state_iter walks a cached QueryState's matching archetypes and sums their entity counts; query_find_into runs one archetype-registry scan. The id's number is n: the world holds n entities in each of two archetypes. Neither call reads a component row",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes; time per call of the timed body (an archetype walk or one registry scan; no component row is read)",
+      "unit": "ns",
+      "ours": 13.822,
+      "ours_range": [
+        13.755,
+        14.1659
+      ],
+      "ours_display": "13.82 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "query_find_into/1000: 13.82 ns (min-max 13.75 ns - 14.17 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-query/query_find_into/1000\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-query_find_into-10000",
+      "category": "ecs_micro",
+      "title": "query_find_into/10000",
+      "workload": "boyko_ecs bench query_iter, time per call: query_state_iter walks a cached QueryState's matching archetypes and sums their entity counts; query_find_into runs one archetype-registry scan. The id's number is n: the world holds n entities in each of two archetypes. Neither call reads a component row",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes; time per call of the timed body (an archetype walk or one registry scan; no component row is read)",
+      "unit": "ns",
+      "ours": 13.7815,
+      "ours_range": [
+        13.7336,
+        13.8809
+      ],
+      "ours_display": "13.78 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "query_find_into/10000: 13.78 ns (min-max 13.73 ns - 13.88 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-query/query_find_into/10000\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-query_find_into-100000",
+      "category": "ecs_micro",
+      "title": "query_find_into/100000",
+      "workload": "boyko_ecs bench query_iter, time per call: query_state_iter walks a cached QueryState's matching archetypes and sums their entity counts; query_find_into runs one archetype-registry scan. The id's number is n: the world holds n entities in each of two archetypes. Neither call reads a component row",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes; time per call of the timed body (an archetype walk or one registry scan; no component row is read)",
+      "unit": "ns",
+      "ours": 13.8052,
+      "ours_range": [
+        13.703,
+        13.9028
+      ],
+      "ours_display": "13.81 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "query_find_into/100000: 13.81 ns (min-max 13.7 ns - 13.9 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-query/query_find_into/100000\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-get_component_raw_hot",
+      "category": "ecs_micro",
+      "title": "get_component_raw_hot",
+      "workload": "boyko_ecs bench random_access: get / has / create / delete / dense iteration",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 5.23724,
+      "ours_range": [
+        5.22203,
+        5.23771
+      ],
+      "ours_display": "5.237 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "get_component_raw_hot: 5.237 ns (min-max 5.222 ns - 5.238 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-random/get_component_raw_hot\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-get_component_raw_cold",
+      "category": "ecs_micro",
+      "title": "get_component_raw_cold",
+      "workload": "boyko_ecs bench random_access: get / has / create / delete / dense iteration",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 1017750.0,
+      "ours_range": [
+        1016170.0,
+        1027280.0
+      ],
+      "ours_display": "1.018 ms",
+      "other": null,
+      "ratio": null,
+      "printed": "get_component_raw_cold: 1.018 ms (min-max 1.016 ms - 1.027 ms, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-random/get_component_raw_cold\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-get_component_typed",
+      "category": "ecs_micro",
+      "title": "get_component_typed",
+      "workload": "boyko_ecs bench random_access: get / has / create / delete / dense iteration",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 5.26513,
+      "ours_range": [
+        5.24327,
+        5.26919
+      ],
+      "ours_display": "5.265 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "get_component_typed: 5.265 ns (min-max 5.243 ns - 5.269 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-random/get_component_typed\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-has_entity",
+      "category": "ecs_micro",
+      "title": "has_entity",
+      "workload": "boyko_ecs bench random_access: get / has / create / delete / dense iteration",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 7.77893,
+      "ours_range": [
+        7.76265,
+        7.82707
+      ],
+      "ours_display": "7.779 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "has_entity: 7.779 ns (min-max 7.763 ns - 7.827 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-random/has_entity\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-iter_entities_dense_10k",
+      "category": "ecs_micro",
+      "title": "iter_entities_dense_10k",
+      "workload": "boyko_ecs bench random_access: get / has / create / delete / dense iteration",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 4966.9,
+      "ours_range": [
+        4966.89,
+        5010.15
+      ],
+      "ours_display": "4.967 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "iter_entities_dense_10k: 4.967 µs (min-max 4.967 µs - 5.01 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-random/iter_entities_dense_10k\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-delete_entity_10k",
+      "category": "ecs_micro",
+      "title": "delete_entity_10k",
+      "workload": "boyko_ecs bench random_access: get / has / create / delete / dense iteration",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 376953.0,
+      "ours_range": [
+        335475.0,
+        382960.0
+      ],
+      "ours_display": "377 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "delete_entity_10k: 377 µs (min-max 335.5 µs - 383 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-random/delete_entity_10k\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-create_entity_10k",
+      "category": "ecs_micro",
+      "title": "create_entity_10k",
+      "workload": "boyko_ecs bench random_access: get / has / create / delete / dense iteration",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 668540.0,
+      "ours_range": [
+        665400.0,
+        670298.0
+      ],
+      "ours_display": "668.5 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "create_entity_10k: 668.5 µs (min-max 665.4 µs - 670.3 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-random/create_entity_10k\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-event_send_warm_cache",
+      "category": "ecs_micro",
+      "title": "event_send_warm_cache",
+      "workload": "boyko_ecs bench event_dispatch: send / update / read",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 6891.96,
+      "ours_range": [
+        6593.91,
+        6925.05
+      ],
+      "ours_display": "6.892 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "event_send_warm_cache: 6.892 µs (min-max 6.594 µs - 6.925 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-events/event_send_warm_cache\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-event_update_events_1_type",
+      "category": "ecs_micro",
+      "title": "event_update_events_1_type",
+      "workload": "boyko_ecs bench event_dispatch: send / update / read",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 62.1863,
+      "ours_range": [
+        56.2382,
+        75.8078
+      ],
+      "ours_display": "62.19 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "event_update_events_1_type: 62.19 ns (min-max 56.24 ns - 75.81 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-events/event_update_events_1_type\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-event_read_iteration_1k",
+      "category": "ecs_micro",
+      "title": "event_read_iteration_1k",
+      "workload": "boyko_ecs bench event_dispatch: send / update / read",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 327.859,
+      "ours_range": [
+        322.987,
+        328.134
+      ],
+      "ours_display": "327.9 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "event_read_iteration_1k: 327.9 ns (min-max 323 ns - 328.1 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-events/event_read_iteration_1k\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-spawn_batch_10k_1comp",
+      "category": "ecs_micro",
+      "title": "spawn_batch_10k_1comp",
+      "workload": "boyko_ecs bench phase12_5_spawn_batch: spawn_batch of 10k entities with 1 and 3 components (this bench's own ids)",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 203305.0,
+      "ours_range": [
+        197306.0,
+        208981.0
+      ],
+      "ours_display": "203.3 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "spawn_batch_10k_1comp: 203.3 µs (min-max 197.3 µs - 209 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-spawn/spawn_batch_10k_1comp\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-spawn_batch_10k_3comp",
+      "category": "ecs_micro",
+      "title": "spawn_batch_10k_3comp",
+      "workload": "boyko_ecs bench phase12_5_spawn_batch: spawn_batch of 10k entities with 1 and 3 components (this bench's own ids)",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 373884.0,
+      "ours_range": [
+        370182.0,
+        381469.0
+      ],
+      "ours_display": "373.9 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "spawn_batch_10k_3comp: 373.9 µs (min-max 370.2 µs - 381.5 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-spawn/spawn_batch_10k_3comp\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-spawn_batch_direct_10k_1comp",
+      "category": "ecs_micro",
+      "title": "spawn_batch_direct_10k_1comp",
+      "workload": "boyko_ecs bench phase12_5_spawn_batch: spawn_batch of 10k entities with 1 and 3 components (this bench's own ids)",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 204231.0,
+      "ours_range": [
+        195431.0,
+        218153.0
+      ],
+      "ours_display": "204.2 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "spawn_batch_direct_10k_1comp: 204.2 µs (min-max 195.4 µs - 218.2 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-spawn/spawn_batch_direct_10k_1comp\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-component_ids_static_pin",
+      "category": "ecs_micro",
+      "title": "component_ids_static_pin",
+      "workload": "boyko_ecs bench phase12_5_spawn_batch: spawn_batch of 10k entities with 1 and 3 components (this bench's own ids)",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 0.645554,
+      "ours_range": [
+        0.64549,
+        0.648739
+      ],
+      "ours_display": "0.6456 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "component_ids_static_pin: 0.6456 ns (min-max 0.6455 ns - 0.6487 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-spawn/component_ids_static_pin\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ]
+    },
+    {
+      "id": "micro-ke16_par_iter_in_system-seq-4096",
+      "category": "ecs_micro",
+      "title": "ke16_par_iter_in_system/seq/4096",
+      "workload": "boyko_ecs bench ke16_par_iter_in_system (SECONDARY): 16 threads, 20 µs synthetic bodies - a regression receipt, never ECS iteration speed (the par_iter comparison with Bevy is g3)",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 81923800.0,
+      "ours_range": [
+        81923300.0,
+        81923900.0
+      ],
+      "ours_display": "81.92 ms",
+      "other": null,
+      "ratio": null,
+      "printed": "ke16_par_iter_in_system/seq/4096: 81.92 ms (min-max 81.92 ms - 81.92 ms, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-pariter/ke16_par_iter_in_system/seq/4096\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)",
+        "SECONDARY: 16 threads, 20 µs synthetic bodies; a regression receipt, never ECS iteration speed"
+      ]
+    },
+    {
+      "id": "micro-ke16_par_iter_in_system-par_from_dispatcher-4096",
+      "category": "ecs_micro",
+      "title": "ke16_par_iter_in_system/par_from_dispatcher/4096",
+      "workload": "boyko_ecs bench ke16_par_iter_in_system (SECONDARY): 16 threads, 20 µs synthetic bodies - a regression receipt, never ECS iteration speed (the par_iter comparison with Bevy is g3)",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 20596400.0,
+      "ours_range": [
+        20541300.0,
+        20598300.0
+      ],
+      "ours_display": "20.6 ms",
+      "other": null,
+      "ratio": null,
+      "printed": "ke16_par_iter_in_system/par_from_dispatcher/4096: 20.6 ms (min-max 20.54 ms - 20.6 ms, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-pariter/ke16_par_iter_in_system/par_from_dispatcher/4096\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)",
+        "SECONDARY: 16 threads, 20 µs synthetic bodies; a regression receipt, never ECS iteration speed"
+      ]
+    },
+    {
+      "id": "micro-ke16_par_iter_in_system-par_in_system-4096",
+      "category": "ecs_micro",
+      "title": "ke16_par_iter_in_system/par_in_system/4096",
+      "workload": "boyko_ecs bench ke16_par_iter_in_system (SECONDARY): 16 threads, 20 µs synthetic bodies - a regression receipt, never ECS iteration speed (the par_iter comparison with Bevy is g3)",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 20539700.0,
+      "ours_range": [
+        20538400.0,
+        20553300.0
+      ],
+      "ours_display": "20.54 ms",
+      "other": null,
+      "ratio": null,
+      "printed": "ke16_par_iter_in_system/par_in_system/4096: 20.54 ms (min-max 20.54 ms - 20.55 ms, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-pariter/ke16_par_iter_in_system/par_in_system/4096\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)",
+        "SECONDARY: 16 threads, 20 µs synthetic bodies; a regression receipt, never ECS iteration speed"
+      ]
+    },
+    {
+      "id": "micro-ke16_par_iter_in_system-seq-65536",
+      "category": "ecs_micro",
+      "title": "ke16_par_iter_in_system/seq/65536",
+      "workload": "boyko_ecs bench ke16_par_iter_in_system (SECONDARY): 16 threads, 20 µs synthetic bodies - a regression receipt, never ECS iteration speed (the par_iter comparison with Bevy is g3)",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 1310770000.0,
+      "ours_range": [
+        1310770000.0,
+        1310790000.0
+      ],
+      "ours_display": "1.311 s",
+      "other": null,
+      "ratio": null,
+      "printed": "ke16_par_iter_in_system/seq/65536: 1.311 s (min-max 1.311 s - 1.311 s, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-pariter/ke16_par_iter_in_system/seq/65536\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)",
+        "SECONDARY: 16 threads, 20 µs synthetic bodies; a regression receipt, never ECS iteration speed"
+      ]
+    },
+    {
+      "id": "micro-ke16_par_iter_in_system-par_from_dispatcher-65536",
+      "category": "ecs_micro",
+      "title": "ke16_par_iter_in_system/par_from_dispatcher/65536",
+      "workload": "boyko_ecs bench ke16_par_iter_in_system (SECONDARY): 16 threads, 20 µs synthetic bodies - a regression receipt, never ECS iteration speed (the par_iter comparison with Bevy is g3)",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 83836100.0,
+      "ours_range": [
+        83833200.0,
+        84255100.0
+      ],
+      "ours_display": "83.84 ms",
+      "other": null,
+      "ratio": null,
+      "printed": "ke16_par_iter_in_system/par_from_dispatcher/65536: 83.84 ms (min-max 83.83 ms - 84.26 ms, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-pariter/ke16_par_iter_in_system/par_from_dispatcher/65536\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)",
+        "SECONDARY: 16 threads, 20 µs synthetic bodies; a regression receipt, never ECS iteration speed"
+      ]
+    },
+    {
+      "id": "micro-ke16_par_iter_in_system-par_in_system-65536",
+      "category": "ecs_micro",
+      "title": "ke16_par_iter_in_system/par_in_system/65536",
+      "workload": "boyko_ecs bench ke16_par_iter_in_system (SECONDARY): 16 threads, 20 µs synthetic bodies - a regression receipt, never ECS iteration speed (the par_iter comparison with Bevy is g3)",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 83858500.0,
+      "ours_range": [
+        83707000.0,
+        84027000.0
+      ],
+      "ours_display": "83.86 ms",
+      "other": null,
+      "ratio": null,
+      "printed": "ke16_par_iter_in_system/par_in_system/65536: 83.86 ms (min-max 83.71 ms - 84.03 ms, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "21:35-21:51 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO, statement \"LAND-MICRO/LM-pariter/ke16_par_iter_in_system/par_in_system/65536\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)",
+        "SECONDARY: 16 threads, 20 µs synthetic bodies; a regression receipt, never ECS iteration speed"
+      ]
+    },
+    {
+      "id": "micro-enable_toggle",
+      "category": "ecs_micro",
+      "title": "enable_toggle",
+      "workload": "boyko_ecs bench enable_tags",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 18.977,
+      "ours_range": [
+        18.9564,
+        18.982
+      ],
+      "ours_display": "18.98 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "enable_toggle: 18.98 ns (min-max 18.96 ns - 18.98 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-enable/enable_toggle\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ],
+      "notes": [
+        "the third of the three processes ran inside the late-evening slowdown (section 1.5); the median is the middle of three"
+      ]
+    },
+    {
+      "id": "micro-query_iter_enabled",
+      "category": "ecs_micro",
+      "title": "query_iter_enabled",
+      "workload": "boyko_ecs bench enable_tags",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 45178.5,
+      "ours_range": [
+        44996.8,
+        45574.1
+      ],
+      "ours_display": "45.18 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "query_iter_enabled: 45.18 µs (min-max 45 µs - 45.57 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-enable/query_iter_enabled\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ],
+      "notes": [
+        "the third of the three processes ran inside the late-evening slowdown (section 1.5); the median is the middle of three"
+      ]
+    },
+    {
+      "id": "micro-enable_toggle_large_archetype",
+      "category": "ecs_micro",
+      "title": "enable_toggle_large_archetype",
+      "workload": "boyko_ecs bench enable_tags",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 18.9871,
+      "ours_range": [
+        18.9377,
+        19.0572
+      ],
+      "ours_display": "18.99 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "enable_toggle_large_archetype: 18.99 ns (min-max 18.94 ns - 19.06 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-enable/enable_toggle_large_archetype\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ],
+      "notes": [
+        "the third of the three processes ran inside the late-evening slowdown (section 1.5); the median is the middle of three"
+      ]
+    },
+    {
+      "id": "micro-query_ref_iter_10k",
+      "category": "ecs_micro",
+      "title": "query_ref_iter_10k",
+      "workload": "boyko_ecs bench query_dsl: the query DSL",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 10140.5,
+      "ours_range": [
+        10050.7,
+        10168.0
+      ],
+      "ours_display": "10.14 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "query_ref_iter_10k: 10.14 µs (min-max 10.05 µs - 10.17 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-dsl/query_ref_iter_10k\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ],
+      "notes": [
+        "the third of the three processes ran inside the late-evening slowdown (section 1.5); the median is the middle of three"
+      ]
+    },
+    {
+      "id": "micro-query_tuple_2_ref_iter_10k",
+      "category": "ecs_micro",
+      "title": "query_tuple_2_ref_iter_10k",
+      "workload": "boyko_ecs bench query_dsl: the query DSL",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 8343.4,
+      "ours_range": [
+        8340.18,
+        8490.91
+      ],
+      "ours_display": "8.343 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "query_tuple_2_ref_iter_10k: 8.343 µs (min-max 8.34 µs - 8.491 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-dsl/query_tuple_2_ref_iter_10k\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ],
+      "notes": [
+        "the third of the three processes ran inside the late-evening slowdown (section 1.5); the median is the middle of three"
+      ]
+    },
+    {
+      "id": "micro-query_mut_iter_10k",
+      "category": "ecs_micro",
+      "title": "query_mut_iter_10k",
+      "workload": "boyko_ecs bench query_dsl: the query DSL",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 8048.15,
+      "ours_range": [
+        7897.85,
+        8089.78
+      ],
+      "ours_display": "8.048 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "query_mut_iter_10k: 8.048 µs (min-max 7.898 µs - 8.09 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-dsl/query_mut_iter_10k\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ],
+      "notes": [
+        "the third of the three processes ran inside the late-evening slowdown (section 1.5); the median is the middle of three"
+      ]
+    },
+    {
+      "id": "micro-query_with_archetypal_filter_10k",
+      "category": "ecs_micro",
+      "title": "query_with_archetypal_filter_10k",
+      "workload": "boyko_ecs bench query_dsl: the query DSL",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 7787.1,
+      "ours_range": [
+        7761.18,
+        7890.64
+      ],
+      "ours_display": "7.787 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "query_with_archetypal_filter_10k: 7.787 µs (min-max 7.761 µs - 7.891 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-dsl/query_with_archetypal_filter_10k\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ],
+      "notes": [
+        "the third of the three processes ran inside the late-evening slowdown (section 1.5); the median is the middle of three"
+      ]
+    },
+    {
+      "id": "micro-query_archetype_transition_2x5k",
+      "category": "ecs_micro",
+      "title": "query_archetype_transition_2x5k",
+      "workload": "boyko_ecs bench query_dsl: the query DSL",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 10178.0,
+      "ours_range": [
+        10103.5,
+        10350.3
+      ],
+      "ours_display": "10.18 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "query_archetype_transition_2x5k: 10.18 µs (min-max 10.1 µs - 10.35 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-dsl/query_archetype_transition_2x5k\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ],
+      "notes": [
+        "the third of the three processes ran inside the late-evening slowdown (section 1.5); the median is the middle of three"
+      ]
+    },
+    {
+      "id": "micro-query_cold_construction",
+      "category": "ecs_micro",
+      "title": "query_cold_construction",
+      "workload": "boyko_ecs bench query_dsl: the query DSL",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 98345.7,
+      "ours_range": [
+        97846.7,
+        105207.0
+      ],
+      "ours_display": "98.35 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "query_cold_construction: 98.35 µs (min-max 97.85 µs - 105.2 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-dsl/query_cold_construction\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ],
+      "notes": [
+        "the third of the three processes ran inside the late-evening slowdown (section 1.5); the median is the middle of three"
+      ]
+    },
+    {
+      "id": "micro-query_init_state_50_archetypes",
+      "category": "ecs_micro",
+      "title": "query_init_state_50_archetypes",
+      "workload": "boyko_ecs bench query_dsl: the query DSL",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 451.475,
+      "ours_range": [
+        440.061,
+        528.378
+      ],
+      "ours_display": "451.5 ns",
+      "other": null,
+      "ratio": null,
+      "printed": "query_init_state_50_archetypes: 451.5 ns (min-max 440.1 ns - 528.4 ns, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-dsl/query_init_state_50_archetypes\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ],
+      "notes": [
+        "the third of the three processes ran inside the late-evening slowdown (section 1.5); the median is the middle of three"
+      ]
+    },
+    {
+      "id": "micro-ke16_solve_route-empty_schedule_control-29751",
+      "category": "physics_micro",
+      "title": "ke16_solve_route/empty_schedule_control/29751",
+      "workload": "boyko_physics bench ke16_solve_in_system: the contact solve over 29,751 contacts, by route",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 1170.92,
+      "ours_range": [
+        1156.8,
+        1306.27
+      ],
+      "ours_display": "1.171 µs",
+      "other": null,
+      "ratio": null,
+      "printed": "ke16_solve_route/empty_schedule_control/29751: 1.171 µs (min-max 1.157 µs - 1.306 µs, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-solve/ke16_solve_route/empty_schedule_control/29751\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ],
+      "notes": [
+        "the third of the three processes ran inside the late-evening slowdown (section 1.5); the median is the middle of three"
+      ]
+    },
+    {
+      "id": "micro-ke16_solve_route-single_threaded_o5-29751",
+      "category": "physics_micro",
+      "title": "ke16_solve_route/single_threaded_O5/29751",
+      "workload": "boyko_physics bench ke16_solve_in_system: the contact solve over 29,751 contacts, by route",
+      "workers": null,
+      "metric": "criterion's typical estimate (slope) per process; cell = median over K processes",
+      "unit": "ns",
+      "ours": 14360300.0,
+      "ours_range": [
+        14351700.0,
+        14842500.0
+      ],
+      "ours_display": "14.36 ms",
+      "other": null,
+      "ratio": null,
+      "printed": "ke16_solve_route/single_threaded_O5/29751: 14.36 ms (min-max 14.35 ms - 14.84 ms, K = 3)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-solve/ke16_solve_route/single_threaded_O5/29751\"",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)"
+      ],
+      "notes": [
+        "the third of the three processes ran inside the late-evening slowdown (section 1.5); the median is the middle of three"
+      ]
+    },
+    {
+      "id": "log-log-disabled-warn",
+      "category": "log_micro",
+      "title": "log_disabled_warn",
+      "workload": "boyko_log custom-main bench: a warn! call on a target switched off at run time",
+      "workers": null,
+      "metric": "the bench's own verdict line, per process",
+      "unit": null,
+      "ours": null,
+      "ours_range": null,
+      "other": null,
+      "ratio": null,
+      "printed": "log_disabled_warn: NO SUBJECT in all 3 processes: the disabled call costs what an empty loop costs; the gate folded and there is nothing to bound",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-log-disabled/log_disabled_warn\" (verdicts only)",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)",
+        "verdict words only: no median is printed for the boyko-log rows in this window"
+      ]
+    },
+    {
+      "id": "log-log-enabled-0args",
+      "category": "log_micro",
+      "title": "log_enabled_0args",
+      "workload": "boyko_log custom-main bench: an enabled log call with no arguments",
+      "workers": null,
+      "metric": "the bench's own verdict line, per process",
+      "unit": null,
+      "ours": null,
+      "ours_range": null,
+      "other": null,
+      "ratio": null,
+      "printed": "log_enabled_0args: PASS in all 3 processes (the bench's bound: 15 ns per call)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-log-enabled/log_enabled_0args\" (verdicts only)",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)",
+        "verdict words only: no median is printed for the boyko-log rows in this window"
+      ]
+    },
+    {
+      "id": "log-log-enabled-2u32",
+      "category": "log_micro",
+      "title": "log_enabled_2u32",
+      "workload": "boyko_log custom-main bench: an enabled log call with two u32 arguments",
+      "workers": null,
+      "metric": "the bench's own verdict line, per process",
+      "unit": null,
+      "ours": null,
+      "ours_range": null,
+      "other": null,
+      "ratio": null,
+      "printed": "log_enabled_2u32: PASS in all 3 processes (the bench's bound: 20 ns per call)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-log-enabled/log_enabled_2u32\" (verdicts only)",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)",
+        "verdict words only: no median is printed for the boyko-log rows in this window"
+      ]
+    },
+    {
+      "id": "log-log-enabled-str32",
+      "category": "log_micro",
+      "title": "log_enabled_str32",
+      "workload": "boyko_log custom-main bench: an enabled log call with a 32-byte string argument",
+      "workers": null,
+      "metric": "the bench's own verdict line, per process",
+      "unit": null,
+      "ours": null,
+      "ours_range": null,
+      "other": null,
+      "ratio": null,
+      "printed": "log_enabled_str32: PASS in all 3 processes (the bench's bound: 30 ns per call)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-log-enabled/log_enabled_str32\" (verdicts only)",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)",
+        "verdict words only: no median is printed for the boyko-log rows in this window"
+      ]
+    },
+    {
+      "id": "log-log-enabled-rate-once-fired",
+      "category": "log_micro",
+      "title": "log_enabled_rate_once_fired",
+      "workload": "boyko_log custom-main bench: a once-rate-limited call whose latch has already fired",
+      "workers": null,
+      "metric": "the bench's own verdict line, per process",
+      "unit": null,
+      "ours": null,
+      "ours_range": null,
+      "other": null,
+      "ratio": null,
+      "printed": "log_enabled_rate_once_fired: verdict not stable over the 3 processes (OVER BOUND, NO SUBJECT, NO SUBJECT)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-log-enabled/log_enabled_rate_once_fired\" (verdicts only)",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)",
+        "verdict words only: no median is printed for the boyko-log rows in this window"
+      ]
+    },
+    {
+      "id": "log-log-enabled-sampled-out",
+      "category": "log_micro",
+      "title": "log_enabled_sampled_out",
+      "workload": "boyko_log custom-main bench: a call that sampling suppresses",
+      "workers": null,
+      "metric": "the bench's own verdict line, per process",
+      "unit": null,
+      "ours": null,
+      "ours_range": null,
+      "other": null,
+      "ratio": null,
+      "printed": "log_enabled_sampled_out: PASS in all 3 processes (the bench's regression guard)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-log-enabled/log_enabled_sampled_out\" (verdicts only)",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)",
+        "verdict words only: no median is printed for the boyko-log rows in this window"
+      ]
+    },
+    {
+      "id": "log-downstream-code-warn",
+      "category": "log_micro",
+      "title": "downstream_code_warn",
+      "workload": "boyko_log custom-main bench: a warn! carrying a log code defined outside the engine (a downstream crate)",
+      "workers": null,
+      "metric": "the bench's own verdict line, per process",
+      "unit": null,
+      "ours": null,
+      "ours_range": null,
+      "other": null,
+      "ratio": null,
+      "printed": "downstream_code_warn: absolute PASS in all 3 processes (the bench's absolute bound: 18 ns per call)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-log-enabled/downstream_code_warn\" (verdicts only)",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)",
+        "verdict words only: no median is printed for the boyko-log rows in this window"
+      ]
+    },
+    {
+      "id": "log-sink-sustained-rate",
+      "category": "log_micro",
+      "title": "sink_sustained_rate",
+      "workload": "boyko_log custom-main bench: the text sink format",
+      "workers": null,
+      "metric": "the bench's own verdict line, per process",
+      "unit": null,
+      "ours": null,
+      "ours_range": null,
+      "other": null,
+      "ratio": null,
+      "printed": "sink_sustained_rate: PASS in all 3 processes (one verdict for both sink legs: the bench's regression guard on the binary format's speed-up over the text format)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-log-sink/sink_sustained_rate\" (verdicts only)",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)",
+        "verdict words only: no median is printed for the boyko-log rows in this window"
+      ]
+    },
+    {
+      "id": "log-sink-sustained-rate-binary",
+      "category": "log_micro",
+      "title": "sink_sustained_rate_binary",
+      "workload": "boyko_log custom-main bench: the binary sink format",
+      "workers": null,
+      "metric": "the bench's own verdict line, per process",
+      "unit": null,
+      "ours": null,
+      "ours_range": null,
+      "other": null,
+      "ratio": null,
+      "printed": "sink_sustained_rate_binary: PASS in all 3 processes (the same verdict as the text leg)",
+      "verdict": "DESCRIPTIVE",
+      "strong": null,
+      "k": 3,
+      "resolution_pct": null,
+      "window": null,
+      "launch": "launch 2 (run tag 195316)",
+      "date": "2026-10-09",
+      "time_local": "22:52-23:05 (UTC+03:00)",
+      "commit": "68ec9312",
+      "source": "window win-land, launch 2 (run tag 195316), block LAND-MICRO+, statement \"LAND-MICRO+/LM-log-sink/sink_sustained_rate_binary\" (verdicts only)",
+      "labels": [
+        "profile bench-shipped = the shipped [profile.release] codegen (fat LTO, x86-64-v3); one machine (Ryzen 9 5900HS, Windows 11, MSVC 1.98.1)",
+        "verdict words only: no median is printed for the boyko-log rows in this window"
+      ]
+    }
+  ],
+  "pending": [
+    {
+      "id": "pending-resting-pile",
+      "what": "boyko physics vs Jolt 5.6 and Rapier 0.36 on the resting pile (J-T, steps [100,500)) and on the landing (S-LAND, steps [0,100)), W 1-16",
+      "why": "measured in launch 1 while the Claude desktop app was active: every one of the 30 comparisons has a pass with fewer than 3 clean processes, and no Rapier pass reached 3 clean processes, so every Rapier cell is empty and no comparison and no resolution can be stated. The ours-only series from the same block is also withheld: its cells come from launch 1, mostly from one pass, inside the slowdown.",
+      "disclosure": "The resting-pile and landing comparisons against Jolt 5.6 and Rapier 0.36 were not measured cleanly in this window and are not shown."
+    },
+    {
+      "id": "pending-gpu-zones",
+      "what": "per-pass GPU zone timings (visibility-buffer and deferred passes) on one synthetic scene at 1920x1080",
+      "why": "one zone is bimodal across and within processes; every GPU process ran while the Claude desktop app was active, and nothing measured GPU contention; the display state was not recorded"
+    },
+    {
+      "id": "pending-microplus-10",
+      "what": "ten micro-benchmark ids: spawn_with_enable_tag/spawn_then_enable, spawn_with_enable_tag/plain_spawn, pob/load, decode_png_fixed_huffman/256x256, decode_png_fixed_huffman/1024x1024, ke16_solve_route/bench_thread_install/29751, ke16_solve_route/bench_thread_install_Wminus1/29751, decode_png_fixed_huffman/64x64, ke16_solve_route/in_scheduled_system/29751, pob/save",
+      "why": "their third process ran inside the late-evening slowdown and was more than 5 % slower than the mean of the first two"
+    },
+    {
+      "id": "pending-sleep-reconfirm",
+      "what": "sleeping on vs off (printed in section 2.3 with a note)",
+      "why": "measured inside the late-evening slowdown; the direction is robust, the two-decimal factors are re-confirmed in the owed window"
+    },
+    {
+      "id": "pending-s5",
+      "what": "an internal A/B of a broadphase change (S5)",
+      "why": "a development decision, not a published comparison; it was not cleared because its cells were short in every pass. No number from it is printed."
+    }
+  ],
+  "pending_owed": "One short measurement window with the Claude desktop app closed (not minimised): S5-AB, the resting-pile block, the second micro-benchmark set, the GPU block and the sleeping block, in one fresh launch.",
+  "not_measured": [
+    {
+      "what": "render frame time / FPS",
+      "why": "no frame-time harness exists; the only boyko_render bench times CPU-side UI packing and renders nothing"
+    },
+    {
+      "what": "other ECS engines: flecs, EnTT, hecs, legion, Unity DOTS",
+      "why": "no harness exists"
+    },
+    {
+      "what": "other physics engines: PhysX, Box2D / Box3D, Avian",
+      "why": "no harness exists"
+    },
+    {
+      "what": "Bevy 0.19",
+      "why": "the comparison uses bevy_ecs 0.18.1; 0.19 is newer and was not ported"
+    },
+    {
+      "what": "ECS shapes vs Bevy: add / remove component, despawn, fragmented iteration, change detection",
+      "why": "not compared in this window"
+    },
+    {
+      "what": "physics body-count scaling vs Jolt",
+      "why": "not compared in this window"
+    },
+    {
+      "what": "the shipping diagnostics profile (BOYKO_PROFILE=shipping)",
+      "why": "every boyko binary in this window was built with the default dev diagnostics profile (profiling zones compiled in)"
+    }
+  ],
+  "binaries": [
+    {
+      "what": "boyko physics runner (jolt_parity_pyramid, profile parity), built from d8320451, whose code equals 68ec9312",
+      "sha256": "8693116feb427880f1d2c152217854b35006530d26eec5b39367cfcc154645af"
+    },
+    {
+      "what": "Jolt 5.6.0 PerformanceTest with the parity patch v2 (MinGW g++ 16.1, Distribution, LTO)",
+      "sha256": "9df0990168bef31f6ba722ff6950b9b6bbfb5e9077a174d17c27c95eb0913a98"
+    },
+    {
+      "what": "Rapier 0.36.0 dynamic-scene harness, arm simd8",
+      "sha256": "c71f747042688c9558aaee2bdb8a0e7bfaf79642cd99c25d8621acd8274ebfeb"
+    },
+    {
+      "what": "Rapier 0.36.0 dynamic-scene harness, arm block",
+      "sha256": "5b0a1b60c23e3b34f6a16c3bf15ab4f591d3469d4805ad667dfa26cb06e5fb6b"
+    },
+    {
+      "what": "bench-bevy-vs-boyko bench comparison (g1-g4)",
+      "sha256": "decef42905a3203f9e839f936c7ff4b8d3df0a157ca2c8e8f0120a764bcc20b9"
+    },
+    {
+      "what": "bench-bevy-vs-boyko bench comparison_v2 (g2b, g5)",
+      "sha256": "0d1aa171981f3174a39cd962f79e48eabb82476abcdec2ba540de14e978dc09a"
+    },
+    {
+      "what": "bench-bevy-vs-boyko bench growth_crossing_pool (g8)",
+      "sha256": "76f357c7993dd44838a3cf8a2ad2ae0e69c3e8d6da97e1491fa9d054c5c74591"
+    },
+    {
+      "what": "bench-bevy-vs-boyko bench growth_crossing (g7)",
+      "sha256": "8d89991696dd57258433e163a62abcb219693823c152dd94a4abc1315c1120c2"
+    },
+    {
+      "what": "bench-bevy-vs-boyko bench g6_for_each_chunk (g6, g6b; nightly)",
+      "sha256": "71e420f3f2885b09b60f8d01b0434c6c27344f4b9e397253da6f0e79a931a4ae"
+    },
+    {
+      "what": "boyko-ecs bench phase9_scheduler",
+      "sha256": "ae5177baff3ad555d75bd6c8391f80c12e240d85a486f09b039fc2702699d3d9"
+    },
+    {
+      "what": "boyko-ecs bench app_overhead",
+      "sha256": "b112c360e2f593e78bddfeac1d944628fa2215d4bee91ca8e725e8ef233cf461"
+    },
+    {
+      "what": "boyko-ecs bench ecs_master_new",
+      "sha256": "aebe9d5ff884f5a20895c27ca5c66a921ec56da7bbdeb8fbc170ab3f205c8184"
+    },
+    {
+      "what": "boyko-ecs bench query_iter",
+      "sha256": "d33635bef92d87504ca078ebfe6fe1009c67316e2066fd09d85cdbaee3430371"
+    },
+    {
+      "what": "boyko-ecs bench random_access",
+      "sha256": "64294b60b5347c659b8139248fc90eb4321aa2a0e8d9cf763e97780f1a1f22a1"
+    },
+    {
+      "what": "boyko-ecs bench event_dispatch",
+      "sha256": "f9d1af5f9cc26a9a1271adb694258ce63a23f41558ee290f11b0f6d2938501d7"
+    },
+    {
+      "what": "boyko-ecs bench phase12_5_spawn_batch",
+      "sha256": "cd020b28eda6751fd35a80fdfa409ac2818fba99b8b8a6be8759c40cf9cdc93f"
+    },
+    {
+      "what": "boyko-ecs bench ke16_par_iter_in_system",
+      "sha256": "8ab45b3c93e4955995d36f983656e62469a5f1ff487575a0ce559e42002d89e9"
+    },
+    {
+      "what": "boyko-ecs bench enable_tags",
+      "sha256": "21df1c094c4f9759153920f2d70e4a39e1a029953cc4145922e2b14bd942f74b"
+    },
+    {
+      "what": "boyko-ecs bench query_dsl",
+      "sha256": "bffb9297ac443d81241839e0eba01898c7de0ae25592710b83d05ba4b618f0ff"
+    },
+    {
+      "what": "boyko-physics bench ke16_solve_in_system",
+      "sha256": "b55d9205373fe25ce939e738bc743bb96a65a6ab2bbd243607fc10670548bd68"
+    },
+    {
+      "what": "boyko-log bench log_disabled_cost",
+      "sha256": "36b1089bfb76d69b2310c1d4389d3c2ed8659b44540d79fd5a55df01024666eb"
+    },
+    {
+      "what": "boyko-log bench log_enabled_cost",
+      "sha256": "598541a5cb8a754cf4c96f2a37feb74e5723cba051d14e43e07d1712397a6577"
+    },
+    {
+      "what": "boyko-log bench sink_sustained_rate",
+      "sha256": "9832c6d63377d61edbeeda4dc8a75a6afafea6f7b8aea7fc9970da033c8ff787"
+    }
+  ]
+}

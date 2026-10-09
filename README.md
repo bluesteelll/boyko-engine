@@ -300,7 +300,27 @@ Apps, benchmarks, tools and test fixtures:
 
 ## Benchmarks
 
-Measured results, each with its date and commit: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Measured on one laptop (Ryzen 9 5900HS, Windows 11) on 2026-10-09 at commit `68ec9312`, with 9
+processes per cell under a quiet-machine protocol. Every result, its method and its caveats are in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md) ([machine-readable](docs/benchmarks.json)).
+
+- **Physics vs Jolt 5.6**, three dynamic scenes (kick, shoot, slide) at 1-16 worker threads, sleeping
+  off in both engines: boyko physics is 1.08 x to 1.18 x faster in 13 of 15 comparisons (claimed; 8
+  of them claimed STRONG). Slide at 8 and 16 threads shows no measurable difference at this
+  resolution (5.6 % and 5.2 %).
+- **Physics vs Rapier 0.36**, the same scenes: boyko physics is 1.39 x to 2.31 x **slower** in all
+  30 comparisons (claimed).
+- **ECS** vs bevy_ecs 0.18.1, both engines built in the shipped configuration (fat LTO, x86-64-v3),
+  Windows system heap: boyko_ecs is 2.86 x faster on 50 empty systems, 2.70 x faster growing one
+  archetype to 1 M entities (Bevy not pre-reserved) and 1.95 x faster growing 16 archetypes to 960k
+  entities (claimed STRONG). It is 1.67 x slower on direct 10k-row query iteration (claimed STRONG),
+  1.17 x slower on `spawn_batch` of 10k (claimed), and 5.89 x slower on a 10k-row query through a
+  system that the harness rebuilds every iteration (claimed STRONG; a harness artifact, explained in
+  the document).
+- **Not yet measured cleanly:** the resting-pile comparisons with Jolt and Rapier. **Not
+  benchmarked:** render frame time; no frame-time harness exists.
+
+To run the benchmarks yourself:
 
 - **Harnesses:** [`crates/boyko_ecs/benches`](crates/boyko_ecs/benches) (31 targets),
   [`crates/boyko_physics/benches`](crates/boyko_physics/benches) (17, including the

@@ -3,10 +3,13 @@
 > Where the benchmark harnesses live, which build profile each number belongs to, and where the
 > results are published.
 
-This book quotes no performance numbers. Measured results, each with the date and commit it was
-taken on, are published in
-[`docs/BENCHMARKS.md`](https://github.com/bluesteelll/boyko-engine/blob/master/docs/BENCHMARKS.md).
-The pages here describe designs and link to that file where a number would go.
+This book quotes no performance numbers. Measured results are published in
+[`docs/BENCHMARKS.md`](https://github.com/bluesteelll/boyko-engine/blob/master/docs/BENCHMARKS.md),
+with a machine-readable copy in
+[`docs/benchmarks.json`](https://github.com/bluesteelll/boyko-engine/blob/master/docs/benchmarks.json).
+Each result names its date, commit, machine and build profile, and how firmly the measurement
+protocol supports it. That file also lists what is still pending and what has no benchmark at all.
+The pages here describe designs and link to it where a number would go.
 
 ## Harnesses
 
@@ -48,6 +51,9 @@ A number is only meaningful together with the profile it was built with. The roo
 | `bench` | no LTO, `codegen-units = 1` | `cargo bench`. One codegen unit makes two builds of the same source lay out the same way, so A/B comparisons have low variance. It is **not** the shipped codegen. |
 | `parity` | inherits `release` | The Jolt parity runner, so it compares a shipped build against Jolt's shipped build. |
 | `bench-shipped` | inherits `release` | Timing a decision about the shipped codegen: `cargo bench --profile bench-shipped`. |
+
+The published physics comparisons use `parity`. The published ECS comparisons against `bevy_ecs` and
+the micro-benchmark absolutes use `bench-shipped`, for both engines.
 
 ## Running a benchmark
 
