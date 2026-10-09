@@ -113,10 +113,18 @@ jobs:
   # component — panicked at `reflect_absence_census.rs:484` with exactly that message, while the
   # `reflect-census` job, the same test on the same runner image WITH it, is not among that run's
   # four failed jobs. Here the trybuild failure above had stopped the run before either census.
+  #
+  # `--no-fail-fast` and `fail-fast: false` for the reason `CLAUDE.md` gives the flag: without it
+  # `cargo test` stops at the first failing target, so "green" means "green up to the first thing
+  # already known to be red". MEASURED 2026-10-09, CI run 37955724283: the debug leg stopped at
+  # `tests/reflect_ship_closure.rs`, target 407 of the 917 this selection builds, so the 510 behind
+  # it (every package after `boyko-engine`) have never run on Linux; and the matrix's default
+  # `fail-fast` then cancelled the release leg sixteen seconds later, before it reported anything.
   test:
     name: cargo test (${{ matrix.profile }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         profile: [debug, release]
     steps:
@@ -128,9 +136,9 @@ jobs:
       - name: cargo test (${{ matrix.profile }})
         run: |
           if [ "${{ matrix.profile }}" = "release" ]; then
-            cargo test --locked --workspace --all-targets --release --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
+            cargo test --locked --workspace --all-targets --no-fail-fast --release --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
           else
-            cargo test --locked --workspace --all-targets --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
+            cargo test --locked --workspace --all-targets --no-fail-fast --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
           fi
 
   # ---------------------------------------------------------------------------------------------
@@ -568,12 +576,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # `rust-src` and `llvm-tools`: the same `--workspace --all-targets` selection as the `test`
-      # job, trybuild suites and the two symbol censuses included — see the note on that job.
+      # job, trybuild suites and the two symbol censuses included — see the note on that job, which
+      # also says why `--no-fail-fast` (this job stopped at the same target 407 of 917 in run
+      # 37955724283).
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rust-src, llvm-tools
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked --workspace --all-targets --release --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
+      - run: cargo test --locked --workspace --all-targets --no-fail-fast --release --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
 
   miri:
     name: Miri
