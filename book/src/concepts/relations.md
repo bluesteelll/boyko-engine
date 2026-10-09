@@ -221,7 +221,7 @@ fn report(ecs: &EcsMaster, root: Entity, child: Entity) {
 
 ### Edge observers: `OnLink<R>` / `OnUnlink<R>`
 
-Two built-in [triggers](./hooks-and-observers.md), one monomorphization per relation `R`, fired on the **committed edge** at the apply window — never from the read-only hook body. Keying on the trigger's own type id gives the flecs `(R, *)` wildcard analogue for free, with no new dispatch path. [edge_observers.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/relationship/edge_observers.rs)
+Two built-in [triggers](./hooks-and-observers.md#custom-triggers--entity-observers), one monomorphization per relation `R`, fired on the **committed edge** at the apply window — never from the read-only hook body. Keying on the trigger's own type id gives the flecs `(R, *)` wildcard analogue for free, with no new dispatch path. [edge_observers.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/relationship/edge_observers.rs)
 
 - **`OnLink<R>`** fires after a new edge is committed (a fresh FK or the new side of a re-target). It targets the source; the payload `target` is the entity the source now points at. An edge that no-ops on a dead target never fires.
 - **`OnUnlink<R>`** fires after an edge is confirmed destroyed (remove, the old side of a re-target, a source despawn, or a non-cascading teardown). Its payload `old_target` is the entity the source used to point at. A *spurious* unlink (self-ref guard, missing link) never fires.
@@ -259,7 +259,7 @@ The fire is gated behind a cold `has_edge_observer` probe, so a world with no ed
 
 ### `Broadcast<R>` — `Down` propagation
 
-A custom trigger can fan **down** a relation: after firing on the target, it recurses over that relation's reverse collection, firing on every descendant. You declare the propagation shape and the broadcast relation on the [`Trigger`] impl:
+A [custom trigger](./hooks-and-observers.md#custom-triggers--entity-observers) (defining, firing and observing one is covered there) can fan **down** a relation: after firing on the target, it recurses over that relation's reverse collection, firing on every descendant. You declare the propagation shape and the broadcast relation on the [`Trigger`] impl:
 
 [`Trigger`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/observers/trigger.rs
 

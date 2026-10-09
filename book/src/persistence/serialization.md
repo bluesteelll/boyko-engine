@@ -216,11 +216,11 @@ fills the reserved regions: a `PlainOldBytes` column is blitted with a single
 `Ignore` column is skipped. No reallocation happens mid-fill. The save never
 mutates the world.
 
-The performance lever is the blit. On an array-heavy world, restoring the
-`[T; N]` array fast path (so transform/vector columns blit whole instead of
-encoding per row) measured roughly **8.7x faster save and 2.4x faster load**
-versus the per-row fallback — a relative figure for that specific workload, not
-an absolute throughput claim.
+The performance lever is the blit. On an array-heavy world, the `[T; N]` array
+fast path lets transform and vector columns blit whole instead of encoding per
+row, which makes both save and load substantially faster than the per-row
+fallback. Measured figures are on the [Benchmarks](../reference/benchmarks.md)
+page.
 
 ## Entity references survive a round-trip
 
@@ -311,10 +311,17 @@ What is shipped today:
 - `SerializeViaFn` encode/decode for owning, bit-restricted, and entity-bearing
   **plain-struct** components (every field `Wire`).
 - `CopyIntoWorld` + `Remap` load (fresh ids).
-- `ChildOf` / `#[entities]` entity remapping.
+- `ChildOf` / `#[entities]` entity remapping — in table **and** dense storage.
+  The load report counts remapped table rows and remapped dense slots
+  separately, so "no dense component opted in" is distinguishable from "the pass
+  missed dense storage".
 - Per-component `format_version` + layout-fingerprint version gating.
 - Fuzz-hardened, Miri-clean untrusted-input handling.
-- Dense (non-fragmenting) **plain-old-bytes** stores round-trip.
+- Dense (non-fragmenting) stores round-trip: plain-old-bytes columns by blit,
+  owning `SerializeViaFn` columns through their per-member decoder. A dense
+  column whose type has no decoder (or is `no_serialize`) is skipped on load
+  observably — counted in the report and logged with `boyko-W0901` — and the
+  owning entities stay valid without it.
 
 Deferred (recorded, not yet available — do not rely on them):
 
@@ -322,9 +329,10 @@ Deferred (recorded, not yet available — do not rely on them):
 - **`MmapInPlace`** — memory-mapped zero-copy load.
 - **Parallel** save/load and a byte-swapping endianness path. v1 is
   native-endian, 64-bit only.
-- **Owning dense stores** — a dense column of a `SerializeViaFn` type is
-  preserved on disk but skipped on load (counted in the report) until the
-  per-member dense decode path lands.
+- **Enable-tag flag state is not persisted.** An
+  [enable tag](../concepts/enable-tags.md) (`storage = "bitset"`) has no column
+  in the format: the saver never writes its bits, and a loaded entity comes back
+  with every enable bit clear. Re-apply flags after `load_world` if they matter.
 - **`enum` / `union` wire encoding** — a top-level `enum`/`union` component
   classified `SerializeViaFn` (and any component with an enum field) currently
   encodes zero bytes; the encoder is a later macro phase.

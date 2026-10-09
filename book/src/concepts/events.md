@@ -178,7 +178,8 @@ use boyko_ecs::ecs::core::events::event_config::EventConfig;
 fn build(app: &mut App, worker_count: u32) {
     // One lane per worker (ids 0..worker_count) plus the dispatcher lane at
     // index `worker_count`. `default_for` keeps the 1024-per-lane capacity.
-    // Bounds: thread_count in 1..=64, capacity_per_lane in 1..=16384.
+    // Bounds: thread_count in 1..=65 (one lane per pool worker plus one for a
+    // non-worker sender), capacity_per_lane in 1..=16384.
     let cfg = EventConfig::default_for(worker_count + 1)
         .expect("config within bounds");
 

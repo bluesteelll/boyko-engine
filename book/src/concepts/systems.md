@@ -125,6 +125,7 @@ narrows which entities match. See [Queries](queries.md) and
 
 ```rust,ignore
 use boyko_ecs::prelude::*;
+use boyko_ecs::ecs::core::iters::query::With; // filters are not in the prelude
 use boyko_macros::Component;
 
 #[derive(Component)]
@@ -142,14 +143,15 @@ fn report(q: Query<&Health, With<Player>>) {
 ```
 
 `Query` is the *only* common param that declares component access, so two systems
-that both write the same component are forced to run on different scheduler stages.
+that both write the same component never run concurrently.
 
 ### `Res<R>` / `ResMut<R>` — global data
 
 A [resource](resources.md) is a single shared value keyed by its type.
 `Res<R>` is a shared borrow (`Deref<Target = R>`); `ResMut<R>` is exclusive
 (`Deref` + `DerefMut`). Missing the resource is a loud panic, not a silent
-`None` — declare it during app setup.
+`None` — declare it during app setup, or ask for `Option<Res<R>>` /
+`Option<ResMut<R>>` when absence is a legal state (see below).
 
 ```rust,ignore
 use boyko_ecs::prelude::*;
@@ -172,6 +174,31 @@ fn tick(time: Res<Time>) {
 Resource access is part of the conflict graph: two systems holding `ResMut<Score>`
 never run concurrently; any number of `Res<Score>` readers do.
 
+### `Option<Res<R>>` / `Option<ResMut<R>>` — a resource that may be absent
+
+The optional form yields `None` instead of panicking when the resource was never
+inserted. It declares the same access as the bare param, so it is scheduled
+against writers exactly the same way.
+
+```rust,ignore
+use boyko_ecs::prelude::*;
+# use boyko_macros::Resource;
+# #[derive(Resource)] struct Score(u32);
+
+fn maybe_award(score: Option<ResMut<Score>>) {
+    if let Some(mut score) = score {
+        score.0 += 10;
+    }
+}
+```
+
+### `NonSendRes<R>` / `NonSendResMut<R>` — thread-bound data
+
+For a value that cannot cross threads (it implements `NonSendResource`, not
+`Resource`). A system that names either param runs exclusively, on the
+dispatcher thread. Both live in `boyko_ecs::ecs::core::system`, not the prelude.
+See [Non-`Send` resources](resources.md#non-send-resources).
+
 ### `Commands` — deferred structural change
 
 You cannot spawn, despawn, or add/remove components *during* a parallel run —
@@ -181,6 +208,8 @@ records the intent into a per-system byte arena and replays it later, in the
 
 ```rust,ignore
 use boyko_ecs::prelude::*;
+use boyko_ecs::ecs::core::iters::query::With;
+use boyko_ecs::ecs::core::system::Entities;
 use boyko_macros::{Bundle, Component};
 
 #[derive(Component)]
@@ -196,15 +225,26 @@ fn spawner(mut commands: Commands) {
     commands.spawn_empty();          // an entity with zero components
 }
 
-fn reaper(mut commands: Commands, q: Query<Entity, With<Position>>) {
-    for e in &q {
-        commands.entity(e).despawn();
+// `Entity` is not query data: iterate ids, then resolve them with `Entities`.
+fn reaper(mut commands: Commands, entities: Entities, q: Query<(), With<Position>>) {
+    for (id, ()) in q.iter_entities() {
+        if let Some(e) = entities.get(id) {
+            commands.entity(e).despawn();
+        }
     }
 }
 ```
 
 `Commands` declares **no** access, so a system using it stays freely parallel
 with everything else; the cost is paid once, serially, at the apply barrier.
+
+### `Entities` — resolve an id to a handle
+
+Query iteration yields `EntityId`s (an index, no generation), while commands,
+relations and events want a full `Entity`. `Entities::get(id)` returns the live
+`Entity` for an id, or `None` if the slot is empty. It reads only the entity
+store and declares no access, so it never blocks parallelism. Import it from
+`boyko_ecs::ecs::core::system::Entities`; it is not in the prelude.
 
 ### `EventReader<E>` / `EventWriter<E>` — message passing
 
@@ -294,13 +334,13 @@ Two rules govern what is legal:
   intra-system aliasing error and panics at build time (diagnostic `B0002`). Split
   the work, or merge into one query.
 - **Across systems, declared access decides parallelism.** Two systems whose
-  access surfaces are disjoint (or both read-only on every shared item) may run on
-  the same stage; a shared write forces them apart. You do not annotate this — it
+  access surfaces are disjoint (or both read-only on every shared item) may run
+  concurrently; a shared write means they never do. You do not annotate this — it
   falls out of the param types. See the [scheduler](../scheduler.md) for how the
   conflict graph is built.
 
-Because `Commands`, `EventReader`/`EventWriter`, and `Local` declare nothing, you
-can sprinkle them anywhere without ever shrinking the parallel set.
+Because `Commands`, `EventReader`/`EventWriter`, `Local`, and `Entities` declare
+nothing, you can sprinkle them anywhere without ever shrinking the parallel set.
 
 ---
 

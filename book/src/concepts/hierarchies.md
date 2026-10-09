@@ -132,15 +132,20 @@ or with `get_component`. It exposes a slice plus the usual length helpers
 ```rust,ignore
 use boyko_ecs::prelude::*;
 
-// Visit every parent and its direct children.
-fn print_children(q_parents: Query<(Entity, &Children)>) {
-    for (parent, children) in q_parents.iter() {
+// Visit every parent and its direct children. `Entity` is not query data:
+// `iter_entities` pairs each row with its `EntityId`.
+fn print_children(q_parents: Query<&Children>) {
+    for (parent_id, children) in q_parents.iter_entities() {
         for &child in children.as_slice() {
-            let _ = (parent, child); // ... do work per (parent, child) edge
+            let _ = (parent_id, child); // ... do work per (parent, child) edge
         }
     }
 }
 ```
+
+If you need the parent's full `Entity` handle (to despawn it or insert on it),
+add the [`Entities`](systems.md#entities--resolve-an-id-to-a-handle) param and
+call `entities.get(parent_id)`.
 
 Two properties worth internalising, both consequences of the storage choice:
 
@@ -151,8 +156,8 @@ Two properties worth internalising, both consequences of the storage choice:
   the parent keeps an empty `Children` (a 24-byte header over a zero-capacity
   `Vec`, no heap allocation). This is deliberate: a `0 ↔ 1 ↔ 0` child-count
   oscillation under remove-on-empty would migrate the parent's archetype on every
-  flip (a full byte-copy, ~590 ns class) versus an in-place `swap_remove`
-  (~90 ns class). Archetype-gated iteration skips an empty `Children` row at zero
+  flip (a full row byte-copy) instead of an in-place `swap_remove`.
+  Archetype-gated iteration skips an empty `Children` row at zero
   cost, so retaining it is free.
 
 ### Walking the whole subtree

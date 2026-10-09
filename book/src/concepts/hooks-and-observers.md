@@ -87,10 +87,9 @@ struct Enemy {
 }
 ```
 
-The derive accepts four keys, each taking a **function path**:
-`on_add = path`, `on_insert = path`, `on_replace = path`, `on_remove = path`.
-The derive does **not** accept `on_despawn` — that key is only available through
-the runtime builder (below). Each key may appear at most once, and all hooks must
+The derive accepts five hook keys, each taking a **function path**:
+`on_add = path`, `on_insert = path`, `on_replace = path`, `on_remove = path`,
+and `on_despawn = path`. Each key may appear at most once, and all hooks must
 live in a single `#[component(...)]` attribute.
 
 > **Import note.** The trait `Component` comes from
@@ -156,8 +155,8 @@ struct Pickup;
 
 ### Hooks at runtime: the builder
 
-When you cannot edit the component's definition (a foreign type) or you need
-`on_despawn`, register hooks at runtime through
+When you cannot edit the component's definition (a foreign type), register hooks
+at runtime through
 [`EcsMaster::register_component_hooks`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/observer_api.rs).
 It returns a chainable builder that commits when dropped (or on `.finish()`):
 
@@ -255,6 +254,92 @@ relevant flag bit, so there is no staleness panic. And because the registry is a
 field on each world's `ArchetypeMaster`, two `EcsMaster`s have **independent**
 observer sets.
 
+## Custom triggers & entity observers
+
+Lifecycle observers react to the engine's five structural events. A **custom
+trigger** is an event *you* define and fire, dispatched through the same observer
+machinery. Unlike [buffered events](events.md), a trigger runs **inline**: the
+`trigger` call runs every matching observer on the calling thread before it
+returns.
+
+### Defining and firing a trigger
+
+Any `'static` type becomes a trigger by implementing `Trigger`. The two
+associated types are required; the two constants have defaults:
+
+```rust,ignore
+use boyko_ecs::prelude::*; // Trigger, TriggerContext, TriggerFn, PropagationMode, ChildOf, propagate
+use boyko_ecs::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
+use boyko_ecs::ecs::core::component::observers::traversal::ChildOfTraversal;
+
+struct Damage { amount: u32 }
+
+impl Trigger for Damage {
+    // Optional: `PROPAGATION` defaults to `None` (target only),
+    // `AUTO_PROPAGATE` to `false`.
+    const PROPAGATION: PropagationMode = PropagationMode::Up;
+    type Traversal = ChildOfTraversal; // bubble from child to parent
+    type Broadcast = ChildOf;          // read only for `Down`
+}
+
+// A `TriggerFn` cannot capture; it reads the event through a raw pointer.
+unsafe fn on_damage(_world: DeferredEcsMaster<'_>, ctx: TriggerContext, ev: *const u8) {
+    // SAFETY: the trigger walk keeps the `Damage` value alive for this call.
+    let damage = unsafe { &*(ev as *const Damage) };
+    let _ = (damage.amount, ctx.target, ctx.original_target);
+    propagate(true); // keep bubbling to the parent
+}
+
+fn wire(ecs: &mut EcsMaster, enemy: Entity) {
+    ecs.observe::<Damage>(on_damage);                     // every target
+    ecs.observe_entity_event::<Damage>(enemy, on_damage); // only `enemy`
+    ecs.trigger(enemy, Damage { amount: 10 });            // fire now
+}
+```
+
+The firing order for `trigger::<E>(target, event)` is: the global observers for
+`E`, then the observers attached to `target`, then propagation. `trigger_global`
+runs only the global observers, with no target and no propagation.
+
+`TriggerContext` travels by value: `target` is the entity the event currently
+visits (it advances as the event bubbles), `original_target` is where it was
+fired, and `trigger_id` is the trigger type's dense id.
+
+### Propagation
+
+`Trigger::PROPAGATION` picks the shape:
+
+| Mode | Behaviour |
+|------|-----------|
+| `None` (default) | Fire on the target, with no automatic propagation. |
+| `Up` | After the target, hop one step at a time along `Traversal` — `ChildOfTraversal` for parents, or `Toward<R>` for any single-target relation — while propagation is on. `AUTO_PROPAGATE` sets the starting value; a runner turns it on or off with `propagate(true)` / `propagate(false)`. |
+| `Down` | After the target, fan out over `Broadcast`'s reverse collection (for `ChildOf`, every transitive child). The walk is cycle-safe and depth-capped; `propagate(false)` in a runner prunes that node's subtree. |
+
+The [Relations](relations.md) page shows a `Down` broadcast over `ChildOf`
+(section "`Broadcast<R>` — `Down` propagation"), and the built-in `OnLink<R>` /
+`OnUnlink<R>` edge triggers.
+
+### Entity-scoped observers
+
+Global observers fire for every entity. An **entity-scoped** observer fires only
+for one entity:
+
+| Call | Fires when |
+|------|------------|
+| `observe_entity_event::<E>(entity, runner)` | `trigger::<E>` targets `entity` |
+| `observe_entity(entity, kind, cid, runner)` | lifecycle `kind` happens to component `cid` on `entity` |
+| `observe_entity_on_despawn::<C>(entity, runner)` | typed sugar for the `Despawn` kind |
+| `commands.entity(e).observe::<E>(runner)` | the deferred form of `observe_entity_event`, from inside a system |
+
+The entity must be **live** when you attach: an observer on a reserved but not
+yet spawned entity, or on a dead one, never fires (a debug build asserts). An
+entity observer reacts only to events after attachment — never retroactively,
+and never at the entity's initial spawn.
+
+Every registration returns an `ObserverId`. `remove_observer_any(id)` removes a
+trigger observer or an entity-scoped observer; `remove_observer(id)` is the
+remover for the global lifecycle observers above.
+
 ## Ordering and the firing pipeline
 
 At every structural-op site the engine fires the per-component **hook first**,
@@ -324,9 +409,14 @@ no captured state to make thread-unsafe.
 
 - [Components](components.md) — defining the types hooks and observers attach to
 - [Hierarchies](hierarchies.md) — parent/child, built on these hooks
-- [Relations](relations.md) — the generic relationship system that hooks power
+- [Relations](relations.md) — the generic relationship system that hooks power,
+  and its `OnLink` / `OnUnlink` edge triggers
+- [Events](events.md) — buffered, frame-deferred messages (the polled
+  alternative to an inline trigger)
 - [Commands](commands.md) — the deferred structural-change API a callback queues into
 - [Change detection](../change_detection.md) — the sibling "0% when unused" mechanism
 - Source:
   [hooks/mod.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/hooks/mod.rs),
-  [observers/mod.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/observers/mod.rs)
+  [observers/mod.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/observers/mod.rs),
+  [observers/trigger.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/observers/trigger.rs),
+  [observer_api.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/observer_api.rs)

@@ -7,7 +7,9 @@ written Bevy before, the shape is familiar — `App::new()`, `add_plugins(...)`,
 happen and *what* the runtime costs.
 
 This page builds the smallest program that actually does something: one
-component, one spawned entity, and one system that queries and prints it.
+component, one spawned entity, and one system that queries and prints it. It
+assumes your crate already depends on `boyko-ecs` and `boyko-macros`; see
+[Installation](installation.md) for the `Cargo.toml` lines.
 
 ## The two import lines (read this first)
 
@@ -210,7 +212,7 @@ There are three ways to drive the loop, picked by how you own the clock:
 
 | Method | Behaviour | Use when |
 |--------|-----------|----------|
-| `run()` | Self-clocked; loops until a system sets `AppExit(true)`. | A standalone game loop. |
+| `run()` | Hands the app to an installed runner if there is one; otherwise self-clocked, looping until a system sets `AppExit(true)`. | A standalone game loop, headless or windowed. |
 | `run_n(frames)` | Self-clocked; runs exactly `frames` frames, then returns. | Examples, smoke tests, headless runs. |
 | `update()` | Runs exactly one frame, self-clocked. | An embedder (a windowing host, a renderer) that owns its own loop. |
 
@@ -234,6 +236,20 @@ fn quit_when_done(mut exit: ResMut<AppExit>) {
 panics on a missing resource, and checks the flag once per frame *after* the
 frame completes. (`run_n` and `update` do not read it — there is no exit branch
 on those paths.)
+
+### Installed runners
+
+A plugin can take over the loop with
+[`App::set_runner`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/app/app.rs).
+When a runner is installed, `run()` hands the app to it as its first action and
+returns the runner's `AppExit` unchanged. The runner then owns the lifecycle: it
+calls `finish()` itself, applies its own exit policy, and tears down before it
+returns. Without a runner, `run()` is the headless loop described above.
+
+The windowed host is the main user of this hook: `boyko_app`'s `EnginePlugins`
+installs a runner that opens the window, boots the GPU device and presents each
+frame. Your `main` still ends in `.run()`. See
+[Windowed Host](../app/windowed-host.md).
 
 ## Plugins: composing setup
 
@@ -299,6 +315,8 @@ startup system, query it in a frame system, and drive the loop with `run` /
   how `add_systems_cfg` builds the frame graph.
 - [Resources](../concepts/resources.md) — the `Time` / `FixedTime` clocks and
   other shared state.
+- [Windowed Host](../app/windowed-host.md) — `EnginePlugins`, the windowed
+  runner, and rendering.
 
 ## Source
 

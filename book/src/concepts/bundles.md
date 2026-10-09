@@ -68,9 +68,10 @@ What the derive will **reject** (each is a compile error, pinned to the struct):
 ## Spawning from a bundle
 
 `Commands::spawn` takes a bundle by value and returns an
-[`EntityCommands`](commands.md) handle you can chain on. The entity ID is minted
-synchronously from an atomic counter; the actual spawn is applied when the
-command queue flushes (`.id()` is valid immediately, the entity becomes
+[`EntityCommands`](commands.md) handle you can chain on. The entity ID is
+reserved synchronously from the world's entity reservoir — either a recycled id
+(whose generation may be above 0) or a fresh one. The actual spawn is applied
+when the command queue flushes (`.id()` is valid immediately, the entity becomes
 query-visible after the apply).
 
 ```rust,ignore
@@ -186,7 +187,7 @@ flowchart TD
 **Level 1 — per-type, process-global.** Each `#[derive(Bundle)]` impl owns one
 `static INFO: OnceLock<BundleStaticInfo>`. The first call mints a process-global
 `BundleTypeId`, sorts the component IDs into canonical order, and leaks the sorted
-slice into `'static` storage. Every later call is a single Acquire load (~2 ns).
+slice into `'static` storage. Every later call is a single Acquire load.
 Because this is keyed on the *type*, it is shared across threads and across
 `EcsMaster` instances — sorting and ID-minting happen at most once per bundle type
 per process.
@@ -196,9 +197,10 @@ per process.
 on each `EcsMaster`: a boxed `[OnceLock<BundleColumnRecord>; MAX_BUNDLE_TYPES]`
 indexed directly by `BundleTypeId`. A record holds the destination `ArchetypeId`
 plus the resolved per-component column IDs in canonical order. The first spawn of
-a bundle in a given world resolves the archetype and the column map (~1 µs);
-every subsequent spawn is a direct array index plus one `OnceLock::get` Acquire
-load (~3 ns) — no sort, no archetype lookup, no per-component map walk.
+a bundle in a given world resolves the archetype and the column map (a cold,
+one-time cost); every subsequent spawn is a direct array index plus one
+`OnceLock::get` Acquire load — no sort, no archetype lookup, no per-component map
+walk.
 
 For `spawn_batch`, this pays off per row. The column record is loaded **once at
 the top of the batch**, the destination capacity is grown once, and the write loop
@@ -254,7 +256,7 @@ copy runs. A leak on panic is the deliberate trade-off over UB.
 
 A bundle holds at most **16 components**
 ([`MAX_BUNDLE_ARITY`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/bundle/bundle.rs)),
-raised from 8 in Phase 22 because tags make wide bundles ordinary. The derive
+raised from 8 because tags make wide bundles ordinary. The derive
 rejects a 17th field at macro-expansion time
 ([`boyko_macros/src/bundle.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_macros/src/bundle.rs)),
 so the limit surfaces as a clear compile error rather than a runtime surprise.
@@ -269,10 +271,10 @@ wider archetype on apply, and the result is identical to a single fat bundle.
 
 | Operation | Cost | Notes |
 |-----------|------|-------|
-| First call to `static_info()` for a type | ~80 ns, once per process | mints `BundleTypeId`, sorts + leaks the ID slice |
-| Cached `static_info()` / `component_ids()` | ~2 ns | one `OnceLock` Acquire load |
-| First spawn of a bundle in a world | ~1 µs | resolves archetype + column record |
-| Warm spawn (cached) | ~3 ns metadata + per-field memcpy | direct `BundleTypeId` array index |
+| First call to `static_info()` for a type | cold, once per process | mints `BundleTypeId`, sorts + leaks the ID slice |
+| Cached `static_info()` / `component_ids()` | O(1) | one `OnceLock` Acquire load |
+| First spawn of a bundle in a world | cold, once per world | resolves archetype + column record |
+| Warm spawn (cached) | O(1) metadata + per-field memcpy | direct `BundleTypeId` array index |
 | `spawn_batch` of N | one resolve + N fixed-width writes | metadata amortised across the batch |
 
 ## See also

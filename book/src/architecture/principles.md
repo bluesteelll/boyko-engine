@@ -21,6 +21,7 @@ use boyko_macros::Component;  // the derive macro is NOT re-exported by the prel
 // ✅ Physics solver state is a dense component in the kernel — one contiguous
 //    buffer, iterated by the physics systems on the engine's own scheduler.
 #[derive(Component)]
+#[component(storage = "dense")]
 struct SolverBody {
     inv_mass: f32,
     linear_velocity: [f32; 3],
@@ -38,6 +39,8 @@ Why this is also the fast path: the kernel storage (`ComponentPool` on a `VmRese
 ## 1. Zero runtime overhead
 
 All abstractions are compile-time. Generic code is monomorphized into direct calls — no virtual dispatch, no dynamic lookup in hot paths.
+
+The ban is enforced mechanically: the workspace's `clippy.toml` lists `HashMap`, `HashSet`, `Mutex`, `RwLock`, `Rc` and `RefCell` under `disallowed-types`, and the workspace denies that lint, so using one fails `cargo clippy`. A justified exception (setup-time structure, a test oracle) carries an explicit `#[allow(clippy::disallowed_types)]` with a rationale comment.
 
 ```rust,ignore
 // ❌ Avoided in hot paths:
@@ -119,7 +122,7 @@ There are no `Mutex`, `RwLock`, `RefCell`, or `Rc` in hot paths. Parallelism is 
 
 No allocations in frame loops. Memory is reserved up front and committed on demand:
 
-- **Per-pool virtual reservation**: each `ComponentPool` owns its own `VmReservation`. At construction it reserves a large region of address space (a 1 GiB data target on 64-bit syscall arms) with **no commit charge and zero resident bytes** — the shared engine-wide arena was retired (Phase X.J); there is no single 64 MB region anymore.
+- **Per-pool virtual reservation**: each `ComponentPool` owns its own `VmReservation`. At construction it reserves a large region of address space (a 1 GiB data target on 64-bit syscall arms) with **no commit charge and zero resident bytes** — the shared engine-wide arena was retired; there is no single 64 MB region anymore.
 - **Lazy commit, stable addresses**: pages are committed on demand at the frontier of the reservation as rows are added. Growth is O(1) in live rows — no bytes are copied and previously returned pointers never move, so a column can grow mid-frame without invalidating any in-flight query pointer. There are no chunks (the `Chunk` type was removed); each pool is one dense contiguous buffer.
 - **Capacity hints**: internal vectors are sized from the start so they never reallocate on the hot path.
 

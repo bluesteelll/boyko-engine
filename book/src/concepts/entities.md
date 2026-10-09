@@ -105,6 +105,16 @@ For more than two components, or for spawning many at once, use `create_entity`
 `create_entity` by hand — a [`Bundle`](bundles.md) packs the component set for
 you, and `Commands` drives the common path.
 
+`create_entity_at(entity, archetype, components)` is the variant for a handle you
+already hold: it registers an `Entity` reserved earlier — for example with
+`Commands::reserve_entity` — instead of minting a new one. Call it from a custom
+[`Command`](commands.md#custom-commands-with-add)'s `apply`; the deferred spawn path uses
+it the same way.
+
+To copy an existing entity, the world also offers `clone_and_spawn`,
+`clone_and_spawn_with`, `clone_subtree`, and prefab capture with
+`capture_prefab` / `instantiate`. See [Cloning & Prefabs](cloning-and-prefabs.md).
+
 ### `spawn_empty`: an entity with zero components
 
 ```rust,ignore
@@ -166,9 +176,31 @@ fn poke(world: &mut EcsMaster, e: Entity) {
   row's `changed_tick`. Plain `&mut` would bypass that, so the API hands you the
   guard, not a bare reference.
 
-There is no separate "is this entity alive?" predicate on the direct API: a
-failed `get_component` *is* the liveness answer for the type you asked about. If
-you only need existence, ask for any component you know the entity carries.
+## Liveness and id lookup
+
+Two direct-API probes answer "is this handle still good?" without naming a
+component:
+
+```rust,ignore
+use boyko_ecs::prelude::*;
+
+fn check(world: &EcsMaster, e: Entity) {
+    // true iff the slot is live AND its generation matches the handle.
+    if world.has_entity(e) {
+        // ...
+    }
+
+    // Resolve a bare id (no generation) to the live handle, if any.
+    let current: Option<Entity> = world.get_entity(e.id());
+}
+```
+
+- `has_entity(entity)` reads one slot of the entity store and compares the
+  generation, so a stale handle answers `false`.
+- `get_entity(id)` turns an `EntityId` back into the full `Entity` of the slot's
+  current occupant, or `None` if the slot is empty. Inside a parallel system,
+  the [`Entities`](systems.md#entities--resolve-an-id-to-a-handle) system
+  parameter does the same lookup.
 
 ## Despawning
 
@@ -244,8 +276,11 @@ sequenceDiagram
 
 The slot-store and recycling internals — the address-stable
 [`InlandStore`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/inland_store.rs),
-the LIFO free list, the generation-on-deallocate bump — live in
-[`EntityMaster`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs).
+the generation-on-deallocate bump, and the
+[`EntityReservoir`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_reservoir.rs)
+that hands out recycled and fresh ids — live in
+[`EntityMaster`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
+and are described on [Entities & Generations](../architecture/entities-and-generations.md).
 For the wider picture of how storage kinds shape archetypes and churn, see
 [Storage Trade-offs](../architecture/storage-tradeoffs.md).
 
@@ -269,7 +304,8 @@ fn spawner(mut commands: Commands) {
     commands.spawn(Position { x: 0.0, y: 0.0 });
 }
 
-fn reaper(mut commands: Commands, e: Entity) {
+// `Entity` is not a system parameter: a helper takes it from its caller.
+fn reap(commands: &mut Commands, e: Entity) {
     commands.entity(e).despawn();
 }
 ```
@@ -285,6 +321,7 @@ See [Commands](commands.md) for the full deferred API and
 - [Components](components.md) — the data an entity points at
 - [Bundles](bundles.md) — packing a component set for spawning
 - [Commands](commands.md) — deferred spawn/despawn inside systems
+- [Cloning & Prefabs](cloning-and-prefabs.md) — copying entities and subtrees
 - [Queries](queries.md) — iterating entities by component set
 - [Change Detection](../change_detection.md) — the `Mut<T>` write-tracking guard
 - [Storage Trade-offs](../architecture/storage-tradeoffs.md) — how storage kinds shape archetypes and churn

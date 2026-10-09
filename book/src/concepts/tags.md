@@ -73,8 +73,8 @@ Two consequences of the Bundle emission worth knowing:
   const-assert error; `#[component(no_bundle)]` suppresses the emission and
   keeps the type usable as a plain component.
 
-Bundles accept up to **16 components** (`MAX_BUNDLE_ARITY`, raised from 8 in
-Phase 22 precisely because tags make wide bundles the norm).
+Bundles accept up to **16 components** (`MAX_BUNDLE_ARITY`, raised from 8
+precisely because tags make wide bundles the norm).
 
 ## Querying tags
 
@@ -156,10 +156,10 @@ archetype granularity, outside the row loop.
 
 ## Hooks and observers
 
-All four lifecycle hooks (`on_add`, `on_insert`, `on_replace`, `on_remove`) and
-all observers fire for tags exactly as for data components, at every structural
-site — spawn, insert, remove, despawn, migration, and the deferred `Commands`
-paths. The callback context carries `{ entity, component_id }`; no data pointer
+All five lifecycle hooks (`on_add`, `on_insert`, `on_replace`, `on_remove`,
+`on_despawn`) and all observers fire for tags exactly as for data components, at
+every structural site — spawn, insert, remove, despawn, migration, and the
+deferred `Commands` paths. The callback context carries `{ entity, component_id }`; no data pointer
 existed in the ABI to go invalid.
 
 ```rust,ignore
@@ -175,7 +175,7 @@ fire.
 
 ## Tag-only and empty entities
 
-Entities may hold **zero components** (Phase 22 D5). Removing the last
+Entities may hold **zero components**. Removing the last
 component does not despawn the entity — it migrates it into the *empty
 archetype*, where it stays alive and addressable:
 

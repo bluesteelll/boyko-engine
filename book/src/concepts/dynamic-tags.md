@@ -111,23 +111,25 @@ fn tick_poison(q: Query<&mut Health>, poisoned: Res<PoisonTag>) {
 Properties of tag terms:
 
 - **Archetype granularity, resolved once per epoch.** Terms resolve **once
-  per epoch at the driver entry** (Phase 22.1), not per archetype transition
+  per epoch at the driver entry**, not per archetype transition
   and never per row. The first driver call builds a memoised, term-filtered
   `&[ArchetypeId]` slice; the iteration cursors and the chunk/par drivers then
   walk that pre-resolved slice carrying **zero** term code. The bit-test (at
   most eight signature-bit tests per matched archetype) runs once, during that
-  per-epoch prefilter build — plus on each point lookup in `QueryView::get` /
-  `get_mut`, where a prefilter cannot help a single in-hand archetype. With no
+  per-epoch prefilter build — plus on each point lookup (`get` / `get_mut` and
+  friends), where a prefilter cannot help a single in-hand archetype. With no
   terms set, the driver takes the shared pre-terms slice through one predicted
   not-taken branch — the inner row loop is byte-identical to a term-free query.
 - **Honored by every iteration driver** (both `Query` and `QueryView`):
   `iter`/`iter_mut`, `iter_entities`/`iter_entities_mut`,
   `par_iter`/`par_iter_mut`, `for_each_chunk`/`par_for_each_chunk`, and the
   `archetype_count`/`is_empty` accessors.
-- **Point lookups are `QueryView`-only.** `single`/`single_mut` and
-  `get`/`get_mut` exist on `QueryView` (the direct API) only — the `Query`
-  SystemParam has no point-lookup methods. On the lookup path the term test
-  runs per call against the in-hand archetype.
+- **Point lookups apply the terms too, on both shapes.** `get`/`get_mut` and
+  `single`/`single_mut` exist on `Query` and `QueryView`, and `Query` adds
+  `contains` and `first`. A lookup answers exactly as iteration would: an
+  entity whose archetype fails a term is `None`. On the lookup path the term
+  test runs per call against the in-hand archetype. See
+  [Point lookups](queries.md#point-lookups--get--get_mut--contains--first--single--single_mut).
 - **Ceiling: 8 terms** per query (`MAX_DYN_TAG_TERMS`), `with_tag` +
   `without_tag` combined. Exceeding it is a loud, release-active panic at
   term-add time (setup), never a silent truncation.
