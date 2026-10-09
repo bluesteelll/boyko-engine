@@ -110,7 +110,7 @@ prop       = "material" ":" IDENT | "children" ":" "[" node ("," node)* ","? "]"
 | `event` | UpperCamel | `}` | `#[::boyko_macros::event] pub struct` | no | [↓](#event) |
 | `system` | snake_case | `}` | `pub fn` with the desugared signature | only if it has a clause | [↓](#system) |
 | `plugin` | UpperCamel | `;` | `pub struct` + `impl Plugin` holding every sibling registration | — | [↓](#plugin) |
-| `machine` | UpperCamel | `}` | flat `States` enum + one transition fn per (leaf, event) | **yes** | [↓](#machine) |
+| `machine` | UpperCamel | `}` | a `boyko_macros::state_chart!` invocation → flat `States` enum + one system per leaf | **yes** | [↓](#machine) |
 | `material` | lowercase | `}` | `#[inline] pub fn` over `Material::new` / `with_textures` | no | [↓](#material) |
 | `scene` | lowercase | `}` | `pub fn` spawning the declared world | no | [↓](#scene) |
 
@@ -938,9 +938,9 @@ impl ::boyko_ecs::Plugin for Movement {
 
 | # | Contents | Ordering rule |
 |---|---|---|
-| 1 | per `machine`: `app.insert_state(M::InitialLeaf);` then, **only if the initial-enter chain has an `enter` body**, `app.add_startup_system(__aether_<machine>_…);` | machine declaration order |
+| 1 | per `machine`: `__state_chart_install_<snake(M)>(app);` — the generated fn calls `app.insert_state(M::InitialLeaf);` then, **only if the initial-enter chain has an `enter` body**, `app.add_startup_system(__state_chart_<snake(M)>__initial_enter);` | machine declaration order |
 | 2 | `app.add_startup_system(f);` for every `on startup` system **and** for every `scene` spawn fn | one pass over `block.constructs` — the two kinds **interleave by declaration order**, so a scene declared before a startup system spawns before it runs |
-| 3 | `b.add_system(f)…;` for every Update-bucket system, then every machine's transition registrations `b.add_system(__aether_…).run_if(in_state(M::Leaf));` | systems first, [topologically sorted](#topological-sort); machine registrations appended afterwards, in machine declaration order |
+| 3 | `b.add_system(f)…;` for every Update-bucket system, then per machine `__state_chart_systems_<snake(M)>(b);`, which registers each leaf system with `.run_if(in_state(M::Leaf))` | systems first, [topologically sorted](#topological-sort); machine registrations appended afterwards, in machine declaration order |
 | 4 | `b.add_system(f)…;` for every Fixed-bucket system | topologically sorted |
 
 Not collected by the plugin: `component`, `tag`, `bundle`, `event`, and `material`. A sibling
@@ -1032,14 +1032,16 @@ source.
 
 ### The arity allow
 
-`expand.rs::arity_allow()` emits a bare `#[allow(clippy::too_many_arguments)]`, attached to exactly
-**three** generated fn kinds — the ones whose arity the user controls:
+A bare `#[allow(clippy::too_many_arguments)]` is attached to exactly **three** generated fn kinds —
+the ones whose arity the user controls. Aether's `expand.rs::arity_allow()` emits it on `system`
+fns; `boyko_macros::state_chart!`, which a `machine` lowers to, emits its own copy on the two
+machine kinds:
 
 | Generated fn | Carries the allow | Site |
 |---|---|---|
 | `system` fn | **yes** | `system_fn` |
-| machine transition fn (`__aether_<machine>__<leaf>__<event>`) — merges the params of every handler it inlines | **yes** | `transition_fn` |
-| machine initial-enter chain fn | **yes** | `initial_enter_fn` |
+| machine leaf system (`__state_chart_<machine>__<leaf>`) — merges the params of every route on that leaf | **yes** | `state_chart::emit::leaf_fn` |
+| machine initial-enter chain fn | **yes** | `state_chart::emit::initial_enter_fn` |
 | `material` builder fn | no — nullary by construction | `material_fn` |
 | `scene` spawn fn | no — demand-driven, at most four params | `scene_fn` |
 | `plugin` struct / `Plugin` impl | n/a | `plugin_impl` |
@@ -1114,12 +1116,14 @@ capture ahead of its referrer.
 ## `machine`
 
 A `machine` declares a Harel-lite chart: composite states, entry/exit actions, guarded event
-transitions. **The hierarchy exists only inside the transpiler.** At expansion the chart is flattened
-to one `enum` of leaf states, superstate handlers are copied down into the leaves, and each
-`(leaf, event)` pair becomes one ordinary system gated by `run_if(in_state(leaf))`. Nothing walks a
-hierarchy at run time and no new runtime type is introduced — the output is `States`, `State<S>`,
-`NextState<S>`, `EventReader<E>` and `in_state`, all pre-existing kernel machinery. Narrative:
-[State machines](state-machines.md).
+transitions. **The hierarchy exists only at compile time.** Aether parses the `machine` grammar,
+de-sugars every param to a real Rust type, and emits a `::boyko_macros::state_chart!` invocation with
+the user's tokens and spans; `state_chart!` owns the flattening. The chart becomes one `enum` of leaf
+states, superstate handlers are copied down into the leaves, and each leaf with at least one route
+becomes **one** ordinary system gated by `run_if(in_state(leaf))`, holding all of that leaf's routes.
+Nothing walks a hierarchy at run time and no new runtime type is introduced — the output is `States`,
+`State<S>`, `NextState<S>`, `EventReader<E>` and `in_state`, all pre-existing kernel machinery.
+Narrative: [State machines](state-machines.md).
 
 ```ebnf
 machine     = "machine" IDENT "{" "initial" IDENT ";" state* "}" ;
@@ -1192,16 +1196,18 @@ any leaf's walk reaches it. This is deliberate: the per-leaf inheritance walk sk
 state shadows, and the retargeting walk only visits states something targets, so under lazy
 resolution a typo in an unreachable name expanded clean.
 
-**Innermost wins.** For each leaf, `MachineModel::build` walks the ancestor chain innermost-first
-(leaf, parent, …, root). The first handler seen for a given event key wins; later (outer) handlers for
-the same event are dropped for that leaf. The dedup key is `path_key` — the event path's whole token
-spelling with whitespace removed — so `a::E` and `b::E` are *different* events for inheritance even
-though they collapse to the same generated fn-name half (which is then its own refusal).
+**Innermost wins.** For each leaf, `state_chart!`'s `build_routes` walks the ancestor chain
+innermost-first (leaf, parent, …, root). The first handler seen for a given event key wins; later
+(outer) handlers for the same event are dropped for that leaf. The dedup key is `path_key` — the event
+path's whole token spelling with whitespace removed — so `a::E` and `b::E` are *different* events for
+inheritance, and both become routes (two readers) of the leaf's one system.
 
-The resulting route list is then **re-sorted by `TransitionDef::decl_index`**, the parser's running
-source-order counter across the whole machine body, nested states included. The innermost-first walk
-order is what resolves inheritance; declaration order is what determines registration order, and the
-two are not the same.
+The resulting route list is then **re-sorted by declaration order**, the running source-order index
+across the whole machine body, nested states included. The innermost-first walk order is what
+resolves inheritance; declaration order is what decides **arbitration** (the first-declared accepting
+route wins), and the two are not the same. Aether re-emits each state's handlers and nested states in
+their original interleaving (`TransitionDef::decl_index`), so the order `state_chart!` sees is the
+order you wrote.
 
 ### Emitted items
 
@@ -1212,55 +1218,78 @@ Emitted in this order, spanned at the machine's own name (each generated fn keep
 | flat enum | `#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)] pub enum M { … }` | always |
 | marker impl | `impl ::boyko_ecs::ecs::core::state::States for M {}` | always |
 | predicates | `impl M { #[inline] pub const fn in_<snake(cat)>(self) -> bool { matches!(self, Self::A \| Self::B) } }` | one per **composite**; the `impl` block is omitted when the machine has no composites |
-| initial-enter | `fn __aether_<snake(M)>__initial_enter(merged params) { … }` | only if some state on the initial leaf's ancestor path declares `enter` |
-| transition fns | `fn __aether_<snake(M)>__<snake(leaf_cat)>__<snake(last event segment)>(…)` | one per (leaf, inherited event) |
+| initial-enter | `fn __state_chart_<snake(M)>__initial_enter(merged params) { … }` | only if some state on the initial leaf's ancestor path declares `enter` |
+| leaf systems | `fn __state_chart_<snake(M)>__<snake(leaf_cat)>(…)` | one per leaf that has at least one route |
+| install fn | `pub fn __state_chart_install_<snake(M)>(app: &mut App)` (`#[doc(hidden)]`) | always |
+| systems fn | `pub fn __state_chart_systems_<snake(M)>(b: &mut ScheduleBuilder)` (`#[doc(hidden)]`) | always |
 
-The enum is `pub`; the generated fns are **private** (`fn`, not `pub fn`) — the sibling plugin's
-`build` is emitted into the same module and references them there. All generated fns carry
+The enum is `pub`; the leaf systems and the initial-enter fn are **private** (`fn`, not `pub fn`) — the
+sibling plugin's `build` is emitted into the same module and reaches them only through the two `pub`
+registration fns. The leaf systems and the initial-enter fn carry
 `#[allow(clippy::too_many_arguments)]`. The composite predicate is emitted per composite even when two
 composites cover the same leaf set (`in_world` and `in_world_field` are both emitted for a two-level
 chain over the same two leaves).
 
-### The transition system
+### The leaf system
+
+One system per leaf, with one route per inherited event, in declaration order. For `Playing.Running`
+of the [narrative chart](state-machines.md#a-chart-and-its-flattening) the routes are `PausePressed`
+then the inherited `PlayerDied`:
 
 ```rust,ignore
 #[allow(clippy::too_many_arguments)]
-fn __aether_game_flow__playing_running__player_died(
-    mut __aether_ev:   ::boyko_ecs::ecs::core::system::EventReader<PlayerDied>,
-    mut __aether_next: ::boyko_ecs::ecs::core::system::ResMut<
-                           ::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
-    score: ::boyko_ecs::ecs::core::system::Res<Score>,     // transition params
+fn __state_chart_game_flow__playing_running(
+    mut __sc_ev_0: ::boyko_ecs::ecs::core::system::EventReader<PausePressed>,
+    mut __sc_ev_1: ::boyko_ecs::ecs::core::system::EventReader<PlayerDied>,
+    mut __sc_next: ::boyko_ecs::ecs::core::system::ResMut<
+                       ::boyko_ecs::ecs::core::state::NextState<GameFlow>>,
+    score: ::boyko_ecs::ecs::core::system::Res<Score>,     // route params
     mut cmds: ::boyko_ecs::ecs::core::system::Commands,    // exit/enter handler params
 ) {
-    let mut __aether_fire = false;
-    for _ in __aether_ev.read() {
-        if !__aether_fire && (score.lives == 0) { __aether_fire = true; }   // guard
+    let mut __sc_route: u32 = 0;
+    {
+        let mut __sc_hit = false;
+        for _ in __sc_ev_0.read() { __sc_hit = true; }                      // no guard
+        if __sc_hit && __sc_route == 0 { __sc_route = 1; }
     }
-    if __aether_fire {
-        { /* exit bodies, innermost-first  */ }
-        { /* the action block              */ }
-        { /* enter bodies, outermost-first */ }
-        *__aether_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::GameOver);
+    {
+        let mut __sc_hit = false;
+        for _ in __sc_ev_1.read() {
+            if !__sc_hit && (score.lives == 0) { __sc_hit = true; }          // guard
+        }
+        if __sc_hit && __sc_route == 0 { __sc_route = 2; }
+    }
+    match __sc_route {
+        1 => { *__sc_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::PlayingPaused); }
+        2 => {
+            { /* exit bodies, innermost-first  */ }
+            { /* the action block              */ }
+            { /* enter bodies, outermost-first */ }
+            *__sc_next = ::boyko_ecs::ecs::core::state::NextState::Pending(GameFlow::GameOver);
+        }
+        _ => {}
     }
 }
 ```
 
-Fixed prefix, always: `__aether_ev: EventReader<E>` then `__aether_next: ResMut<NextState<M>>`. Merged
-params follow. Without a guard the loop body is bare `__aether_fire = true;`.
+Fixed prefix, always: one `__sc_ev_<i>: EventReader<E>` per route (0-based, declaration order), then
+`__sc_next: ResMut<NextState<M>>`. Merged params follow. Without a guard a route's loop body is bare
+`__sc_hit = true;`.
 
-**Drain-then-act.** The loop always runs to completion; it only *remembers* that one event was
-accepted. The exit/action/enter chain and the `NextState` write happen once, after the drain. This is
-§5.1's "one transition per machine per frame — the remainder observed and discarded", and it is
-load-bearing rather than stylistic: the kernel's `EventIter` advances the cursor only past events it
-*yielded*, so a `return`-in-loop shape would leave the frame's remaining events unread, and the next
+**Drain, arbitrate, act.** Every route's loop always runs to completion; each only *remembers* that
+one of its events was accepted. `__sc_route` records the first-declared route that accepted, and the
+`match` runs that one route's exit/action/enter chain and its `NextState` write, once. Draining every
+lane is load-bearing rather than stylistic: the kernel's `EventIter` advances the cursor only past
+events it *yielded*, so stopping early would leave the frame's remaining events unread, and the next
 frame would re-read them and fire a second transition. Pinned by
-`two_same_frame_events_produce_exactly_one_transition`, which reads `2` under the `return` shape.
+`two_same_frame_events_produce_exactly_one_transition` (one event type) and
+`two_events_on_one_leaf_in_one_frame_run_exactly_one_chain` (two types, `r2_chart_arbitration.rs`).
 
-**Guard evaluation.** `!__aether_fire &&` short-circuits, so a guard is evaluated once per event
-*until one passes*, and never against the events being discarded. A failing guard consumes the event
-but does not fire the transition and runs no action.
+**Guard evaluation.** `!__sc_hit &&` short-circuits, so a route's guard is evaluated once per event
+*until one passes*, and never against that route's remaining events. A losing route's guard still runs,
+because its lane must be drained. A failing guard consumes the event but does not accept the route.
 
-**The event payload is not bound.** The drain is `for _ in __aether_ev.read()` — guards and actions
+**The event payload is not bound.** The drain is `for _ in __sc_ev_<i>.read()` — guards and actions
 can read resources, queries and locals, but **not the event's own fields**. There is no grammar for
 naming the event value in v1.
 
@@ -1294,19 +1323,21 @@ emit empty blocks. Consequences that fall out of the rule and are pinned by test
 
 ### Parameter merging
 
-The transition fn's signature is `merge_params` over, in order: the transition's own params, then each
-exit handler's params (innermost-first), then each enter handler's params (outermost-first). The
-initial-enter fn merges the `enter` params of the whole ancestor chain, outermost-first.
+The leaf system's signature is `merge_params` over, route by route in declaration order: the route's
+own params, then each exit handler's params on its chain (innermost-first), then each enter handler's
+params (outermost-first). The initial-enter fn merges the `enter` params of the whole ancestor chain,
+outermost-first.
 
 - Dedup is **by param name**.
 - A name reused at a **different emitted type** is a hard fault, with both spans.
-- The *first* occurrence is what gets emitted, so the first binding's explicit `mut` spelling wins for
-  a name declared twice at one type.
+- `mut` merges by union: one site needing a mutable binding makes the merged binding mutable.
 - Because the merge is one flat signature, an **action block may reference a binding declared by an
-  `enter`/`exit` handler on the transition's chain** — `a4_machine_hierarchy.rs` relies on this.
+  `enter`/`exit` handler on the leaf** — `a4_machine_hierarchy.rs` relies on this.
+- The merge spans **every route on the leaf**, so a name reused at two types by two different routes
+  of one leaf is refused too.
 
-Site strings appear verbatim in the diagnostic: `this transition's merged enter/exit/action handlers`,
-or ``the initial state's merged `enter` chain``.
+Site strings appear verbatim in the diagnostic: `this leaf's merged routes`, or ``the initial state's
+merged `enter` chain``.
 
 ### The initial-enter startup chain
 
@@ -1315,7 +1346,7 @@ transitioned into. So the `enter` bodies along the initial leaf's whole ancestor
 **one** startup system, outermost-first, with their params merged:
 
 ```rust,ignore
-fn __aether_sim__initial_enter(
+fn __state_chart_sim__initial_enter(
     mut cmds: ::boyko_ecs::ecs::core::system::Commands,
     mut log:  ::boyko_ecs::ecs::core::system::ResMut<Probe>,
 ) {
@@ -1337,17 +1368,13 @@ Order inside the emitted `Plugin::build` body — the general shape is in
 ```rust,ignore
 impl ::boyko_ecs::Plugin for Flow {
     fn build(&self, app: &mut ::boyko_ecs::App) {
-        // 1. per machine, in block order:
-        app.insert_state(GameFlow::Boot);                            // the resolved INITIAL LEAF
-        app.add_startup_system(__aether_game_flow__initial_enter);   // if the chain has a body
+        // 1. per machine, in block order — insert_state + the initial-enter startup system:
+        __state_chart_install_game_flow(app);
         // 2. sibling `system … on startup` and `scene` spawn fns, in block source order
         // 3. the Main bucket:
         app.add_systems_cfg(|b| {
             // sibling systems' own registrations first, then per machine:
-            b.add_system(__aether_game_flow__boot__assets_ready)
-                .run_if(::boyko_ecs::ecs::core::schedule::common_conditions::in_state(
-                    GameFlow::Boot));
-            // … one per (leaf, inherited event) …
+            __state_chart_systems_game_flow(b);
         });
         // 4. the Fixed bucket
     }
@@ -1355,12 +1382,12 @@ impl ::boyko_ecs::Plugin for Flow {
 }
 ```
 
-**Registration order** of the transition systems: outer loop over leaves in **variant (preorder)**
-order, inner loop over that leaf's routes in **`decl_index` (source) order**. This is §5.1's
-deterministic mitigation for the case where several transition systems of the *same* leaf accept
-different events on one frame: each writes `NextState`, and the last one wins. Multiple machines in
-one block are all registered by that one plugin, in block order; their `insert_state` calls all
-precede every startup registration in the body.
+`__state_chart_systems_game_flow` registers one system per leaf with routes, in **variant
+(preorder)** order, each with `.run_if(in_state(GameFlow::<Leaf>))`. Only the current leaf's gate is
+open in a frame, so a machine's leaf systems never race on `NextState`; arbitration between one leaf's
+routes happens inside its system. Multiple machines in one block are all registered by that one
+plugin, in block order; their install calls (and so their `insert_state` calls) all precede every
+other startup registration in the body.
 
 ### Refusals — `machine`
 
@@ -1396,10 +1423,11 @@ Whole-block (`ctx.rs`):
 |---|---|---|---|
 | `machine` with no sibling `plugin` | ``a `machine` needs a `plugin <Name>;` declaration in this block to hold its `insert_state` and transition registrations`` | **name** of the machine | — |
 
-Expansion-time (`MachineModel::build`, `resolve_child`, `resolve_to_leaf`, `resolve_target`,
-`merge_params`). Every one of these exists because the fault would otherwise surface as a rustc
-duplicate-definition error on tokens the user never wrote. Rows marked *(2 spans)* attach a second
-error as a note at the earlier declaration.
+Expansion-time, raised by `boyko_macros::state_chart!` on the tokens Aether hands it (`Chart::build`,
+`resolve_child`, `resolve_to_leaf`, `resolve_target`, `merge_params`, `check_reachability`). Most of
+these exist because the fault would otherwise surface as a rustc duplicate-definition error on tokens
+the user never wrote. Rows marked *(2 spans)* attach a second error as a note at the earlier
+declaration.
 
 | Trigger | Message | Span | Golden |
 |---|---|---|---|
@@ -1411,18 +1439,21 @@ error as a note at the earlier declaration.
 | `initial` on a childless state | ``` `Idle` has no nested states, so `initial` has nothing to name — drop it, or nest `state Running { … }` inside `Idle` ``` | **name** of the `initial` target | ✓ `machine_initial_on_a_leaf` |
 | a state name that does not exist in the scope being resolved | ``no state `Runing` in `Playing`; states declared here: `Running`, `Paused` (did you mean `Running`?)`` | **name** of the offending ident | ✓ `machine_unknown_initial_did_you_mean`, ✓ `machine_unreferenced_composite_initial`, ✓ `machine_shadowed_handler_target` |
 | target is a composite with no `initial` | ``target `Playing` is a composite state with no `initial` — add `initial <leaf>;` or target a leaf (`Playing.Running`)`` | **name** of the last target segment (or the machine `initial` ident) | ✓ `machine_composite_target_without_initial` |
-| two leaves minting one fn name *(2 spans)* | ``states `AB` and `Ab` both generate the system `__aether_m__ab__e` — generated names are the snake_case collapse of the flattened state path, and `AB` and `Ab` collapse alike; rename one`` + ``the first handler generating this name is here`` | **kw** of the second `on` / first | ✓ `machine_snake_collapse_collision` |
-| two event paths on one leaf whose last segments collapse alike *(2 spans)* | ``events `a::E` and `b::E` both generate the system `__aether_m__a__e` for leaf `A` — the generated name keys on the event's last path segment; import one under an alias (`use … as …`)`` + same note | **kw** of the second `on` / first | — |
-| a merged param name reused at a different type *(2 spans)* | ``param `cmds` is declared with conflicting types across this transition's merged enter/exit/action handlers`` (or ``… across the initial state's merged `enter` chain``) + ``the first binding of this name is here`` | later **name** / earlier | — |
+| two leaves minting one fn name *(2 spans)* | ``states `AB` and `Ab` both generate the system `__state_chart_m__ab` — generated names are the snake_case collapse of the flattened state path, and `AB` and `Ab` collapse alike; rename one`` + ``the first state generating this name is here`` | second leaf's **name** / first | ✓ `machine_snake_collapse_collision` |
+| a merged param name reused at a different type *(2 spans)* | ``param `cmds` is declared with conflicting types across this leaf's merged routes`` (or ``… across the initial state's merged `enter` chain``) + ``the first binding of this name is here`` | later **name** / earlier | — |
+| a state the machine can never enter | ``state `Victory` is unreachable: no transition in `M` targets it and it is not the chart's `initial` state, so the machine can never enter it — add a transition into it, or remove it`` (a dead composite: ``state `Credits` and everything nested in it are unreachable: …``) | the dead state's **name**, one error per maximal dead subtree | ✓ `machine_unreachable_state` |
+
+Two event paths on one leaf (`on a::E`, `on b::E`) are **legal**: the generated name carries no event
+segment, so they are two readers in one system.
 
 The did-you-mean is Levenshtein ≤ 2 against the *declared sibling states of that scope*, and the
 "states declared here" list is exhaustive and in declaration order.
 
-**Recovery interacts asymmetrically with these two classes.** A machine that fails to *parse* recovers
-normally: one `compile_error!`, a `pub struct M;` name-resolving stub, and every sibling construct
-still expands. A machine that parses but fails one of the expansion-time checks above makes
-`expand_inner` return `Err`, so **no** construct in the block emits its items — only the
-`compile_error!` (plus any stubs).
+**Recovery.** A machine that fails to *parse* recovers normally: one `compile_error!`, a
+`pub struct M;` name-resolving stub, and every sibling construct still expands. A machine that parses
+but fails one of the expansion-time checks above fails inside its own `state_chart!` expansion, which
+emits the error plus name-resolving stubs for the two registration fns, so the plugin's calls still
+resolve and the sibling constructs still expand.
 
 ### Known open semantics (v1.1)
 
@@ -1439,10 +1470,9 @@ Recorded in the shipped tests, not fixed in code.
   the `Pending` is discarded by `apply_state_transition`'s identity check, and no state-transition
   condition observes anything. Aether neither refuses the construct nor special-cases it; a chart that
   wants an observable re-entry has no v1 spelling for one.
-- **Last-write-wins across event types.** Drain-then-act bounds each *generated system* to one
-  transition per frame. Two systems of the *same current leaf* accepting different events on one frame
-  both write `NextState`, and the later registration wins. Declaration-order registration is the
-  documented determinism story; Aether adds no arbitration in v1.
+- **Arbitration is first-declared-wins, not window-aware.** Since rung R2, two routes of one leaf
+  accepting on one frame (different event types) run exactly one chain: the first-declared route's.
+  Arbitration that accounts for a reader's event window (the backlog bounce above) is not shipped.
 
 ---
 ## Content constructs
@@ -1920,20 +1950,20 @@ Everything Aether owns has the same justification: **rustc would report it on ge
 | duplicate `material` key | Aether, two spans | — |
 | second `on` clause on a system | Aether | a whole-construct invariant |
 | duplicate `let` mesh binding in a scene | Aether, two spans | a second binding silently retargets every `mesh NAME` below it |
-| duplicate sibling `state` | Aether, two spans | rustc would see one generated variant |
-| duplicate handler for one event in one state | Aether, two spans | one generated fn |
-| two chart positions flattening to one name | Aether, two spans | one generated variant |
+| duplicate sibling `state` | `state_chart!`, two spans | rustc would see one generated variant |
+| duplicate handler for one event in one state | `state_chart!`, two spans | inheritance keeps the first, so the second could never run |
+| two chart positions flattening to one name | `state_chart!`, two spans | one generated variant |
 | two states whose snake_case collapse coincides | Aether, two spans | one generated fn name |
 | bundle arity > 16 | Aether | the derive owns the rule; Aether owns the 17th field's span |
 
 The snake-collapse case is the sharpest example of the principle:
 
 ```text
-error: states `AB` and `Ab` both generate the system `__aether_m__ab__e` — generated names are the
+error: states `AB` and `Ab` both generate the system `__state_chart_m__ab` — generated names are the
 snake_case collapse of the flattened state path, and `AB` and `Ab` collapse alike; rename one
-  --> tests/ui/machine_snake_collapse_collision.rs:21:13
-error: the first handler generating this name is here
-  --> tests/ui/machine_snake_collapse_collision.rs:18:13
+  --> tests/ui/machine_snake_collapse_collision.rs:30:15
+error: the first state generating this name is here
+  --> tests/ui/machine_snake_collapse_collision.rs:27:15
 ```
 
 ---
@@ -2120,8 +2150,10 @@ rationale.
 
 **(4) Generated internal names are `__aether_`-prefixed.** `__aether_commands`, `__aether_meshes`,
 `__aether_materials`, `__aether_dev`, `__aether_mat_<name>`, `__aether_e<N>`, `__aether_k_<system>`,
-`__aether_ev`, `__aether_next`, `__aether_fire`, `__aether_<machine>__<leaf>__<event>`. **A name
-without that prefix in an error message is one you wrote.**
+and the machine's names, which `state_chart!` mints with its own prefixes: `__state_chart_<machine>__<leaf>`,
+`__state_chart_install_<machine>`, `__state_chart_systems_<machine>`, `__sc_ev_<i>`, `__sc_next`,
+`__sc_hit`, `__sc_route`. **A name without one of those prefixes in an error message is one you
+wrote.**
 
 The prefix is not cosmetic. Measured: `let dev = plane(1.0); mesh dev;` in a scene shadowed the device
 param and produced E0599 (`no method get on MeshHandle`) with **both** labels on the whole `aether!`
@@ -2435,20 +2467,22 @@ has shipped that exact failure — a gate whose green state includes the empty o
 |---|---|---|---|---|
 | component+tag (§3.1) | 26 | 70 | 2.69 | 63..=77 |
 | system+plugin (§3.3) | 74 | 239 | 3.23 | 215..=263 |
-| machine (§3.5) | 59 | 624 | 10.58 | 560..=690 |
+| machine (§3.5) | 59 | 139 | 2.36 | 125..=153 |
 | material (§3.6) | 19 | 52 | 2.74 | 46..=58 |
 | scene (§3.7) | 55 | 493 | 8.96 | 443..=543 |
 
-Re-measured live 2026-08-21 (`cargo test -p aether-lang --lib expansion_volume -- --nocapture`):
-identical to the A7 numbers. The test `println!`s the measurement on every run, so a passing band still
+Re-measured 2026-10-09 (`cargo test -p aether-lang --lib expansion_volume -- --nocapture`): the
+`machine` row dropped when rung R2 moved chart flattening into `boyko_macros::state_chart!`, because
+Aether now emits only the `state_chart!` invocation; the other rows are unchanged since A7. The test
+`println!`s the measurement on every run, so a passing band still
 tells a reader which way the number is drifting. Bands are the measured count ±10% **rounded outward**
 — a band rounded inward excludes counts the stated tolerance admits, so the number and the rule it
 claims to follow would disagree.
 
-The two double-digit ratios are the constructs that *transpile* rather than sugar (one system per
-(leaf, inherited event); one spawn statement per node). The sugar constructs sit near 3× — that is
-Decision A3's claim expressed as a number. **If you change an emission deliberately: re-measure and
-move the band in the same commit.**
+The one high ratio is `scene`, the construct that *transpiles* rather than sugars (one spawn statement
+per node). The sugar constructs sit near 3× — that is Decision A3's claim expressed as a number — and
+`machine` now sits below them, since its flattening happens inside `state_chart!`, outside Aether's
+count. **If you change an emission deliberately: re-measure and move the band in the same commit.**
 
 #### The span sweep
 
@@ -2592,9 +2626,9 @@ shipped. Construct-local divergences are called out inline — [`component`](#re
 
 | Plan §3.5 "After" block | Shipped |
 |---|---|
-| `for __e in &mut __ev { … if !(guard) { continue; } … return; }` | [drain-then-act](#the-transition-system) with `__aether_fire`. §5.1 is the semantic authority and the expander follows it; the deviation is recorded in `transition_fn`'s own comment. |
-| `__ev` / `__next` | `__aether_ev` / `__aether_next` (the prefix rule) |
-| `__aether_gameflow__playing_running__player_died` | `__aether_game_flow__…` — the machine-name half is also `snake()`-collapsed |
+| `for __e in &mut __ev { … if !(guard) { continue; } … return; }` | [drain, arbitrate, act](#the-leaf-system) with `__sc_hit` / `__sc_route`, one system per leaf. §5.1 is the semantic authority; since R2 the code lives in `state_chart::emit::leaf_fn`. |
+| `__ev` / `__next` | `__sc_ev_<i>` (one per route) / `__sc_next` |
+| `__aether_gameflow__playing_running__player_died` | `__state_chart_game_flow__playing_running` — one system per leaf (no event half); the machine-name half is also `snake()`-collapsed |
 | `::boyko_ecs::States`, `::boyko_ecs::ResMut`, `in_state` | the real nested paths |
 | a doc comment on the generated enum | no doc comment on the enum; only the `in_*` predicates carry one |
 | — | `#[allow(clippy::too_many_arguments)]` on every generated fn |

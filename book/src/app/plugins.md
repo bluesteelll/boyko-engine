@@ -352,6 +352,7 @@ fixed, documented order:
 
 ```mermaid
 flowchart TD
+    Z["⓪ profiler frame fold<br/>(one predicted branch when profiling is off)"] --> A
     A["① Time::advance_with(raw)<br/>clamp · scale · pause"] --> B["② margin-aware check-ticks pass<br/>(one u32 compare, predicted-not-taken)"]
     B --> C["③ gated event swap<br/>(EventUpdatePolicy)"]
     C --> D["④ fixed catch-up loop<br/>0..N Fixed Schedule::run"]
@@ -362,6 +363,12 @@ Every step between the runs holds the dispatcher's own `&mut EcsMaster` with zer
 workers in flight, so the `Schedule::run`s are opaque, conflict-free units. The
 clock advance plus three predictable branches are the entire additive envelope
 over the bare schedule runs.
+
+Step ⓪ runs the profiler's frame fold, if the world has an armed profiler. It
+sits in `update_with_delta`, the one entry both the self-clocked loop and the
+windowed host call, and it runs before the frame's own zone opens, so the
+reported frame time does not include the cost of reporting it. Without an armed
+profiler it is one load and one predicted branch.
 
 ### CoreSchedule
 
@@ -435,11 +442,27 @@ else `EveryFrame`.
 | `update_with_delta(d)` | one frame with an externally supplied raw delta — the frame function |
 | `run_n(frames)` | `finish` once, then run `frames` self-clocked frames |
 | `run_n_with_delta(frames, d)` | `finish` once, then run `frames` frames with the same `d` each frame — the deterministic loop for tests, benches, and Miri |
-| `run()` | `finish` once, then loop self-clocked frames until a system sets `AppExit(true)` |
+| `run()` | if a runner is installed, hand the app to it and return its `AppExit`; otherwise `finish` once, then loop self-clocked frames until a system sets `AppExit(true)` |
+| `set_runner(runner)` | install a run-loop owner, a `Box<dyn FnOnce(&mut App) -> AppExit>`, that `run()` calls first — before `finish` |
 
 Embedders that own their own clock (an eframe / wasm host, a deterministic test)
 call `update_with_delta` directly and never touch `Instant`. Pinning the delta
 with `run_n_with_delta` keeps `Instant::now` jitter out of measured loops.
+
+### Installing a runner
+
+`App::set_runner` is how a host takes over the loop. `EnginePlugins` installs the
+windowed frame loop this way, so `app.run()` in a windowed app runs the window, not
+the self-clocked loop. An installed runner owns the app's lifecycle:
+
+- it calls `app.finish()` itself, typically after inserting its platform resources so
+  the startup systems see them;
+- it sets its own `AppExit` policy;
+- it tears down before returning, and its `AppExit` is what `run()` returns.
+
+Installing a second runner replaces the first. Unlike the config methods,
+`set_runner` may be called any time before `run`, even after `finish`. See
+[Windowed host](windowed-host.md).
 
 ### AppExit
 
@@ -460,7 +483,9 @@ fn main() {
 }
 ```
 
-`AppExit(pub bool)` is the cooperative exit flag read by `run()`. `run()` inserts
+`AppExit(pub bool)` is the cooperative exit flag read by `run()`. With an installed
+runner, `run()` returns whatever the runner returns, and the runner reads the flag on
+its own policy. Without one, `run()` inserts
 `AppExit(false)` before the loop (so the per-frame read never panics on a missing
 resource) and checks the flag once per frame, after the Main run — so a
 Fixed-schedule exit request is observed at the end of the same frame. Because

@@ -127,7 +127,7 @@ schedule.run(&mut a); // OK — same world
 
 The check is a single `u64` compare, predicted-not-taken, with the panic body
 kept out of line (`#[cold]`). It costs effectively nothing on the hot path
-(measured at +0.06 ns on an empty 50-system run) and it is a **release-level**
+(one predicted-not-taken branch per `run`) and it is a **release-level**
 panic, not a `debug_assert!`. That is deliberate: a cross-world `run` would
 dereference cached pointers against the wrong world — a use-after-free surface —
 so it must fail loudly in every build. This matches Bevy, whose `Schedule::run`

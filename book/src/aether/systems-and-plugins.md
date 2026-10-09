@@ -131,10 +131,11 @@ warning: this function has too many arguments (8/7)
 where no `#[allow]` of yours can reach it and "take fewer arguments" is not
 advice about data dependencies.
 
-Aether now emits `#[allow(clippy::too_many_arguments)]` on the three generated
-fn kinds whose arity you control: `system` fns, machine
-[transition systems](state-machines.md#merged-parameters) (which merge the
-params of every handler they inline), and the machine
+`#[allow(clippy::too_many_arguments)]` is emitted on the three generated fn kinds
+whose arity you control: Aether emits it on `system` fns, and `state_chart!` (which
+Aether lowers a `machine` to) emits it on the machine's
+[per-leaf systems](state-machines.md#merged-parameters) (which merge the params of
+every route on that leaf) and on its
 [initial-enter chain](state-machines.md#the-initial-enter-chain). A shipped test
 target carries an eight-param system, so the repo's `-D warnings` clippy run
 fails the day the suppression is dropped.

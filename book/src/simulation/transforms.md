@@ -322,6 +322,99 @@ fn build(app: &mut App) {
 }
 ```
 
+### Fly cameras: `FlyCameraBundle`
+
+`FlyCameraBundle` is the interactive sibling of the camera rigs: a `Transform`, a
+`GlobalTransform`, a `Camera`, a `Projection`, and a `FlyCamera` controller that
+accumulates `yaw` / `pitch` and carries a `speed` and a `sensitivity`.
+`fly_camera_system` rewrites the camera's `Transform` from the per-frame input
+snapshot. The system and the OS → ECS input bridge are wired by
+`boyko_app::FlyCameraPlugin`; see [Windowed host](../app/windowed-host.md).
+
+```rust,ignore
+use boyko_scene::{Camera, FlyCamera, FlyCameraBundle, GlobalTransform, Projection, Transform};
+use boyko_math::Vec3;
+
+commands.spawn(FlyCameraBundle {
+    transform: Transform::from_translation(Vec3::new(0.0, 1.7, 6.0)), // the initial eye
+    global: GlobalTransform::IDENTITY,
+    camera: Camera::DEFAULT,
+    // `Projection` has no `Default`: fill it.
+    projection: Projection::Perspective { fov_y: 1.047, aspect: 16.0 / 9.0, near: 0.1, far: 100.0 },
+    fly: FlyCamera::default(), // yaw / pitch seed the initial view direction
+});
+```
+
+## Ordering sets: how plugins order across crates
+
+Several pipelines cross plugin and crate boundaries, so their edges are pinned **by
+name** with system sets that live in `boyko_scene` (the bottom of the spatial
+dependency graph). A system joins a set with `.in_set(..)`; the sets are ordered
+against each other once.
+
+| Set | Members | Order |
+|-----|---------|-------|
+| `FixedSet::Gameplay` | user and physics gameplay in `CoreSchedule::Fixed` | before `Snapshot` |
+| `FixedSet::Snapshot` | per-substep snapshot systems (the interpolation pack `pack_gpu_transforms`) | after `Gameplay` (wired by `EnginePlugins`) |
+| `CameraSet::Control` | camera controllers that write a camera's `Transform` (`fly_camera_system`) | before `Resolve` (wired by `CameraPlugin`) |
+| `CameraSet::Resolve` | `propagate_transforms`, `resolve_active_camera` | after `Control` |
+| `VisibilitySet::Sync` | `visibility_sync`, the writer of the draw bit | first |
+| `VisibilitySet::Validate` | `validate_asset_refs`, which also clears the bit on a stale mesh row | after `Sync` |
+| `VisibilitySet::Read` | every system that only filters on `Enabled<RenderEnabled>` (the instance packs, the mesh and shadow-caster gathers) | after `Validate` and `Sync` |
+
+Two rules follow:
+
+- **Put rate-sensitive gameplay in `FixedSet::Gameplay`** and a camera controller in
+  `CameraSet::Control`. A system in neither set is unordered against the snapshot or
+  the camera resolve and may see, or produce, a pose one step or one frame stale.
+- **A system may join only one `VisibilitySet` phase.** The phases are ordered against
+  each other, and a member of two ordered sets is rejected when the schedule builds
+  (`boyko-B9004`).
+
+Source: [`sets.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/sets.rs).
+
+## Visibility: the authoring byte and the draw bit
+
+Visibility has two surfaces:
+
+- **`Visibility`** — a `#[repr(u8)]` per-row byte (`Inherited`, `Visible`, `Hidden`):
+  the persisted authoring intent, the value that survives serialization.
+- **`RenderEnabled`** — an [enable tag](../concepts/enable-tags.md) bit: the O(1)
+  per-frame draw toggle. The render packs filter on `Enabled<RenderEnabled>`, so a row
+  with the bit clear is skipped at iteration, branch-free, with no archetype
+  migration.
+
+`visibility_sync` bridges them. It is `Changed<Visibility>`-gated and drives the bit
+through deferred commands: `Hidden` disables `RenderEnabled`, and `Visible` or
+`Inherited` enables it. `CameraPlugin` and `TransformPlugin` register it in
+`VisibilitySet::Sync`. `Inherited` is treated as visible at the entity level:
+propagating a parent's visibility down the hierarchy is not implemented.
+
+```rust,ignore
+use boyko_scene::Visibility;
+
+// Hide an entity: write the authoring byte; visibility_sync clears the draw bit.
+commands.entity(e).insert(Visibility::Hidden);
+```
+
+## Names: `Name`, `intern`, `resolve`
+
+`Name` gives an entity a stable, deduplicated identity. It wraps a `NameId`, a `u32`
+into a process-global string interner, so two names compare with one integer compare
+and a `Query<&Name>` never touches the interner.
+
+```rust,ignore
+use boyko_scene::{intern, resolve, Name};
+
+let player: Name = intern("player");   // setup / spawn time only
+commands.entity(e).insert(player);
+assert_eq!(resolve(player), Some("player"));
+```
+
+`intern` and `resolve` are **cold**: they take a lock and belong at setup or spawn
+time, never on a per-frame path. Interned strings live for the whole process. If a
+system needs a name's text every frame, resolve it once at setup and store the result.
+
 ## The per-frame chain at a glance
 
 ```mermaid
@@ -345,6 +438,14 @@ sequenceDiagram
   `GlobalTransform` and `ViewUniform`.
 - [Change Detection](../change_detection.md) — how propagation stays
   zero-overhead on a static scene.
+- [Assets & Handles](../concepts/assets.md) — mesh and material handles, and the
+  reference counting that `AssetRefcountPlugin` validates each frame.
+- [Time & Fixed Timestep](../app/time.md) — the Fixed schedule the `FixedSet`
+  phases live in.
 - Source: [`boyko_scene/src/transform.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/transform.rs),
   [`propagation.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/propagation.rs),
-  [`camera.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/camera.rs).
+  [`camera.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/camera.rs),
+  [`sets.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/sets.rs),
+  [`render_caps.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/render_caps.rs),
+  [`visibility_sync.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/visibility_sync.rs),
+  [`identity.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/identity.rs).

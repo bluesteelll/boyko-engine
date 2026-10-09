@@ -159,7 +159,35 @@ zero-readback guarantee made concrete.
 Not every column needs to be device-resident. When the host stays authoritative
 — for example positions written by a CPU physics step — the data still has to
 reach the GPU each frame, and the engine does that **without an intermediate AoS
-copy**.
+copy**. The windowed host does it with its own instance path, described first;
+the `boyko_demo` sandbox demonstrates the same pattern in its simplest form.
+
+### The windowed host's instance path
+
+The windowed host (`boyko_app` + `boyko_render`) draws meshes from columns that
+are the GPU layout:
+
+- **`InstanceModelCol`** is a 48-byte, row-major 3×4 affine: the exact record the
+  G-buffer vertex shader reads from its instance buffer. `sync_instance_model_cols`
+  packs it from each visible entity's `GlobalTransform`, one affine read and one
+  packed write per row, with no allocation. The column is the source; there is no
+  `std::Vec` mirror.
+- **The mesh-draw gather** (`mesh_draw`) buckets the rows by mesh and scatters each
+  bucket into a contiguous range of a per-frame instance ring. The recorder binds the
+  ring once, and each draw indexes `instances[base_instance + SV_InstanceID]`.
+- **The upload is fenced.** `upload_instance_models` writes the ring slot that the
+  frame's `FrameWriteToken` names, so the CPU never overwrites instances the GPU is
+  still reading.
+- **Interpolation runs on the GPU.** An entity that carries `GpuTransform3D` — a
+  dense component holding its previous and current pose — is blended by a compute
+  pre-pass (`interp_instances.comp.hlsl`) at the frame's fixed-step alpha.
+  `teleport_to` sets the `SnapInterpolation` bit so a discontinuous jump draws at
+  its new pose without a streak.
+
+See [Windowed host](../app/windowed-host.md) for the user-facing side (`MeshBundle`,
+`GpuTransform3D`, `FixedSet::Gameplay`).
+
+### The pattern, demonstrated in `boyko_demo`
 
 The kernel's chunked iteration (see [iteration](../concepts/iteration.md)) hands
 a system one *contiguous column slice per archetype chunk*. For a component that
@@ -288,4 +316,7 @@ flowchart TD
 - Source: [`gpu_column.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/gpu_column.rs),
   [`gpu_system.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/gpu_system.rs),
   [`device_column.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/device_column.rs),
-  [`instance.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_demo/src/render/instance.rs)
+  [`instance_model.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/instance_model.rs),
+  [`upload.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/upload.rs),
+  [`gpu_transform3d.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/gpu_transform3d.rs),
+  [`instance.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_demo/src/render/instance.rs) (demo)

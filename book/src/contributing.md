@@ -17,15 +17,26 @@ cd boyko-engine
 # Build
 cargo build --release
 
-# Run the test suite
-cargo test --all-targets
+# Run the test suite: every member, and every target even after one fails
+cargo test --workspace --all-targets --no-fail-fast
 
 # Lints (must pass with zero warnings)
-cargo clippy --all-targets -- -D warnings
-
-# Format
-cargo fmt
+cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+Both flags matter. Without `--workspace`, a command run from the repository root checks
+only part of the workspace and still reports success. Without `--no-fail-fast`, the first
+failing test target stops the run and hides every target after it.
+
+**Toolchain and platforms.** The engine is Rust edition 2024 on the stable channel
+([`rust-toolchain.toml`](https://github.com/bluesteelll/boyko-engine/blob/master/rust-toolchain.toml)).
+It targets x86-64 with AVX2 as the baseline (`.cargo/config.toml` builds with
+`-C target-cpu=x86-64-v3`) on Windows and Linux. The development host is Windows with
+the MSVC toolchain: `stable-x86_64-pc-windows-msvc` for builds and
+`nightly-x86_64-pc-windows-msvc` for Miri.
+
+**Formatting.** Format the code you add with rustfmt; the tree is not yet
+rustfmt-normalised and CI does not check formatting.
 
 For documentation work:
 
@@ -85,22 +96,54 @@ A PR with undocumented `unsafe` will not be merged.
 ### Tests
 
 - Unit tests live in `#[cfg(test)] mod tests { ... }` at the bottom of each module.
-- Integration tests live in `crates/boyko_ecs/tests/`.
+- Integration tests live in each crate's own `tests/` directory. Repository-wide census
+  tests live in the root `tests/` directory (for example `tests/ignore_reasons_census.rs`).
 - Property-based tests use `proptest` and live alongside unit tests.
-- `unsafe`-heavy code should be tested under [Miri](https://github.com/rust-lang/miri):
+
+### Testing
+
+- **Ignored tests carry a class.** `cargo test` runs none of the `#[ignore]`d tests. Each
+  one's reason starts with a class from a closed list —
+  `#[ignore = "<class>: <prose>"]` with `class` one of `gpu`, `gpu-windowed`, `gpu-cap`,
+  `feature`, `solo`, `slow`, `miri-slow`, `miri-unsupported`, `generator`, `deferred`,
+  `flaky` — and the census test `tests/ignore_reasons_census.rs` fails the build on an
+  ignore without one. A composite spells two classes (`feature+gpu`,
+  `gpu-windowed+gpu-cap`). The class says which leg runs the test:
+  - `gpu`, `gpu-windowed` and `gpu-cap` need a Vulkan device (`gpu-windowed` also a
+    desktop window; `gpu-cap` a capability such as ray queries). Run them one test binary
+    at a time with `-- --ignored --test-threads=1`; each file's header names the
+    environment variables it reads.
+  - `feature` tests compile only with a named Cargo feature (for example `--features hwrt`).
+  - `solo` and `slow` are device-free legs: run them with `-- --ignored`, `solo` with
+    `--test-threads=1`.
+  - `generator`, `deferred` and `flaky` belong to no leg; do not sweep them into a run.
+  - A leg that prints `running 0 tests` did not run anything — it is not a pass.
+- **Miri.** `unsafe`-heavy code is tested under [Miri](https://github.com/rust-lang/miri),
+  on the nightly toolchain:
 
   ```powershell
-  cargo +nightly miri test
+  cargo +nightly-x86_64-pc-windows-msvc miri test -p <crate>
   ```
 
-- Lock-free code should be tested with [Loom](https://github.com/tokio-rs/loom).
+  `.cargo/config.toml` turns on Tree Borrows. Tests that still run natively but that Miri
+  would need hours for carry `miri-slow`, and tests Miri cannot execute at all (a child
+  process, a custom global allocator, a deliberate leak) carry `miri-unsupported`.
+- **Loom.** Lock-free protocols are model-checked with
+  [Loom](https://github.com/tokio-rs/loom) by the `loom_*.rs` tests in
+  `crates/boyko_threadpool/tests` and `crates/boyko_ecs/tests`. They compile only under
+  `--cfg loom`; the `loom` job in `.github/workflows/ci.yml` shows the exact flags.
+- **Golden images.** `scripts\golden.ps1` renders frames and checks them against the
+  SHA-256 pins in `goldens/PINS.toml`. The pins are byte-identity hashes blessed on one
+  NVIDIA RTX 3060, so they hold for that device only; on other hardware a mismatch is not
+  by itself a regression.
 
 ### Benchmarks
 
 - Use [criterion](https://github.com/bheisler/criterion.rs).
-- Benchmarks live in each crate's `benches/` directory — for example `crates/boyko_ecs/benches/` for the kernel, `crates/bench_bevy_vs_boyko/benches/` for cross-engine comparisons against Bevy, plus `boyko_physics`, `boyko_serialize`, `boyko_fontbake`, and `boyko_demo`.
-- `[profile.bench]` pins `codegen-units = 1` so two builds of the same source produce identical machine code — this hardens the "0%-regression / byte-identical asm" A/B methodology.
+- Benchmarks live in each crate's `benches/` directory: `boyko_ecs` (the kernel), `bench_bevy_vs_boyko` (cross-engine comparisons against `bevy_ecs`), `boyko_physics`, `boyko_render`, `boyko_threadpool`, `boyko_serialize`, `boyko_fontbake`, `boyko_image`, `boyko_log`, `boyko_demo`, and the `reflect_fixture` test fixture.
+- `[profile.bench]` pins `codegen-units = 1` and turns LTO off, so two builds of the same source produce identical machine code — this hardens the "0%-regression / byte-identical asm" A/B methodology. A number taken under `bench` therefore does not describe the shipped `release` build; name the profile with every result.
 - Don't add a benchmark just for the sake of it — measure something meaningful.
+- Published results live on the [Benchmarks](reference/benchmarks.md) page.
 
 ### Changing the Aether DSL
 
@@ -127,14 +170,14 @@ The living version is the `aether` crate's module doc
 
 1. **Open an issue first** if your change is more than a trivial fix. Get alignment on the approach before writing code.
 2. **Write the architecture plan** for non-trivial features — describe what you'll build and why before the PR.
-3. **Branch from `ecs`** — the active development branch holding the full, green engine. Do **not** branch from `master`: it is a historical foundation that contains only the memory subsystem (see [Project structure](#project-structure)).
+3. **Branch from `master`.** It holds the whole engine.
 4. **Keep commits focused** — one logical change per commit.
 5. **Update documentation** — both API doc comments and (if relevant) pages in `book/src/`.
 6. **Pass all checks**:
    - `cargo build --release`
-   - `cargo test --all-targets`
-   - `cargo clippy --all-targets -- -D warnings`
-   - `cargo fmt --check`
+   - `cargo test --workspace --all-targets --no-fail-fast`
+   - `cargo clippy --workspace --all-targets -- -D warnings`
+   - the ignored-test legs your change touches (see [Testing](#testing))
    - `mdbook build` (if docs changed)
 7. **Write a clear PR description** — explain the *why*, not just the *what*. Reference the issue.
 
@@ -165,41 +208,57 @@ The workspace is a single unified engine: every system (physics, render, input, 
 
 ```text
 boyko-engine/
-├── Cargo.toml                   # workspace (18 members) + [profile.bench] + thin binary
-├── src/main.rs                  # entry point (library-shaped project)
+├── Cargo.toml                   # workspace (33 members) + profiles + the root package
+├── src/main.rs                  # placeholder binary (library-shaped project)
+├── tests/                       # repository-wide census tests
 ├── crates/
-│   ├── boyko_ecs/               # ECS kernel: memory, components, archetypes, queries,
-│   │                            #   events, scheduler, change-detection, hooks/observers,
-│   │                            #   commands, states, app/plugin, serialize seam
-│   ├── boyko_macros/            # #[derive(Component/Bundle/Resource/SystemSet)], #[event]
+│   ├── boyko_ecs/               # ECS kernel: storage, archetypes, queries, systems,
+│   │                            #   scheduler, commands, events, change detection,
+│   │                            #   hooks/observers, relations, states, assets, App/Plugin
+│   ├── boyko_memory/            # virtual-memory reserve/commit primitive and column
+│   ├── boyko_macros/            # derives and macros: Component, Bundle, Resource,
+│   │                            #   SystemSet, #[event], ui!, state_chart!, ...
 │   ├── boyko_utils/             # BitSet / BitMask / SparseMap / Slot
 │   ├── boyko_threadpool/        # Chase-Lev work-stealing pool
+│   ├── boyko_diag/              # diagnostics substrate: clock, lane topology
+│   ├── boyko_log/               # in-house structured logging, boyko-Cnnnn codes
 │   │
-│   ├── boyko_math/              # math primitives
-│   ├── boyko_scene/             # Transform / Camera
-│   ├── boyko_physics/           # in-house 3D TGS-Soft solver
-│   ├── boyko_sdf_math/          # SDF math
-│   ├── boyko_input/             # input
-│   ├── boyko_serialize/         # codegen serialization
+│   ├── boyko_math/              # SIMD-aligned, deterministic POD math
+│   ├── boyko_scene/             # Transform / Camera / visibility
+│   ├── boyko_physics/           # in-house 3D TGS-Soft rigid and XPBD soft-body physics
+│   ├── boyko_sdf_math/          # analytic SDF field math (render + physics)
+│   ├── boyko_input/             # rebindable action mapping
+│   ├── boyko_serialize/         # binary world save / load
+│   ├── boyko_reflect/           # editor-build reflection (experimental)
 │   │
 │   ├── boyko_rhi/               # in-house render hardware interface
-│   ├── boyko_rhi_vulkan/        # raw-FFI Vulkan backend
-│   ├── boyko_render/            # GPU columns, lighting, SDF render
+│   ├── boyko_rhi_vulkan/        # raw-FFI Vulkan backend, framegraph, window
+│   ├── boyko_render/            # ECS-to-RHI bridge: GPU columns, render paths,
+│   │                            #   lighting, shadows, GI, AA, particles, loaders
+│   ├── boyko_shaderdsl/         # shader eDSL (single-sourced host/GPU shader math)
+│   ├── boyko_image/             # in-house PNG / zlib / DEFLATE decoder
+│   ├── boyko_fontbake/          # MTSDF font atlas baker
 │   ├── boyko_ui/                # ECS-native UI
-│   ├── boyko_fontbake/          # MSDF atlas baker
-│   ├── boyko_shaderdsl/         # shader eDSL (single-sourced host/GPU field code)
+│   ├── boyko_app/               # host layer: OS loop, device boot, windowed runner,
+│   │                            #   EnginePlugins, the examples
 │   │
-│   ├── boyko_demo/              # wgpu/egui sandbox that dogfoods the API
-│   └── bench_bevy_vs_boyko/     # cross-engine comparison benches
+│   ├── aether_lang/             # Aether DSL: parser and expander
+│   ├── aether/                  # the aether! macro
+│   ├── aether_tests/            # Aether integration and trybuild tests
+│   │
+│   ├── boyko_demo/              # eframe/wgpu sandbox that dogfoods the ECS API
+│   ├── bench_bevy_vs_boyko/     # cross-engine comparison benches
+│   ├── boyko_symcensus/         # dev-only symbol census of post-LTO builds
+│   ├── reflect_fixture/         # test fixtures for the reflection and
+│   ├── reflect_dogfood/         #   profiling gates
+│   ├── profile_fixture/
+│   └── profile_fixture_log/
+├── tools/
+│   └── prof_decode/             # prints a profiling telemetry stream as text
 ├── book/                        # mdBook source (this site)
 │   └── src/
 └── docs/                        # internal documentation (agent-facing)
 ```
-
-### Branches: `ecs` vs `master`
-
-- **`ecs`** is the active development branch — the full engine, builds green. This is where all feature work goes. It carries the complete architecture: type-erased `ComponentPool` / archetypes, the typed `Query<D, F>` DSL, `Commands` / `EntityCommands`, events, resources, lifecycle hooks and observers, required components, entity cloning, generic relations (`ChildOf` / `Children`), states, schedule ordering and sets, run conditions, the `App` + `Plugin` facade, fixed timestep, multi-world, and dense (non-fragmenting) components — plus the in-house RHI + raw-FFI Vulkan render path, SDF (sphere-trace + brick atlas + shader eDSL), clustered lighting, the in-house physics solver, ECS-native UI, input, and codegen serialization.
-- **`master`** is a historical foundation containing the memory subsystem only (the generic `ComponentPool<T>` / `Chunk<T>` with two-level addressing). It is **not** where new work goes.
 
 ## Reporting issues
 
@@ -221,7 +280,9 @@ When filing a feature request:
 
 ## License
 
-By contributing, you agree your contributions will be licensed under the same terms as the project (see the repository for details).
+Licensed under the Apache License, Version 2.0 ([LICENSE](https://github.com/bluesteelll/boyko-engine/blob/master/LICENSE)). Some files are third-party and remain under their own licenses; they are listed in [NOTICE](https://github.com/bluesteelll/boyko-engine/blob/master/NOTICE) and [THIRD-PARTY-NOTICES.md](https://github.com/bluesteelll/boyko-engine/blob/master/THIRD-PARTY-NOTICES.md).
+
+By contributing, you agree that your contributions are licensed under the same terms.
 
 ---
 

@@ -166,10 +166,11 @@ sampler, then read by every frame with no per-frame barrier.
 
 A glyph on screen is one instanced quad — the same
 [`UiInstance`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/ui/instance.rs) record the UI uses for rounded rects. When the
-[`FLAG_TEXT`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/ui/instance.rs) bit is set, the fragment shader reinterprets the quad's
-`corner_radius` field as the glyph's normalized atlas UV rect and samples the
-MSDF atlas instead of evaluating the rounded-box SDF. One pipeline, one z-sort,
-one draw call covers both rects and text.
+[`FLAG_TEXT`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/ui/instance.rs) bit is set, the fragment shader reads the glyph's normalized atlas
+UV rect from the record's own `uv` field and samples the MSDF atlas instead of
+evaluating the rounded-box SDF. `UiInstance` is 80 bytes (`UI_INSTANCE_SIZE`), and
+`corner_radius` always means the corner radius: a text instance packs it as zero.
+One pipeline, one z-sort, one draw call covers rects, text and sprites.
 
 ### The fragment math
 
@@ -241,9 +242,9 @@ works in physical pixels and `screenPxRange` resolves to one device pixel of AA.
 - **Single source of truth.** The runtime reuses the baker's POD metric records
   directly; there is no parallel copy of the layout. The font table is an
   ECS-resident resource, not a `HashMap`.
-- **One pipeline for rects and text.** Text quads reuse the rounded-rect
-  `UiInstance` record via a flag-gated field alias, so the on-screen path is one
-  z-sort and one draw.
+- **One pipeline for rects and text.** Text quads use the same `UiInstance`
+  record as rounded rects, in a flag-gated lane with its own UV field, so the
+  on-screen path is one z-sort and one draw.
 - **Deterministic bakes.** The coloring seed, pixels-per-em, and distance range
   are pinned constants recorded in the `.bfont` header, so a bake is
   byte-reproducible and a stale asset is detected at load.

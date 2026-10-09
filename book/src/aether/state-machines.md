@@ -1,13 +1,19 @@
 # State Machines
 
 The `machine` construct is Aether's reactive centerpiece: a Harel-lite chart —
-nested states, guards, entry/exit actions — that the transpiler **flattens at
-compile time**. What reaches the runtime is a flat enum implementing
-[`States`](../scheduling/states.md), one ordinary system per (leaf state, event)
-pair, and — when the initial state's lineage declares `enter` — one startup
-system holding [the initial-enter chain](#the-initial-enter-chain). There is no
-runtime hierarchy walk, no `dyn`, no queue beyond the engine's own
-double-buffered events, and no new runtime type of any kind.
+nested states, guards, entry/exit actions — **flattened at compile time**. Aether
+lowers a `machine` to an invocation of the kernel's `boyko_macros::state_chart!`
+macro, which owns the flattening; Aether only de-sugars the parameter types
+(`res<T>` → `Res<T>`, `commands` → `Commands`) first. So a hand-written
+`state_chart!` and an Aether `machine` cannot drift apart.
+
+What reaches the runtime is a flat enum implementing
+[`States`](../scheduling/states.md), **one ordinary system per leaf state** (all of
+that leaf's transitions merged into it), two generated registration fns, and —
+when the initial state's lineage declares `enter` — one startup system holding
+[the initial-enter chain](#the-initial-enter-chain). There is no runtime hierarchy
+walk, no `dyn`, no queue beyond the engine's own double-buffered events, and no
+new runtime type of any kind.
 
 Machines are **app-scoped** in this build: the state is a world-global
 `State<S>` resource, exactly like a hand-written state enum. Per-entity machines
@@ -29,8 +35,9 @@ params     := '(' param (',' param)* ')'                  (* the `system` param 
 
 A machine opens with `initial <State>;` and its body holds nothing but states.
 Machine and state names are UpperCamelCase — leaf names concatenate into enum
-variants. A `machine` **requires a `plugin` header** in the same block to hold
-its `insert_state` and its transition registrations.
+variants. A `machine` **requires a `plugin` header** in the same block: the plugin
+calls the machine's two generated registration fns (see
+[Registration](#registration)).
 
 Guards and actions use the same parameter grammar as
 [systems](systems-and-plugins.md#parameter-sugar): `res<T>`, `mut res<T>`,
@@ -104,95 +111,112 @@ impl GameFlow {
 | Composites get predicates | Each composite emits `const fn in_<name>(self) -> bool` over its leaf set |
 | Targets are root-anchored | `Playing.Paused` is resolved from the machine's top level, never relative to the enclosing state |
 
-Because `PlayerDied` is declared on `Playing`, both `Playing` leaves get their
-own generated transition system for it — the copy-down happens in the
-transpiler, so "bubbling" costs exactly nothing at run time. Handler inheritance
-dedupes by the event path's **token spelling**, so spell an event the same way
-throughout one chart (`Damage` and `events::Damage` count as two). If two
-spellings of one event do reach the same leaf, Aether refuses the chart instead
-of emitting it — the generated fn name keys on the path's *last* segment, so
-both would mint one name. See
-[Charts the flattener refuses](#charts-the-flattener-refuses).
+Because `PlayerDied` is declared on `Playing`, both `Playing` leaves inherit it:
+each leaf's system carries a route for it. The copy-down happens at compile time,
+so "bubbling" costs exactly nothing at run time. Handler inheritance dedupes by
+the event path's **token spelling**, so spell an event the same way throughout one
+chart: `Damage` and `events::Damage` count as two routes. Two such routes on one
+leaf are legal — they become two event readers in that leaf's system, arbitrated
+like any other pair (below).
 
-## What a transition system does
+## What a leaf system does
 
-Each (leaf, event) pair becomes one plain fn named
-`__aether_<machine>__<leaf>__<event>`, taking an `EventReader<E>`, a
-`ResMut<NextState<M>>`, and the merged parameters of everything it inlines:
+Each leaf that has at least one route becomes one plain fn named
+`__state_chart_<machine>__<leaf>` (both snake_case). It takes one `EventReader` per
+route, a `ResMut<NextState<M>>`, and the merged parameters of everything it can run.
+For `Playing.Running` above, the routes in declaration order are its own
+`PausePressed` and the inherited `PlayerDied`:
 
 ```rust,ignore
-fn __aether_game_flow__playing_running__player_died(
-    mut __aether_ev: EventReader<PlayerDied>,
-    mut __aether_next: ResMut<NextState<GameFlow>>,
-    score: Res<Score>,          // from the transition's own params (guard)
-    mut cmds: Commands,         // from the exit action it inlines
+fn __state_chart_game_flow__playing_running(
+    mut __sc_ev_0: EventReader<PausePressed>,   // route 1, declared first
+    mut __sc_ev_1: EventReader<PlayerDied>,     // route 2, inherited from Playing
+    mut __sc_next: ResMut<NextState<GameFlow>>,
+    score: Res<Score>,                          // the PlayerDied guard's param
+    mut cmds: Commands,                         // Playing's exit action
 ) {
-    let mut __aether_fire = false;
-    for _ in __aether_ev.read() {                        // drain: every event, every frame
-        if !__aether_fire && (score.lives == 0) {        // guard — verbatim expr
-            __aether_fire = true;
-        }
+    let mut __sc_route: u32 = 0;                // 0 = no route accepted
+    {
+        let mut __sc_hit = false;
+        for _ in __sc_ev_0.read() { __sc_hit = true; }        // drain every event
+        if __sc_hit && __sc_route == 0 { __sc_route = 1; }
     }
-    if __aether_fire {                                   // …then act, exactly once
-        { cmds.despawn_hud(); }                          // exit  Playing (below the LCA)
-        { }                                              // the transition's action block
-        *__aether_next = NextState::Pending(GameFlow::GameOver);
+    {
+        let mut __sc_hit = false;
+        for _ in __sc_ev_1.read() {
+            if !__sc_hit && (score.lives == 0) { __sc_hit = true; }   // guard — verbatim expr
+        }
+        if __sc_hit && __sc_route == 0 { __sc_route = 2; }
+    }
+    match __sc_route {                          // one selection, one chain
+        1 => {
+            // Running → Paused: the LCA is Playing, so no exit or enter runs.
+            *__sc_next = NextState::Pending(GameFlow::PlayingPaused);
+        }
+        2 => {
+            { cmds.despawn_hud(); }             // exit Playing (below the LCA)
+            { }                                 // the transition's action block
+            *__sc_next = NextState::Pending(GameFlow::GameOver);
+        }
+        _ => {}
     }
 }
 ```
 
 (Engine paths elided; the real emission is fully qualified.) The shape is
-**drain-then-act**, and the action order is computed from the **lowest common
-ancestor** of source and target:
+**drain, arbitrate, act**, and the action order is computed from the **lowest
+common ancestor** of source and target:
 
 ```mermaid
 flowchart TD
-    S["for every event queued this frame"] --> G{"guard passes,<br/>and nothing accepted yet?"}
-    G -- no --> S
-    G -- yes --> M["remember the acceptance"]
-    M --> S
-    S -- reader drained --> F{"accepted anything?"}
-    F -- no --> Q["no transition this frame"]
-    F -- yes --> X["exit actions:<br/>source side below the LCA, innermost first"]
-    X --> A["the transition's action block"]
+    D["drain every route's reader,<br/>in declaration order"] --> R{"any route accepted?"}
+    R -- no --> Q["no transition this frame"]
+    R -- yes --> W["the first-declared accepting route wins"]
+    W --> X["exit actions:<br/>source side below the LCA, innermost first"]
+    X --> A["the winner's action block"]
     A --> N["enter actions:<br/>target side below the LCA, outermost first"]
     N --> P["NextState::Pending(target)"]
 ```
 
-Four consequences to keep in mind:
+Five consequences to keep in mind:
 
-- **One transition per machine per frame, and the remainder is discarded.** The
-  loop always runs to completion, so the reader's cursor advances past every
-  event delivered this frame. Two `Tick`s in one frame produce one transition —
-  not one now and one next frame. This is the §5.1 policy, and the shipped test
-  `two_same_frame_events_produce_exactly_one_transition` measures it.
-- **A failed guard skips that event, not the frame.** Acceptance is a flag, not
-  an early exit, so a later queued event can still pass the guard the first one
+- **One transition per machine per frame, and exactly one chain.** Every lane is
+  drained to completion, so each reader's cursor advances past every event
+  delivered this frame. Two `Tick`s in one frame produce one transition — not one
+  now and one next frame (the test `two_same_frame_events_produce_exactly_one_transition`).
+  Two events of *different* types on one leaf in one frame also run exactly one
+  chain (`two_events_on_one_leaf_in_one_frame_run_exactly_one_chain`).
+- **The first-declared accepting route wins.** Arbitration is the order you wrote
+  the handlers in the source, not the inheritance walk's innermost-first order.
+- **A failed guard skips that event, not the frame.** Acceptance is a flag, not an
+  early exit, so a later queued event can still pass the guard the first one
   failed.
-- **The guard stops being evaluated once one event is accepted.** The emitted
-  condition is `!__aether_fire && (<your expr>)`, so a guard with side effects
-  never runs against the events that are about to be discarded.
+- **A guard stops being evaluated once its route accepted one event.** The emitted
+  condition is `!__sc_hit && (<your expr>)`, so a guard with side effects never runs
+  against the events being discarded. A losing route's guard still runs on its
+  events, because its lane must be drained.
 - **The LCA decides what runs.** `Playing.Running → Playing.Paused` has LCA
   `Playing`, so `Playing`'s `exit` and `enter` do **not** fire — you are not
-  leaving `Playing`. Only `Boot → Playing.*` and `Playing.* → GameOver` cross
-  that boundary, and the pinned expansion shows exactly that.
+  leaving `Playing`. Only `Boot → Playing.*` and `Playing.* → GameOver` cross that
+  boundary.
 
-> The earlier shape — act on the first accepted event and `return` from inside
-> the loop — is gone as of rung A4. The kernel's `EventIter` advances the cursor
-> only past what it *yielded*, so returning mid-drain left the rest of the
-> frame's events unread and fired a second transition on the next frame.
+> **Why one system per leaf.** The earlier emission gave every (leaf, event) pair
+> its own system. Within the accepting frame every one of a leaf's `in_state`
+> gates is open, so two events of different types ran **both** chains, and the
+> surviving state was whichever system the scheduler ran last. Merging a leaf's
+> routes into one system makes a second chain structurally impossible and makes
+> first-declared-wins expressible at all.
 
 ### Merged parameters
 
-The transition's own params, plus the params of every `exit` and `enter` action
-it inlines, are merged into one signature and deduped by name. Two handlers may
-both declare `mut cmds: commands` — that is one parameter. The same **name**
-bound to a **different type** across the merged handlers is a compile error
-naming the conflict.
+Every route's own params, plus the params of every `exit` and `enter` action any
+route on that leaf can run, are merged into one signature and deduped by name. Two
+handlers may both declare `mut cmds: commands` — that is one parameter, and `mut`
+merges by union. The same **name** bound to a **different type** anywhere on the
+leaf is a compile error naming the conflict.
 
 Because that merge can push a generated fn past clippy's argument threshold on
-params you never wrote in one place, transition systems and the initial-enter
-chain carry
+params you never wrote in one place, leaf systems and the initial-enter chain carry
 [the arity allow](systems-and-plugins.md#generated-fns-and-the-arity-lint).
 
 ## The initial-enter chain
@@ -233,7 +257,7 @@ machine Sim {
 with their params merged:
 
 ```rust,ignore
-fn __aether_sim__initial_enter(
+fn __state_chart_sim__initial_enter(
     mut cmds: Commands,             // declared by two handlers at one type → one binding
     mut log: ResMut<Probe>,
 ) {
@@ -245,8 +269,8 @@ fn __aether_sim__initial_enter(
 
 Four properties are pinned:
 
-- **It is a startup system**, registered immediately after `insert_state`, so it
-  runs once, pre-loop, before frame 1.
+- **It is a startup system.** The generated install fn registers it right after
+  `insert_state`, so it runs once, pre-loop, before frame 1.
 - **The whole ancestor path runs, once.** The shipped E2E asserts
   `world_entered == field_entered == idle_entered == 1`.
 - **Later transitions do not replay it.** `Idle → Busy → Idle` re-enters the leaf
@@ -268,70 +292,76 @@ engine synthesizes a `none → initial` transition on the first run); see
 
 ## Registration
 
-The sibling plugin holds it all:
+`state_chart!` generates two registration fns per machine, and the sibling plugin
+calls them:
 
 ```rust,ignore
 impl ::boyko_ecs::Plugin for Flow {
     fn build(&self, app: &mut ::boyko_ecs::App) {
-        app.insert_state(GameFlow::Boot);
-        // Had the initial leaf's lineage declared `enter`, the chain's startup system
-        // would be registered right here:
-        //     app.add_startup_system(__aether_game_flow__initial_enter);
-        // `Boot` declares none, so nothing is emitted and nothing is registered.
+        __state_chart_install_game_flow(app);
         app.add_systems_cfg(|b| {
-            b.add_system(__aether_game_flow__boot__assets_ready)
-                .run_if(in_state(GameFlow::Boot));
-            b.add_system(__aether_game_flow__playing_running__pause_pressed)
-                .run_if(in_state(GameFlow::PlayingRunning));
-            // … one registration per generated transition system …
+            __state_chart_systems_game_flow(b);
         });
     }
     fn name(&self) -> &'static str { "Flow" }
 }
+
+// Generated by state_chart! (engine paths elided):
+pub fn __state_chart_install_game_flow(app: &mut App) {
+    app.insert_state(GameFlow::Boot);
+    // Had the initial leaf's lineage declared `enter`, the chain's startup system
+    // would be registered right here:
+    //     app.add_startup_system(__state_chart_game_flow__initial_enter);
+    // `Boot` declares none, so nothing is emitted and nothing is registered.
+}
+pub fn __state_chart_systems_game_flow(b: &mut ScheduleBuilder) {
+    b.add_system(__state_chart_game_flow__boot).run_if(in_state(GameFlow::Boot));
+    b.add_system(__state_chart_game_flow__playing_running).run_if(in_state(GameFlow::PlayingRunning));
+    b.add_system(__state_chart_game_flow__playing_paused).run_if(in_state(GameFlow::PlayingPaused));
+    b.add_system(__state_chart_game_flow__game_over).run_if(in_state(GameFlow::GameOver));
+}
 ```
 
 `insert_state` seeds the machine-level `initial`, resolved through composite
-`initial` chains to a leaf. Every transition system carries
-`run_if(in_state(<its leaf>))`, so the dormant cost of a machine idling in
-another state is the engine's ordinary run-condition machinery — a bit test, not
-a walk. Everything here is existing kernel machinery by name: `States`,
+`initial` chains to a leaf. There is one registration per **leaf** with routes, in
+leaf order; a leaf with no routes emits no system and no registration. Each leaf
+system carries `run_if(in_state(<its leaf>))`, so the dormant cost of a machine
+idling in another state is the engine's ordinary run-condition machinery — a bit
+test, not a walk. Everything here is existing kernel machinery by name: `States`,
 `State<S>` / `NextState<S>`, `insert_state`, the transition pass, `in_state`,
 `EventReader`.
 
+Because the two fns are a pure function of the machine's name, a hand-written
+plugin can register a hand-written `state_chart!` the same way.
+
 ### Declaration order
 
-`NextState<S>` is a plain resource, so if two transition systems of one machine
-fire on the same frame (different events), the **last write wins**. Aether adds
-no priority arbitration in v1; what it does add is determinism about *which
-order the registrations are emitted in* — and since A4 that order is your
-**declaration order**.
-
-That is not free, because inheritance walks each leaf innermost-first: a
-superstate handler declared *above* an inner state would otherwise register
-after the leaf's own, ordering the block by the shape of the tree instead of by
-the source. The parser stamps every `on` handler with its source index, and the
-walk re-sorts on it:
+Arbitration between two routes accepted on one leaf in one frame is
+**first-declared-wins**, so the order you write handlers in is semantic. It is not
+the inheritance walk's order: inheritance walks each leaf innermost-first, which
+would put a superstate handler declared *above* an inner state after the leaf's own.
+Each `on` handler carries its source index, and the routes are re-sorted on it:
 
 ```rust,ignore
 machine M {
     initial P0;
     state P0 {
         initial A;
-        on E1 => X;            // registered first — it is written first
+        on E1 => X;            // route 1 of leaf A — it is written first
         state A { on E2 => X; }
     }
     state X {}
 }
 ```
 
-Swap those two lines in the source and the registrations swap with them. The
-pinned unit test is `registration_follows_declaration_order_not_the_inheritance_walk`.
+If `E1` and `E2` both arrive in one frame while `M` is in `P0.A`, the `E1` route
+wins. Swap those two lines in the source and the winner swaps with them. The pinned
+unit test is `routes_arbitrate_in_declaration_order_not_inheritance_order` (in
+`boyko_macros::state_chart`), and Aether re-emits a state's handlers and nested
+states in their original interleaving so that the order survives the lowering.
 
-That order reaches execution, too: every transition system of one machine takes
-`ResMut<NextState<M>>`, so any two of them conflict, and the scheduler's
-topological tie-break for conflicting systems is insertion order (see
-[the scheduler](../scheduler.md)). The handler you wrote last is the one whose
-write survives the frame.
+Only one leaf system of a machine runs in a frame — the `in_state` gates of
+different leaves are disjoint — so there is no cross-system race on `NextState<M>`.
 
 ## Timing
 
@@ -342,7 +372,7 @@ transition pass at the top of the next `Schedule::run`, which means:
   deterministic, allocation-free mapping; the alternative (engine-side enqueued
   action callbacks) would be a `dyn` design and was rejected.
 - The new state is visible to `in_state`-gated systems on the following frame.
-- **Each leg costs two frames**: one for the transition system to read the event
+- **Each leg costs two frames**: one for the leaf system to read the event
   and write the request, one for the state pass to apply it. The shipped A4
   chart test walks five legs that way and asserts *every* intermediate state —
   checking only the final one cannot see a composite-`initial` regression that
@@ -361,8 +391,8 @@ ordinary system. Aether adds nothing there and hides nothing.
 Flattening is **concatenation**, and the generated fn and predicate names are
 its snake_case **collapse**. Both steps are lossy, so two positions in a legal
 chart can collide on one emitted name. Left alone, rustc reports "defined
-multiple times" pointing at tokens you never wrote; Aether owns the check, so
-the message names both chart positions and the name they share:
+multiple times" pointing at tokens you never wrote; `state_chart!` owns the check,
+so the message names both chart positions and the name they share:
 
 ```text
 error: states `A.BC` and `AB.C` both flatten to `ABC` — flattening concatenates the state path, so they would emit one name; rename one
@@ -382,13 +412,13 @@ The same comparison, at each level a name is minted:
 
 - two siblings spelled alike — ``duplicate state `Idle` — sibling states need
   distinct names``;
-- ``states `AB` and `Ab` both generate the system `__aether_m__ab__e` `` — the
+- ``states `AB` and `Ab` both generate the system `__state_chart_m__ab` `` — the
   variants differ, their snake_case collapse does not;
 - ``composite states `AB` and `Ab` … which both collapse to the predicate
-  `in_ab` — rename one``;
-- ``events `a::E` and `b::E` both generate the system `__aether_m__a__e` for
-  leaf `A` `` — inheritance dedupes on the event's full spelling, the fn name
-  keys on its last segment. Import one under an alias.
+  `in_ab` — rename one``.
+
+Two event paths on one leaf (`on a::E` and `on b::E`) are **not** a collision: the
+generated name carries no event segment, so they are two readers in one system.
 
 The second family is about **when** a name gets checked. Retargeting and handler
 inheritance are lazy walks, so a name no leaf happens to reach was never
@@ -405,13 +435,27 @@ is resolved eagerly, reachability be damned:
   no leaf's inheritance walk ever reaches: ``no state `Nowhere` in `M`; states
   declared here: `P0`, `Top` ``.
 
+The third family is about states the machine can never enter. **An unreachable
+state is a compile error.** A leaf is reachable if it is the initial leaf or the
+target of a route on a reachable leaf (inherited routes count), and a composite is
+reachable if any leaf under it is. One error is reported per maximal dead subtree:
+
+```text
+error: state `Victory` is unreachable: no transition in `M` targets it and it is not the chart's `initial` state, so the machine can never enter it — add a transition into it, or remove it
+```
+
+A composite with only dead leaves reads ``state `Credits` and everything nested in
+it are unreachable: …``. One known gap: hand-written code *can* drive a chart from
+outside its own edges, because `NextState<M>` is a public resource. A state entered
+only that way is rejected today, and there is no opt-out keyword yet.
+
 Every one of these is a `trybuild` golden; see
 [Diagnostics](diagnostics.md#machines) for the full table.
 
 > **The colliding pair moved at A7.** The collapse used to spell a run of
 > capitals one letter per word — `GOLD` became `g_o_l_d`, then `gold` — which
 > made `AB` and `A_b` collide. With that fixed, they no longer do: they mint
-> `__aether_m__ab__e` and `__aether_m__a_b__e`. The collision *fixture* was
+> `__state_chart_m__ab` and `__state_chart_m__a_b`. The collision *fixture* was
 > therefore re-aimed at `AB` / `Ab`, a pair the current rule really does
 > collapse alike, rather than re-blessed — a compile-fail fixture whose input
 > has stopped being a fault still passes, for the wrong reason, and pins
@@ -428,8 +472,9 @@ Every one of these is a `trybuild` golden; see
 > drove the transition has already left `reader_buf` by the frame the new leaf
 > first runs. That holds only while your presses are **at least two frames
 > apart**, which is the v1 requirement, not a property of the chart. Give
-> opposing edges distinct event types if you cannot guarantee the spacing;
-> reader-window-aware arbitration is a §5 v1.1 refinement, not shipped.
+> opposing edges distinct event types if you cannot guarantee the spacing.
+> First-declared-wins arbitration among one leaf's routes is shipped; arbitration
+> that is aware of a reader's event window is not.
 
 ## A runnable machine
 
@@ -555,7 +600,9 @@ initial-enter chain live in `crates/aether_tests/tests/a4_machine_hierarchy.rs`.
   pass, and the `on_enter` / `on_exit` conditions the flattened enum works with.
 - [Events](../concepts/events.md) — the reader cursor behind the backlog hazard.
 - [Diagnostics](diagnostics.md) — the machine error contract.
-- Source: `crates/aether_lang/src/expand.rs` (the `MachineModel` flattener, the
-  initial-enter chain and the drain-then-act body),
+- Source: `crates/boyko_macros/src/state_chart/` (the flattener, the per-leaf route
+  merge, the initial-enter chain, reachability and every machine diagnostic),
+  `crates/aether_lang/src/expand.rs` (the lowering of `machine` to `state_chart!`),
   `crates/aether_tests/tests/a3_machine.rs`,
-  `crates/aether_tests/tests/a4_machine_hierarchy.rs`.
+  `crates/aether_tests/tests/a4_machine_hierarchy.rs`,
+  `crates/aether_tests/tests/r2_chart_arbitration.rs`.

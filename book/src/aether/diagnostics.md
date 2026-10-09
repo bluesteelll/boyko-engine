@@ -317,16 +317,20 @@ error: no state `Runing` in `Playing`; states declared here: `Running`, `Paused`
 Flattening concatenates the state path, and the generated fn and predicate names
 are its snake_case collapse. Both steps are lossy, so two legal chart positions
 can mint one name. rustc would report these as "defined multiple times" against
-generated tokens; Aether reports both chart positions instead — every one of
-these carries a second span, *the first … is here*:
+generated tokens; `state_chart!`, which Aether lowers a `machine` to, reports both
+chart positions instead — every one of these carries a second span, *the first …
+is here*:
 
 | You write | Aether says |
 |-----------|-------------|
 | `state A { state BC {} }` next to `state AB { state C {} }` | ``states `A.BC` and `AB.C` both flatten to `ABC` — flattening concatenates the state path, so they would emit one name; rename one`` |
 | two sibling `state Idle {}` | ``duplicate state `Idle` — sibling states need distinct names`` |
-| leaves `AB` and `Ab`, each with `on E` | ``states `AB` and `Ab` both generate the system `__aether_m__ab__e` — generated names are the snake_case collapse of the flattened state path, and `AB` and `Ab` collapse alike; rename one`` |
+| leaves `AB` and `Ab`, each with a route | ``states `AB` and `Ab` both generate the system `__state_chart_m__ab` — generated names are the snake_case collapse of the flattened state path, and `AB` and `Ab` collapse alike; rename one`` |
 | composites that collapse alike | ``composite states `AB` and `Ab` flatten to `AB` and `Ab`, which both collapse to the predicate `in_ab` — rename one`` |
-| `on a::E` and `on b::E` in one state | ``events `a::E` and `b::E` both generate the system `__aether_m__a__e` for leaf `A` — the generated name keys on the event's last path segment; import one under an alias (`use … as …`)`` |
+
+`on a::E` and `on b::E` in one state are **not** a collision: a leaf's generated
+system name carries no event segment, so the two routes become two event readers in
+one system, and the first declared wins when both accept in one frame.
 
 ```text
 error: states `A.BC` and `AB.C` both flatten to `ABC` — flattening concatenates the state path, so they would emit one name; rename one
@@ -366,6 +370,31 @@ The shadowed-target case is the sharpest of the three: `P0`'s `on E` is shadowed
 for every leaf by `A`'s own `on E`, so no inheritance walk ever reaches it — and
 the target it names would never have been looked up. A chart that names a state
 which does not exist is broken whether or not anything reaches it.
+
+### Unreachable states
+
+A state the machine can never enter is a compile error. A leaf is reachable if it is
+the chart's initial leaf or the target of a route on a reachable leaf (inherited
+routes count); a composite is reachable if any leaf under it is. One error is reported
+per maximal dead subtree:
+
+| You write | Aether says |
+|-----------|-------------|
+| a leaf `Victory` that no transition targets | ``state `Victory` is unreachable: no transition in `M` targets it and it is not the chart's `initial` state, so the machine can never enter it — add a transition into it, or remove it`` |
+| a composite `Credits` none of whose leaves is reachable | ``state `Credits` and everything nested in it are unreachable: …`` (same tail) |
+
+```text
+error: state `Victory` is unreachable: no transition in `M` targets it and it is not the chart's `initial` state, so the machine can never enter it — add a transition into it, or remove it
+  --> tests/ui/machine_unreachable_state.rs:27:15
+   |
+27 |         state Victory {
+   |               ^^^^^^^
+```
+
+It is an error rather than a warning because a stable proc-macro has no warning
+channel: a "warning" would print nothing. The known gap: hand-written code can drive
+a chart from outside its own edges through the public `NextState<M>` resource, and a
+state entered only that way is rejected today.
 
 ## Materials
 

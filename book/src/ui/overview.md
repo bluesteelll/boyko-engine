@@ -2,6 +2,11 @@
 
 > `boyko_ui` is an ECS-native UI: a widget IS an entity, every layout / style / interaction property IS a component, and layout / hit-testing / projection are ordinary ECS systems over the kernel storage. There is no parallel UI data system.
 
+> **Status.** `boyko_ui` and the UI render pack in `boyko_render` (`boyko_render::ui`) are
+> shipped and tested. The windowed host does **not** composite UI yet: `EnginePlugins`
+> records no UI pass, and `boyko_app` depends on `boyko_ui` only in its tests. Until the host
+> gains a UI pass, the UI draw path runs in the render crates' own tests and present harness.
+
 ## What it is
 
 Most UI libraries keep a tree of their own. Bevy UI delegates layout to Taffy, which holds a parallel `UiSurface` node tree plus an entity↔node map. Immediate-mode toolkits (egui, imgui) own a per-frame context: a `Vec`/`HashMap` of widget state behind an ID stack. Both are a second data system glued beside the application's data.
@@ -100,13 +105,14 @@ flowchart TD
 
 `ui_world_project_system` projects each anchor's world point through the camera's column-major view-projection matrix (one `Mat4·Vec4` + a divide), writes the screen origin / scale / visibility into `UiWorldProjection` (set-if-changed, the `Changed`-gate), and flips the frustum-cull `UiWorldCulled` bit. The layout pass reads `UiWorldProjection` to seed the root origin — again keeping the layout pass the single `ComputedRect` writer.
 
-A bare tuple is **not** a `Bundle` here, and neither is a lone component — every
-`Commands::spawn` / `EntityCommands::insert` takes a `Bundle`, and the `Bundle`
-trait is sealed so the only way to mint one is `#[derive(Bundle)]` (the derive is
-**not** in any prelude; import it from `boyko_macros`). So a world-anchored root is
-a `#[derive(Bundle)]` struct that carries the node base (`UiLayout` + `ComputedRect`)
-plus the `UiRoot` marker and the `UiWorldAnchor` config. Spawning it hits the static
-archetype cache as a single unit:
+A bare tuple is **not** a `Bundle` here. Every `Commands::spawn` /
+`EntityCommands::insert` takes a `Bundle`, and the `Bundle` trait is sealed: a bundle
+is either a single table-stored `#[derive(Component)]` type (the derive makes it a
+one-component bundle) or a `#[derive(Bundle)]` struct (that derive is **not** in any
+prelude; import it from `boyko_macros`). So a world-anchored root, which needs four
+components at once, is a `#[derive(Bundle)]` struct that carries the node base
+(`UiLayout` + `ComputedRect`) plus the `UiRoot` marker and the `UiWorldAnchor`
+config. Spawning it hits the static archetype cache as a single unit:
 
 ```rust,ignore
 use boyko_ecs::prelude::*;            // EcsMaster, Commands, ...
@@ -156,9 +162,40 @@ Source: [`world/pick.rs`](https://github.com/bluesteelll/boyko-engine/blob/maste
 
 ## Rendering
 
-The layout pass produces `ComputedRect` (plus `StackIndex`, `ComputedClip`, `UiBackground`). The render side lives in `boyko_render`'s `ui` module: it packs those columns into a std430 `UiInstance` record, stable-sorts by `StackIndex`, uploads to a persistent-mapped storage ring, and draws every node as one instanced, anti-aliased, rounded-rect SDF quad on the in-house Vulkan path — steady-state one draw call, zero per-frame heap allocation, with an O(1) generation gate that skips the pack when nothing changed. Colors are authored straight RGBA8 and premultiplied at pack time. See [Rendering overview](../rendering/overview.md).
+The layout pass produces `ComputedRect` (plus `StackIndex`, `ComputedClip`, `UiBackground`). The render side lives in `boyko_render`'s `ui` module:
 
-## What ships (GUI phases P1–P7)
+- `ui_render_discovery` asks whether any render input changed, and the gather packs the columns into an 80-byte std430 `UiInstance` record per quad, stable-sorted by `StackIndex`.
+- The upload writes the records into a persistent-mapped storage ring, one slot per frame in flight.
+- `record_ui_rects` draws every quad — rounded rects, glyphs and sprites alike — with **one pipeline and one instanced draw**. The instance ring is bound at descriptor set 0 and the sprite textures at set 1; per-instance flags select the rect, text or textured lane in the fragment shader.
+
+The steady state does zero per-frame heap allocation, and an O(1) generation gate skips the pack when nothing changed. Colors are authored straight RGBA8 and premultiplied at pack time. See [Rendering overview](../rendering/overview.md).
+
+## Sprites, nine-slice and flipbooks
+
+Images rasterize through the textured lane: a node with `UiImage` packs a sprite quad (`FLAG_TEXTURED`) that samples a bindless texture slot, tinted by `UiImage::tint`.
+
+- **Nine-slice** — `UiNineSlice` splits the image into a border and a center with two insets: `border_px` (the destination, in logical pixels) and `border_uv` (the source, as a fraction of the node's current UV rect). `mode` makes the edges and the center stretch (`NineSliceMode::Stretch`, the default) or repeat (`NineSliceMode::Tile`); a tiled sub-quad (`FLAG_TILED`) repeats inside its own UV rect, and the corners never change.
+- **Sprite sheets** — `UiSheetTable` is the resource that registers sheets, keyed by a dense `SheetId`. A node with `UiSpriteSheet` shows one frame of a sheet.
+- **Flipbooks** — `UiSpriteAnim` names a frame range; `ui_sprite_flipbook` advances each node's `UiSpriteCursor` through it and writes `UiSpriteSheet::index` through `Mut::set_if_neq`, so a frame that did not move costs no repaint.
+- **Authoring** — the `.ui` text format accepts the nine-slice and sprite-sheet vocabulary.
+
+Two rules matter when you register these systems yourself:
+
+- **Order `ui_sprite_flipbook` `.before(ui_render_discovery)`.** A reader ordered before the writer misses a change tick for good, so a wrong order *loses* the repaint rather than delaying it.
+- **A per-frame repaint signal must be a table component.** A dense component's `Changed<C>` inside `Or<(…)>` never fires on this kernel, so a dense per-frame write would render a frozen first frame with no error. `UiSpriteSheet` and `UiVisual` are table components for this reason.
+
+Details: [Sprites & Animation](sprites-and-animation.md). Source: [`sprite.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ui/src/sprite.rs).
+
+## Animation
+
+Time-varying UI reads one clock. `UiClock` holds two clamped deltas, written once per frame by `ui_clock_tick`; `UiAnimationPlugin` registers it in `UiAnimationSet` on the `Main` schedule, so consumers order after one set.
+
+- **Which delta.** A tween reads the **real** delta by default, so a pause-menu fade still runs while the game is paused; setting `TWEEN_FLAG_VIRTUAL_CLOCK` on the tween row moves it to the virtual delta. Every other consumer (the flipbook included) reads the virtual delta, so it pauses and slows with the game.
+- **Tweens.** Four channels — `TweenOffset`, `TweenOpacity`, `TweenScale`, `TweenTint` — started with `start_tween_*` and stopped with `stop_tween_*`. `ui_visual_tick` folds the active channels into one `UiVisual` per node, which the render gather reads, and `ui_tween_reap` removes finished tweens.
+
+Source: [`animation.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ui/src/animation.rs).
+
+## What ships (GUI phases P1–P7, UI-advanced rungs S and A)
 
 Be precise about scope — all of these are shipped:
 
@@ -173,17 +210,28 @@ Be precise about scope — all of these are shipped:
 | P6 | HUD widgets (Bar/Label/Button/Panel/Image/Grid) + anchoring/safe-area | Shipped |
 | P7a | World-space projection / visibility core | Shipped |
 | P7b | Cursor-ray pick + CPU-proxy depth occlusion | Shipped |
+| S0 | The canonical render gather + `ui_render_discovery`; the two-phase upload | Shipped |
+| S2 | The glyph UV moves to its own `UiInstance::uv` field (the 80-byte record) | Shipped |
+| S3 | The textured lane: `UiImage` rasterizes through bindless textures | Shipped |
+| S4 | Nine-slice (`UiNineSlice`) | Shipped |
+| S5 | Sprite sheets and flipbooks; tiled nine-slice | Shipped |
+| S6 | `.ui` authoring of the sprite vocabulary | Shipped |
+| A0 | The UI clock (`UiClock`, `ui_clock_tick`, `UiAnimationPlugin`) | Shipped |
+| A1 | Tweens (offset, opacity, scale, tint) | Shipped |
 
-Documented deferrals (not yet shipped): GPU depth-buffer occlusion (P7b uses a CPU proxy), subtree-AABB world culling (the cull is anchor-point-based), per-side asymmetric borders (the renderer draws a uniform border), and `UiImage` consumption in the render pack (an Image node is layout-complete and authorable but does not yet rasterize).
+Documented deferrals (not yet shipped): UI compositing in the windowed host (see the status note at the top), GPU depth-buffer occlusion (P7b uses a CPU proxy), subtree-AABB world culling (the cull is anchor-point-based), and per-side asymmetric borders (the renderer draws a uniform border).
+
+`ProfilingOverlayPlugin` is the reference profiling overlay: one system that writes the profiler's windowed statistics into on-screen text rows, with no allocation on the read path. Add it after `ProfilerPlugin`; in a world without a profiler it registers nothing.
 
 ## Scheduling note
 
-`boyko_ui` ships systems, not an `App` schedule — ordering is the host's responsibility. The required order: run structural / prop-mutation systems first, then `ui_text_measure_system` (`.before(ui_layout_discovery)`), then `ui_world_project_system` / `ui_world_pick_system` (`.after` the camera + transform propagation, `.before` layout), then `ui_layout_discovery`, then `ui_layout_apply`. The `UiPlugin` / `UiInteractionPlugin` / `UiWidgetsPlugin` plugins wire the common registrations.
+`boyko_ui` ships systems, not an `App` schedule — ordering is the host's responsibility. The required order: run structural / prop-mutation systems first, then `ui_text_measure_system` (`.before(ui_layout_discovery)`), then `ui_world_project_system` / `ui_world_pick_system` (`.after` the camera + transform propagation, `.before` layout), then `ui_layout_discovery`, then `ui_layout_apply`. Time-varying systems order after `UiAnimationSet`, and `ui_sprite_flipbook` before `ui_render_discovery`. The `UiPlugin` / `UiInteractionPlugin` / `UiWidgetsPlugin` / `UiAnimationPlugin` plugins wire the common registrations; `ProfilingOverlayPlugin` adds the profiling overlay.
 
 ## See also
 
 - [Hierarchies](../concepts/hierarchies.md) — the `ChildOf` / `Children` tree that *is* the widget tree.
 - [Text & MSDF](text-msdf.md) — glyph atlas, shaping, and the text-on-the-quad-path render.
+- [Sprites & Animation](sprites-and-animation.md) — sprites, nine-slice, flipbooks, the UI clock and tweens.
 - [EnableTags](../concepts/enable-tags.md) — the O(1) bitset backend behind the world-UI visibility / cull / occlusion bits.
 - [Rendering overview](../rendering/overview.md) — how `ComputedRect` becomes a drawn quad.
 - Source: [`boyko_ui`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ui/src/lib.rs).
