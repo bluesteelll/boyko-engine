@@ -557,10 +557,10 @@ impl ExecutorScratch {
                 panicked: AtomicU32::new(NO_PANICKED_SYSTEM),
             }),
         });
-        // SAFETY: `Box::into_raw` yields a non-null, properly-aligned, live
-        //   pointer; ownership is transferred to `self.completion` and freed
-        //   exactly once in `Drop for ExecutorScratch`.
-        let completion = unsafe { NonNull::new_unchecked(Box::into_raw(completion_box)) };
+        // `Box::into_raw` hands ownership to `self.completion`; `Drop for ExecutorScratch` frees
+        //   it exactly once. (`Box::into_non_null` does this in one call from Rust 1.99 on.)
+        let completion =
+            NonNull::new(Box::into_raw(completion_box)).expect("invariant: a Box is non-null");
 
         // Phase 16 — per-frame condition memos. `cond_evaluated` is sized by
         // system count (one bit per system); the set memos by row count.
