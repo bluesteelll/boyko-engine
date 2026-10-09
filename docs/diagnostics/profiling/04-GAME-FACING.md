@@ -139,7 +139,7 @@ let mut bits = 0u64;
 for scope in world.query::<&ProfilingScope, Enabled<ProfilingScopeEnabled>>().iter() {
     bits |= scope.arm_bit();
 }
-profiling_abi::project_scopes(bits)      // writes bits 8..64; fetch_update, no store if unchanged
+profiling_abi::project_scopes(bits)      // writes bits 8..64; try_update, no store if unchanged
 ```
 
 * **No `scope_entity[]`.** The loop above is over the *search space* and needs a bit → entity table
@@ -148,7 +148,7 @@ profiling_abi::project_scopes(bits)      // writes bits 8..64; fetch_update, no 
   the mirror this decision forbids two paragraphs below.
 * **`ARM_MASK.store(bits)` would clear the channel half**, including the bit `arm` holds. See the
   boxed note at the top of this decision: that store is a one-way switch. `project_scopes` writes
-  bits `8..64` through a `fetch_update` and returns whether anything changed.
+  bits `8..64` through a `try_update` and returns whether anything changed.
 
 **The write path a game system actually uses, with its cost (B2).** `EcsMaster::enable`/`disable`
 take **`&mut self`** (`enable_tag_api.rs:87`, `:95`), which no parallel system can hold, and rev 3

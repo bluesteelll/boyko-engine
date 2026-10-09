@@ -58,7 +58,7 @@ fn quiesce() {
 /// **The trap the split exists to avoid.** A projection of zero must not clear the channel bit, so
 /// the fold keeps running and the toggle stays two-sided.
 ///
-/// RED, run at implementation: replace `project_scopes`'s `fetch_update` body with a plain
+/// RED, run at implementation: replace `project_scopes`'s `try_update` body with a plain
 /// `store(scopes)`. MEASURED — it fires **three assertions earlier than predicted**, on
 /// *"publishing scopes cleared the channel the profiler is armed on"*: the channel is lost by the
 /// FIRST projection, not by the projection of zero, because a plain store overwrites the whole word
