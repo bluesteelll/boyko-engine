@@ -1831,7 +1831,14 @@ mod tests {
         }
 
         proptest! {
-            #![proptest_config(ProptestConfig::with_cases(256))]
+            #![proptest_config(ProptestConfig {
+                cases: 256,
+                // No failure file under Miri: proptest finds it through the cwd, which Miri's
+                // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+                #[cfg(miri)]
+                failure_persistence: None,
+                ..ProptestConfig::default()
+            })]
             #[test]
             fn assets_matches_hashmap_oracle(ops in proptest::collection::vec(op_strategy(), 1..300)) {
                 let mut assets = Assets::<u64>::with_reserved(16);
@@ -1952,7 +1959,14 @@ mod tests {
         }
 
         proptest! {
-            #![proptest_config(ProptestConfig::with_cases(256))]
+            #![proptest_config(ProptestConfig {
+                cases: 256,
+                // No failure file under Miri: proptest finds it through the cwd, which Miri's
+                // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+                #[cfg(miri)]
+                failure_persistence: None,
+                ..ProptestConfig::default()
+            })]
             #[test]
             fn assets_refcount_matches_model_oracle(ops in proptest::collection::vec(ref_op_strategy(), 1..300)) {
                 let mut assets = Assets::<u64>::with_reserved(16);
@@ -2709,7 +2723,14 @@ mod tests {
         use super::*;
 
         proptest! {
-            #![proptest_config(ProptestConfig::with_cases(256))]
+            #![proptest_config(ProptestConfig {
+                cases: 256,
+                // No failure file under Miri: proptest finds it through the cwd, which Miri's
+                // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+                #[cfg(miri)]
+                failure_persistence: None,
+                ..ProptestConfig::default()
+            })]
             #[test]
             fn dec_ref_never_mutates_on_a_generation_mismatch(gen_offset in 1u32..=1_000_000) {
                 let mut assets = Assets::<u64>::with_reserved(4);
@@ -2919,7 +2940,14 @@ mod tests {
             // Under Miri, two cases of at most 48 ops (the `row_identity.rs` cfg!(miri) precedent):
             // the op alphabet is the same, and even 4 interpreted cases of up to 300 ops did not
             // finish inside a 25-minute bounded run.
-            #![proptest_config(ProptestConfig { cases: if cfg!(miri) { 2 } else { 256 }, ..ProptestConfig::default() })]
+            #![proptest_config(ProptestConfig {
+                cases: if cfg!(miri) { 2 } else { 256 },
+                // No failure file under Miri: proptest finds it through the cwd, which Miri's
+                // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+                #[cfg(miri)]
+                failure_persistence: None,
+                ..ProptestConfig::default()
+            })]
             /// The edited set against a per-row model of the whole lifecycle: after every op
             /// the count and `edited_any` match the model's marked set, and every drain yields
             /// exactly the marked rows, ascending, each with `Some(value)` iff the row is

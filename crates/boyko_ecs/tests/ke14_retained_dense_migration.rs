@@ -670,6 +670,13 @@ fn step_strategy() -> impl Strategy<Value = Step> {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        // No failure file under Miri: proptest finds it through the cwd, which Miri's
+        // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+        #[cfg(miri)]
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
     /// **The D2 invariant, asserted as itself**: the set a dense query
     /// enumerates equals the set the dense STORE holds, after EVERY structural
     /// step. `has_component` routes a dense id to the store's `e2s` map, which

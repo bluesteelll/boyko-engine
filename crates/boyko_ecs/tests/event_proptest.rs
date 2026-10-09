@@ -45,6 +45,13 @@ fn ensure_registered() {
 // ── Property-based tests ──────────────────────────────────────────────────────
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        // No failure file under Miri: proptest finds it through the cwd, which Miri's
+        // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+        #[cfg(miri)]
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
     /// Test #15: events sent round-trip correctly through the double buffer.
     ///
     /// For any sequence of values (up to capacity), all sent values appear

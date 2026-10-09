@@ -92,6 +92,13 @@ fn pool_op_strategy() -> impl Strategy<Value = PoolOp> {
 struct PModelTag;
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        // No failure file under Miri: proptest finds it through the cwd, which Miri's
+        // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+        #[cfg(miri)]
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
     /// Random add/swap_remove/pop sequence: every public observable of the
     /// ZST pool must match the reference model after every operation.
     #[test]
@@ -231,6 +238,13 @@ impl Drop for PDropTag {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        // No failure file under Miri: proptest finds it through the cwd, which Miri's
+        // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+        #[cfg(miri)]
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
     /// Every logical removal drops the Drop-impl ZST exactly once; pool
     /// Drop accounts exactly the survivors; total drops == total adds.
     #[test]

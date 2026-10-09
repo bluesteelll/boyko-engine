@@ -233,6 +233,13 @@ fn archetype_counts_strategy() -> impl Strategy<Value = Vec<usize>> {
 // ── Properties ──────────────────────────────────────────────────────────────
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        // No failure file under Miri: proptest finds it through the cwd, which Miri's
+        // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+        #[cfg(miri)]
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
     /// §11.3 invariant 1: total rows seen via the sequential
     /// `for_each_chunk` equals the total spawned row count, for any
     /// archetype-count layout.

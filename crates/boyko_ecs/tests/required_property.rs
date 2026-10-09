@@ -165,6 +165,13 @@ fn b_effective_ids(ecs: &EcsMaster, e: Entity) -> HashSet<usize> {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        // No failure file under Miri: proptest finds it through the cwd, which Miri's
+        // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+        #[cfg(miri)]
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
     /// Invariant 1+2: spawning ARoot1 (with random value) always yields exactly
     /// {ARoot1, AMid, ALeaf} — value-independent canonical set, each id once.
     #[test]

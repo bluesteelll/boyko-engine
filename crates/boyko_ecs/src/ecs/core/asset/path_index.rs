@@ -328,7 +328,14 @@ mod tests {
     const PREAMBLE_KEYS: usize = 5 * MERGE_THRESHOLD;
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(256))]
+        #![proptest_config(ProptestConfig {
+            cases: 256,
+            // No failure file under Miri: proptest finds it through the cwd, which Miri's
+            // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
+            #[cfg(miri)]
+            failure_persistence: None,
+            ..ProptestConfig::default()
+        })]
 
         /// A `BTreeMap<hash, (slot, generation)>` under first-insert-wins is
         /// the ground-truth oracle for [`PathIndex`]: every `insert` maps to
