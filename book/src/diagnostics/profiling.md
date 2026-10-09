@@ -11,7 +11,7 @@ Profiling spans three places:
 |------|-------|------|
 | Substrate | [`boyko_diag`](https://github.com/bluesteelll/boyko-engine/tree/master/crates/boyko_diag) | The clock, the per-lane sample rings, the zone macros and the build-profile table. It has no dependencies and prints nothing itself. |
 | Store | `boyko_ecs`, module [`profiling`](https://github.com/bluesteelll/boyko-engine/tree/master/crates/boyko_ecs/src/ecs/core/profiling) | The `Profiler` resource: a reservation-backed store that the fold fills once per frame, plus `ProfilerPlugin` and the engine's own zones. |
-| Host | `boyko_app`, module `profiling` | Arming from the environment, the telemetry writer and the measurement artifacts. |
+| Host | `boyko_app` | `EnginePlugins` arms the profiler from the environment (`BOYKO_PROFILE_ON`). The module `profiling` holds the telemetry writer and the measurement artifacts. |
 
 A zone site passes two gates. The **tier** gate is a compile-time constant from the build profile,
 so a site above the profile's tier is deleted. The **scope** gate is one atomic load of the arm

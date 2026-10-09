@@ -268,7 +268,7 @@ hardware. Each of the others has an owner-set config that a plugin inserts with 
 |--------|----------------|---------|------|
 | SDF marcher soft shadow and AO | the primary directional light's visibility, and every point/spot light's while punctual shadows are off; AO on the ambient term | on (the shadow needs a directional light) | — |
 | Cascaded shadow maps (CSM) | the sun, from mesh casters carrying `ShadowCaster` | off | `CsmConfig::cascade_count` > 0 |
-| Punctual shadow atlas | spot and point lights | off | `ShadowConfig::enabled` |
+| Punctual shadow atlas | spot and point lights carrying `CastsPunctualShadow`, from mesh casters carrying `ShadowCaster` | off | `ShadowConfig::enabled` |
 | Ray-query mesh shadows | the sun, traced against an acceleration structure | only in `--features hwrt` builds on a ray-query GPU, where the boot selects it | `RayShadowConfig` (tuning); `BOYKO_FORCE_SOFTWARE=1` forces the non-ray-traced path |
 | Shadow denoiser (spatial / temporal) | the ray-traced shadow's visibility | off; `hwrt` builds only | `ShadowDenoiseConfig::mode` |
 | SSAO | screen-space AO on the ambient term | off | `SsaoConfig::quality` |

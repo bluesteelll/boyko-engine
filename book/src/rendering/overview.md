@@ -71,8 +71,9 @@ The defining choice is **static dispatch**. `RhiApi` is intentionally *not*
 object-safe; backends implement the traits over their own concrete resources, so every
 call monomorphizes to a direct, non-virtual call — zero abstraction overhead versus the
 backend's inherent methods. There is no `dyn`, no `Box`, no `HashMap` anywhere in the
-crate. Its only dependency is `boyko_utils` (for the generational `Slot` handles); it
-does **not** depend on `boyko_ecs`, which keeps the dependency graph acyclic. See
+crate. It depends on two engine crates: `boyko_utils` (for the generational `Slot` handles)
+and `boyko_log` (its diagnostic channel). It does **not** depend on `boyko_ecs`, which keeps
+the dependency graph acyclic. See
 [The RHI](rhi.md).
 
 ### `boyko_rhi_vulkan` — the backend
@@ -117,9 +118,10 @@ the raw-FFI path. Two gates use it:
 ### `boyko_render` — the bridge
 
 [`boyko_render`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/lib.rs)
-is the **only** crate allowed to name both the ECS and the RHI. It depends directly on
-`boyko_ecs`, `boyko_rhi`, `boyko_rhi_vulkan`, and `boyko_utils`, with no cycle, so the
-graphics-aware types live here and never leak into the graphics-pure ECS core. It
+is the bridge between the ECS and the RHI. It depends directly on `boyko_ecs`, `boyko_rhi`
+and `boyko_rhi_vulkan`, with no cycle, so the graphics-aware types live here and never leak
+into the graphics-pure ECS core. Only it and the host layer above it (`boyko_app`) name both
+sides. It
 holds:
 
 - **GPU-resident columns** — `GpuColumnManager` mints DeviceLocal (VRAM) SSBOs and
@@ -243,11 +245,14 @@ device-local output, synchronized by the derived barriers.
 
 ## What ships today
 
-Each optional feature has an owner-set config resource, and all but one default to
-**off**, so an unconfigured world renders exactly as before the feature existed. (The
-exception, ray-traced shadows, exists only in `hwrt` builds.) To turn a feature on,
-overwrite its config **after** `add_plugins(EnginePlugins::…)`: the plugins insert the
-defaults.
+The table lists each feature with its default and its switch. The base frame needs no
+configuration: the Deferred path with both geometry legs, meshes, textured PBR, lights, ACES
+tonemapping and, with the SDF leg, SDF tracing are on by default. Every **opt-in** feature
+defaults to **off**, so an unconfigured world renders without it. (The exception, ray-traced
+shadows, exists only in `hwrt` builds, where the boot selects it on a ray-query GPU.) Most
+opt-in features have an owner-set config resource: to turn one on, overwrite its config
+**after** `add_plugins(EnginePlugins::…)`, because the plugins insert the defaults. Some also
+need a marker component on the entities they apply to, as the Knob column notes.
 
 | Feature | Crate | Default | Knob |
 |---------|-------|---------|------|
@@ -260,15 +265,15 @@ defaults.
 | [Clustered light cull](lighting.md) | `boyko_render` | off; Visibility Buffer path only | `LightingConfig::clusters_enabled` / `cluster_select` |
 | [Tonemapping](lighting.md): ACES, Neutral, Reinhard-Jodie | `boyko_render` | ACES | `LightingConfig::tonemapper` |
 | [SDF sphere-tracing](sdf.md), its soft shadow and AO | `boyko_rhi_vulkan` | on with the SDF leg | — |
-| [Cascaded sun shadows](shadows-and-ao.md) | `boyko_render`, `boyko_app` | off | `CsmConfig::cascade_count` > 0 |
-| [Spot/point shadow atlas](shadows-and-ao.md) | `boyko_render`, `boyko_app` | off | `ShadowConfig::enabled` |
+| [Cascaded sun shadows](shadows-and-ao.md) | `boyko_render`, `boyko_app` | off | `CsmConfig::cascade_count` > 0, plus `ShadowCaster` on the casting meshes |
+| [Spot/point shadow atlas](shadows-and-ao.md) | `boyko_render`, `boyko_app` | off | `ShadowConfig::enabled`, plus `CastsPunctualShadow` on the lights and `ShadowCaster` on the casting meshes |
 | [Ray-traced mesh shadows](shadows-and-ao.md) (ray query) | `boyko_render`, `boyko_app` | only in `--features hwrt` builds on a ray-query GPU, where the boot selects it | `RayShadowConfig` (tuning); `BOYKO_FORCE_SOFTWARE=1` forces the non-ray-traced path |
 | [Shadow denoiser](shadows-and-ao.md), spatial and temporal | `boyko_render`, `boyko_app` | off; `hwrt` builds only | `ShadowDenoiseConfig::mode` |
 | [SSAO](shadows-and-ao.md) | `boyko_render` | off | `SsaoConfig::quality` |
 | [SDF DDGI global illumination](global-illumination.md) | `boyko_render` | off | `DdgiConfig::ddgi_indirect` |
 | [Anti-aliasing](anti-aliasing.md): FXAA, SMAA, TAA, RCAS sharpen | `boyko_render` | off | `AaConfig::mode`, `TaaConfig::sharpen` |
 | [2× SSAA](anti-aliasing.md) | `boyko_render`, `boyko_app` | off (boot-fixed) | `EnginePlugins::with_ssaa_scale(2)` |
-| [Two-phase HZB occlusion culling](render-paths.md) | `boyko_render`, `boyko_app` | off; Visibility Buffer path only | `OcclusionConfig::mode` (`HzbConfig` builds the depth pyramid on its own) |
+| [Two-phase HZB occlusion culling](render-paths.md) | `boyko_render`, `boyko_app` | off; Visibility Buffer path only | `OcclusionConfig::mode`, plus `OcclusionCulling` on each instance to test (`HzbConfig` builds the depth pyramid on its own) |
 | [GPU particles](particles.md) | `boyko_render` | off | `ParticleConfig::mode` |
 
 Some features depend on the render path. Under Forward and Forward+, SSAO, DDGI, the

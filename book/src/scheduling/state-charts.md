@@ -144,8 +144,10 @@ These are compile errors, reported at the offending tokens:
   names collide after snake-casing (`AB` and `Ab` both become `ab`);
 - one parameter name used with two different types in the routes and actions a leaf's system
   merges;
-- **an unreachable state**: one that no transition targets and that is not the chart's initial
-  state. The error names the state and the chart.
+- **an unreachable state**: one the machine can never enter by following transitions from the
+  chart's initial state. The check follows transitions transitively, so a state targeted only
+  from other unreachable states is refused too. There is one error per dead branch: it names the
+  branch's outermost state (which covers everything nested in it) and the chart.
 
 The reachability check has one known gap. `NextState<C>` is a public resource, so ordinary code can
 move a chart into a state that no transition targets. Such a chart is refused even though the

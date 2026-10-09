@@ -15,8 +15,9 @@ replaces them with declarations:
    mask and (for images) the layout it needs.
 2. **Compile.** A per-resource state machine (in the style of Granite's) walks the passes in order
    and emits a barrier only where a real hazard exists.
-3. **Record.** Before each pass, its barriers are grouped by `(src_stage, dst_stage)` and recorded
-   as one `vkCmdPipelineBarrier` call per group.
+3. **Record.** Before each pass, its image barriers and its buffer barriers are each grouped by
+   `(src_stage, dst_stage)`, and each group is recorded as one `vkCmdPipelineBarrier` call. Image
+   and buffer barriers that share a stage pair still go out as two calls.
 
 Every render path declares its own graph (`declare_deferred_graph`, `declare_forward_graph`,
 `declare_vb_graph` in

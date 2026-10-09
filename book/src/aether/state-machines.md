@@ -536,7 +536,7 @@ struct Script {
     entered_playing: u32,
 }
 
-/// The kernel's maximum event-lane count (`EventConfig` validates `1..=64`).
+/// One event lane per pool worker (`MAX_WORKERS` == 64); `EventConfig` validates `1..=65`.
 const MAX_EVENT_LANES: u32 = 64;
 
 #[test]

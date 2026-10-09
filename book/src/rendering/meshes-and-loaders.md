@@ -78,7 +78,7 @@ give more control:
 
 - `decode_scene` keeps the primitives apart (`GlbScene::parts`) and returns the file's materials
   (base colour, metallic and roughness factors, emissive, and the indices of the base-colour,
-  normal, metallic-roughness and occlusion images) and its embedded images. Wiring those into
+  normal, metallic-roughness, occlusion and emissive images) and its embedded images. Wiring those into
   `Material` and `TextureGpu` assets is up to the caller, and only PNG images can be decoded.
 - `decode_static_pose` and `decode_scene_static_pose` accept rigged files and return the rest
   shape, dropping joints, weights and morph targets.

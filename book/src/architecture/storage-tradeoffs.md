@@ -201,9 +201,11 @@ excluded rows. An enable tag works in two steps, and the polarity matters:
   exactly the set the query must visit; every candidate row is tested.
 
 The per-row test is small (one predicted branch per row; queries that name no
-enable tag pay nothing), but it is not zero. The cull list is recomputed only
-when the world's enable-presence epoch moves, that is, when some archetype
-allocates a new enable column. The data-less sole `Query<(), Enabled<A>>` is
+enable tag pay nothing), but it is not zero. The cull list is recomputed when
+the query rebuilds its matched archetype set (the world's archetype or
+structural generation moved), or when the world's enable-presence epoch moves,
+that is, when some archetype allocates a new enable column. Between those
+events the query reuses the list. The data-less sole `Query<(), Enabled<A>>` is
 bounded the same way: it seeds its candidate archetypes from the per-world
 presence bitset, so it visits only archetypes where `A` is a property — never a
 full-world sweep.

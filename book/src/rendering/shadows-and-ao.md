@@ -105,8 +105,18 @@ be, so CSM must still be enabled. On any other build or device, the cascade map 
 `Spatial` (an edge-avoiding à-trous filter), `Temporal` (reprojection with a variance clamp) or
 `Both`. The denoiser exists only in `hwrt` builds on a ray-query device, and it runs on frames where
 the TLAS is non-empty and CSM is enabled with at least one caster. While it is armed, the denoised
-visibility takes the place of the SDF soft-march term; the two are never combined. Under Forward and
-Forward+ it is forced off; under the Visibility Buffer it needs the mesh leg.
+visibility takes the place of the per-pixel trace, and so of the cascade-map sample. It does not
+replace the SDF soft shadow:
+
+- On the **Deferred** path, the resolve min-combines the ray-traced (or denoised) mesh visibility
+  with the SDF soft shadow, as it does the cascade sample. A pixel is as dark as the darker of the
+  two.
+- On the **Visibility Buffer** path, the resolver never arms the SDF-on-mesh shadow
+  (`vb_sdf_mesh_shadow`) together with a ray-traced source, so mesh pixels there have no SDF term
+  to combine with.
+
+Under Forward and Forward+ the denoiser is forced off; under the Visibility Buffer it needs the mesh
+leg.
 
 ## Ambient occlusion
 

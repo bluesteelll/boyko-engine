@@ -277,7 +277,7 @@ impl Trigger for DamageWave {
 }
 ```
 
-`PropagationMode` has three arms: `None` (target-only, the historical default), `Up` (bubble one hop along `Traversal` — the existing single-chain bubble), and `Down` (the reverse-collection fan-out). The descent is cycle-safe and depth-capped, with a per-node propagate snapshot so calling `propagate(false)` prunes only that node's subtree. Fire it with `ecs.trigger::<DamageWave>(root, DamageWave)` after registering per-entity runners via `observe_entity_event`. [traversal.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/observers/traversal.rs)
+`PropagationMode` has three arms. `None` (the default) and `Up` run the same single-chain bubble along `Traversal`, one hop at a time while propagation is on; `Down` is the reverse-collection fan-out. The descent is cycle-safe and depth-capped, with a per-node propagate snapshot so calling `propagate(false)` prunes only that node's subtree. Fire it with `ecs.trigger::<DamageWave>(root, DamageWave)` after registering per-entity runners via `observe_entity_event`. [traversal.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/observers/traversal.rs)
 
 The `Up` direction is `Toward<R>`: a bridge that lets *any* single-target relation bubble, not just `ChildOf`. Setting `type Traversal = Toward<MyRelation>` makes a custom trigger walk up your relation one hop at a time, reusing the existing per-hop `get_component` lookup.
 

@@ -188,9 +188,12 @@ A read or decode failure does not panic. `load` still returns a well-formed
 handle, and its row is marked `Failed`; poll `Assets::state(handle)` to see the
 outcome. The upload half lives in `boyko_render`: an upload pass drains
 `AssetStaging<A>` and `fill`s each reserved row. The windowed host inserts
-`AssetServer` and the per-type `AssetStaging` / `AssetPaths` resources for
-`Material`, `MeshGpu` and `TextureGpu`, and runs the upload drains once at boot,
-after the startup systems.
+`AssetServer` as a regular resource and, for `Material`, `MeshGpu` and
+`TextureGpu`, the per-type `AssetStaging` / `AssetPaths` as **non-send**
+resources. A system reaches those two through `NonSendResMut`, not `ResMut`, so
+it runs on the dispatcher thread; see
+[Non-`Send` resources](resources.md#non-send-resources). The host runs the
+upload drains once at boot, after the startup systems.
 
 ## Change signals
 

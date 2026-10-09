@@ -4,7 +4,9 @@
 
 > **Status.** `boyko_ui` and the UI render pack in `boyko_render` (`boyko_render::ui`) are
 > shipped and tested. The windowed host does **not** composite UI yet: `EnginePlugins`
-> records no UI pass, and `boyko_app` depends on `boyko_ui` only in its tests. Until the host
+> records no UI pass, and `boyko_app` lists `boyko_ui` only as a test dependency. (The crate
+> is still compiled into every windowed app, because `boyko_render`, whose `ui` module packs
+> and draws UI, depends on it.) Until the host
 > gains a UI pass, the UI draw path runs in the render crates' own tests and present harness.
 
 ## What it is

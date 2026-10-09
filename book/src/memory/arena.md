@@ -62,7 +62,7 @@ classDiagram
 
 `VmReservation` is `pub` in `boyko_memory` (`boyko_memory::vm::VmReservation`); `boyko_ecs` re-exports it only inside its own crate. The `layout` field exists only on the fallback arm (Miri / wasm32 / non-syscall targets); the syscall arms carry just `base` + `os_len`.
 
-A pool's **backing** is either `Host` — its own `VmReservation`, the default — or `Device`, when `boyko_render` moves a GPU-resident component's rows into device memory. A device-backed pool keeps no host rows. See [GPU-Resident Columns](../rendering/gpu-columns.md).
+A pool's **backing** is either `Host` — its own `VmReservation`, the default — or `Device`, when `boyko_render` switches a GPU-resident component's pool to device memory. Only an empty pool may switch (the switch asserts `len == 0`), so no rows move, and a device-backed pool keeps no host rows. See [GPU-Resident Columns](../rendering/gpu-columns.md).
 
 Within a host pool's reservation, the bytes are laid out as four sub-regions:
 
@@ -102,7 +102,7 @@ Makes the byte range `[old, new)` readable/writable and zero-filled (`VirtualAll
 - **Commits are page-aligned.** Ranges are multiples of `COMMIT_PAGE`: 4 KiB on `x86_64`, and the 64 KiB granule on every other architecture. Only the reservation itself is bound by the 64 KiB granularity; committing inside it is page-granular.
 - **It never frees**; the model only ever commits forward.
 
-Every commit is counted under a **commit owner** at one choke point inside `boyko_memory` (`commit_at::<O>`). `VmReservation::commit` is the route for the default owner, `ColumnOwner` (every `ComponentPool`, every default `VmColumn`, `InlandStore` and the profiling store). `boyko_memory::committed_bytes::<O>()` reads the running total per owner. The counters only grow, and the extra cost is one relaxed add on the cold commit path. See [vm.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_memory/src/vm.rs) and [owner.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_memory/src/owner.rs).
+Every commit is counted under a **commit owner** at one choke point inside `boyko_memory` (`commit_at::<O>`). `VmReservation::commit` is the route for the default owner, `ColumnOwner`, taken by every `ComponentPool`, `InlandStore` and the profiling store. `VmColumn<T, O>` calls `commit_at::<O>` directly; its default owner is also `ColumnOwner`, and a kernel table names its own owner (`VmColumn<T, TableOwner>`). `boyko_memory::committed_bytes::<O>()` reads the running total per owner. The counters only grow, and the extra cost is one relaxed add on the cold commit path. See [vm.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_memory/src/vm.rs) and [owner.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_memory/src/owner.rs).
 
 ### `ComponentPool::grow_rows(n)`
 
@@ -143,7 +143,7 @@ sequenceDiagram
         P->>V: commit(changed_off, old, new)
         V-->>P: pages now RW + zeroed
     end
-    P->>P: copy bytes into row[len]; len += 1
+    P->>P: copy bytes into row[len], len += 1
     P-->>U: Some(row_index)
 ```
 

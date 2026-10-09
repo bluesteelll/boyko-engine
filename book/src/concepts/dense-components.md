@@ -124,7 +124,9 @@ filter (`Enabled<T>`, `Disabled<T>`) is a compile error. For an enable-filtered 
 - `Added<T>` and `Changed<T>` work on dense components. The store keeps per-slot ticks, and a
   reused slot gets fresh ticks.
 - Lifecycle hooks and observers (`on_add`, `on_insert`, `on_replace`, `on_remove`, `on_despawn`)
-  fire for dense components on every structural path, despawn included.
+  fire for dense components on every structural path of `EcsMaster` and `Commands`, despawn
+  included. The exception is a direct `DenseStore::remove` through the public
+  `EcsMaster::dense_registry_mut()`: it fires no `on_replace` or `on_remove`.
 - `get_component`, `get_component_mut` and `has_component` route to the dense store.
   [`EcsMaster::dense_contains`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs)
   and `dense_slot_of` answer membership by `ComponentId`.
@@ -141,8 +143,10 @@ filter (`Enabled<T>`, `Disabled<T>`) is a compile error. For an enable-filtered 
 | `for_each_chunk`, `par_for_each_chunk` | no (compile error) | `iter_mut` or `dense_iter_mut` |
 | `Query::contains` | no (compile error) | `query.get(e).is_some()` |
 
-A dense type is always host-resident (`ResidencyKind::Cpu`). The derive rejects a GPU residency
-for it at compile time, so it cannot be a [GPU-resident column](../rendering/gpu-columns.md).
+A derived dense type is host-resident (`ResidencyKind::Cpu`): the derive has no residency key and
+never sets one, so the type cannot be a [GPU-resident column](../rendering/gpu-columns.md). A
+hand-written `impl Component` that pairs dense storage with a `Gpu` residency is caught only by a
+`debug_assert!` when the type registers, so only debug builds catch it.
 
 ## Internals
 

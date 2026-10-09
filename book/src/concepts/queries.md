@@ -250,7 +250,7 @@ only row":
 |--------|---------|-------------|---------|
 | `get(entity)` | yes | yes | `Option<item>` — `None` if the entity is dead, stale, or filtered out |
 | `get_mut(entity)` | yes | yes | the writable twin of `get` |
-| `contains(entity)` | yes | — | `bool` |
+| `contains(entity)` | yes | — | `bool`; a dense `D` is a compile error, so use `get(entity).is_some()` there |
 | `first()` | yes | — | `Option<item>` — exactly `iter().next()` |
 | `single()` / `single_mut()` | yes | yes | the one row; panics on zero or more than one |
 

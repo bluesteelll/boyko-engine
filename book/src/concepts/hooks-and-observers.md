@@ -275,8 +275,8 @@ use boyko_ecs::ecs::core::component::observers::traversal::ChildOfTraversal;
 struct Damage { amount: u32 }
 
 impl Trigger for Damage {
-    // Optional: `PROPAGATION` defaults to `None` (target only),
-    // `AUTO_PROPAGATE` to `false`.
+    // Optional: `PROPAGATION` defaults to `None`, `AUTO_PROPAGATE` to `false`.
+    // `Up` names the intent; the default `None` walks the same way.
     const PROPAGATION: PropagationMode = PropagationMode::Up;
     type Traversal = ChildOfTraversal; // bubble from child to parent
     type Broadcast = ChildOf;          // read only for `Down`
@@ -311,9 +311,14 @@ fired, and `trigger_id` is the trigger type's dense id.
 
 | Mode | Behaviour |
 |------|-----------|
-| `None` (default) | Fire on the target, with no automatic propagation. |
-| `Up` | After the target, hop one step at a time along `Traversal` — `ChildOfTraversal` for parents, or `Toward<R>` for any single-target relation — while propagation is on. `AUTO_PROPAGATE` sets the starting value; a runner turns it on or off with `propagate(true)` / `propagate(false)`. |
+| `None` (default) and `Up` | After the target, hop one step at a time along `Traversal` — `ChildOfTraversal` for parents, or `Toward<R>` for any single-target relation — while propagation is on. `AUTO_PROPAGATE` sets the starting value; a runner turns it on or off with `propagate(true)` / `propagate(false)`. With `AUTO_PROPAGATE = false` (the default) the event stops at the target unless a runner calls `propagate(true)`. The two modes run the same walk. |
 | `Down` | After the target, fan out over `Broadcast`'s reverse collection (for `ChildOf`, every transitive child). The walk is cycle-safe and depth-capped; `propagate(false)` in a runner prunes that node's subtree. |
+
+Only `Down` changes the walk. `None` is not "target only": with `AUTO_PROPAGATE = true`, or with
+a runner that calls `propagate(true)`, a `None` trigger bubbles along `Traversal` exactly like an
+`Up` one. The `Trigger` trait's doc comments still describe `None` as target-only; the walk in
+[`observer_api.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/observer_api.rs)
+(`trigger_walk`) branches only on `Down`.
 
 The [Relations](relations.md) page shows a `Down` broadcast over `ChildOf`
 (section "`Broadcast<R>` — `Down` propagation"), and the built-in `OnLink<R>` /

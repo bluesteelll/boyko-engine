@@ -331,21 +331,24 @@ app.add_systems_cfg_in(CoreSchedule::Fixed, |b| {
 
 Physics is wired into a schedule as a block of ordinary systems, registered in a
 fixed order via `.after(...)`. The body-only pipeline (`add_physics_systems::<S>`)
-runs the stages below. The solver **type** `S` picks the solve stage, once, at
-wire-up:
+runs the stages below. Two choices are made once, at wire-up. The **colored**
+pipeline (colored broadphase and narrowphase, plus the constraint graph) runs for
+the default solver, or for any solver under `add_physics_colored` (the plugin's
+`.colored()`). The solver **type** `S` picks the solve stage:
 
 ```mermaid
 flowchart LR
     T["sync_transform_to_body (scene sync)"] -.-> A
     A[physics_integrate] --> B[physics_gather]
     B --> P[select_broadphase]
-    P -->|"S = ColoredSoftStepSolver (default)"| CC[physics_broadphase_colored]
+    P -->|"colored pipeline"| CC[physics_broadphase_colored]
     CC --> DC[physics_narrowphase_colored]
     DC --> G[physics_build_graph]
-    G --> E[physics_solve_colored]
-    P -->|"any other S"| C[physics_broadphase]
+    G -->|"S = ColoredSoftStepSolver (default)"| E[physics_solve_colored]
+    G -->|"any other S"| R["physics_solve_step::&lt;S&gt;"]
+    P -->|"plain pipeline"| C[physics_broadphase]
     C --> D[physics_narrowphase]
-    D --> R["physics_solve_step::&lt;S&gt;"]
+    D --> R
     E --> F[physics_apply]
     R --> F
     F -.-> S2["sync_body_to_transform (scene sync)"]
@@ -473,7 +476,9 @@ or `insert_resource`.
 The soft-body fields (`soft_body`, `soft_damping`, `soft_rest_clamp`,
 `soft_rigid_coupling`, `self_collision_iters`, `soft_body_colored`,
 `soft_self_collision_colored`) all default to off or zero; see [Soft bodies](#soft-bodies-xpbd).
-`colored` records the schedule's shape at wire-up, and nothing reads it at runtime.
+`colored` records the schedule's shape at wire-up. The gather also reads it on every step:
+with `sleeping` on and `sleep_skip` not `Off`, it keeps the previous step's resting baseline
+for the colored broadphase only while `colored` is true. Leave it as the plugin set it.
 
 ## Scaling — the performance paths
 

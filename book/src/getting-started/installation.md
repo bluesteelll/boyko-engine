@@ -26,11 +26,13 @@ must support:
 
 - `samplerAnisotropy` and `geometryShader` (Vulkan 1.0 core features);
 - `dynamicRendering` and `shaderDemoteToHelperInvocation` (Vulkan 1.3 features);
-- the five descriptor-indexing features of the bindless texture path.
+- the five descriptor-indexing features of the bindless texture path;
+- the basic and ballot subgroup operations in compute shaders. Core Vulkan does not guarantee
+  ballot (`VK_SUBGROUP_FEATURE_BALLOT_BIT`); the GPU particle simulation uses it.
 
 The boot also checks a few storage-image formats and the per-stage descriptor limits. A device that
 misses any of these fails fast with a `BootError` that names the missing piece. The tables are
-`REQUIRED_CORE` and `REQUIRED_V13` in
+`REQUIRED_CORE`, `REQUIRED_V13` and `REQUIRED_SUBGROUP_OPERATIONS` in
 [`device.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/src/device.rs).
 
 Two capabilities are optional:

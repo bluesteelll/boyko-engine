@@ -22,11 +22,17 @@ Every harness is a Cargo `[[bench]]` target. The workspace has 72 of them; the l
 The remaining seven are single targets in `boyko_threadpool`, `boyko_render`, `boyko_fontbake`,
 `boyko_image`, `boyko_serialize`, `boyko_demo` and `reflect_fixture`.
 
-Most targets are criterion benchmarks. One is not:
-[`jolt_parity_pyramid`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/benches/jolt_parity_pyramid.rs)
-is a fixed-window runner (`harness = false`). It rebuilds the pyramid scene of Jolt Physics'
-`PerformanceTest`, steps it from t = 0 with no warm-up and times each step, as Jolt's own test
-does.
+Most targets (59 of 72) are criterion benchmarks. Eleven are hand-timed runners: a `fn main`
+(`harness = false`) that times its own loop with `std::time::Instant` and prints its own report,
+with no criterion baselines. They are the seven benches `boyko_log` declares, `gj1_flag_cost` in
+`boyko_ecs`, and three in `boyko_physics`: `narrowphase_classes`, `omega_b_region` and
+[`jolt_parity_pyramid`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/benches/jolt_parity_pyramid.rs).
+The last one rebuilds the pyramid scene of Jolt Physics' `PerformanceTest`, steps it from t = 0
+with no warm-up and times each step, as Jolt's own test does.
+
+The other two targets measure nothing. `instrument` in `boyko_log` is the clock helper that the
+log benches include as a module; Cargo also discovers the file as a target of its own.
+`reflect_optin_cost` in `reflect_fixture` is an empty placeholder (`fn main() {}`).
 
 **Rendering has no frame-time benchmark.** The only `boyko_render` bench, `ui_pack_sort`, times the
 CPU-side packing and sorting of UI instances. It renders nothing.

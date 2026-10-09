@@ -99,10 +99,12 @@ use boyko_render::sdf_edit::{SdfPrimitive, SdfEdit, sdf_op};
 commands.spawn(SdfPrimitive(SdfEdit::sphere([0.0, 1.0, 0.0], 0.5, sdf_op::UNION, 0.0)));
 ```
 
-`SdfPlugin`, part of `EnginePlugins`, gathers every `SdfPrimitive` **once, at
-startup** (`collect_sdf_edits`), and the windowed host uploads the list once. So the
-solids are static for the run: a primitive spawned or changed later is not picked up,
-and the position is the one stored in the edit (no `Transform` is read). See
+`SdfPlugin`, part of `EnginePlugins`, only inserts the gather's staging resource. The
+windowed host runs the gather (`collect_sdf_edits`) **once**, after every startup system
+has run and before the first frame, and uploads the list once. A headless `App` with
+`SdfPlugin` never runs the gather. So the solids are static for the run: a primitive
+spawned or changed later is not picked up, and the position is the one stored in the edit
+(no `Transform` is read). See
 [Windowed host](../app/windowed-host.md).
 
 ## The marcher

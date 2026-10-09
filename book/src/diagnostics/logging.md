@@ -124,8 +124,8 @@ running, so a process never exits silently.
 
 ## Logging from a game
 
-A game declares its own targets in the downstream band (ids 96 to 223) and its own code table with
-its own prefix:
+A game declares its own targets in the downstream band (ids 96 to 223) and its own code table, which
+names a prefix:
 
 ```rust,ignore
 use boyko_log::target::LogTarget;
@@ -158,7 +158,10 @@ fn on_wave(wave: u32, alive: u32) {
 - An id outside 96..=223 does not compile. Two crates claiming one id are reported at
   `register()`, with both names.
 - `BOYKO_LOG` sets only the engine's targets. Set your own targets' levels yourself, as above.
-- Records from this table print `mygame-W0001`, never `boyko-W0001`.
+- The table stores its prefix (`codes::PREFIX`), but the printer does not use it. The emission
+  macros stamp the engine prefix on every call site, so the `warn!` above prints `boyko-W0001`,
+  not `mygame-W0001`. In the output, a downstream code cannot be told apart from an engine code
+  with the same class and number.
 - Targets named only at run time (a mod, a script namespace) come from
   `boyko_log::target::register_dynamic_target(name, control)`: 32 slots, idempotent by name.
 
