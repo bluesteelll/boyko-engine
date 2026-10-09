@@ -40,18 +40,13 @@ mdbook serve --open
 
 ## Navigating the codebase
 
-The repository ships a **graphify** knowledge graph in `graphify-out/` — a semantic map of the codebase with cross-file relationships and per-subsystem anchors. Query it **before** browsing raw source; it returns a scoped subgraph that is usually far smaller than a wide grep:
+Start with the internal docs. `docs/FEATURE_MAP.md` is the first point of contact: it answers "where is X?". From there, `docs/SYSTEMS.md` catalogs each subsystem with `file:line` references, and `docs/ARCHITECTURE.md` covers layers, crate dependencies, and data flow. They are the fastest way to find a subsystem. If an anchor and the source disagree, the source is right.
+
+Once you know where to look, let the tools answer questions about the code itself. [rust-analyzer](https://rust-analyzer.github.io/) is the ground truth for a symbol: *Go to Definition*, *Find References*, and *Go to Implementation* follow a type or a call across crates. Hovering a type also shows its computed size and alignment. For literal or pattern-shaped searches — a string, an attribute, every `// SAFETY:` comment — use [ripgrep](https://github.com/BurntSushi/ripgrep):
 
 ```powershell
-graphify query "where is the component pool grown"   # scoped subgraph for a question
-graphify explain "ComponentPool"                     # focused view of one concept
-graphify path "EcsMaster" "VmReservation"            # how two things relate
-
-# After you change code, keep the graph current (AST-only, no network call):
-graphify update .
+rg -n "// SAFETY:" crates/boyko_ecs/src   # every SAFETY justification in the ECS kernel
 ```
-
-The internal docs are the other half of orientation: `docs/FEATURE_MAP.md` (first point of contact — "where is X"), `docs/SYSTEMS.md` (subsystem catalog with `file:line`), and `docs/ARCHITECTURE.md` (layers, dependencies, data flow). These are kept in sync with the code and are the fastest way to find a subsystem.
 
 ## Coding standards
 
