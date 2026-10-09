@@ -2,9 +2,9 @@ name: Deploy Documentation
 
 on:
   push:
-    branches: [master, ecs]
+    branches: [master]
   pull_request:
-    branches: [master, ecs]
+    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -87,9 +87,12 @@ jobs:
         # fails, "Assemble site" below publishes the book without /api/.
         #   - default features only (NOT --all-features): --all-features pulls the
         #     bench-only `bench-alloc`/mimalloc C dependency, which has no doc value.
-        #   - boyko_demo / bench_bevy_vs_boyko are excluded: they are the app/bench
+        #   - boyko_demo / bench-bevy-vs-boyko are excluded: they are the app/bench
         #     harnesses (wgpu/winit/eframe, bevy), not the engine's public API, and
         #     winit's linux backend trips "platform not supported" in this CI image.
+        #     `--exclude` takes the PACKAGE name. The directory spelling
+        #     `bench_bevy_vs_boyko` matched no package: cargo only warned "excluded
+        #     package(s) not found in workspace" and documented the crate anyway.
         #   - profile-fixture / profile-fixture-log are excluded (profiling rung 14):
         #     they are single-site binaries that exist only so G14/G16's cross-profile
         #     symbol census has something one-site-shaped to take a census OF. They have
@@ -99,7 +102,7 @@ jobs:
         #     redirect written in "Assemble site".
         #   - RUSTDOCFLAGS=-D warnings is intentionally NOT set.
         continue-on-error: true
-        run: cargo doc --locked --no-deps --workspace --exclude boyko_demo --exclude bench_bevy_vs_boyko --exclude profile-fixture --exclude profile-fixture-log
+        run: cargo doc --locked --no-deps --workspace --exclude boyko_demo --exclude bench-bevy-vs-boyko --exclude profile-fixture --exclude profile-fixture-log
 
       - name: Assemble site
         run: |
@@ -146,17 +149,17 @@ jobs:
       # `continue-on-error`, and the publish step below only copies dist/ if it
       # was actually produced. See docs/DEMO-DOGFOODING.md (Wave-7 finding).
       - name: Add wasm target
-        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
+        if: github.ref == 'refs/heads/master'
         run: rustup target add wasm32-unknown-unknown
 
       - name: Install Trunk
-        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
+        if: github.ref == 'refs/heads/master'
         uses: jetli/trunk-action@v0.5.0
         with:
           version: 'latest'
 
       - name: Build boyko_demo (wasm, non-fatal until the core layout asserts are pointer-width-aware)
-        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
+        if: github.ref == 'refs/heads/master'
         id: build_demo
         continue-on-error: true
         working-directory: crates/boyko_demo
@@ -167,17 +170,17 @@ jobs:
         run: trunk build --release --public-url /boyko-engine/demo/
 
       - name: Publish boyko_demo to /demo/ (only if the wasm build succeeded)
-        if: (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs') && steps.build_demo.outcome == 'success'
+        if: github.ref == 'refs/heads/master' && steps.build_demo.outcome == 'success'
         run: |
           mkdir -p _site/demo
           cp -r crates/boyko_demo/dist/* _site/demo/
 
       - name: Setup Pages
-        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
+        if: github.ref == 'refs/heads/master'
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
-        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
+        if: github.ref == 'refs/heads/master'
         uses: actions/upload-pages-artifact@v3
         with:
           path: _site
@@ -185,7 +188,7 @@ jobs:
   deploy:
     name: Deploy to GitHub Pages
     needs: build
-    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
