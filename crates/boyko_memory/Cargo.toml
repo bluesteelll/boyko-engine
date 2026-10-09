@@ -2,7 +2,7 @@
 name = "boyko-memory"
 version = "0.1.0"
 edition = "2024"
-
+license.workspace = true
 # Unified plan KC-01 (rung C1): the memory primitives one layer below the ECS pool -- the per-OS
 # virtual-memory reservation (`vm`), the typed address-stable column on it (`vm_column`), and the
 # commit-granularity constants they step by. `boyko_ecs` depends on this crate and re-exports its

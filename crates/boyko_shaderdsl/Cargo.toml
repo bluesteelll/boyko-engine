@@ -3,7 +3,7 @@ name = "boyko_shaderdsl"
 version = "0.1.0"
 edition = "2024"
 description = "In-house Rust shader eDSL: author the SDF field math ONCE, generic over a `FieldScalar` backend, instantiated as (a) a CPU f32 mirror byte-identical to `boyko_sdf_math::sdf_edit_list` and (b) an HLSL SSA emitter textually equivalent to the frozen `sdf_field.hlsli`. ZERO third-party deps (in-house). NO rust-gpu / naga / spirv-builder."
-
+license.workspace = true
 # INVIOLABLE: in-house, ZERO third-party deps. The `Eval` path (`scalar.rs` f32
 # impl + `field.rs`) is `#![no_std]`-clean so it can be the physics leaf — physics
 # never links the emitter. The `emit` feature (OFF by default) gates the std-side

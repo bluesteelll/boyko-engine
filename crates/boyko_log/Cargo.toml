@@ -3,7 +3,7 @@ name = "boyko-log"
 version = "0.1.0"
 edition = "2024"
 description = "In-house structured logging for boyko-engine: compile-time ceilings, one packed control byte per target, and no third-party facade"
-
+license.workspace = true
 # The diagnostics substrate, and the ONLY dependency this crate will ever have.
 # It supplies the lane topology both diagnostics subsystems index by, the clock
 # both stamp with, the loss vocabulary both count in, and the build-profile

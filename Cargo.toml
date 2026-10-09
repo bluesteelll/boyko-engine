@@ -200,7 +200,7 @@ strip = "none"
 name = "boyko-engine"
 version = "0.1.0"
 edition = "2024"
-
+license.workspace = true
 [dependencies]
 
 [dev-dependencies]
@@ -221,3 +221,6 @@ proc-macro2 = { workspace = true }
 
 [lints]
 workspace = true
+
+[workspace.package]
+license = "Apache-2.0"

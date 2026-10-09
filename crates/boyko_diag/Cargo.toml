@@ -2,7 +2,7 @@
 name = "boyko-diag"
 version = "0.1.0"
 edition = "2024"
-
+license.workspace = true
 # INVIOLABLE: this crate is the BOTTOM of the workspace graph and depends on `std` ONLY.
 # Zero workspace dependencies, zero third-party dependencies. `boyko_log` depends on it,
 # `boyko_threadpool` depends on it, and `boyko_utils` keeps its own empty table — so a single

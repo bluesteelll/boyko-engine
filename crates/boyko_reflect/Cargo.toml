@@ -3,7 +3,7 @@ name = "boyko-reflect"
 version = "0.1.0"
 edition = "2024"
 publish = false
-
+license.workspace = true
 # GATES G0 (docs/REFLECTION-PLAN-GATES.md): the EDITOR-ONLY reflection layer. This crate
 # is depended on ONLY as `optional = true` behind a consumer feature named `reflect`
 # (CORE D1/D2), so a ship build's resolved closure never contains it — a property gated

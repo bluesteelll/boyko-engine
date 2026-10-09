@@ -3,7 +3,7 @@ name = "profile-fixture"
 version = "0.1.0"
 edition = "2024"
 publish = false
-
+license.workspace = true
 # G14(a)'s whole argument is this dependency table, so it is INVIOLABLE in the same sense
 # `boyko_diag`'s is. A symbol census answers "is symbol S referenced in this object?" — per BINARY,
 # never per site — so it can only answer a per-SITE question when the binary holds exactly one site.

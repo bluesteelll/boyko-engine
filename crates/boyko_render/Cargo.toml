@@ -3,7 +3,7 @@ name = "boyko-render"
 version = "0.1.0"
 edition = "2024"
 description = "GPU-resident ECS columns: the boyko_render manager that mints device-local component pools behind the boyko_rhi registry and drives the boyko_ecs A2 device-mint seam (Phase 5)."
-
+license.workspace = true
 # Dependency fan-out (no cycle): boyko_render depends DIRECTLY on boyko_ecs +
 # boyko_rhi + boyko_rhi_vulkan + boyko_utils. boyko_rhi itself depends only on
 # boyko_utils (NOT on boyko_ecs). Layering (host plan D1 amendment): boyko_render

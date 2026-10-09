@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 description = "UG-15's instrument: post-LTO object builds with a pairing guard, LLVM tool wrappers that are RED on an absent tool or an empty census, and the `ug15` probe / leg driver (unification plan rung B3)."
-
+license.workspace = true
 # DEV-ONLY, and that is a property this crate's position in the graph must keep. No package may
 # name it under `[dependencies]` or `[build-dependencies]`: it spawns `cargo`, `llvm-*` and
 # `llvm-symbolizer`, reads the file system and parses tool output, none of which belongs in a

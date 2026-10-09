@@ -3,7 +3,7 @@ name = "boyko-threadpool"
 version = "0.1.0"
 edition = "2024"
 description = "Custom Chase-Lev work-stealing thread pool for boyko-engine Phase 9 scheduler"
-
+license.workspace = true
 [dependencies]
 # The diagnostics substrate. This crate owns the ONE per-thread lane integer
 # that the profiler and the logger both index by; the pool is the only code

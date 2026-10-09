@@ -11,7 +11,7 @@ publish = false
 # missing target that gate 6's named-target invocation reds.
 autobins = false
 autobenches = false
-
+license.workspace = true
 # GATES G0 (docs/REFLECTION-PLAN-GATES.md): the reflection campaign's PRIMARY GATED
 # SUBJECT — a consumer stand-in for a game's own crate, not for the engine (the
 # `profile-fixture` census argument, verbatim). This dependency table is the gate's
