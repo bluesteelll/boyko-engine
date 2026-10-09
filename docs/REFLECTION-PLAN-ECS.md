@@ -69,7 +69,7 @@ Every row was read in this worktree on 2026-08-21. The anchors are load-bearing:
 | F21 | `make_component_device_backed` sets `columns[cid] = Column::null()` and `assert!`s (release) that the id is `ResidencyKind::Gpu`. It is `#[cfg(not(miri))]` and needs a `DeviceColumnHandle`. | `archetype/archetype.rs:867-903~` |
 | F22 | **`grep -rn 'residency = "gpu"' crates/*/src/` returns **0** hits** <!-- measure: tree-lines crates rs residency%20=%20%22gpu%22 = 0 --> — there is no GPU-resident component in the tree. `classify_component_residency` is the `pub` runtime classifier. | (measured) `component_registry/mod.rs:687-690~` |
 | F23 | The fixture types the acceptance test needs all exist: `Transform` (`boyko_scene/src/transform.rs:46`), `Visibility` `#[repr(u8)]` (`render_caps.rs:226`), `GpuTransform3D` `#[component(storage="dense")]` (`boyko_render/src/gpu_transform3d.rs:84~`), `TrsPacked` (`:55`), `ParticleEmitter` (`boyko_render/src/particle.rs:127`), `ParticleEffectHandle` with `on_insert`/`on_replace` (`:185`), `EmitterActive` `#[component(storage="bitset")]` (`:164`). | (as cited) |
-| F24 | ⚠️ **`force_alloc_panic` has ZERO `#[cfg(force_alloc_panic)]` sites in any `.rs` file in the tree.** It survives only in the root `Cargo.toml`'s `check-cfg` list and an **archived** doc, while CI still runs a whole job under it. That job asserts nothing. | [`Cargo.toml`](../Cargo.toml):26~, `docs/archive/PHASE-9-FORCE-ALLOC-PANIC.md`, `.github/workflows/ci.yml:217-232` |
+| F24 | ⚠️ **`force_alloc_panic` has ZERO `#[cfg(force_alloc_panic)]` sites in any `.rs` file in the tree.** It survives only in the root `Cargo.toml`'s `check-cfg` list and an **archived** doc, while CI still runs a whole job under it. That job asserts nothing. | [`Cargo.toml`](../Cargo.toml):26~, `docs/archive/PHASE-9-FORCE-ALLOC-PANIC.md`, `.github/workflows/ci.yml:228-243` |
 | F25 | `proptest` is a workspace dependency ([`Cargo.toml`](../Cargo.toml):70~) already used by six crates. | `crates/boyko_ecs/Cargo.toml:93~` and five siblings |
 | F26 | Package names use hyphens: `boyko-ecs`, `boyko-scene`. The new crate is therefore `boyko-reflect` in `crates/boyko_reflect/`. | `crates/boyko_ecs/Cargo.toml:2~` |
 | F27 | 🔴 **`register_enable_tag(name)` MINTS A NEW ID for any name not already in `TAG_NAMES`, and a derived `#[component(storage = "bitset")]` type never interns its name there.** Traced end to end: `EcsMaster::register_enable_tag` → `try_register_enable_tag_by_name` → `try_register_tag_by_name`, whose table is `TAG_NAMES` and whose miss path calls `try_register_dynamic(ComponentLayout::new_dynamic_tag(leaked))`. A derived bitset component's id came from `register_new::<Self>()` (`component_registry/mod.rs:920`, a monotonic `NEXT_ID.fetch_add`) and its name was never interned. | `enable_tag_api.rs:61`, `component_registry/tags.rs:134`, `:155`, `:182-196`, `component_registry/mod.rs:920` |
@@ -782,7 +782,7 @@ in §4 shrinks by one and EG2 gets smaller. Record it; do not re-argue it.
 
 **Miri / proptest.** ~~None (no `unsafe`, no data).~~ **CORRECTED (D19): no proptest and no
 `unsafe` — but TWO guards this rung must carry.** CI runs `cargo +nightly miri test
---all-targets … -p boyko-reflect …` (`.github/workflows/ci.yml:589`), so `--all-targets` picks
+--all-targets … -p boyko-reflect …` (`.github/workflows/ci.yml:600`), so `--all-targets` picks
 up every target this rung adds. The trybuild harness needs `#![cfg(not(miri))]` — it shells out
 to `cargo`, which Miri cannot execute, and `crates/boyko_reflect/tests/c6_compile_fail.rs`
 already carries the guard **in this package** for exactly that reason. If gate 4's assertion
@@ -1033,7 +1033,7 @@ whole rung's test surface. The homes, and each is a decision, not a preference:
 * **Gate 10 is a `#[cfg(test)] mod` inside the EXISTING `crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs`**
   (which already carries one), because its subject is `pub(crate)` and an integration test cannot
   reach it. It is covered by CI's Miri sweep, which runs `--all-targets -p boyko-ecs`
-  (`.github/workflows/ci.yml:589`).
+  (`.github/workflows/ci.yml:600`).
 
   > ⚠️ **That coverage sentence was FALSE when it was written. EG2 made it true — it is not being
   > struck, it is being earned.** The sweep row carries **no `--no-fail-fast`**, and

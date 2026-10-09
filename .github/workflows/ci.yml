@@ -105,6 +105,14 @@ jobs:
   # `rust-src`, printed all 10 actual outputs byte-identical to the Linux ones (with it: 18/18 ok).
   # trybuild's own documentation ("Troubleshooting") prescribes this component for the same reason.
   # It is per job, not in `rust-toolchain.toml`, because that file deliberately lists no components.
+  #
+  # `components: llvm-tools` for the same reason the two census jobs below carry it: this
+  # `--workspace --all-targets` selection runs `reflect_absence_census` and `profile_axis_census`
+  # too, and both panic without `llvm-nm` (tool absence is a RED, never a skip). MEASURED 2026-10-09:
+  # CI run 37922685029's `cargo test reflect ON (debug)` — the same toolchain step without the
+  # component — panicked at `reflect_absence_census.rs:484` with exactly that message, while the
+  # `reflect-census` job, the same test on the same runner image WITH it, is not among that run's
+  # four failed jobs. Here the trybuild failure above had stopped the run before either census.
   test:
     name: cargo test (${{ matrix.profile }})
     runs-on: ubuntu-latest
@@ -115,7 +123,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
-          components: rust-src
+          components: rust-src, llvm-tools
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (${{ matrix.profile }})
         run: |
@@ -209,7 +217,10 @@ jobs:
   # `tests/reflect_ci_coverage.rs` pins the flag and the variable together.
   #
   # `rust-src`: this job runs trybuild suites too, so it gets the environment their baselines are
-  # blessed in — see the note on the `test` job.
+  # blessed in — see the note on the `test` job. `llvm-tools`: `--all-targets` over
+  # `reflect-fixture` includes `reflect_absence_census`, which panics without `llvm-nm` (D6) — the
+  # failure of this job's debug leg in CI run 37922685029; the `reflect-census` job below is the
+  # census's dedicated leg, this is the same test reached through the package selection.
   reflect-on:
     name: cargo test reflect ON (${{ matrix.profile }})
     runs-on: ubuntu-latest
@@ -222,7 +233,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
-          components: rust-src
+          components: rust-src, llvm-tools
       - uses: Swatinem/rust-cache@v2
       - name: cargo test reflect ON (${{ matrix.profile }})
         run: |
@@ -556,11 +567,11 @@ jobs:
       RUSTFLAGS: "--cfg force_alloc_panic -D warnings -C target-cpu=x86-64-v3"
     steps:
       - uses: actions/checkout@v4
-      # `rust-src`: the same `--workspace --all-targets` selection as the `test` job, trybuild
-      # suites included — see the note on that job.
+      # `rust-src` and `llvm-tools`: the same `--workspace --all-targets` selection as the `test`
+      # job, trybuild suites and the two symbol censuses included — see the note on that job.
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
-          components: rust-src
+          components: rust-src, llvm-tools
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --workspace --all-targets --release --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
 

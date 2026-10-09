@@ -74,7 +74,7 @@
 //! on the stack.
 //!
 //! This binary needs the guard MORE than `block.rs` does, because it is in the
-//! deciding gate's scope: `.github/workflows/ci.yml:277-280` runs
+//! deciding gate's scope: `.github/workflows/ci.yml:288-291` runs
 //! `cargo +nightly miri test --all-targets … -p boyko-threadpool` as a required
 //! job. After stage 3b the scoped cell outlives the release RMW, so what
 //! carries the soundness argument's last clause is an execution gate over
