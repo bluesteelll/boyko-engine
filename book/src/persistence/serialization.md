@@ -30,7 +30,7 @@ entire SoA buffer for that component in one bulk copy, no per-row call at all.
 ## Three classifications
 
 The derive classifies every component into one of three
-[`Serializability`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/component_registry.rs#L1989)
+[`Serializability`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/component_registry/serialize.rs)
 variants automatically — you do not write a registration call:
 
 | Classification | When | How it is stored |
@@ -55,7 +55,7 @@ derive: the most specific arm that compiles wins, defaulting downward from
 ### The `SerPod` marker
 
 The blit fast path is gated on an `unsafe` marker trait,
-[`SerPod`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/component_registry.rs#L2366)
+[`SerPod`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/component_registry/serialize.rs)
 (*serialize-plain-old-data*). Implementing it asserts that **every** bit pattern
 of the type's size is a valid value — so a column of it can be read back from
 untrusted bytes without validation. The engine implements `SerPod` for the
@@ -178,13 +178,13 @@ assert_eq!(report.entities_loaded as usize, dst.entity_count());
 
 `save_world` appends to your `Vec<u8>` and returns the byte count.
 `save_world_to_file` / `load_world_from_file` are the file-path wrappers.
-[`LoadReport`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_serialize/src/load.rs#L80)
+[`LoadReport`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_serialize/src/load.rs)
 returns diagnostics: entities loaded, archetypes created, columns blitted vs
 decoded, and how many file types were skipped.
 
 ### Save options
 
-[`SaveOptions`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_serialize/src/save.rs#L46)
+[`SaveOptions`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_serialize/src/save.rs)
 is `Default` and carries:
 
 - `include_filter: Option<fn(ComponentId) -> bool>` — when set, only components
@@ -216,16 +216,16 @@ fills the reserved regions: a `PlainOldBytes` column is blitted with a single
 `Ignore` column is skipped. No reallocation happens mid-fill. The save never
 mutates the world.
 
-The performance lever is the blit. On an array-heavy world, restoring the
-`[T; N]` array fast path (so transform/vector columns blit whole instead of
-encoding per row) measured roughly **8.7x faster save and 2.4x faster load**
-versus the per-row fallback — a relative figure for that specific workload, not
-an absolute throughput claim.
+The performance lever is the blit. On an array-heavy world, the `[T; N]` array
+fast path lets transform and vector columns blit whole instead of encoding per
+row, which makes both save and load substantially faster than the per-row
+fallback. Measured figures are on the [Benchmarks](../reference/benchmarks.md)
+page.
 
 ## Entity references survive a round-trip
 
 Loaded entities receive **fresh** ids — the saved ids are not preserved (that is
-the only shipped [`LoadEntityPolicy`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_serialize/src/load.rs#L71):
+the only shipped [`LoadEntityPolicy`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_serialize/src/load.rs):
 `Remap`). A naive copy would therefore leave every stored `Entity` reference
 pointing at a stale id. The loader fixes this with a dedicated remap pass.
 
@@ -263,7 +263,7 @@ offsets.
 On load, a `PlainOldBytes` column is only blitted when both the fingerprint and
 the `format_version` match the running build. A blittable column whose
 `format_version` differs is a hard
-[`LoadError::VersionMismatch`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_serialize/src/error.rs#L113) —
+[`LoadError::VersionMismatch`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_serialize/src/error.rs) —
 never a silent blit of stale bytes, even when the fingerprint still matches (a
 same-shape semantic reinterpretation). The `format_version` is the deliberate
 human signal that a component's bytes changed meaning; bump it whenever you
@@ -296,9 +296,9 @@ rolled back to empty before the error returns. The fuzz, the round-trip suite,
 and the remap suite all run under Miri-TB.
 
 The error surfaces are split by side:
-[`SaveError`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_serialize/src/error.rs#L24)
+[`SaveError`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_serialize/src/error.rs)
 is small (offset overflow, file I/O — save reads an already-valid world), while
-[`LoadError`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_serialize/src/error.rs#L74)
+[`LoadError`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_serialize/src/error.rs)
 is rich (bad magic, unsupported version, endianness or pointer-width mismatch,
 truncation, fingerprint mismatch, version mismatch, decode rejection, capacity
 overflow).
@@ -311,10 +311,17 @@ What is shipped today:
 - `SerializeViaFn` encode/decode for owning, bit-restricted, and entity-bearing
   **plain-struct** components (every field `Wire`).
 - `CopyIntoWorld` + `Remap` load (fresh ids).
-- `ChildOf` / `#[entities]` entity remapping.
+- `ChildOf` / `#[entities]` entity remapping — in table **and** dense storage.
+  The load report counts remapped table rows and remapped dense slots
+  separately, so "no dense component opted in" is distinguishable from "the pass
+  missed dense storage".
 - Per-component `format_version` + layout-fingerprint version gating.
 - Fuzz-hardened, Miri-clean untrusted-input handling.
-- Dense (non-fragmenting) **plain-old-bytes** stores round-trip.
+- Dense (non-fragmenting) stores round-trip: plain-old-bytes columns by blit,
+  owning `SerializeViaFn` columns through their per-member decoder. A dense
+  column whose type has no decoder (or is `no_serialize`) is skipped on load
+  observably — counted in the report and logged with `boyko-W0901` — and the
+  owning entities stay valid without it.
 
 Deferred (recorded, not yet available — do not rely on them):
 
@@ -322,9 +329,10 @@ Deferred (recorded, not yet available — do not rely on them):
 - **`MmapInPlace`** — memory-mapped zero-copy load.
 - **Parallel** save/load and a byte-swapping endianness path. v1 is
   native-endian, 64-bit only.
-- **Owning dense stores** — a dense column of a `SerializeViaFn` type is
-  preserved on disk but skipped on load (counted in the report) until the
-  per-member dense decode path lands.
+- **Enable-tag flag state is not persisted.** An
+  [enable tag](../concepts/enable-tags.md) (`storage = "bitset"`) has no column
+  in the format: the saver never writes its bits, and a loaded entity comes back
+  with every enable bit clear. Re-apply flags after `load_world` if they matter.
 - **`enum` / `union` wire encoding** — a top-level `enum`/`union` component
   classified `SerializeViaFn` (and any component with an enum field) currently
   encodes zero bytes; the encoder is a later macro phase.
@@ -337,6 +345,6 @@ Deferred (recorded, not yet available — do not rely on them):
 - [Hierarchies](../concepts/hierarchies.md) — `ChildOf` / `Children`, whose
   references the remap pass restores.
 - Source:
-  [`boyko_serialize`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_serialize/src/lib.rs) ·
-  [`save.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_serialize/src/save.rs#L153) ·
-  [`load.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_serialize/src/load.rs#L196)
+  [`boyko_serialize`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_serialize/src/lib.rs) ·
+  [`save.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_serialize/src/save.rs) ·
+  [`load.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_serialize/src/load.rs)

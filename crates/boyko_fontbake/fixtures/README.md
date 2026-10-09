@@ -10,7 +10,7 @@ build machine are proprietary and must never be checked in.
 
 | File | Format | Outline kind | Purpose | Status |
 |------|--------|--------------|---------|--------|
-| `Ubuntu-Light.ttf` | TrueType (`glyf`) | quadratic | T0/T1/T2/T3 goldens: outline + metrics + MSDF passes + atlas/.bfont | **present** (Ubuntu Font License / UFL, libre) |
+| `Ubuntu-Light.ttf` | TrueType (`glyf`) | quadratic | T0/T1/T2/T3 goldens: outline + metrics + MSDF passes + atlas/.bfont | **present** (Ubuntu Font Licence 1.0 — see `Ubuntu-UFL-1.0.txt`; Copyright 2011 Canonical Ltd.) |
 | `SourceCodePro-Regular.otf` | OpenType-CFF (`OTTO`) | cubic | T2a end-to-end cubic golden (CFF charstring path) | **present** (SIL Open Font License 1.1 — see `SourceCodePro-OFL.txt`) |
 
 `Ubuntu-Light.ttf` is the canonical TrueType fixture the test suite pins

@@ -4,19 +4,18 @@ The scheduler is the engine's top-level system runner. It takes a set of
 registered systems plus their declared `Access` surfaces and a `ThreadPool`,
 and runs them concurrently when their accesses don't conflict — fanning
 work onto worker threads, auto-inserting synchronization points where
-`Commands` deferral demands them, and re-raising the first panic seen on
-any worker.
+`Commands` deferral demands them, and delivering a system's panic to the
+caller exactly once.
 
-This page covers the user-facing scheduler API as introduced by **Phase 9**
-of the engine. The internal contracts (apply window, conflict graph,
-incremental ready-set) live in the architecture deep-dives — most users do
-not need them.
+This page covers the user-facing scheduler API. The internal contracts
+(apply window, conflict graph, incremental ready-set) are summarized where
+they explain behaviour you can observe; most users do not need more.
 
 ## Why a parallel scheduler
 
 Single-threaded ECS loops cap at the rate one CPU core can stream
 component bytes — for an engine targeting AAA-scale entity counts (1M+
-entities, 60 Hz tick), that's not enough. Phase 9 adds:
+entities, 60 Hz tick), that's not enough. The scheduler provides:
 
 1. **Multi-system concurrency** — independent systems run in parallel
    when their declared `Access` doesn't overlap. A `fn(Query<&Position>)`
@@ -37,9 +36,8 @@ entities, 60 Hz tick), that's not enough. Phase 9 adds:
 The scheduler does not introduce `Mutex` or `RwLock` on the hot path.
 Cross-worker synchronization is one `AtomicUsize` per frame
 (`pending_apply`) plus a lock-free MPSC `ArrayQueue` for completions,
-both living inside an out-of-line `CompletionChannel` (Phase 9.3c) the
-workers reach through a `NonNull` rather than through the dispatcher's
-`&mut self`.
+both living inside an out-of-line `CompletionChannel` the workers reach
+through a `NonNull` rather than through the dispatcher's `&mut self`.
 
 ## High-level overview
 
@@ -68,7 +66,7 @@ Two types form the public surface:
   `ScheduleBuilder::build`. Mutable; its internal scratch state advances
   per frame.
 
-A third type — [`SystemConfig`](#systemconfig) — is the value returned
+A third type — [`SystemConfig`](#systemconfig-fluent-api) — is the value returned
 from `add_system(...)`. It carries the `.before`, `.after`, `.chain`,
 `.in_set`, `.before_set`, `.after_set`, `.run_if`, and `.gpu` fluent
 hints, plus `.key()` to capture the system's `SystemKey` for use in a
@@ -82,8 +80,9 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::schedule::ScheduleBuilder;
 use boyko_threadpool::ThreadPoolBuilder;
 
-// Build a thread pool. Worker count defaults to num_cpus::get() if not
-// specified. Reuse the pool across schedules — building one is expensive.
+// Build a thread pool. Worker count defaults to
+// std::thread::available_parallelism() if not specified. Reuse the pool
+// across schedules — building one is expensive.
 let pool: Arc<_> = ThreadPoolBuilder::new().num_threads(8).build();
 
 let mut world = EcsMaster::new();
@@ -132,6 +131,17 @@ The function returns only after every system has both **run** (its body
 executed) and **applied** (its `Commands` queue, if any, has flushed
 against `world`).
 
+A `Schedule` is bound to the world it was built on. Calling `run` with a
+different `EcsMaster` panics with `boyko-B9101` (one compare per run,
+checked in release builds too), because the schedule caches per-world
+pointers. Build one schedule per world.
+
+Every system also gets a profiling zone at build time, so a profiler
+capture shows one span per system run. `Schedule::system_zones()` lists
+each system's name and zone id, in topological order, for joining profiler
+rows back to systems; it yields nothing in builds that compile system zones
+out.
+
 ## Exclusive systems
 
 A system whose declared `Access` is universal — equivalent to "this
@@ -149,9 +159,21 @@ fn save_world(world: &mut EcsMaster) {
 ```
 
 `IntoSystem` has a blanket impl for `FnMut(&mut EcsMaster) -> ()` via the
-`ExclusiveSystemMarker` (Phase 8c Q9). The blanket coexists with the
+`ExclusiveSystemMarker`. The blanket coexists with the
 `SystemParamFunction` blanket for the same name without a coherence
 conflict.
+
+Two other kinds of system also run on the dispatcher thread with nothing
+else in flight:
+
+- a system that takes `NonSendRes<R>` / `NonSendResMut<R>` (its data cannot
+  cross threads);
+- a **GPU-compute system**, marked with `.gpu()` on its `SystemConfig`. It runs
+  at the apply-window barrier, the sound place to record and submit through
+  the single-threaded RHI. For every producer → consumer edge of the conflict
+  graph whose consumer is a GPU-compute system,
+  `Schedule::gpu_barrier_inputs()` yields a `GpuBarrierEdge` that
+  `boyko_render` lowers into Vulkan buffer barriers.
 
 ## `Commands` and the apply window
 
@@ -165,12 +187,12 @@ fn spawn_enemies(mut commands: Commands) {
 }
 ```
 
-…enqueues a `SpawnCommand<EnemyBundle>` into the system's per-system
-`CommandQueue`. The queue is then flushed against `world` during the
-**apply window** of the dispatch round — the serial phase between waves
-where the dispatcher holds `&mut EcsMaster` exclusively.
+…enqueues a spawn command into the system's per-system `CommandQueue`.
+The queue is then flushed against `world` during the **apply window** of
+the dispatch round — the serial phase between waves where the dispatcher
+holds `&mut EcsMaster` exclusively.
 
-The apply window contract (SCH7):
+The apply window contract:
 
 - The dispatcher does not reborrow `&mut EcsMaster` while any worker
   holds a cell copy. The gate `pending_apply == running.count_ones()`
@@ -209,7 +231,7 @@ Bounds and behaviour:
   mutation flows through `D::Item<'_>` (e.g. `&mut Position`).
 - **`Send + Sync`** — workers cross thread boundaries; the closure body
   is shared across them. This compile-fails any `&mut Commands` capture
-  (CQ-SEND2 — the failing fixture is
+  (the failing fixture is
   `crates/boyko_ecs/tests/par_iter_compile_fail/capture_commands.rs`, run
   by the trybuild harness `tests/par_iter_captures_commands_fails.rs`).
 - **Inline threshold** — archetypes with fewer than
@@ -218,7 +240,8 @@ Bounds and behaviour:
 - **Nested scopes** — `par_iter` calls `pool.scope`, which is re-entrant.
   Calling `par_iter` from inside a system body that is itself running on
   a worker works without deadlock (the rayon work-stealing pattern in
-  `Scope::Drop`).
+  `Scope::Drop`), and its chunks really fan out: every spawned task, a
+  worker's own included, lands where other workers can steal it.
 
 `par_iter` is read-only (`D: ReadOnlyQueryData`); `par_iter_mut` accepts
 any `D: QueryData`.
@@ -254,8 +277,8 @@ own). The full ordering vocabulary is:
 - `.chain(key)` — strict serial order (this → `key`), a distinct edge variant for diagnostics.
 - `.in_set(set)` — set membership.
 - `.before_set(set)` / `.after_set(set)` — order against every (transitive) member of a set.
-- `.run_if(cond)` (Phase 16) — attach a run condition.
-- `.gpu()` (Phase 5) — mark a GPU-compute system (runs dispatcher-solo at the apply-window barrier).
+- `.run_if(cond)` — attach a run condition.
+- `.gpu()` — mark a GPU-compute system (runs dispatcher-solo at the apply-window barrier).
 
 These compose; conflicts between hints panic at `build` time with a cycle
 diagnostic.
@@ -273,8 +296,10 @@ diagnostic.
   is no no-arg `.chain()` — pass the target key explicitly.
 - **`.in_set(set)`** — adds this system to `set` (a `SystemSet` value).
 - **`.before_set(set)` / `.after_set(set)`** — order against a set's members.
-- **`.run_if(cond)`** — attach a run condition (Phase 16).
-- **`.gpu()`** — mark a GPU-compute system (Phase 5).
+- **`.run_if(cond)`** — attach a run condition (see
+  [Run Conditions](scheduling/run-conditions.md)).
+- **`.gpu()`** — mark a GPU-compute system (see
+  [Exclusive systems](#exclusive-systems)).
 
 ```rust,ignore
 let physics = builder
@@ -287,10 +312,10 @@ builder
     .before(physics);
 ```
 
-## Context discipline (ALLOC1)
+## Context discipline
 
 There is no shared arena allocator to protect — the engine retired the
-shared `Arena` in **Phase X.J**. Component storage now lives in per-pool
+shared `Arena`. Component storage lives in per-pool
 virtual-memory reservations: each `ComponentPool` reserves a fixed,
 address-stable row ceiling up front (`ComponentPool::new(component_id,
 reserve_rows)` on a `VmReservation`) and commits frontier pages lazily as
@@ -301,15 +326,15 @@ Growth (`ComponentPool::grow_rows`) is plain `&mut self` field mutation —
 it commits more pages on the pool's **own** reservation and never moves
 the base pointer. Because it is reachable only through `&mut` paths (the
 owner's direct API, or the apply window where the dispatcher holds
-`&mut EcsMaster` and SCH7 guarantees zero workers in flight), the `&mut`
+`&mut EcsMaster` with zero workers in flight), the `&mut`
 exclusivity **is** the guard. The commit syscalls are not global-allocator
 calls, so they need no separate allocation flag
-([`component_pool.rs:2023`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs#L2023)).
+([`component_pool.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/component_pool.rs)).
 
 What survives from the old discipline is a thread-local **context flag**.
 The dispatcher wraps every system body in
 `boyko_threadpool::InSystemRunGuard::enter()`
-([`schedule.rs:1239`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs#L1239)),
+([`executor_scratch.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/executor_scratch.rs)),
 and context-restricted paths `debug_assert!(boyko_threadpool::is_in_system_run())`
 (or its negation) to catch misuse:
 
@@ -334,7 +359,7 @@ The event dispatcher reserves one lane per worker plus one lane for the
 dispatcher. Worker bodies emit events to their own lane; the dispatcher
 emits during the apply window. The lane count is the `thread_count`
 passed to `EventConfig::default_for(thread_count: u32) -> EcsResult<Self>`
-([`event_config.rs:66`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/events/event_config.rs#L66)) —
+([`event_config.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/events/event_config.rs)) —
 sized to cover every worker plus the dispatcher lane.
 
 User code calls `EventDispatcher::send_event::<E>(event) -> EcsResult<()>`
@@ -349,9 +374,13 @@ out-of-range config).
 - The **dispatcher** thread is the thread that calls `Schedule::run`.
   It owns `&mut EcsMaster` for the duration of the call and re-borrows
   `world_mut` during the apply window.
-- **Workers** are the OS threads owned by `ThreadPool`. Each one has a
-  local injector (Chase-Lev deque), a stealer pointing at every sibling
-  deque, and TLS state (`current_worker_id`, `is_in_system_run`).
+- **Workers** are the OS threads owned by `ThreadPool` (by default one per
+  `std::thread::available_parallelism()`). Each one owns a Chase-Lev deque
+  whose `Stealer` is published in a global registry, plus TLS state
+  (`current_worker_id`, `is_in_system_run`). Every spawn — a worker's own
+  included — lands either on a registered deque or in the pool's global
+  `Injector`, so no task is reachable by one thread alone and an idle
+  worker can always steal it.
 - `Schedule::run` enters `pool.install(|scope| ...)` once per frame. The
   install sets `ACTIVE_POOL` TLS for the calling thread so that ambient
   `par_iter` calls inside system bodies can discover the pool without an
@@ -361,90 +390,81 @@ out-of-range config).
 two unsafe Send/Sync impls that enable workers to receive cell copies.
 The aliasing discipline is enforced upstream:
 
-- **Conflict graph (SCH3)** — at run time, no two concurrent systems
-  hold overlapping `&/&mut` views through their cell copies. The graph
-  is built at `ScheduleBuilder::build` from declared `Access` surfaces.
-- **Apply-window barrier (SCH7)** — the dispatcher reborrows
-  `&mut EcsMaster` only when all dispatched systems have reported
-  completion (the gate `pending_apply == running.count_ones()`).
+- **Conflict graph** — at run time, no two concurrent systems hold
+  overlapping `&/&mut` views through their cell copies. The graph is
+  built at `ScheduleBuilder::build` from declared `Access` surfaces.
+- **Apply-window barrier** — the dispatcher reborrows `&mut EcsMaster`
+  only when all dispatched systems have reported completion (the gate
+  `pending_apply == running.count_ones()`).
 
 ## Panic handling
 
-The scheduler re-raises the first panic observed by any worker, on the
-dispatcher thread, surfaced through `Scope::Drop`. Subsequent panics
-within the same frame are dropped (logged in `scheduler-trace` feature
-builds). The world is **not rolled back** — a panicking system may have
-left partial mutation behind. Save/restore is the application's concern.
+When a system body panics, `Schedule::run` promises the following:
 
-## Performance targets
+- **The panic reaches the caller exactly once**, on the thread that
+  called `run`, with the original `Box<dyn Any + Send>` payload. If
+  several systems panic in one run, the first captured payload wins; each
+  other one is discarded with the diagnostic `boyko-E0202`.
+- **The run is cancelled at round granularity.** No system is dispatched
+  after the panic is observed; systems already spawned run to completion.
+  Delivery happens when the pool's scope has drained, never earlier.
+- **The schedule stays reusable, and the world stays well-formed but
+  semantically partial.** The per-frame scratch state is reset on the
+  next `run`, and no storage invariant is broken. What is *not* promised
+  is application-level consistency: the panicked system's half-written
+  state stays. The world is not rolled back.
+- **Commands queued during the aborted run stay queued** in the buffer of
+  the system that queued them. They are applied the next time that system
+  is applied — in a later run that dispatches it (a system whose run
+  conditions are false is skipped without an apply, so its commands keep
+  waiting).
 
-Phase 9 binding targets (plan §1.2):
+Two consequences follow. A system that panicked has already advanced its
+change-detection window, so on its next run it sees only changes since
+the aborted run. And because `Commands` claims entity ids at enqueue
+time, a cancelled run leaves those ids claimed until that system's next
+apply.
 
-| Operation                                | Target          |
-|------------------------------------------|-----------------|
-| Schedule build (50 sys, no cycles)       | ≤ 50 µs         |
-| Per-frame dispatch (50 sys, 16 threads)  | ≤ 20 µs         |
-| Per-frame dispatch (1000 sys, 16 threads)| ≤ 200 µs        |
-| Steal cost (worker idle → sibling deque) | ~100 ns         |
-| Worker wake-up latency                   | ≤ 1 µs          |
-| `par_iter` per-chunk dispatch            | ≤ 200 ns        |
-| Steady-state worker idle                 | ≤ 1% CPU / core |
+## Performance
 
-Measured numbers (8-core Windows reference box, `cargo bench --release`):
-
-| Bench                               | Time      | Target  | Headroom |
-|-------------------------------------|-----------|---------|----------|
-| `phase9_schedule_run_empty`         | ~3.5 ns   | n/a     | n/a      |
-| `phase9_schedule_run_50_exclusive_systems` | ~4.3 µs | ≤ 20 µs | 5× |
-| `phase9_par_iter_4096_entities`     | ~25.0 µs  | n/a     | n/a      |
-| `phase9_schedule_run_two_disjoint`  | ~1.6 µs   | n/a     | n/a      |
-| `phase9_schedule_run_one_exclusive` | ~265 ns   | n/a     | n/a      |
-
-See `crates/boyko_ecs/benches/phase9_scheduler.rs` for the measurement
-harness.
-
-## Migration from Phase 8.x
-
-`EcsMaster::run_system`, `run_cached_system`, `run_system_once`, and
-`run_closure_once` all continue to work unchanged. Phase 9 is an
-**additive** layer — the existing single-system entry points are still
-the correct choice for one-off invocations.
-
-Phase 8.x users who want to upgrade can do so incrementally:
-
-1. Build a `ThreadPool` once at world setup.
-2. Build a `ScheduleBuilder`; move existing per-frame `run_system` calls
-   to `builder.add_system(...)`.
-3. Replace the frame loop's individual `run_system` calls with one
-   `schedule.run(&mut world)` call.
-
-No `Cargo.toml` change is required for `boyko_ecs` users — the public
-re-exports (`Schedule`, `ScheduleBuilder`, `SystemConfig`, `SystemSet`)
-flow through `boyko_ecs::ecs::core::schedule::*`.
+The scheduler has its own criterion harness,
+`crates/boyko_ecs/benches/phase9_scheduler.rs` (an empty schedule, one
+exclusive system, 50 exclusive systems, two disjoint systems, and
+`par_iter` over 4096 entities).
+Measured results, each with its date and commit, are collected on the
+[Benchmarks](reference/benchmarks.md) page.
 
 ## What layers on top
 
-Phase 9 is the execution core. Later phases extend the **same**
-`Schedule` / `ScheduleBuilder` without re-architecting it:
+The executor core is extended by the **same** `Schedule` /
+`ScheduleBuilder`, without re-architecting it:
 
-- **Schedule ordering & sets** (Phase 15) — `.before_set` / `.after_set`
-  and `configure_set`, expanded into per-member edges at `build`.
-- **Run conditions** (Phase 16) — `.run_if(cond)` gates a system's body
-  per frame; conditions evaluate single-threaded at the apply-window
-  barrier.
-- **States** (Phase 17) — `State<S>` / `NextState<S>` with the
-  `in_state` / `on_enter` / `on_exit` / `on_transition` conditions, built
-  on the same run-condition mechanism.
-- **App / Plugin facade** (Phase 18) — the `App` builder owns one or more
-  `Schedule`s; plugins register systems through it.
-- **Fixed timestep** (Phase 20) — `Time` / `FixedTime` and a `CoreSchedule`
-  driving a fixed-step inner loop.
+- **Schedule ordering & sets** — `.before_set` / `.after_set` and
+  `configure_set`, expanded into per-member edges at `build`
+  ([Ordering & Sets](scheduling/ordering-and-sets.md)).
+- **Run conditions** — `.run_if(cond)` gates a system's body per frame;
+  conditions evaluate single-threaded at the apply-window barrier
+  ([Run Conditions](scheduling/run-conditions.md)).
+- **States** — `State<S>` / `NextState<S>` with the `in_state` /
+  `on_enter` / `on_exit` / `on_transition` conditions, built on the same
+  run-condition mechanism ([States](scheduling/states.md)).
+- **App / Plugin facade** — the `App` builder owns one or more
+  `Schedule`s; plugins register systems through it
+  ([App & Plugins](app/plugins.md)).
+- **Fixed timestep** — `Time` / `FixedTime` and a `CoreSchedule` driving a
+  fixed-step inner loop ([Time & Fixed Timestep](app/time.md)).
+
+The one-shot runners (`EcsMaster::run_system`, `run_cached_system`,
+`run_system_once`, `run_closure_once`) remain the right tool for a single
+system outside a frame loop; see [Resources](concepts/resources.md#a-standalone-system-run).
 
 ## Further reading
 
-- `docs/PHASE-9-PARALLEL-SCHEDULER-PLAN.md` — the architectural plan
-  with full §2 invariants (SCH1-15, SEND1-3, EVT1-4, ALLOC1-6,
-  EXC1-2, PAR1-9, CQ-SEND1-2) and the §13 test matrix.
+- `docs/archive/PHASE-9-PARALLEL-SCHEDULER-PLAN.md` — the original design
+  record, for contributors: the numbered invariants the source comments
+  cite (SCH1-15 for the executor, including SCH7 for the apply window;
+  SEND1-3; EVT1-4; ALLOC1-6; EXC1-2; PAR1-9; CQ-SEND1-2) and the test
+  matrix.
 - `crates/boyko_threadpool/` — the underlying work-stealing pool. Not
   intended for direct user consumption; `ScheduleBuilder::new` and
   `par_iter` are the right entry points.

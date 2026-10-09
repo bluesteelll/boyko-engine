@@ -2,7 +2,7 @@
 name = "boyko-ecs"
 version = "0.1.0"
 edition = "2024"
-
+license.workspace = true
 [dependencies]
 boyko-utils =  { path = "../boyko_utils" }
 boyko-threadpool = { path = "../boyko_threadpool" }

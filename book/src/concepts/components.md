@@ -6,8 +6,6 @@ its identity, and its layout. If you have written Bevy components, these will
 feel immediately familiar; the differences are about *where the bytes live*, not
 about the API shape.
 
-*(Branch: `ecs`.)*
-
 ## What a component is
 
 An [entity](entities.md) is just an id. All of its actual state lives in
@@ -81,7 +79,7 @@ struct Frozen;
 
 There is no attribute and no special trait for this. Tag-ness is detected purely
 from `size_of::<T>() == 0` at registration — internally
-[`ComponentLayout::is_zst`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/component_registry.rs#L148)
+[`ComponentLayout::is_zst`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs)
 is just `self.size == 0`. A zero-byte component gets a *tick-only* pool (8 bytes
 per row, no data region) so that `Added<Player>` / `Changed<Player>` still work,
 but otherwise attaching it only flips the entity's archetype signature bit and
@@ -102,7 +100,8 @@ Assignment is **lazy and per-process**:
 
 1. The first call to `T::component_id()` mints a fresh id from a global
    `AtomicUsize` and registers `T`'s `Layout` (size, alignment, drop glue) into
-   the global `ComponentRegistry`.
+   the global component registry (the module `component_registry`, a set of
+   per-id `OnceLock` tables).
 2. The minted id is cached in a per-type `OnceLock<ComponentId>`, so every
    later call is a plain cached read — no atomic, no lock on the hot path.
 
@@ -121,7 +120,7 @@ flowchart LR
     A["Position::component_id()"] --> B{OnceLock set?}
     B -- yes --> C[return cached ComponentId]
     B -- no --> D[fetch_add on global AtomicUsize]
-    D --> E[register Layout in ComponentRegistry]
+    D --> E[register Layout in component_registry]
     E --> F[store in OnceLock]
     F --> C
 ```
@@ -161,9 +160,9 @@ const _: () = {
 // Position::layout() returns the matching core::alloc::Layout.
 ```
 
-Storage is **Struct-of-Arrays, one column per component type**. Each component
-type owns its own
-[`ComponentPool`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs#L147)
+Storage is **Struct-of-Arrays, one column per component type**. With the
+default (table) storage, each component type owns its own
+[`ComponentPool`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/component_pool.rs)
 inside an archetype — a single contiguous, SIMD-aligned buffer holding every
 instance of *that* component for entities in *that* archetype, back to back.
 Iterating `Position` does not drag `Velocity` or `Health` into cache; each query
@@ -180,8 +179,42 @@ read by hand-written SIMD. When in doubt, leave it off.
 
 > **Drop discipline.** A component's `Drop` impl runs when the row is removed or
 > the world is torn down, and it must **not panic** — the teardown path is not
-> wrapped in `catch_unwind` (that would cost ~20-30 ns per element). Prefer owning
+> wrapped in `catch_unwind` (that would add a cost to every element). Prefer owning
 > heap data through `Vec` / `Box` / `Arc`, which drop without panicking.
+
+## Storage kinds
+
+Everything above describes the default **table** storage: the component is part
+of the archetype signature, and attaching or detaching it moves the entity to
+another archetype. The derive offers two other kinds, chosen per type with the
+`storage` key:
+
+```rust,ignore
+use boyko_macros::Component;
+
+// Dense: one global column for every instance, no archetype moves.
+#[derive(Component)]
+#[component(storage = "dense")]
+struct SolverBody { inv_mass: f32, velocity: [f32; 3] }
+
+// Bitset: a one-bit enable flag per row, no bytes at all.
+#[derive(Component)]
+#[component(storage = "bitset")]
+struct Stunned;
+```
+
+- **`storage = "dense"`** keeps every instance of the type in one global
+  `DenseStore` column keyed by entity, outside every archetype signature. Adding
+  or removing it never moves the entity between archetypes, and live slots never
+  move. Use it for data that many entities gain and lose, or that a subsystem
+  wants as one contiguous buffer. See [Dense Components](dense-components.md).
+- **`storage = "bitset"`** makes the type an *enable tag*: a per-row bit that is
+  toggled in place, read through `Enabled<T>` / `Disabled<T>`. It has no bytes,
+  so it carries no change ticks. See [Enable Tags](enable-tags.md).
+
+Neither kind gets the automatic one-component bundle: spawn or insert a dense
+component inside a `#[derive(Bundle)]` struct, and toggle an enable tag with
+`enable` / `disable`.
 
 ## Required components
 
@@ -211,6 +244,10 @@ Each entry in the list may be a bare type (`Position`, constructed via its
 that already carries `Position` and `Velocity` even though you only named
 `Player`.
 
+A required component may use dense storage, but not bitset storage: requiring a
+`storage = "bitset"` type is a **compile error**, reported at the offending entry.
+A required component is constructed as bytes, and an enable flag has none.
+
 ## Lifecycle hooks on a component
 
 A component can bind **lifecycle hooks** — code that runs when the component is
@@ -225,11 +262,32 @@ use boyko_macros::Component;
 struct Health(u32);
 ```
 
-The valid keys are `on_add`, `on_insert`, `on_replace`, and `on_remove`, each
-pointing at an `unsafe fn(DeferredEcsMaster<'_>, HookContext)`. The derive-bound
-form is mutually exclusive with the runtime hook builder for the same type. Hooks,
-their runtime sibling **observers**, and the full `HookContext` API are documented
-on [Hooks and observers](hooks-and-observers.md).
+The valid keys are `on_add`, `on_insert`, `on_replace`, `on_remove`, and
+`on_despawn`, each pointing at an `unsafe fn(DeferredEcsMaster<'_>, HookContext)`.
+`on_despawn` fires once per dying entity at the despawn site, before any of its
+components drop. The derive-bound form is mutually exclusive with the runtime hook
+builder for the same type. Hooks, their runtime sibling **observers**, and the
+full `HookContext` API are documented on
+[Hooks and observers](hooks-and-observers.md).
+
+## Derive attributes at a glance
+
+`#[derive(Component)]` reads one `#[component(...)]` attribute plus a few helper
+attributes. Every key is optional; an unknown or duplicate key is a compile error.
+
+| Attribute | Effect | More |
+|-----------|--------|------|
+| `#[component(on_add = f)]`, `on_insert`, `on_replace`, `on_remove`, `on_despawn` | Bind a lifecycle hook. | [Hooks and observers](hooks-and-observers.md) |
+| `#[component(no_bundle)]` | Skip the automatic one-component `Bundle` impl. | [Bundles](bundles.md) |
+| `#[component(storage = "dense")]` | Dense storage: one global column, no archetype moves. | [Dense Components](dense-components.md) |
+| `#[component(storage = "bitset")]` | An enable tag: one bit per row, toggled in place. | [Enable Tags](enable-tags.md) |
+| `#[component(no_clone)]` / `#[component(clone = f)]` | Skip the type when an entity is cloned, or clone it with a custom `unsafe fn(*const u8, *mut u8)`. | [Cloning & Prefabs](cloning-and-prefabs.md) |
+| `#[component(no_serialize)]` | Leave the type out of saved worlds. | [Serialization](../persistence/serialization.md) |
+| `#[component(stable_name = "..")]`, `#[component(format_version = N)]` | The on-disk type key and a `u16` layout version. | [Serialization](../persistence/serialization.md) |
+| `#[component(reflect)]` | Editor-only reflection, emitted only when your crate enables its own `reflect` feature. | [`boyko_reflect`](https://github.com/bluesteelll/boyko-engine/tree/master/crates/boyko_reflect) |
+| `#[require(B)]`, `#[require(C = expr)]`, `#[require(D(args))]` | Required components. | [above](#required-components) |
+| `#[entities]` on a field | Remap that `Entity` field when a saved world is loaded. | [Serialization](../persistence/serialization.md) |
+| `#[relationship(target = T)]`, `#[relationship_target(source = S)]` | Used with `#[derive(Relationship)]` / `#[derive(RelationshipTarget)]`. | [Relations](relations.md) |
 
 ## Performance characteristics
 
@@ -248,6 +306,6 @@ on [Hooks and observers](hooks-and-observers.md).
 - [Tags](tags.md) — zero-sized marker components, in depth.
 - [Hooks and observers](hooks-and-observers.md) — react to component add/remove.
 - [Storage trade-offs](../architecture/storage-tradeoffs.md) — why SoA columns.
-- Source: [`component.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/component.rs),
-  [`component_registry.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/component_registry.rs),
-  derive in [`boyko_macros/src/lib.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_macros/src/lib.rs).
+- Source: [`component.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/component.rs),
+  [`component_registry/`](https://github.com/bluesteelll/boyko-engine/tree/master/crates/boyko_ecs/src/ecs/core/component/component_registry),
+  derive in [`boyko_macros/src/lib.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_macros/src/lib.rs).

@@ -3,7 +3,7 @@ name = "profile-fixture-log"
 version = "0.1.0"
 edition = "2024"
 publish = false
-
+license.workspace = true
 # The logging half of the axis needs `boyko_log`, and that is exactly why it is a SEPARATE package
 # from `profile-fixture`. G14(a)'s argument is that the profiling fixture's image can contain no
 # emitter other than its own single zone site, which rests on `boyko_diag` having out-degree 0.

@@ -318,7 +318,7 @@ slow path or a runtime panic:
   has no world cell to resolve them per row. Use the sequential
   [`iter` / `iter_mut`](queries.md) instead, or `dense_iter` for a pure-dense
   query. (The guard is a `const` assert in
-  [`par_iter.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs#L305),
+  [`par_iter.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs),
   so a misuse fails to compile rather than silently degrading.)
 
 Everything else — `&T`, `&mut T`, `()`, tuples up to 12, and the archetypal
@@ -332,13 +332,15 @@ filters `With` / `Without` / `Or` — works on all four methods.
 |----------------------------------------------------------------------|-----------------------|
 | Branchy per-entity logic, modest counts                              | `iter` / `iter_mut`   |
 | Tight numeric body you want vectorized; or a zero-copy SoA hand-off  | `for_each_chunk`      |
+| The same, but the body also needs each row's `EntityId`              | `for_each_chunk_entities` (a `&[EntityId]` slice parallel to the chunk) |
 | Heavy per-entity body, large counts, simple data                     | `par_iter_mut`        |
 | Heavy *and* vectorizable, large counts, many cores                   | `par_for_each_chunk`  |
-| Tick filtering (`Changed`/`Added`), `Option`/`AnyOf`, relations, dense | `iter` / `iter_mut` (only path that supports them) |
+| One [dense component](components.md#storage-kinds), every live instance | `dense_iter` / `dense_iter_mut` (one contiguous column, no archetype walk) |
+| Tick filtering (`Changed`/`Added`), `Option`/`AnyOf`, relations, mixed dense queries | `iter` / `iter_mut` (only path that supports them) |
 
 When in doubt, start with `iter`, measure, and escalate. Parallelism has a fixed
-dispatch cost; below ~1 024 rows the engine already keeps you on one core
-because that is the faster choice.
+dispatch cost; below `MIN_ARCHETYPE_FOR_PARALLEL` (1 024) rows per archetype the
+engine keeps you on one core.
 
 ---
 
@@ -349,6 +351,7 @@ because that is the faster choice.
 - [The scheduler](../scheduler.md) — the work-stealing pool the parallel paths run on.
 - [Change detection](../change_detection.md) — why ticked terms stay on `iter`.
 - Source:
-  [`chunk_iter.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/chunk_iter.rs),
-  [`par_chunk.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/par_chunk.rs),
-  [`par_iter.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs).
+  [`chunk_iter.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/chunk_iter.rs),
+  [`par_chunk.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/par_chunk.rs),
+  [`par_iter.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs),
+  [`dense_iter.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/dense_iter.rs).

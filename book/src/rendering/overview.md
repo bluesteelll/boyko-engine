@@ -7,14 +7,25 @@ dispatch boundary on the hot path. There is no `wgpu`, no `ash`, no `vulkano` �
 whole pipeline, down to the raw Vulkan loader and the Win32 window, is hand-written.
 
 This page is the map. It explains the three layers of the stack, the
-CPU-orchestrate / GPU-execute philosophy that ties them together, and how one frame
-flows through them. Each subsystem then has its own page:
+CPU-orchestrate / GPU-execute philosophy that ties them together, how one frame
+flows through them, and what ships today. Each subsystem then has its own page:
 
+- [Render paths](render-paths.md) — Deferred, Forward, Forward+ and the Visibility
+  Buffer, crossed with the mesh and SDF geometry legs.
 - [The RHI](rhi.md) — the backend-agnostic, static-dispatch hardware interface.
+- [The framegraph](framegraph.md) — the render dependency graph that derives every
+  barrier.
 - [GPU-resident columns](gpu-columns.md) — ECS component columns that live in VRAM.
+- [Meshes and loaders](meshes-and-loaders.md) and
+  [materials and textures](materials-and-textures.md) — assets, textured PBR, bindless
+  textures.
+- [Lighting](lighting.md) — ECS light entities, the GPU light table, clustered cull,
+  tonemapping.
+- [Shadows and ambient occlusion](shadows-and-ao.md),
+  [global illumination](global-illumination.md),
+  [anti-aliasing](anti-aliasing.md) and [GPU particles](particles.md).
 - [SDF rendering](sdf.md) — the analytic sphere-tracer and the hybrid mesh↔SDF path.
-- [The shader eDSL](shader-edsl.md) — single-sourcing field math between CPU and GPU.
-- [Lighting](lighting.md) — ECS light entities, the GPU light table, clustered cull.
+- [The shader eDSL](shader-edsl.md) — single-sourcing shader math between CPU and GPU.
 
 ## Why in-house
 
@@ -36,7 +47,7 @@ driver.
 ```mermaid
 flowchart TD
     ECS["boyko_ecs<br/>(entities, components, systems, scheduler)"]
-    R["boyko_render<br/>GPU columns · GpuSystem · deferred G-buffer · lighting"]
+    R["boyko_render<br/>GPU columns · render configs · lighting · materials · particles"]
     RHI["boyko_rhi<br/>backend-agnostic trait surface (FFI-free, static dispatch)"]
     VK["boyko_rhi_vulkan<br/>raw hand-FFI Vulkan backend + Win32 window"]
     GPU["GPU / driver"]
@@ -50,7 +61,7 @@ flowchart TD
 
 ### `boyko_rhi` — the interface
 
-[`boyko_rhi`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi/src/lib.rs)
+[`boyko_rhi`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi/src/lib.rs)
 is the backend-agnostic Render Hardware Interface: an umbrella `RhiApi` trait with
 associated owned-resource types, operational traits (`RhiDevice`, `RhiQueue`,
 `RhiCommandEncoder`), thin enums and descriptors, and a generational handle registry
@@ -60,20 +71,22 @@ The defining choice is **static dispatch**. `RhiApi` is intentionally *not*
 object-safe; backends implement the traits over their own concrete resources, so every
 call monomorphizes to a direct, non-virtual call — zero abstraction overhead versus the
 backend's inherent methods. There is no `dyn`, no `Box`, no `HashMap` anywhere in the
-crate. Its only dependency is `boyko_utils` (for the generational `Slot` handles); it
-does **not** depend on `boyko_ecs`, which keeps the dependency graph acyclic. See
+crate. It depends on two engine crates: `boyko_utils` (for the generational `Slot` handles)
+and `boyko_log` (its diagnostic channel). It does **not** depend on `boyko_ecs`, which keeps
+the dependency graph acyclic. See
 [The RHI](rhi.md).
 
 ### `boyko_rhi_vulkan` — the backend
 
-[`boyko_rhi_vulkan`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/src/lib.rs)
+[`boyko_rhi_vulkan`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/src/lib.rs)
 implements the RHI traits over a **raw, hand-FFI Vulkan** backend. The INVIOLABLE rule
 here is specific: every `vk*` call is hand-declared raw FFI resolved through
 `vkGetInstanceProcAddr` / `vkGetDeviceProcAddr` — there is **no `ash`, no `vulkano`**
 in the Vulkan path. It hand-rolls the Vulkan loader, instance, and device (`device`), a
-`VkDeviceMemory` sub-allocator with coalescing (`memory`, `suballocator`), compute
-pipelines from committed SPIR-V (`compute`), and the command-encoder lowering
-(`rhi_impl::VulkanCommandEncoder`).
+`VkDeviceMemory` sub-allocator with coalescing (`memory`, `suballocator`), compute and
+graphics pipelines from committed SPIR-V, bindless descriptor sets (`bindless`),
+ray-tracing acceleration structures (`accel`), the framegraph (`framegraph`), and the
+command-encoder lowering (`rhi_impl::VulkanCommandEncoder`).
 
 The OS windowing / Raw-Input layer is the one approved exception. `window::Window` is a
 raw Win32 window: the class/window/message calls (`RegisterClassExW`, `CreateWindowExW`,
@@ -81,21 +94,34 @@ the `WndProc` message loop) are hand-declared `extern "system"` against `user32`
 `kernel32`, while the window-handle accessors, the Raw-Input calls, and the `RAWINPUT*`
 structs / `WM_*` constants come from the official, Microsoft-maintained
 [`windows-sys`](https://crates.io/crates/windows-sys) raw bindings — re-exported through
-[`ffi::os`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/src/ffi.rs#L37).
+[`ffi::os`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/src/ffi.rs).
 `windows-sys` is target-gated to `cfg(windows)`, so non-Windows builds pull nothing, and
-it never touches a `vk*` symbol. On top of that window, `swapchain` brings up the
-surface, a FIFO swapchain, and a Vulkan 1.3 dynamic-rendering present loop
+it never touches a `vk*` symbol. On top of that window, the `present` module brings up
+the surface, the swapchain, and a Vulkan 1.3 dynamic-rendering present loop
 (`vkCmdBeginRendering` / `vkCmdEndRendering`, no `VkRenderPass` / `VkFramebuffer`), two
-frames in flight. Every `unsafe` block carries a concrete `// SAFETY:` comment, and the
-`VK_LAYER_KHRONOS_validation` messenger — asserted to zero messages — is the soundness
-oracle that stands in for Miri on the raw-FFI path.
+frames in flight. The swapchain takes a present mode: FIFO (the default), Immediate or
+Mailbox, each probed with a fallback to FIFO (`Swapchain::new_with_present_mode`). The
+windowed host presents with FIFO.
+
+Every `unsafe` block carries a concrete `// SAFETY:` comment, and the
+`VK_LAYER_KHRONOS_validation` layer is the soundness oracle that stands in for Miri on
+the raw-FFI path. Two gates use it:
+
+- **The absolute validation gate** (`crates/boyko_app/tests/boot_validation_clean.rs`)
+  boots the full engine with the layer armed, renders a few frames, and fails on any
+  error or validation warning. In an ordinary run the layer is opt-in:
+  `BOYKO_ENABLE_VALIDATION` arms it.
+- **The SPIR-V capability census** (`spirv_capability_census.rs`) needs no device. It
+  checks that every capability a committed shader declares is licensed by a device
+  feature the backend enables.
 
 ### `boyko_render` — the bridge
 
-[`boyko_render`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/lib.rs)
-is the **only** crate allowed to name both the ECS and the RHI. It depends directly on
-`boyko_ecs`, `boyko_rhi`, `boyko_rhi_vulkan`, and `boyko_utils`, with no cycle, so the
-graphics-aware types live here and never leak into the graphics-pure ECS core. It
+[`boyko_render`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/lib.rs)
+is the bridge between the ECS and the RHI. It depends directly on `boyko_ecs`, `boyko_rhi`
+and `boyko_rhi_vulkan`, with no cycle, so the graphics-aware types live here and never leak
+into the graphics-pure ECS core. Only it and the host layer above it (`boyko_app`) name both
+sides. It
 holds:
 
 - **GPU-resident columns** — `GpuColumnManager` mints DeviceLocal (VRAM) SSBOs and
@@ -103,10 +129,17 @@ holds:
   [GPU-resident columns](gpu-columns.md).
 - **`GpuSystem`** — a hand-written `impl System` that records and submits compute
   dispatches *on* a GPU-resident column, fully inside the engine's scheduler.
+- **The render configs** — one owner-set resource per feature (`RenderPathConfig`,
+  `AaConfig`, `SsaoConfig`, `CsmConfig`, `ShadowConfig`, `DdgiConfig`,
+  `ShadowDenoiseConfig`, `HzbConfig`, `OcclusionConfig`, `ParticleConfig`), each with a
+  plugin that inserts its default. See the table [below](#what-ships-today).
 - **Lighting** — ECS light components folded into a GPU `GpuLight[]` table plus the
-  clustered froxel cull. See [Lighting](lighting.md).
+  clustered froxel cull and the tonemapper choice. See [Lighting](lighting.md).
+- **Meshes, materials and textures** — `Assets<MeshGpu>`, the material table, bindless
+  textures, and the asset loaders (OBJ, glTF 2.0 binary, PNG, RON material).
 - **3D instancing** — `Render3dPlugin` packs each visible entity's `GlobalTransform`
   into a `Gpu3dInstance` column for the instance buffer.
+- **GPU particles** and the **UI render pack** (`boyko_render::ui`).
 
 ## CPU-orchestrate / GPU-execute
 
@@ -118,7 +151,8 @@ The dividing line that shapes the whole stack:
 The CPU runs systems on the scheduler, folds ECS data into GPU-shaped buffers, and
 records command buffers. The GPU then executes those commands. Crucially, results that
 feed the next GPU pass **stay on the GPU** — chained passes are synchronized with
-`vkCmdPipelineBarrier`, not with a readback to host memory.
+`vkCmdPipelineBarrier` barriers that the [framegraph](framegraph.md) derives, not with a
+readback to host memory.
 
 This is why rigid-body physics resolve stays on the CPU: it is latency-bound,
 branch-heavy, and needs its result the same frame, so a GPU round-trip would lose more
@@ -151,95 +185,128 @@ compiler-enforced rather than convention. The
 
 ## How a frame flows
 
-A representative frame, from ECS data to a presented image:
+The renderer makes one decision at boot and runs one loop per frame.
+
+**At boot.** The windowed runner calls `resolve_render_path` once. It reads the
+owner's `RenderPathConfig` (a `RenderPath` × `GeometryLegs` pair), the features that
+need inputs from before lighting (SSAO, DDGI, the shadow denoiser, TAA), and the
+device's capabilities. The result is a frozen `ResolvedRenderPath`.
+
+- A request the device cannot serve degrades to one it can, with a logged reason; it
+  never panics. For example, the Visibility Buffer falls back to Deferred on a device
+  without `shaderStorageBufferArrayNonUniformIndexing`.
+- There is no live toggle. Changing the path means booting again.
+
+**Every frame:**
 
 ```mermaid
 sequenceDiagram
     participant Sched as Scheduler (CPU)
-    participant Sys as Render systems (CPU)
-    participant GS as GpuSystem (dispatcher-solo)
-    participant Enc as Command encoder
+    participant Run as Windowed runner (CPU)
+    participant FG as Framegraph
     participant GPU as GPU
 
-    Sched->>Sys: run packing systems
-    Note over Sys: propagate_transforms →<br/>sync_gpu_3d_instances (GlobalTransform → Gpu3dInstance)<br/>collect_lights (light components → GpuLight[] table)
-    Sched->>GS: dispatch GPU systems (running == 0)
-    GS->>Enc: record pipeline barriers (prior write → this read)
-    GS->>Enc: record compute dispatch on the GPU column
-    Enc->>GPU: submit (one queue submit)
-    Note over GPU: cluster cull → deferred G-buffer →<br/>SDF march (mesh-depth bound) → deferred lighting → composite
-    GPU->>GPU: present (acquire → render → present)
+    Sched->>Sched: run the frame's systems
+    Note over Sched: propagate_transforms → instance gather<br/>collect_lights → light table<br/>camera, material and particle packs
+    Run->>Run: wait the frame slot's fence → FrameWriteToken
+    Run->>GPU: per-slot uploads under the token
+    Run->>FG: declare the resolved path's passes
+    FG->>FG: compile → derived barriers
+    Run->>GPU: record passes + barriers, submit, present
 ```
 
 Step by step:
 
 1. **Pack (CPU systems).** Ordinary scheduled systems fold ECS data into GPU-shaped
-   columns: `sync_gpu_3d_instances` packs propagated `GlobalTransform`s into the
-   `Gpu3dInstance` column (it must run after `propagate_transforms`); `collect_lights`
-   folds light components into one contiguous `[LightHeaderGpu || GpuLight[]]` staging
-   slice. These are alloc-free transform-and-write passes.
+   buffers. `propagate_transforms` runs first; the mesh-draw gather packs instances,
+   and `collect_lights` folds light components into one contiguous
+   `[LightHeaderGpu || GpuLight[]]` staging slice. These are alloc-free
+   transform-and-write passes.
+2. **Fence and upload.** `wait_frame_in_flight` waits the fence of the frame slot about
+   to be reused and returns a `FrameWriteToken`, a compile-time proof that the slot is
+   safe to write. Every per-slot host write (the UI instance ring, the interpolation
+   pair ring, the camera ring) takes the token, and the submit consumes it. A write after the submit is
+   a compile error, not a convention.
+3. **Declare and compile.** The resolved path picks the declarator:
+   `declare_deferred_graph`, `declare_forward_graph` (Forward and Forward+) or
+   `declare_vb_graph`. Each pass declares what it reads and writes, and
+   `FrameGraph::compile` derives the barrier set.
+4. **Record, submit, present.** Two frames in flight.
 
-2. **Upload / record (GPU systems).** During the apply window, `GpuSystem`-style work
-   runs solo on the dispatcher. It resolves its target column by
-   `(ArchetypeId, ComponentId)` (so a buffer that grew and rotated its handle is
-   transparent), records the necessary pipeline barriers, then records the compute
-   dispatch into the same encoder and submits.
-
-3. **Execute (GPU).** On the swapchain present path
-   ([`render_gbuffer_frame`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/src/swapchain.rs#L2169)),
-   the GPU runs the deferred pipeline: an optional clustered light cull, a rasterized
-   G-buffer pass that produces a depth image, an SDF compute march bounded by that
-   depth (the **hybrid mesh↔SDF** occlusion — meshes and SDF share one depth so each
-   correctly occludes the other), a deferred lighting resolve over the G-buffer, and a
-   composite blit into the acquired swapchain image.
-
-4. **Present.** Acquire → record (barrier → `vkCmdBeginRendering` clear →
-   `vkCmdEndRendering` → barrier) → submit → present, two frames in flight.
+**The Deferred path, as one example**
+([`frame_driver.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/src/present/frame_driver.rs)):
+a rasterized G-buffer pass that produces a depth image; an SDF compute march bounded by
+that depth (the **hybrid mesh↔SDF** occlusion — meshes and SDF share one depth, so each
+correctly occludes the other); a deferred lighting resolve over the G-buffer; the
+enabled post passes; and a present blit into the acquired swapchain image.
 
 No stage reads a buffer back to the CPU. Each GPU pass consumes the previous pass's
-device-local output, synchronized by barriers.
+device-local output, synchronized by the derived barriers.
 
-## What is shipped vs. deferred
+## What ships today
 
-This stack is a deliberately staged ladder. To be precise about what runs today:
+The table lists each feature with its default and its switch. The base frame needs no
+configuration: the Deferred path with both geometry legs, meshes, textured PBR, lights, ACES
+tonemapping and, with the SDF leg, SDF tracing are on by default. Every **opt-in** feature
+defaults to **off**, so an unconfigured world renders without it. (The exception, ray-traced
+shadows, exists only in `hwrt` builds, where the boot selects it on a ray-query GPU.) Most
+opt-in features have an owner-set config resource: to turn one on, overwrite its config
+**after** `add_plugins(EnginePlugins::…)`, because the plugins insert the defaults. Some also
+need a marker component on the entities they apply to, as the Knob column notes.
 
-**Shipped:**
+| Feature | Crate | Default | Knob |
+|---------|-------|---------|------|
+| [Render paths](render-paths.md): Deferred, Forward, Forward+, Visibility Buffer | `boyko_render`, `boyko_rhi_vulkan` | Deferred | `RenderPathConfig::path` (boot-fixed) |
+| [Geometry legs](render-paths.md): meshes, SDF, or both | `boyko_render`, `boyko_rhi_vulkan` | both | `RenderPathConfig::legs` (boot-fixed) |
+| [Framegraph](framegraph.md) barrier derivation | `boyko_rhi_vulkan` | always on | — |
+| [Meshes](meshes-and-loaders.md): `Assets<MeshGpu>`, OBJ and glTF 2.0 binary loaders | `boyko_render` | on | — |
+| [Textured PBR, bindless textures, PNG decoding](materials-and-textures.md) | `boyko_render`, `boyko_image` | on | — |
+| [Lights](lighting.md): directional, point, spot, sky ambient | `boyko_render` | on | `LightingConfig` |
+| [Clustered light cull](lighting.md) | `boyko_render` | off; Visibility Buffer path only | `LightingConfig::clusters_enabled` / `cluster_select` |
+| [Tonemapping](lighting.md): ACES, Neutral, Reinhard-Jodie | `boyko_render` | ACES | `LightingConfig::tonemapper` |
+| [SDF sphere-tracing](sdf.md), its soft shadow and AO | `boyko_rhi_vulkan` | on with the SDF leg | — |
+| [Cascaded sun shadows](shadows-and-ao.md) | `boyko_render`, `boyko_app` | off | `CsmConfig::cascade_count` > 0, plus `ShadowCaster` on the casting meshes |
+| [Spot/point shadow atlas](shadows-and-ao.md) | `boyko_render`, `boyko_app` | off | `ShadowConfig::enabled`, plus `CastsPunctualShadow` on the lights and `ShadowCaster` on the casting meshes |
+| [Ray-traced mesh shadows](shadows-and-ao.md) (ray query) | `boyko_render`, `boyko_app` | only in `--features hwrt` builds on a ray-query GPU, where the boot selects it | `RayShadowConfig` (tuning); `BOYKO_FORCE_SOFTWARE=1` forces the non-ray-traced path |
+| [Shadow denoiser](shadows-and-ao.md), spatial and temporal | `boyko_render`, `boyko_app` | off; `hwrt` builds only | `ShadowDenoiseConfig::mode` |
+| [SSAO](shadows-and-ao.md) | `boyko_render` | off | `SsaoConfig::quality` |
+| [SDF DDGI global illumination](global-illumination.md) | `boyko_render` | off | `DdgiConfig::ddgi_indirect` |
+| [Anti-aliasing](anti-aliasing.md): FXAA, SMAA, TAA, RCAS sharpen | `boyko_render` | off | `AaConfig::mode`, `TaaConfig::sharpen` |
+| [2× SSAA](anti-aliasing.md) | `boyko_render`, `boyko_app` | off (boot-fixed) | `EnginePlugins::with_ssaa_scale(2)` |
+| [Two-phase HZB occlusion culling](render-paths.md) | `boyko_render`, `boyko_app` | off; Visibility Buffer path only | `OcclusionConfig::mode`, plus `OcclusionCulling` on each instance to test (`HzbConfig` builds the depth pyramid on its own) |
+| [GPU particles](particles.md) | `boyko_render` | off | `ParticleConfig::mode` |
 
-- The FFI-free RHI trait surface and the raw-FFI Vulkan backend (headless compute +
-  on-screen present).
-- GPU-resident DeviceLocal columns + the `GpuSystem` zero-readback compute path.
-- The deferred G-buffer present path with the hybrid mesh↔SDF shared-depth bound.
-- Analytic SDF sphere-tracing with Keinert over-relaxation (B1, ω = 1.2), mesh-depth
-  bound, soft shadows, and AO.
-- Lighting **L0** (ECS lights → GPU `GpuLight[]` table) and **L1** (clustered froxel
-  cull, a 16×9×24 exponential-Z grid).
+Some features depend on the render path. Under Forward and Forward+, SSAO, DDGI, the
+shadow denoiser and TAA are capped off at boot, with a logged reason: those paths
+produce none of the inputs they read.
 
-**Deferred / parked (not available today — do not assume these exist):**
+**Not shipped (do not assume these exist):**
 
-- **The P9 GPU-resident brick atlas.** The SDF renderer is, by design, a *brute-force*
-  per-pixel analytic sphere-tracer: every march step re-folds the entire edit list with
-  no distance cache, no brick map, and no BVH, bounded today only by
-  `MAX_SDF_EDITS = 16`. The cache-and-interpolate hierarchy is pre-cut behind the
-  `field_distance` shader seam but **not implemented**. See [SDF rendering](sdf.md) and
-  the audit in
-  [docs/SDF-PERF-AUDIT.md](https://github.com/bluesteelll/boyko-engine/blob/ecs/docs/SDF-PERF-AUDIT.md).
-- **The P4b coarse tile-cull.** Built and golden-proven, but *disabled on the windowed
-  present* (`coarse_enabled = 0`) — it currently runs only in the offscreen golden test.
-- **Baked / runtime global illumination (lighting L2+).** Irradiance volumes, DDGI, and
-  SDF-native GI capstones are planned, not shipped.
-- **VRAM brick streaming (M5b)** and half-resolution / temporal march seeding — owner-
-  deferred optimizations.
+- **The brick atlas in the windowed host.** The brick-atlas accelerator and its
+  incremental re-bake exist in `boyko_rhi_vulkan`, but the windowed host binds an empty
+  placeholder and never arms them. See [SDF rendering](sdf.md).
+- **The coarse tile-cull** on screen: built and golden-proven, never armed by the
+  windowed host.
+- **VRAM brick streaming (M5b)**, half-resolution or temporal march seeding, and the SDF
+  geometry/shading split.
+- **Auto-exposure.** Exposure is a fixed `LightingConfig::exposure` multiply.
+
+The renderer has no frame-time benchmark yet. Measured results for the rest of the
+engine are on the [Benchmarks](../reference/benchmarks.md) page.
 
 For the honest, caveat-by-caveat breakdown of what the SDF renderer does and does not
 do, the page to read is [SDF rendering](sdf.md).
 
 ## See also
 
+- [Render paths](render-paths.md) — the four paths, the geometry legs, the boot-time resolve.
 - [The RHI](rhi.md) — the FFI-free, static-dispatch interface and its backend.
+- [The framegraph](framegraph.md) — barrier derivation and `FrameWriteToken`.
 - [GPU-resident columns](gpu-columns.md) — VRAM-backed ECS columns and `GpuSystem`.
+- [Windowed host](../app/windowed-host.md) — `EnginePlugins` and the renderer knobs.
 - [SDF rendering](sdf.md) — the analytic marcher, the hybrid path, and the deferred ladder.
 - [The shader eDSL](shader-edsl.md) — one source of truth for CPU and GPU field math.
 - [Lighting](lighting.md) — light entities, the GPU table, and clustered cull.
-- Source: [`boyko_render`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/lib.rs),
-  [`boyko_rhi`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi/src/lib.rs),
-  [`boyko_rhi_vulkan`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/src/lib.rs).
+- Source: [`boyko_render`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/lib.rs),
+  [`boyko_rhi`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi/src/lib.rs),
+  [`boyko_rhi_vulkan`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/src/lib.rs).

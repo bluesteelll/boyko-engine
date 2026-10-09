@@ -90,18 +90,34 @@ component with lifecycle hooks; `boyko_render`'s `MaterialId::from_handle` does
 the same narrowing on the GPU-side sibling. Both debug-assert the row index fits
 16 bits — the material table is documented to stay under 65 536 rows.
 
-> **Caveat — the carrier has no generation.** Sixteen bits of index, and nothing
-> else. A freed-and-reused slot therefore renders stale content silently, with
-> no generation check anywhere on the GPU side. Until a later rung carries the
-> generation (or a remap) into the render path, treat render-visible `Assets<T>`
-> tables as **append-only / live-forever**: do not call `remove` on a handle a
-> renderer may still hold.
+### Freed and reused rows
 
-Refcounting exists for the streaming path — a carrier component's `on_insert` /
-`on_replace` hooks feed attach/detach counts that a `boyko_render` system folds
-in — and slot 0 of the material table is **pinned**: the windowed host mints the
-engine default material there at boot, and pinning keeps a refcount that reaches
-zero from retiring the row every entity without an explicit material points at.
+The carrier holds only the 16-bit index, so the GPU never sees a generation. The
+CPU side checks it instead:
+
+- `MeshHandle` and `MaterialHandle` each `#[require]` a generation lane,
+  `MeshRefGen` / `MaterialRefGen`, which records the row generation the carrier
+  was bound against.
+- Under the windowed host, `AssetRefcountPlugin` (part of `EnginePlugins`) runs
+  `boyko_render::validate_asset_refs` every frame, before the gathers that read
+  the carriers.
+- When a row's generation or load state no longer matches a carrier's lane — the
+  row was freed, reused, or is not `Loaded` — the system marks the carrier stale.
+  A stale mesh carrier is not drawn. A stale material carrier is drawn with the
+  pinned default material (slot 0). A carrier with no lane at all (a row loaded
+  from an older save) is treated as stale.
+
+Refcounting keeps a row alive while carriers reference it. A carrier's
+`on_insert` hook adds one reference and its `on_replace` hook (which also fires
+on removal and despawn) drops one; a `boyko_render` system folds the counts in.
+A row whose count reaches zero is retired only after the frames in flight have
+finished with it. So the normal way to free a render-visible asset is to drop its
+last carrier. An explicit `remove` is still caught by the validation above, but
+every carrier on that row stops drawing (or falls back to the default material).
+
+Slot 0 of the material table is **pinned**: the windowed host mints the engine
+default material there at boot, and pinning keeps a refcount that reaches zero
+from retiring the row every entity without an explicit material points at.
 
 ## Where the tables come from
 
@@ -130,6 +146,55 @@ That signature is exactly what [an Aether `scene`](../aether/scenes.md) writes
 for you, and the reason a scene with mesh bindings needs a live device while one
 without runs headless.
 
+## Loading from bytes and paths
+
+Loading is split in two: a pure-CPU **decode** and a device-side **upload**.
+
+- **`AssetLoader`** decodes raw bytes into an asset's CPU intermediate
+  (`Asset::Cpu`). It names the file extensions it claims (lowercase, no dot).
+- **`HasLoaders`** is the per-asset-type dispatch table: a `const LOADERS` slice
+  built with `LoaderEntry::of::<YourLoader>()`. It is fixed at compile time, so
+  there is no runtime loader registry and no type erasure.
+- **`AssetServer`** is a zero-sized resource with two methods.
+  `decode_bytes::<A>(ext, bytes)` picks the loader by extension and decodes.
+  `load(path, &mut assets, &mut staging, &mut paths)` reads the file, decodes
+  it, reserves a `Loading` row in `Assets<A>`, and queues the decoded value on
+  `AssetStaging<A>`.
+- **`AssetPaths<A>`** is the per-type path index that makes `load` dedupe: the
+  same path returns the same handle while that handle still resolves.
+
+```rust,ignore
+use boyko_ecs::prelude::*; // AssetServer, AssetLoader, Assets, Handle, ...
+use boyko_ecs::ecs::core::asset::{AssetPaths, AssetStaging};
+use boyko_render::Material; // its loader claims the "mat" extension
+
+fn decode_only(server: &AssetServer, bytes: &[u8]) {
+    // CPU-only: no file system, no device.
+    let _cpu = server.decode_bytes::<Material>("mat", bytes);
+}
+
+fn load_one(
+    server: &AssetServer,
+    assets: &mut Assets<Material>,
+    staging: &mut AssetStaging<Material>,
+    paths: &mut AssetPaths<Material>,
+) -> Handle<Material> {
+    // Returns at once; the row is `Loading` until the upload pass fills it.
+    server.load("assets/gold.mat", assets, staging, paths)
+}
+```
+
+A read or decode failure does not panic. `load` still returns a well-formed
+handle, and its row is marked `Failed`; poll `Assets::state(handle)` to see the
+outcome. The upload half lives in `boyko_render`: an upload pass drains
+`AssetStaging<A>` and `fill`s each reserved row. The windowed host inserts
+`AssetServer` as a regular resource and, for `Material`, `MeshGpu` and
+`TextureGpu`, the per-type `AssetStaging` / `AssetPaths` as **non-send**
+resources. A system reaches those two through `NonSendResMut`, not `ResMut`, so
+it runs on the dispatcher thread; see
+[Non-`Send` resources](resources.md#non-send-resources). The host runs the
+upload drains once at boot, after the startup systems.
+
 ## Change signals
 
 Four counters let a GPU mirror decide what to re-upload without diffing the
@@ -145,6 +210,40 @@ table:
 `install_epoch` is the one worth remembering: a mirror gated on row-count growth
 alone cannot see free-list reuse, and would keep serving the old contents.
 
+### The edited-row set
+
+The counters say *that* something changed; the **edited set** says *which rows*.
+It is one bit per row meaning "a GPU copy of this row may differ from the CPU
+value", and it is the preferred re-upload signal:
+
+- `get_mut`, `add` (fresh or reused row), `fill`, `remove` and `retire` mark the
+  row. `fail`, `reserve` and a refcount reaching zero do not.
+- `edited_any()` and `edited_count()` are O(1), so an idle frame costs one load.
+- `drain_edited(|row, value| …)` visits every marked row in ascending order and
+  clears the marks. `value` is `Some(&T)` for a `Loaded` row and `None` for any
+  other state, which a mirror writes as zeros.
+
+```rust,ignore
+fn sync_mirror(mut materials: ResMut<Assets<Material>>) {
+    if !materials.edited_any() {
+        return; // nothing changed since the last drain
+    }
+    materials.drain_edited(|row, value| {
+        // upload `value` (or zeros for `None`) into GPU row `row`
+        let _ = (row, value);
+    });
+}
+```
+
+Marks persist until drained, however many frames pass.
+
+### Other table methods
+
+`iter` walks the `Loaded` rows with their handles. `state_of_index` and
+`try_generation` read a row by raw index. `pin`, `inc_ref`, `dec_ref` and
+`retire` are the refcount and retirement surface that `boyko_render` drives; you
+rarely call them yourself.
+
 ## Performance characteristics
 
 | Operation | Cost |
@@ -153,7 +252,9 @@ alone cannot see free-list reuse, and would keep serving the old contents.
 | `get` / `get_mut` | O(1) — bounds check, state check, direct pointer |
 | `get_by_index` | O(1), and skips the generation check by design (the render carrier's path) |
 | handle | 8 bytes, `Copy`, no allocation, no refcount traffic |
-| carrier component | 2 bytes on the entity |
+| carrier component | `MaterialHandle` 2 bytes, `MeshHandle` 4 bytes, each plus a 4-byte generation lane |
+| `edited_any` / `edited_count` | O(1) |
+| `drain_edited` | O(words up to the last marked row) |
 
 ## See also
 
@@ -165,6 +266,9 @@ alone cannot see free-list reuse, and would keep serving the old contents.
   through this table.
 - [Rendering overview](../rendering/overview.md) — the consumer.
 - Source: `crates/boyko_ecs/src/ecs/core/asset/` (`assets.rs`, `handle.rs`,
-  `asset.rs`), `crates/boyko_scene/src/render_caps.rs` (`MaterialHandle`),
+  `asset.rs`, `server.rs`, `loader.rs`, `paths.rs`),
+  `crates/boyko_scene/src/render_caps.rs` (`MaterialHandle`, `MeshHandle`, the
+  generation lanes), `crates/boyko_render/src/asset_refcount.rs`
+  (`validate_asset_refs`, `AssetRefcountPlugin`),
   `crates/boyko_render/src/material.rs` (`MaterialId::from_handle`); design in
   `docs/ASSET-STREAMING-PLAN.md`.

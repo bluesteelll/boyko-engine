@@ -3,7 +3,7 @@ name = "boyko-app"
 version = "0.1.0"
 edition = "2024"
 description = "The host layer: OS loop + device singleton boot + the windowed runner + plugin composition (EnginePlugins) — host plan D1/R2."
-
+license.workspace = true
 # Layering (host plan D1, the amended boyko_render invariant): boyko_render
 # (the data bridge) and boyko_app (the host) are the only two crates that name
 # both the graphics RHI and the ECS core; boyko_app must not define per-entity

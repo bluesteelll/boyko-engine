@@ -18,6 +18,9 @@ edit-url-template = "https://github.com/bluesteelll/boyko-engine/edit/master/{pa
 site-url = "/boyko-engine/"
 no-section-label = false
 additional-css = ["book/theme/custom.css"]
+# Vendored from mdbook-mermaid 0.14.0 (the version docs.yml pins), which bundles mermaid 11.2.0.
+# Licenses: THIRD-PARTY-NOTICES.md, section "mermaid".
+additional-js = ["book/theme/mermaid.min.js", "book/theme/mermaid-init.js"]
 
 [output.html.fold]
 enable = true

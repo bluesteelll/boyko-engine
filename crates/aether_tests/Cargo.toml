@@ -2,7 +2,7 @@
 name = "aether-tests"
 version = "0.1.0"
 edition = "2024"
-
+license.workspace = true
 # The integration half of Decision A2: this crate is where the ENGINE dependency lives, so the
 # drift gate (Aether output compiling against the real `boyko_ecs`/`boyko_macros`) sits beside
 # the engine deps rather than inside the dependency-free language crates.

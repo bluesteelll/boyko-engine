@@ -1,26 +1,6 @@
 {
   "hooks": {
     "enabled": true,
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python ./.claude/hooks/graphify_bash_gate.py"
-          }
-        ]
-      },
-      {
-        "matcher": "Read|Glob",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python ./.claude/hooks/graphify_read_gate.py"
-          }
-        ]
-      }
-    ],
     "UserPromptSubmit": [
       {
         "hooks": [

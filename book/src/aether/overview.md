@@ -24,7 +24,7 @@ The consequences are the point:
   through as verbatim token trees with their original spans, so rustc errors,
   rust-analyzer completions and go-to-definition land on your own tokens.
 
-*(Branch: `feat/multi-paradigm-render`. Shipped rungs: **A0–A7 — the plan is
+*(Shipped rungs: **A0–A7 — the plan is
 complete**. Nothing in the language is scheduled for a later rung.)*
 
 ## Hello, Aether
@@ -156,7 +156,7 @@ expansion:
 | `event Name { … }` | `#[::boyko_macros::event]` struct | A1 | [Data constructs](data-constructs.md#event) |
 | `system name(…) clauses { … }` | `pub fn` with the desugared `SystemParam` signature | A2 | [Systems & plugins](systems-and-plugins.md) |
 | `plugin Name;` | `pub struct` + `impl Plugin` holding every sibling registration | A2 | [Systems & plugins](systems-and-plugins.md#the-plugin-header) |
-| `machine Name { … }` | flat `States` enum + one transition system per (leaf, event) + the initial-enter startup system | A3 · A4 | [State machines](state-machines.md) |
+| `machine Name { … }` | a `boyko_macros::state_chart!` invocation → flat `States` enum + one system per leaf + two registration fns (+ the initial-enter startup system) | A3 · A4 · R2 | [State machines](state-machines.md) |
 | `material name { … }` | `#[inline] pub fn` over `Material::new` / `with_textures` | A5 | [Materials](materials.md) |
 | `scene name { … }` | `pub fn` spawning the declared world, registered as a startup one-shot | A6 | [Scenes](scenes.md) |
 
@@ -243,7 +243,7 @@ already there:
   for a state nobody transitioned into. One generated startup system now walks
   the initial leaf's ancestor path, outermost-first — emitted only when that
   chain has a body.
-- **[Drain-then-act](state-machines.md#what-a-transition-system-does).** A
+- **[Drain-then-act](state-machines.md#what-a-leaf-system-does).** A
   transition system reads *every* event queued this frame and acts once. The
   earlier `return`-in-loop shape left the remainder unread, and it fired a
   second transition on the next frame.
@@ -290,9 +290,10 @@ A7 added **no constructs** — it hardened the language around them:
   present — see below.
 - **An expansion-volume band**, two-sided per corpus. A ceiling alone is
   satisfied by emitting nothing; a band catches drift in both directions. The
-  sugar constructs measure near 3× their source, and the two that *transpile* —
-  `machine` and `scene` — sit at 9–11×, counted against the hand-written code
-  they replace.
+  sugar constructs measure near 3× their source, and `scene`, which *transpiles*,
+  sits near 9×, counted against the hand-written code it replaces. (`machine`
+  measured near 11× at A7; since R2 it emits a `state_chart!` invocation and
+  measures near 2.4×.)
 - **A mechanical span sweep** over the whole golden corpus: every fixture is
   registered, every `.stderr` pins a `line:column`, and **no label sits on the
   `aether! {` line** — primary or secondary. That last clause was widened this
@@ -303,9 +304,19 @@ A7 added **no constructs** — it hardened the language around them:
   [`too_many_arguments` allow](systems-and-plugins.md#generated-fns-and-the-arity-lint),
   the snake-collapse fix, and both spans on a duplicate key.
 
+After A7, rung R2 moved chart flattening out of Aether and into the kernel's
+`boyko_macros::state_chart!`, and merged each leaf's transitions into one system:
+two events on one leaf in one frame now run exactly one chain, the first-declared
+route wins, and an unreachable state is a compile error. See
+[State machines](state-machines.md).
+
 **Nothing is planned and unshipped.** Post-v1 ideas exist — an `aetherfmt`, a
 tree-sitter grammar, a `shader` construct pointing at an eDSL body — but none of
-them is a keyword the language names today and refuses tomorrow.
+them is a keyword the language names today and refuses tomorrow. Aether v2 and the
+Gaia data language exist only as design documents
+([`docs/aether-v2/`](https://github.com/bluesteelll/boyko-engine/tree/master/docs/aether-v2),
+[`docs/gaia/`](https://github.com/bluesteelll/boyko-engine/tree/master/docs/gaia));
+the only grammar that parses is v1.
 
 ### The version header
 

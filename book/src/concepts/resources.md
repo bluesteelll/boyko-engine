@@ -150,6 +150,28 @@ Both params **panic at first run if the resource was never inserted**. Insert yo
 resources during setup (via `App::insert_resource` or directly on the world) before
 the systems that consume them run.
 
+### Optional resources: `Option<Res<R>>` / `Option<ResMut<R>>`
+
+When a resource may legitimately be absent, wrap the param in `Option`. The
+system then receives `None` instead of panicking:
+
+```rust,ignore
+use boyko_ecs::prelude::*;
+# use boyko_macros::Resource;
+# #[derive(Resource)] struct Score(u32);
+
+fn maybe_award(score: Option<ResMut<Score>>) {
+    if let Some(mut score) = score {
+        score.0 += 1;
+    }
+}
+```
+
+The optional form declares the **same** access as the bare one. Whether the
+resource exists is a runtime fact, but the scheduler's conflict analysis is
+static, so an `Option<Res<R>>` system is still ordered against every
+`ResMut<R>` writer.
+
 ### A standalone system run
 
 For a quick end-to-end picture without the full `App`, you can drive a single
@@ -175,6 +197,25 @@ world.run_system_once(&mut system);
 world.run_system_once(&mut system);
 
 assert_eq!(world.resource::<Counter>().0, 2);
+```
+
+`EcsMaster` has a small family of these one-shot runners:
+
+| Method | Takes | Notes |
+|--------|-------|-------|
+| `run_system(f)` | a function or closure | Builds the system, runs it once, applies its deferred buffers (e.g. `Commands`), then discards it. |
+| `run_cached_system(&mut system)` | a pre-built system | Same sequence, but the system's state is initialized only on the first call, so reuse it in a loop. |
+| `run_system_once(&mut system)` | a pre-built system | Runs the body only, as in the example above. It does not call the system's `apply`, so `Commands` it queued are not flushed; use `run_cached_system` for such a system. |
+| `run_closure_once(f)` | a closure | A compatibility alias for `run_system`; prefer `run_system` in new code. |
+
+```rust,ignore
+use boyko_ecs::prelude::*;
+# use boyko_macros::Resource;
+# #[derive(Resource)] struct Counter(u32);
+
+let mut world = EcsMaster::new();
+world.insert_resource(Counter(0));
+world.run_system(|mut c: ResMut<Counter>| c.0 += 1);
 ```
 
 ## Resource access and the scheduler
@@ -266,19 +307,43 @@ fn drift(time: Res<Time>, /* ...query... */) {
 
 When a value genuinely cannot cross threads — a Vulkan device handle, an OS input
 ring, anything `!Send` — it cannot be a `Resource`. The engine provides a parallel
-lane: implement `NonSendResource` and store it with
-`insert_non_send_resource`. Such a value lives in a separate slab and is only
-reachable from systems that run on the dispatcher thread, so the `!Send` payload is
-never touched concurrently. Reach for this only when the ordinary `Resource` lane is
-impossible.
+lane: implement the marker trait `NonSendResource` (it has no `Send` / `Sync`
+bound) and store the value with `insert_non_send_resource`. Such a value lives in
+a separate slab, so the `!Send` payload is never touched concurrently.
+
+```rust,ignore
+use boyko_ecs::prelude::*;
+use boyko_ecs::ecs::core::resources::resource::NonSendResource;
+use boyko_ecs::ecs::core::system::{NonSendRes, NonSendResMut}; // not in the prelude
+
+struct InputRing { /* holds an OS handle; !Send */ }
+impl NonSendResource for InputRing {}
+
+fn poll(ring: NonSendResMut<InputRing>) { /* ... */ }
+```
+
+- **In systems:** `NonSendRes<R>` reads and `NonSendResMut<R>` writes. A system
+  that names either one runs exclusively, on the dispatcher thread, so it never
+  overlaps another system.
+- **On the world:** `insert_non_send_resource`, `non_send_resource(_mut)`,
+  `try_non_send_resource(_mut)`, `contains_non_send_resource`, and
+  `remove_non_send_resource`.
+
+Reach for this only when the ordinary `Resource` lane is impossible.
+
+## Resources carry no change ticks
+
+Change detection (`Added` / `Changed`, `Mut::is_changed`) applies to
+**components** only. `Res<R>` and `ResMut<R>` have no `is_changed`, and the world
+records no tick when a resource is written. If a consumer needs to know that a
+resource changed, keep a version counter or a dirty flag inside the resource.
 
 ## See also
 
 - [Systems](./systems.md) — how `Res` / `ResMut` are declared as `SystemParam`s.
 - [The scheduler](../scheduler.md) — the conflict graph that resource access feeds.
-- [Change detection](../change_detection.md) — tracking when a resource was written.
 - [Tags](./tags.md) — the component-side answer to "presence as data".
 - Source:
-  [`resource.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/resources/resource.rs),
-  [`res.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/system/params/res.rs#L40),
-  [`resmut.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/system/params/resmut.rs#L42).
+  [`resource.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/resources/resource.rs),
+  [`res.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/system/params/res.rs),
+  [`resmut.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/system/params/resmut.rs).

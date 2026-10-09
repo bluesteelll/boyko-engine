@@ -2,7 +2,7 @@
 name = "boyko-serialize"
 version = "0.1.0"
 edition = "2024"
-
+license.workspace = true
 # Phase S1 — custom binary save format + two-pass save. The crate-boundary
 # decision (SERIALIZATION-PLAN.md §3.2): depends on `boyko_ecs`, the diagnostic
 # seam and `std` ONLY, never `boyko_reflect` (the codegen-not-reflection

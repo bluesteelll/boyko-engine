@@ -3,7 +3,7 @@ name = "reflect-dogfood"
 version = "0.1.0"
 edition = "2024"
 publish = false
-
+license.workspace = true
 # GATES G0 / D15 (docs/REFLECTION-PLAN-GATES.md): the REAL-ENGINE-TYPES acceptance
 # package — the dogfood claim, proved separately from `reflect-fixture` (which must stay
 # FFI-free because it is the package the CI Miri row names; THIS package reaches

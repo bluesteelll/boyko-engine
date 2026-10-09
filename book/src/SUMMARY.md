@@ -4,13 +4,16 @@
 
 # Getting Started
 
+- [Installation](getting-started/installation.md)
 - [Your First App](getting-started/first-app.md)
 
 # Core ECS
 
 - [Components](concepts/components.md)
+- [Dense Components](concepts/dense-components.md)
 - [Bundles](concepts/bundles.md)
 - [Entities](concepts/entities.md)
+- [Cloning & Prefabs](concepts/cloning-and-prefabs.md)
 - [Resources](concepts/resources.md)
 - [Assets & Handles](concepts/assets.md)
 - [Queries](concepts/queries.md)
@@ -27,7 +30,7 @@
 
 # Reactivity & Relationships
 
-- [Lifecycle Hooks & Observers](concepts/hooks-and-observers.md)
+- [Lifecycle Hooks, Observers & Triggers](concepts/hooks-and-observers.md)
 - [Hierarchies](concepts/hierarchies.md)
 - [Relations](concepts/relations.md)
 
@@ -37,6 +40,7 @@
 - [System Ordering & Sets](scheduling/ordering-and-sets.md)
 - [Run Conditions](scheduling/run-conditions.md)
 - [States](scheduling/states.md)
+- [State Charts](scheduling/state-charts.md)
 - [Change Detection](change_detection.md)
 
 # Application
@@ -68,11 +72,19 @@
 # Rendering
 
 - [Overview](rendering/overview.md)
+- [Render Paths & Visibility Buffer](rendering/render-paths.md)
 - [RHI & Vulkan Backend](rendering/rhi.md)
+- [Framegraph](rendering/framegraph.md)
 - [GPU-Resident Columns](rendering/gpu-columns.md)
+- [Meshes & Loaders](rendering/meshes-and-loaders.md)
+- [Materials & Textures](rendering/materials-and-textures.md)
+- [Lighting](rendering/lighting.md)
+- [Shadows & Ambient Occlusion](rendering/shadows-and-ao.md)
+- [Global Illumination (SDF DDGI)](rendering/global-illumination.md)
+- [Anti-Aliasing](rendering/anti-aliasing.md)
+- [GPU Particles](rendering/particles.md)
 - [SDF Rendering](rendering/sdf.md)
 - [Shader eDSL](rendering/shader-edsl.md)
-- [Lighting](rendering/lighting.md)
 
 # Simulation
 
@@ -84,14 +96,22 @@
 
 - [Overview](ui/overview.md)
 - [Text & MSDF](ui/text-msdf.md)
+- [Sprites & Animation](ui/sprites-and-animation.md)
+
+# Diagnostics
+
+- [Logging & Error Codes](diagnostics/logging.md)
+- [Profiling](diagnostics/profiling.md)
 
 # Persistence
 
 - [Serialization](persistence/serialization.md)
+- [Reflection (Editor Builds)](persistence/reflection.md)
 
 # Reference
 
 - [Glossary](reference/glossary.md)
+- [Benchmarks](reference/benchmarks.md)
 
 ---
 

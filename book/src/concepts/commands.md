@@ -87,8 +87,8 @@ fn spawn_projectiles(mut commands: Commands) {
 ```
 
 `Commands` declares **no** component or resource access. Buffering is a pure
-append onto its own queue, and reserving an entity ID is a single atomic
-increment — neither conflicts with anything. That is *why* a system taking
+append onto its own queue, and reserving an entity ID is one atomic claim on the
+world's entity reservoir — neither conflicts with anything. That is *why* a system taking
 `Commands` never blocks a sibling: it adds no edges to the scheduler's conflict
 graph.
 
@@ -100,8 +100,9 @@ graph.
 
 ## Spawning: `spawn` and `EntityCommands`
 
-`commands.spawn(bundle)` reserves a fresh [`Entity`](entities.md) immediately (via
-the world's atomic counter) and enqueues the spawn. It returns an
+`commands.spawn(bundle)` reserves an [`Entity`](entities.md) immediately and
+enqueues the spawn. The id comes from the world's entity reservoir: either a
+recycled id (its generation may be above 0) or a fresh one. It returns an
 [`EntityCommands`](#the-entitycommands-handle) handle so you can keep building the
 entity in one expression:
 
@@ -152,6 +153,14 @@ Two convenience constructors round this out:
   bundle type in a single command. Returns an iterator of the reserved IDs.
   Batches are capped at `MAX_BATCH_HINT` (8192) per call; chunk larger requests
   yourself.
+- `commands.reserve_entity()` — claim an `Entity` now and decide what to spawn
+  later, for example to link two not-yet-spawned entities. You must then spawn
+  into it yourself (a custom command calling `EcsMaster::create_entity_at`); an
+  id that is never applied is leaked, one per missed apply.
+- `commands.clone_and_spawn(source)` / `commands.clone_and_spawn_with(source,
+  cloner)` — reserve an id now and, at apply time, clone `source`'s cloneable
+  components into it. The `_with` form takes an `EntityCloner` configuration. See
+  [Cloning & Prefabs](cloning-and-prefabs.md).
 
 ---
 
@@ -172,7 +181,8 @@ struct Frozen;
 #[derive(Bundle)]
 struct Shield { amount: Health }
 
-fn modify(mut commands: Commands, target: Entity) {
+// `Entity` is not a system parameter: a helper receives it from its caller.
+fn modify(commands: &mut Commands, target: Entity) {
     commands
         .entity(target)
         .insert(Shield { amount: Health(50) })  // add components
@@ -190,11 +200,22 @@ The core surface:
 | `.despawn()` | Destroy the entity (recursively despawns its children by default). |
 | `.id()` | Return the targeted `Entity` (not deferred — just reads the captured ID). |
 
-It also carries the ergonomic helpers for the kernel's higher-level features —
-`.add_child` / `.set_parent` / `.clear_children` for parent-child hierarchies,
-`.add_tag` / `.remove_tag` for [dynamic tags](dynamic-tags.md), and
-`.enable::<T>()` / `.disable::<T>()` for [enable-tags](enable-tags.md). All of them
-are just typed wrappers that push the corresponding command.
+It also carries the ergonomic helpers for the kernel's higher-level features. All
+of them are typed wrappers that push the corresponding command:
+
+| Method | Effect on apply |
+|--------|-----------------|
+| `.add_child(e)` / `.add_children(&[e])` | Make `e` (each entry) a child of this entity. |
+| `.set_parent(p)` / `.remove_parent()` | Set or clear this entity's parent ([hierarchies](hierarchies.md)). |
+| `.remove_children(&[e])` / `.clear_children()` | Unlink the given children, or all of them; nothing is despawned. |
+| `.despawn_without_children()` | Despawn only this entity; its children survive with a dangling `ChildOf`. |
+| `.add_tag(tag)` / `.remove_tag(tag)` | Attach or detach a [dynamic tag](dynamic-tags.md). |
+| `.enable::<T>()` / `.disable::<T>()`, `.enable_id(tag)` / `.disable_id(tag)` | Set or clear an [enable tag](enable-tags.md) bit, with no archetype move. |
+| `.observe::<E>(runner)` | Attach an entity-scoped observer for the custom trigger `E` ([triggers](hooks-and-observers.md#custom-triggers--entity-observers)). |
+| `.try_insert(b)` / `.try_remove::<C>()` / `.try_despawn()` | Currently identical to the plain forms; the names are reserved for a future "report success" variant. |
+
+`.reborrow()` hands a shorter-lived `EntityCommands` to a helper function while
+keeping the original handle usable afterwards.
 
 Two sharp edges worth internalizing:
 
@@ -215,45 +236,45 @@ It takes an [`Entity`](entities.md) — the full handle, ID **and** generation, 
 the apply-time generation guard rejects stale handles.
 
 To despawn from inside a system you need that full `Entity` for each row you iterate.
-A `Query<&T>` yields component references, not entities, so the idiomatic pattern is
-to store each entity's own handle in a self-reference component, written at spawn
-time. Then query for it:
+`iter_entities()` yields each row's [`EntityId`](entities.md) — a bare index — and
+the [`Entities`](systems.md#entities--resolve-an-id-to-a-handle) system parameter
+resolves it to the live `Entity`, generation included:
 
 ```rust,ignore
 use boyko_ecs::prelude::*;
+use boyko_ecs::ecs::core::system::Entities; // not in the prelude
 use boyko_macros::Component;
 
 #[derive(Component)]
 struct Health(u32);
 
-// A self-reference: every entity carries its own handle, set when it spawns.
-#[derive(Component)]
-struct EntityRef(Entity);
-
-fn cull_dead(mut commands: Commands, query: Query<(&EntityRef, &Health)>) {
-    for (me, hp) in query.iter() {
+fn cull_dead(mut commands: Commands, entities: Entities, query: Query<&Health>) {
+    for (id, hp) in query.iter_entities() {
         if hp.0 == 0 {
-            commands.despawn(me.0);
+            if let Some(e) = entities.get(id) {
+                commands.despawn(e);
+            }
         }
     }
 }
 ```
 
-> Why a self-reference and not the entity ID from the row? `Query` does expose the
-> per-row entity through `iter_entities()`, but it yields an
-> [`EntityId`](entities.md) — a bare index — whereas `despawn` needs a full
-> `Entity` carrying the generation. An `EntityId` alone cannot be turned into a
-> valid `Entity` for despawn, because a fabricated generation would be rejected as
-> stale for any recycled slot. Storing the real `Entity` handle in a component
-> sidesteps the problem entirely.
+Never fabricate the generation yourself: a guessed generation is rejected as stale
+for any recycled slot. `Entities` reads the current one from the entity store and
+declares no access, so the system stays fully parallel.
+
+An alternative is a self-reference component — each entity stores its own
+`Entity` handle, written at spawn time — which is handy when the handle must
+also travel with the data (for example into an event).
 
 Despawning an entity with children **cascades by default**: `commands.despawn(e)`
-flushes to [`EcsMaster::delete_entity`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L1368),
+flushes to [`EcsMaster::delete_entity`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs),
 which fires the `Children` relationship's despawn hook and recursively destroys the
 whole subtree — no orphaned children, no dangling parents. If you want to free just
-the one entity and keep its children alive, the direct opt-out is
-[`EcsMaster::despawn_without_children(e)`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L1391),
-which suppresses the cascade for exactly that one removal (the surviving children
+the one entity and keep its children alive, use the deferred
+`commands.entity(e).despawn_without_children()` or the direct
+[`EcsMaster::despawn_without_children(e)`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs).
+Either suppresses the cascade for exactly that one removal (the surviving children
 keep a now-dangling `ChildOf` — a documented footgun, so reparent or despawn them
 yourself).
 
@@ -396,7 +417,7 @@ hundreds of commands per system per frame is cheap.
   `.add_tag` / `.enable::<T>()` helpers on `EntityCommands`.
 - [Events](events.md) — `commands.send_event` and deferred dispatch.
 
-Source: [`params/commands.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/system/params/commands.rs),
-[`params/entity_commands.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs),
-[`commands/command_queue.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/commands/command_queue.rs),
-[`commands/command.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/commands/command.rs).
+Source: [`params/commands.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/system/params/commands.rs),
+[`params/entity_commands.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs),
+[`commands/command_queue.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/commands/command_queue.rs),
+[`commands/command.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/commands/command.rs).

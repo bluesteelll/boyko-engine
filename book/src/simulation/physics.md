@@ -46,6 +46,9 @@ components are present**, not a `BodyType` enum branch.
   integrate cache lines.
 - `Collider` — a zero-`dyn` tagged-union shape (`ColliderShape::Sphere` or
   `ColliderShape::Box`, an oriented OBB) plus a `layer`/`mask` broadphase filter.
+  These two are the only collider shapes: there are no capsule, convex-hull, mesh or
+  heightfield colliders. Terrain-like static geometry collides through
+  [SDF contacts](#contact-shapes) instead.
 
 A permanent static body simply **does not carry** a `RigidBody` (structural skip —
 the integrator never iterates it). An immovable contact surface carries
@@ -174,7 +177,52 @@ The narrowphase generates manifolds for:
   *same* CPU-authoritative edit list the renderer draws (see
   [SDF rendering](../rendering/sdf.md)). SDF contacts use a sentinel `body_b` and
   ride the one-sided immovable-surface impulse path, with **zero GPU readback**. The
-  SDF narrowphase is opt-in (`add_physics_sdf`).
+  SDF narrowphase is opt-in (`add_physics_sdf`, or `PhysicsPlugin::with_sdf`).
+
+## Contacts: speculative margin and reuse
+
+Two contact rules are **on by default**, and both change simulation values. They are
+part of the value contract: a replay must run with the settings it was recorded with.
+
+**Speculative contacts.** A contact point is kept while its separation is at most an
+effective margin, not only while the shapes overlap:
+
+```text
+d_eff = d + min(cap, max(0, approach) · dt)
+```
+
+- `d` is `PhysicsConfig::speculative_distance` (default 20 mm).
+- `cap` is `speculative_velocity_cap` (default 0.5 m). `approach` is the rate at which
+  the two bodies close the gap at the start of the step, linear and angular.
+- Each body's broadphase bounding sphere is inflated to match, so every pair a contact
+  could keep is a candidate.
+- The solvers treat a point whose separation is still positive as a speculative
+  contact: it can stop the approach, but it never pushes the bodies apart (the Box2D v3
+  and Jolt rule).
+- The rule covers every pair type: box–box, sphere–sphere, sphere–box and SDF. A pair
+  with a sensor on either side keeps the overlap-only rule, so overlap reports stay
+  exact.
+
+The velocity term makes a pair that closes more than `d` in one step a contact on the
+step *before* it touches, instead of landing on whichever corner arrives first. Setting
+both `d` and `cap` to `0` gives the overlap-only rule, bit for bit the engine before
+speculative contacts.
+
+**Contact reuse.** A slow, touching box–box pair with no sensor keeps a record of its
+last full collision. While the pair's relative pose stays within a small distance τ of
+that collision, the narrowphase refreshes the record from the current poses instead of
+re-running the SAT test and the clip.
+
+- τ is `contact_reuse_distance` (default 1 mm). It is clamped per pair, so small and
+  thin boxes get a tighter bound.
+- A kept point travels with its body, and a point that lifted off is dropped.
+- Reuse is deterministic: the serial loop and the parallel narrowphase give the same
+  bits for any worker count.
+- `contact_reuse = false` runs the exact narrowphase every step.
+
+Source:
+[`narrowphase/speculative.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/narrowphase/speculative.rs),
+[`narrowphase/reuse.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/narrowphase/reuse.rs).
 
 ## The `RigidSolver` seam
 
@@ -215,25 +263,102 @@ The crate ships three solvers:
 
 `DefaultRigidSolver` is a type alias for `ColoredSoftStepSolver`, not a fourth solver.
 
+## Using it from an `App`
+
+`PhysicsPlugin` is the `App`-facing wiring. It inserts the physics resources and
+registers the pipeline into `CoreSchedule::Fixed`, with every stage in
+`FixedSet::Gameplay`:
+
+```rust,ignore
+use boyko_ecs::App;
+use boyko_physics::PhysicsPlugin;
+
+let mut app = App::new();
+app.add_plugin(PhysicsPlugin::new());
+```
+
+- **The solver** is `DefaultRigidSolver`, the colored solve.
+- **Pose sync is on.** The plugin wires the `Transform ⇄ RigidBody` sync, because a
+  drawn scene reads `Transform`. The builder `add_physics_systems` leaves it off: its
+  callers are determinism harnesses that read `RigidBody` directly.
+- **The set matters.** `EnginePlugins` orders `FixedSet::Snapshot` after
+  `FixedSet::Gameplay`, and the engine's interpolation pack reads each body's
+  post-solve `Transform` in `Snapshot`.
+- **Everything else is off.** Builder methods opt in:
+
+| Method | Effect |
+|--------|--------|
+| `with_sdf()` | adds the body-vs-SDF narrowphase stage and an empty `SdfField` to fill |
+| `colored()` | builds the constraint graph for a non-colored solver; a no-op on the default |
+| `colored_solve()` | re-types the plugin to `ColoredSoftStepSolver`; a no-op on the default |
+| `soft(coupling)` | adds the XPBD soft-body pass, with two-way soft↔rigid coupling if `coupling` |
+| `soft_colored()` | adds the colored soft-body step (the non-coupling path) |
+| `without_scene_sync()` | drops the pose sync; nothing then writes `Transform` |
+| `PhysicsPlugin::<S>::with_solver()` | the same plugin on another solver, e.g. `SoftStepSolver` |
+
+`build` inserts a `PhysicsConfig` whose `colored`, `soft_body`,
+`soft_rigid_coupling` and `broadphase` match the stages it registered. Tune the
+config field by field after `add_plugin`. Inserting a whole new value resets those
+fields, and a soft stage then runs with its flag off.
+
+```rust,ignore
+use boyko_physics::{PhysicsConfig, PhysicsPlugin};
+
+app.add_plugin(PhysicsPlugin::new());
+let cfg = app.world_mut().resource_mut::<PhysicsConfig>();
+cfg.substeps = 8;
+```
+
+The `playground` example runs this path:
+`cargo run --release -p boyko-app --example playground`.
+
+### Spawning before the gather
+
+To have bodies spawned by a system join the same step, order the spawner before
+`PhysicsGatherSet`, the set the gather stage belongs to. The executor applies a
+system's `Commands` before it dispatches that system's successors.
+
+```rust,ignore
+use boyko_ecs::prelude::CoreSchedule;
+use boyko_physics::PhysicsGatherSet;
+
+app.add_systems_cfg_in(CoreSchedule::Fixed, |b| {
+    b.add_system(spawn_projectiles).before_set(PhysicsGatherSet);
+});
+```
+
 ## The pipeline
 
 Physics is wired into a schedule as a block of ordinary systems, registered in a
 fixed order via `.after(...)`. The body-only pipeline (`add_physics_systems::<S>`)
-runs the stages below. The solver **type** `S` picks the solve stage, once, at
-wire-up:
+runs the stages below. Two choices are made once, at wire-up. The **colored**
+pipeline (colored broadphase and narrowphase, plus the constraint graph) runs for
+the default solver, or for any solver under `add_physics_colored` (the plugin's
+`.colored()`). The solver **type** `S` picks the solve stage:
 
 ```mermaid
 flowchart LR
+    T["sync_transform_to_body (scene sync)"] -.-> A
     A[physics_integrate] --> B[physics_gather]
     B --> P[select_broadphase]
-    P --> C[physics_broadphase]
+    P -->|"colored pipeline"| CC[physics_broadphase_colored]
+    CC --> DC[physics_narrowphase_colored]
+    DC --> G[physics_build_graph]
+    G -->|"S = ColoredSoftStepSolver (default)"| E[physics_solve_colored]
+    G -->|"any other S"| R["physics_solve_step::&lt;S&gt;"]
+    P -->|"plain pipeline"| C[physics_broadphase]
     C --> D[physics_narrowphase]
-    D -->|"S = ColoredSoftStepSolver (default)"| G[physics_build_graph]
-    G --> E[physics_solve_colored]
-    D -->|"any other S"| R["physics_solve_step::&lt;S&gt;"]
+    D --> R
     E --> F[physics_apply]
     R --> F
+    F -.-> S2["sync_body_to_transform (scene sync)"]
 ```
+
+The dotted stages exist only with pose sync: `sync_transform_to_body` copies the
+`Transform` of static and kinematic bodies into `RigidBody` before the step, and
+`sync_body_to_transform` copies dynamic root bodies back out after it. The optional
+SDF stage (`physics_narrowphase_sdf`) runs after the narrowphase and before the graph
+build and the solve.
 
 - **integrate** — `par_iter_mut` over simulated dynamic bodies: gravity, position
   advance, quaternion advance. **Gated off** when the solver owns integration (both
@@ -247,9 +372,15 @@ flowchart LR
 - **select_broadphase** — a cold density policy. In the default
   `BroadphaseSelectMode::Manual` it only counts bodies and never changes
   `PhysicsConfig::broadphase`.
-- **broadphase** — emits candidate pairs in deterministic `(min, max)` order.
-- **narrowphase** — produces `Manifold`s for the overlapping pairs.
-- **build_graph** — registered only for the colored solver. Partitions this step's
+- **broadphase** — emits candidate pairs in deterministic `(min, max)` order. Its
+  first act is to latch the step's inputs (below). The colored pipeline registers
+  `physics_broadphase_colored` (with the SDF stage, `physics_broadphase_colored_sdf`)
+  and `physics_narrowphase_colored`; these carry the sleeping world's skip of held
+  islands. The colored pipeline is the default solver's, or any solver's under
+  `add_physics_colored`.
+- **narrowphase** — produces `Manifold`s for the candidate pairs: the touching ones,
+  plus the speculative ones (see [Contacts](#contacts-speculative-margin-and-reuse)).
+- **build_graph** — registered only on the colored pipeline. Partitions this step's
   manifolds into islands and greedy-colors them so no color shares a dynamic body.
 - **solve** — `physics_solve_colored` for the colored solver. For any other `S`,
   `physics_solve_step::<S>`: `if solver.is_noop() { return } else { S::solve(...) }`.
@@ -296,6 +427,9 @@ colored solve when given `DefaultRigidSolver`:
 | `add_physics_soft::<S>` | the XPBD soft-body pass |
 | `add_physics_soft_colored::<S>` | the colored-parallel soft-body pass |
 
+`PhysicsPlugin` (above) is the same wiring for an `App`: its builder methods map onto
+these shapes.
+
 ### Pose stays in one datum
 
 With scene sync, the body's pose has exactly one writer per window: the solver
@@ -308,6 +442,12 @@ parallel pose store — see [Transforms](transforms.md).
 `PhysicsConfig` is the global tunable resource. Most fields are user-set; `dt` is
 **not** — it is stamped each step from the fixed clock.
 
+**When a write takes effect.** The broadphase reads `PhysicsConfig` (and the
+`SdfField`) once per step and copies it into the `StepInputs` record. Every later
+stage of that step reads the record. So a write made after the broadphase takes
+effect at the next step's broadphase, however it is made: a field write, a new value,
+or `insert_resource`.
+
 | Field | Default | Meaning |
 |-------|---------|---------|
 | `gravity` | `(0, -9.81, 0)` | constant acceleration on dynamic bodies |
@@ -315,25 +455,62 @@ parallel pose store — see [Transforms](transforms.md).
 | `relax_iterations` | `2` | bias-free relaxation passes per substep |
 | `contact_hertz` | `30.0` | soft-constraint stiffness (penetration-recovery spring frequency) |
 | `contact_damping` | `10.0` | soft-constraint damping ratio (heavily overdamped, for stable resting contact) |
+| `warm_start` | `true` | warm-start contacts from the previous step; the effective value is this flag AND the solver's own setup flag |
+| `broadphase` | `Tree` | `Tree`, `AllPairs` or `Grid`; all three give the same pair set ([Scaling](#scaling--the-performance-paths)) |
+| `broadphase_select` | `Manual` | `Auto` lets a density policy pick `broadphase` from the live body count; the result is unchanged |
+| `speculative_distance` | `0.02` | the speculative contact distance `d`, in metres; **value-changing** |
+| `speculative_velocity_cap` | `0.5` | the cap on the approach-velocity margin, in metres; **value-changing** |
+| `contact_reuse` | `true` | refresh slow box–box contacts instead of re-colliding them; **value-changing** |
+| `contact_reuse_distance` | `0.001` | the reuse distance τ, in metres |
+| `simd`, `simd_solve` | `true` | the AVX2 kernels; bit-identical to scalar |
+| `parallel_solve` | `true` | the parallel colored solve; bit-identical for any worker count |
+| `parallel_narrowphase` | `true` | the parallel narrowphase; bit-identical for any worker count |
+| `parallel_broadphase` | `false` | the parallel candidate emit of the `Grid` broadphase |
+| `parallel_tree_query` | `false` | the parallel query of the `Tree` broadphase |
+| `sleeping` | `false` | per-island sleeping; **value-changing** on purpose |
+| `sleep_skip` | `SleepSkip::Sets` | how a sleeping world treats frozen islands (`Sets` holds them, `Off` still collides them) |
+| `sleep_threshold`, `sleep_frames` | `1e-4`, `60` | the per-island speed² threshold and the debounce, in frames |
+| `sdf_narrowphase` | `Scalar` | the box-vs-SDF kernel. ⚠ `Avx2` is **not** bit-identical to `Scalar`: it can return `+0` where the scalar fold returns `-0` |
 | `dt` | stamped | the fixed step delta, written by the gather — a hand-set value is overwritten |
+
+The soft-body fields (`soft_body`, `soft_damping`, `soft_rest_clamp`,
+`soft_rigid_coupling`, `self_collision_iters`, `soft_body_colored`,
+`soft_self_collision_colored`) all default to off or zero; see [Soft bodies](#soft-bodies-xpbd).
+`colored` records the schedule's shape at wire-up. The gather also reads it on every step:
+with `sleeping` on and `sleep_skip` not `Off`, it keeps the previous step's resting baseline
+for the colored broadphase only while `colored` is true. Leave it as the plugin set it.
 
 ## Scaling — the performance paths
 
-These are the production-scale levers from the physics optimization campaign. The
-colored solve is the default solver, and two AVX2 kernels are **on by default**:
-`simd_solve` and `simd`. Both kernels are pure speed paths: each lane mirrors the
-scalar op sequence exactly (no FMA, no `rsqrt`/`rcp`), so turning one off changes
-performance, never a result bit. On a non-AVX2 build both are no-ops.
+These are the production-scale levers. They fall into three groups:
 
-The rest are **default-off and opt-in**: `broadphase = Grid`, `parallel_broadphase`,
-`parallel_solve` and `sleeping`. Each one's off state leaves the default path
-byte-identical (the campaign's 0%-gate).
+- **On by default, bit-identical:** `simd`, `simd_solve`, `parallel_solve`,
+  `parallel_narrowphase` and the `Tree` broadphase. They are pure speed paths: turning
+  one off changes performance, never a result bit. The AVX2 kernels mirror the scalar
+  op sequence exactly per lane (no FMA, no `rsqrt`/`rcp`), and on a non-AVX2 build
+  they are no-ops.
+- **Opt-in:** the `Grid` and `AllPairs` broadphases, `parallel_broadphase` and
+  `parallel_tree_query` (all bit-identical), and `sleeping` (value-changing on
+  purpose).
+- **On by default, value-changing:** speculative contacts and contact reuse (see
+  [Contacts](#contacts-speculative-margin-and-reuse)).
 
-- **Grid broadphase** (`broadphase = BroadphaseKind::Grid`, default `AllPairs`) — a
-  uniform-grid CSR counting-sort replacing the O(n²) all-pairs loop. Its pair set is
-  bit-identical to all-pairs after the same feasibility filter and `(min, max)`
-  sort. `parallel_broadphase` (default off) fans the candidate emit across the
-  threadpool.
+In detail:
+
+- **Broadphase** (`PhysicsConfig::broadphase`). All three kinds emit the same
+  `(min, max)`-sorted pair set, bit for bit:
+  - `Tree` (default) — a packed 8-wide BVH over the moving rows, plus persistent
+    static and sleeper sets. At or below `TREE_BRUTE_MAX_ROWS` (128) rows it runs the
+    all-pairs loop itself. `parallel_tree_query` (default off) runs the moving rows'
+    query on the threadpool.
+  - `AllPairs` — the O(n²) loop.
+  - `Grid` — a uniform-grid CSR counting-sort. `parallel_broadphase` (default off)
+    fans its candidate emit across the threadpool. The soft↔rigid coupling path
+    reads the grid's cells, so it forces `Grid`.
+- **Parallel narrowphase** (`parallel_narrowphase`, **default on**) — splits the
+  step's candidate pairs into chunks and collides them across the threadpool's
+  workers. The manifold stream is bit-identical to the serial loop for any worker
+  count and any chunk partition. A one-worker pool runs the serial loop.
 - **Constraint coloring** — islands + greedy graph coloring so no color shares a
   dynamic body; the enabler for parallel and SIMD solving. The colored solve
   consumes it, so every world on the default solver builds it.
@@ -345,39 +522,50 @@ byte-identical (the campaign's 0%-gate).
   - `simd_solve` (**default on**) widens each color's sweep over cohorts of 8
     body-disjoint manifold-groups with an AVX2 kernel. It is bit-identical to the
     scalar colored oracle.
-  - `parallel_solve` (default off) runs each color's groups across workers, with a
-    barrier between colors. It is bit-identical to the single-threaded colored
-    result for any worker count.
+  - `parallel_solve` (**default on**) runs the solve on the threadpool. A step's
+    fill and all of its substeps run as **one region** (the solve region), cut into
+    blocks by `RegionGrain`; no color opens a scope of its own. The grain decides
+    only where work runs, never a bit: the result is bit-identical to the
+    single-threaded colored solve for any worker count. A one-worker pool, or a step
+    whose widest color is below the region's floor, runs the single-threaded path.
 - **SIMD integrate/inertia** (`simd`, **default on**) — AVX2 width-only kernels for
   the per-substep inertia refresh and the gravity integrate loop. The SIMD output is
   **bit-identical** to scalar — toggling it changes performance, never the result.
-- **Sleeping** (`sleeping`, default off) — per-island deactivation: an island below a
-  speed² threshold for a debounce window freezes and skips its solve/integrate, while
-  the gather still walks every row (so warm keys stay valid and a new contact wakes
-  the island the same frame). Unlike the other levers, it changes results on
-  purpose — a frozen island stops integrating — so its gate is "rest state with
-  sleeping on equals rest state with sleeping off, to ε". Two combinations the
-  default solver makes reachable have no gate yet: sleeping with SDF contacts is
-  unmeasured, and with soft↔rigid coupling a soft→rigid reaction does not wake a
-  sleeping body.
+- **Sleeping** (`sleeping`, default off) — per-island deactivation. An island whose
+  fastest body stays below `sleep_threshold` (speed²) for `sleep_frames` consecutive
+  frames freezes. The gather still walks every row, so warm keys stay valid.
+  - With `sleep_skip = SleepSkip::Sets` (the default mode), a frozen, clean island is
+    **held**: its pairs skip the narrowphase, the SDF stage, the coloring and the
+    solve, while its contacts stay in the public views. A held island is restored on
+    the step its inputs change.
+  - `SleepSkip::Off` still collides frozen islands and skips only their solve and
+    integrate. It is the oracle: both modes give the same observables, bit for bit.
+  - An island wakes when a new body joins it or its contact count changes.
+    `IslandSleep::wake_all()` wakes every island at the next broadphase. A change
+    that keeps the island's contact count — a support that moves, a user write to a
+    sleeping body — does not wake it; call `wake_all`.
+  - Sleeping changes results on purpose (a frozen island stops integrating), so its
+    gate is "rest state with sleeping on equals rest state with sleeping off, to ε".
+    Sleeping with SDF contacts is gated by `tests/sdf_sleep_settles_and_wakes.rs`: a
+    pile on an SDF floor freezes, rests at the sleeping-off pose, and wakes on a field
+    edit. One recorded gap remains: with soft↔rigid coupling, a soft→rigid reaction
+    does not wake a sleeping body.
 
 `simd_solve`, `parallel_solve` and `sleeping` act only inside the colored solve. With
 the reference `SoftStepSolver` they are silent no-ops.
 
-> **What is measured, and what is not.** Two figures from
-> [`benches/colored_solve.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/benches/colored_solve.rs)
-> back the default. The AVX2 cohort kernel runs the colored step **1.96×** faster
-> than the scalar colored arm, on that bench's production-shaped sphere pile
-> (one-point manifolds, not box–box contacts). The scalar colored solve, graph build
-> included, runs **1.059×** faster than the reference solver at ~1k contacts and
-> **1.131×** at ~10k. The figures come from different bench groups, and neither
-> measures a whole default world. The campaign's other headline numbers (grid
-> broadphase crossover, ~workers× on the colored solve) remain *targets to
-> validate*, not claimed benchmark results.
+> **Measurements.** This page states no speed figures. The physics benches live in
+> [`crates/boyko_physics/benches/`](https://github.com/bluesteelll/boyko-engine/tree/master/crates/boyko_physics/benches)
+> (for example `colored_solve.rs`, `broadphase.rs`, `sleeping.rs`); results are on
+> the [Benchmarks](../reference/benchmarks.md) page.
+
+The physics step also has its own profiling zones and per-step counters, in the
+`boyko_physics::profiling` module.
 
 ## Soft bodies (XPBD)
 
-A separate, opt-in path (`add_physics_soft`, config `soft_body = true`) advances
+A separate, opt-in path (`add_physics_soft` or `PhysicsPlugin::soft`, config
+`soft_body = true`) advances
 `SoftBody` components by an XPBD position pass after the rigid solve. It is a
 *strictly disjoint* integrator — it operates only on the soft-body columns and never
 touches the rigid `SolverScratch`, so the rigid simulation is byte-identical whether
@@ -431,6 +619,13 @@ The two solvers do **not** match each other bit for bit (see
 [above](#the-default-and-the-reference-differ-in-value-not-in-validity)), so a
 replay pinned to one solver must run under that solver.
 
+The same holds for the value-changing defaults. Speculative contacts
+(`speculative_distance`, `speculative_velocity_cap`) and contact reuse
+(`contact_reuse`, `contact_reuse_distance`) are deterministic for any worker count,
+but changing them changes trajectories. A replay must run with the values it was
+recorded with. Sleeping, when on, is run-to-run bit-deterministic too, but it is not
+bit-equal to sleeping off.
+
 One precondition: dense-row order is the archetype row order, which is deterministic
 across runs only under a deterministic spawn/despawn order. Single-threaded spawning
 satisfies this.
@@ -442,12 +637,17 @@ satisfies this.
 - [Transforms](transforms.md) — the single-source-of-truth pose pipeline
 - [Math](math.md) — the deterministic POD `Vec3` / `Quat` / `Mat3`
 - [SDF rendering](../rendering/sdf.md) — the field physics shares for SDF contacts
+- [Windowed host](../app/windowed-host.md) — the `playground` example runs `PhysicsPlugin`
+- [Benchmarks](../reference/benchmarks.md) — where measured results are published
 - Source:
-  [`boyko_physics/src/lib.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/lib.rs#L1),
-  [`components.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/components.rs#L1),
-  [`solver/mod.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/solver/mod.rs#L46),
-  [`solver/soft_step.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/solver/soft_step.rs#L1),
-  [`solver/colored.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/solver/colored.rs#L1),
-  [`resources.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/resources.rs#L1),
-  [`systems.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/systems.rs#L1),
-  [`plugin.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/plugin.rs#L159)
+  [`boyko_physics/src/lib.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/lib.rs),
+  [`components.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/components.rs),
+  [`solver/mod.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/solver/mod.rs),
+  [`solver/soft_step.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/solver/soft_step.rs),
+  [`solver/colored.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/solver/colored.rs),
+  [`resources.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/resources.rs),
+  [`systems.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/systems.rs),
+  [`plugin.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/plugin.rs),
+  [`step_inputs.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/step_inputs.rs),
+  [`sleep_sets.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/sleep_sets.rs),
+  [`broadphase_tree/mod.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/broadphase_tree/mod.rs)

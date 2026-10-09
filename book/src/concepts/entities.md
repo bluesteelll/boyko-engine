@@ -2,9 +2,7 @@
 
 > An entity is a tiny, copyable handle — an id plus a generation — that names a row of component data. It owns nothing itself.
 
-*(Branch: `ecs`.)*
-
-An [`Entity`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity.rs#L5)
+An [`Entity`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity.rs)
 is the thing you keep around to refer to a game object later: a player, a
 projectile, a UI node. It is deliberately small and `Copy`, so you pass it by
 value everywhere. The actual data lives in [component](components.md) columns
@@ -13,9 +11,9 @@ inside an archetype; the entity is just the key that finds the right row.
 If you come from Bevy, this is the same `Entity` concept and most of the same
 spelling. What differs is the layer below it: recycling and lookup are built on
 an address-stable slab
-([`EntityMaster`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs#L44)
+([`EntityMaster`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
 over an
-[`InlandStore`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/inland_store.rs#L1))
+[`InlandStore`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/inland_store.rs))
 rather than a sparse-set generation table. This page is the "use it" view; the
 recycling rules that matter to a caller are covered in
 [Generations defend against ABA](#generations-defend-against-aba) below.
@@ -61,7 +59,7 @@ build one by hand — you receive entities back from spawning.
 
 ## Spawning directly through `EcsMaster`
 
-[`EcsMaster`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L148)
+[`EcsMaster`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs)
 is the world: it owns every archetype, pool, and the entity store. When you hold
 `&mut EcsMaster` directly — at startup, in tests, or inside an exclusive
 `|w: &mut EcsMaster|` system — you spawn through it immediately. (Inside ordinary
@@ -107,6 +105,16 @@ For more than two components, or for spawning many at once, use `create_entity`
 `create_entity` by hand — a [`Bundle`](bundles.md) packs the component set for
 you, and `Commands` drives the common path.
 
+`create_entity_at(entity, archetype, components)` is the variant for a handle you
+already hold: it registers an `Entity` reserved earlier — for example with
+`Commands::reserve_entity` — instead of minting a new one. Call it from a custom
+[`Command`](commands.md#custom-commands-with-add)'s `apply`; the deferred spawn path uses
+it the same way.
+
+To copy an existing entity, the world also offers `clone_and_spawn`,
+`clone_and_spawn_with`, `clone_subtree`, and prefab capture with
+`capture_prefab` / `instantiate`. See [Cloning & Prefabs](cloning-and-prefabs.md).
+
 ### `spawn_empty`: an entity with zero components
 
 ```rust,ignore
@@ -118,7 +126,7 @@ fn boot(world: &mut EcsMaster) {
 }
 ```
 
-[`spawn_empty`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L1237)
+[`spawn_empty`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs)
 gives you a live entity that belongs to the **EMPTY archetype** — the archetype
 with an empty signature. It is the explicit "I want a handle now, components
 later" path. Two consequences follow from the empty signature:
@@ -158,19 +166,41 @@ fn poke(world: &mut EcsMaster, e: Entity) {
 }
 ```
 
-- [`get_component::<T>`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L2139)
+- [`get_component::<T>`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs)
   returns `Option<&T>`. `None` means one of: the handle is stale (wrong
   generation), the id was never registered, or the entity's archetype does not
   host `T`. You do not get to tell these apart — and you usually do not need to.
-- [`get_component_mut::<T>`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L2184)
+- [`get_component_mut::<T>`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs)
   returns `Option<Mut<T>>`. The [`Mut`](../change_detection.md) guard is what
   ties a direct write into change detection: any `DerefMut` through it stamps the
   row's `changed_tick`. Plain `&mut` would bypass that, so the API hands you the
   guard, not a bare reference.
 
-There is no separate "is this entity alive?" predicate on the direct API: a
-failed `get_component` *is* the liveness answer for the type you asked about. If
-you only need existence, ask for any component you know the entity carries.
+## Liveness and id lookup
+
+Two direct-API probes answer "is this handle still good?" without naming a
+component:
+
+```rust,ignore
+use boyko_ecs::prelude::*;
+
+fn check(world: &EcsMaster, e: Entity) {
+    // true iff the slot is live AND its generation matches the handle.
+    if world.has_entity(e) {
+        // ...
+    }
+
+    // Resolve a bare id (no generation) to the live handle, if any.
+    let current: Option<Entity> = world.get_entity(e.id());
+}
+```
+
+- `has_entity(entity)` reads one slot of the entity store and compares the
+  generation, so a stale handle answers `false`.
+- `get_entity(id)` turns an `EntityId` back into the full `Entity` of the slot's
+  current occupant, or `None` if the slot is empty. Inside a parallel system,
+  the [`Entities`](systems.md#entities--resolve-an-id-to-a-handle) system
+  parameter does the same lookup.
 
 ## Despawning
 
@@ -183,16 +213,16 @@ fn cleanup(world: &mut EcsMaster, e: Entity) {
 }
 ```
 
-[`delete_entity`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L1368)
+[`delete_entity`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs)
 drops every component of the entity, frees its slot for recycling, and returns
 `true` on success / `false` for a handle that was already dead. It also runs the
 full removal pipeline — the `on_replace` / `on_remove` / `on_despawn` lifecycle
 hooks and observers fire for the dying row before its data is dropped — and, by
 default, it **cascades to children**: an entity's `Children` are despawned
 recursively
-([`delete_entity`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L1368)).
+([`delete_entity`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs)).
 Use
-[`despawn_without_children`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L1391)
+[`despawn_without_children`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs)
 to despawn a single node and leave its children alive (they will keep a
 now-dangling `ChildOf` — reparent or despawn them yourself).
 
@@ -245,9 +275,12 @@ sequenceDiagram
 ```
 
 The slot-store and recycling internals — the address-stable
-[`InlandStore`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/inland_store.rs#L1),
-the LIFO free list, the generation-on-deallocate bump — live in
-[`EntityMaster`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs#L44).
+[`InlandStore`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/inland_store.rs),
+the generation-on-deallocate bump, and the
+[`EntityReservoir`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_reservoir.rs)
+that hands out recycled and fresh ids — live in
+[`EntityMaster`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
+and are described on [Entities & Generations](../architecture/entities-and-generations.md).
 For the wider picture of how storage kinds shape archetypes and churn, see
 [Storage Trade-offs](../architecture/storage-tradeoffs.md).
 
@@ -271,7 +304,8 @@ fn spawner(mut commands: Commands) {
     commands.spawn(Position { x: 0.0, y: 0.0 });
 }
 
-fn reaper(mut commands: Commands, e: Entity) {
+// `Entity` is not a system parameter: a helper takes it from its caller.
+fn reap(commands: &mut Commands, e: Entity) {
     commands.entity(e).despawn();
 }
 ```
@@ -287,7 +321,8 @@ See [Commands](commands.md) for the full deferred API and
 - [Components](components.md) — the data an entity points at
 - [Bundles](bundles.md) — packing a component set for spawning
 - [Commands](commands.md) — deferred spawn/despawn inside systems
+- [Cloning & Prefabs](cloning-and-prefabs.md) — copying entities and subtrees
 - [Queries](queries.md) — iterating entities by component set
 - [Change Detection](../change_detection.md) — the `Mut<T>` write-tracking guard
 - [Storage Trade-offs](../architecture/storage-tradeoffs.md) — how storage kinds shape archetypes and churn
-- Source: [`entity.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity.rs#L5), [`entity_master.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs#L44) — the handle and its recycling store
+- Source: [`entity.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity.rs), [`entity_master.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) — the handle and its recycling store

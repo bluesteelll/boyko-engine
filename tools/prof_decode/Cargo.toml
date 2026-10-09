@@ -3,7 +3,7 @@ name = "prof_decode"
 version = "0.1.0"
 edition = "2024"
 description = "Profiling rung 13 — the only reader of the telemetry stream format."
-
+license.workspace = true
 # ONE dependency, and that is the whole reason this crate exists rather than a `[[bin]]` somewhere
 # convenient. MEASURED with `cargo tree --edges normal`: rooted here the decoder builds 2 crates;
 # rooted at `boyko_ecs` it would build 12; rooted at `boyko_app`, where the WRITER lives, 45 —

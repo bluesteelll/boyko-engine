@@ -2,8 +2,6 @@
 
 > Tags are free to carry and free to query — but not free to toggle, and not free to combine without limit. This page is the cost model, and the storage-kind decision matrix.
 
-*(Branch: `ecs`, EnableTag + Dense components.)*
-
 ## Problem
 
 Every game has boolean-ish state: *frozen*, *selected*, *poisoned*, *dirty*.
@@ -28,7 +26,7 @@ the axis that decides it is toggle frequency.
 
 Tags are not the only place storage kind matters. The kernel classifies every
 component id into a `StorageKind` with **three** members
-([`component_registry.rs:397`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/component_registry.rs#L397)):
+([`component_registry/mod.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs)):
 
 | `StorageKind` | In archetype signature? | Backing store |
 |---------------|-------------------------|---------------|
@@ -38,7 +36,7 @@ component id into a `StorageKind` with **three** members
 
 Only `Table` is a *signature* kind: `is_signature_storage` returns `true` for
 `Table` and `false` for both `Bitset` and `Dense`
-([`component_registry.rs:428`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/component_registry.rs#L428)).
+([`component_registry/mod.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs)).
 That single predicate is why neither bitset tags nor dense components ever mint
 an archetype.
 
@@ -98,11 +96,11 @@ Boyko's hard ceiling is `MAX_ARCHETYPES = 1024`, and hitting it is a **loud
 failure**, never silent misbehavior. There are two surfaces, both carrying the
 count: the infallible creation path trips a release-active
 `assert!(self.count < MAX_ARCHETYPES, ...)`
-([`archetype_bundle.rs:654`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs#L654)),
+([`archetype_bundle.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs)),
 while the fallible path returns `Err(BundleFullError)`
-([`archetype_bundle.rs:433`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs#L433))
+([`archetype_bundle.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs))
 whose `Display` reads `ArchetypeBundle is full (MAX_ARCHETYPES = {…})`
-([`archetype_bundle.rs:71`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs#L71)).
+([`archetype_bundle.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs)).
 The practical guidance:
 
 - Budget tags per entity *kind*, not per idea. Ten orthogonal toggleable tags
@@ -128,7 +126,7 @@ too: at the theoretical 1024-archetype ceiling with one tag pool each, the
 worst case is **128 GiB of reserved address space** — out of a 128 TiB user VA
 space on x86-64. This is bounded and harmless (demand-zero pages, zero
 resident cost until a row range actually commits, committed slabs grow
-geometrically from 64 KiB), but it is stated here so nobody discovers it from
+geometrically from one 4 KiB page), but it is stated here so nobody discovers it from
 a VM-commit monitor and files it as a leak. Watch **resident/committed**
 memory, not reserved.
 
@@ -151,7 +149,7 @@ The recurring trade in this design is *honest costs over silent lies*:
 | `Added`/`Changed` on tags | yes | yes | n/a (different reactive model) |
 | Toggle cost | archetype move | archetype move | archetype move; opt-in non-fragmenting toggle (`DontFragment`/enable bits) |
 | Dynamic (runtime) tags | name-keyed `TagId` in the shared id space | dynamic components share `ComponentId` space | tags are entities |
-| Fragmentation mitigation | enable bitset tags (below) + dense (signature-excluded) components | none built-in | enable bits / union storage |
+| Fragmentation mitigation | enable bitset tags (below) + dense (signature-excluded) components | `SparseSet` storage avoids table moves on insert/remove, but the component still splits archetypes | enable bits / union storage |
 
 ## The second backend: enable bitset tags
 
@@ -181,7 +179,7 @@ bitset backend.)
 | Fragmentation | yes — N tags → up to 2^N archetypes | **none** — toggling never mints an archetype |
 | Carry cost | 8 B/row resident (tick pair) | 0 B/row until a row is toggled |
 | Spawn-time floor | tick-pool floor per hosting archetype | none |
-| Query cull | whole archetypes included/excluded — **free** | per-row bit test (≈ 1 branch/row); positive-term archetype cull is a planned follow-up |
+| Query cull | whole archetypes included/excluded — **free** | `Enabled<A>` skips archetypes that never allocated an `A` column, then tests the bit per row (≈ 1 branch/row); `Disabled<A>` tests every candidate row |
 | Change detection | `Added`/`Changed` work | **compile-rejected** (the bit has no per-row tick) |
 | `Or<…>` composition | `With`/`Without` compose freely | `Enabled`/`Disabled` are sealed against `Or` |
 | Data-less sole query | n/a | `Query<(), Enabled/Disabled<A>>` — bounded global scan |
@@ -191,18 +189,26 @@ bitset backend.)
 This is the one axis that is not strictly in the bitset tag's favour. An
 archetype tag culls at archetype granularity: a query that excludes `Frozen`
 never even enters a frozen archetype's row loop — the work is *zero* for the
-excluded rows. An enable tag currently filters **per row**: every candidate row
-is visited and its bit tested, even rows that will be rejected. The cost is
-small (one predicted branch per row, bench-flat for queries that name no enable
-tag), but it is not zero.
+excluded rows. An enable tag works in two steps, and the polarity matters:
 
-A positive-term archetype-level cull for enable tags — skipping an archetype
-whose presence bitset shows no enabled rows for the tag — is a **planned
-follow-up**, not yet implemented. Until it lands, an `Enabled<A>` positive-term
-query scans every row of every archetype that satisfies its data term, gating
-per row. The data-less sole `Query<(), Enabled<A>>` is already bounded the other
-way: it seeds its candidate archetypes from the per-world presence bitset, so it
-visits only archetypes where `A` is a property — never a full-world sweep.
+- **`Enabled<A>` culls archetypes first.** A candidate archetype is kept only if
+  it has ever allocated a column for `A` (the first toggle of `A` into an
+  archetype allocates it). An archetype with no `A` column has every row
+  disabled, so the query drops it without visiting a row. Inside the kept
+  archetypes, every row is visited and its bit tested, even rows whose bit is
+  now clear.
+- **`Disabled<A>` never culls.** A no-column archetype is all-disabled, so it is
+  exactly the set the query must visit; every candidate row is tested.
+
+The per-row test is small (one predicted branch per row; queries that name no
+enable tag pay nothing), but it is not zero. The cull list is recomputed when
+the query rebuilds its matched archetype set (the world's archetype or
+structural generation moved), or when the world's enable-presence epoch moves,
+that is, when some archetype allocates a new enable column. Between those
+events the query reuses the list. The data-less sole `Query<(), Enabled<A>>` is
+bounded the same way: it seeds its candidate archetypes from the per-world
+presence bitset, so it visits only archetypes where `A` is a property — never a
+full-world sweep.
 
 ### Paging
 
@@ -228,4 +234,4 @@ in v1 (no worker is live during a toggle). Queries read the bit **shared**
 - [Tags](../concepts/tags.md) — the 8 B/row cost model and change detection on tags
 - [Dynamic Tags](../concepts/dynamic-tags.md) — runtime tags, budgets, query terms
 - [Design Principles](principles.md)
-- Source: [`constants.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/constants.rs) (`POOL_MAX_ROWS`, layout math), [`component_pool.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs) (tick-only pools, reserve/commit growth)
+- Source: [`constants.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/constants.rs) (`POOL_MAX_ROWS`, layout math), [`component_pool.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/component_pool.rs) (tick-only pools, reserve/commit growth)

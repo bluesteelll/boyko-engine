@@ -1,9 +1,9 @@
 # Lighting
 
 > Lights are ordinary ECS components. A `Changed`-gated system folds them into one
-> contiguous GPU light table; the deferred resolve reads that table — optionally through
-> a clustered froxel cull — to shade every SDF surface pixel. No parallel light store, no
-> per-frame readback.
+> contiguous GPU light table; the lighting resolve reads that table — optionally through
+> a clustered froxel cull — to shade every pixel. No parallel light store, no per-frame
+> readback.
 
 The engine's lighting follows the same rule as every other subsystem (see
 [Principles](../architecture/principles.md)): the *authoritative* data lives in the ECS
@@ -12,10 +12,11 @@ itself. A `DirectionalLight`, `PointLight`, `SpotLight` or `SkyLight` is a plain
 `HashMap` side store. The GPU light table is a *derived upload* — a projection of the
 live light components, rebuilt only when something changes.
 
-This page describes what is **shipped today**: the four light types, the GPU light table,
-clustered (froxel) light culling, SDF-native shadow/AO, and the `LightEnabled` O(1) on/off
-gate. Baked global illumination (irradiance probe volumes, DDGI) is **planned and
-deferred** — see [Status and roadmap](#status-and-roadmap) at the end. Read
+This page describes the light data path: the four light types, the GPU light table,
+clustered (froxel) light culling, the `LightEnabled` O(1) on/off gate, exposure and
+tonemapping. It also lists the shadow, ambient-occlusion and global-illumination
+sources the resolve reads, each of which has its own config (see
+[Shadows and AO: the sources](#shadows-and-ao-the-sources)). Read
 [Rendering overview](overview.md) first for how lighting sits in the render pipeline, and
 [GPU columns](gpu-columns.md) for the CPU-orchestrate / GPU-execute upload mechanism this
 builds on.
@@ -37,7 +38,7 @@ Three forces shape the lighting layer:
 ## The four light types
 
 All four are `#[repr(C)]` PODs defined in
-[`light.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/light.rs).
+[`light.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/light.rs).
 Radiometric values are **LINEAR**.
 
 | Type | Role | Carries | Resolve rung |
@@ -101,7 +102,7 @@ If a light has a `GlobalTransform`, `light_reconcile` derives its world `positio
 pose. The write is doubly gated: by `Changed<GlobalTransform>` on the query, and by a
 bit-exact per-lane compare — a static light writes nothing and re-triggers no rebuild.
 A light without a `GlobalTransform` keeps its self-contained pose. Wiring lives in
-[`light_reconcile.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/light_reconcile.rs).
+[`light_reconcile.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/light_reconcile.rs).
 
 ## The GPU light table
 
@@ -142,11 +143,18 @@ flowchart TD
     H --> I["lit pixels"]
 ```
 
-`collect_lights` writes into `LightTableStaging`, a single preallocated `Vec<u8>` sized
-once for the worst case (`LIGHT_HEADER_BYTES + MAX_LIGHTS * GPU_LIGHT_BYTES`). It is refilled
-in place — no per-frame allocation. The first seed uses the fence-waited setup upload; every
-on-change re-upload is the fence-free recorded copy. `MAX_LIGHTS` is **1024**, so the entire
-worst-case table is ~48 KiB (L2-resident).
+`collect_lights` writes into `LightTableStaging`, whose bytes live in a `ScratchColumn<u8>`
+(the kernel's `ComponentPool`-backed scratch primitive, not a `std::Vec` side store), sized
+once for the worst case (`LIGHT_HEADER_BYTES + MAX_LIGHTS * GPU_LIGHT_BYTES`). It is
+refilled in place — no per-frame allocation. `MAX_LIGHTS` is **1024**, so the entire
+worst-case table is ~48 KiB.
+
+In the windowed host the upload goes through a **staging ring**, one staging buffer per
+frame in flight. `LightTableGeneration` counts changes; `upload_light_table` writes the
+bytes into the staging slot that the frame's `FrameWriteToken` names, and the recorder
+copies staging → table on a dirty frame. Both in-flight slots re-upload on the two frames
+after a change, and a slot's staging is only read by frames in that slot, so a write can
+never race a copy still in flight.
 
 ### The change channel
 
@@ -225,11 +233,11 @@ component too, so one registration subsumes both component-remove and whole-enti
 ## The deferred resolve and the rung split
 
 Lighting is resolved in the deferred pass
-([`deferred_pbr.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/shaders/deferred_pbr.hlsl)),
+([`deferred_pbr.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/shaders/deferred_pbr.hlsl)),
 a Cook-Torrance / GGX shader (D_GGX + height-correlated Smith visibility + Schlick Fresnel +
 Lambert diffuse + a Karis analytic environment-BRDF for the sky term). It reads the light
 table through the shared decode in
-[`light_table.hlsli`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/shaders/light_table.hlsli).
+[`light_table.hlsli`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/shaders/light_table.hlsli).
 
 The split exists because **directional and sky lights need no per-pixel surface position**,
 while **point and spot lights do**:
@@ -248,21 +256,42 @@ constant byte-for-byte (the 0%-gate): `LightingConfig::default()` carries `expos
 and the old `SKY_*` ambient constants, so a world that never inserts a custom config renders
 the same image as before lights were data-driven.
 
-## SDF-native shadow and ambient occlusion
+## Shadows and AO: the sources
 
-Shadows and AO are computed **by the SDF marcher against the analytic field**, not by shadow
-maps. The marcher writes per-pixel soft-shadow visibility into `gMaterial.r` and ambient
-occlusion into `gMaterial.g` (the mask lives in `gMaterial.b`). The deferred resolve reads
-those two channels and modulates each light's direct contribution by `NoL · shadow` and the
-ambient term by AO. Because the marcher already traces the field, shadows and AO come from
-the same field the geometry does — no second geometry representation, no shadow-map pass. See
+The resolve reads several shadow, AO and GI sources. The SDF marcher's is on by default.
+Ray-query shadows exist only in `hwrt` builds, where the boot selects them on capable
+hardware. Each of the others has an owner-set config that a plugin inserts with an
+**off** default; turn one on by overwriting its config after
+`add_plugins(EnginePlugins::…)`.
+
+| Source | What it shades | Default | Knob |
+|--------|----------------|---------|------|
+| SDF marcher soft shadow and AO | the primary directional light's visibility, and every point/spot light's while punctual shadows are off; AO on the ambient term | on (the shadow needs a directional light) | — |
+| Cascaded shadow maps (CSM) | the sun, from mesh casters carrying `ShadowCaster` | off | `CsmConfig::cascade_count` > 0 |
+| Punctual shadow atlas | spot and point lights carrying `CastsPunctualShadow`, from mesh casters carrying `ShadowCaster` | off | `ShadowConfig::enabled` |
+| Ray-query mesh shadows | the sun, traced against an acceleration structure | only in `--features hwrt` builds on a ray-query GPU, where the boot selects it | `RayShadowConfig` (tuning); `BOYKO_FORCE_SOFTWARE=1` forces the non-ray-traced path |
+| Shadow denoiser (spatial / temporal) | the ray-traced shadow's visibility | off; `hwrt` builds only | `ShadowDenoiseConfig::mode` |
+| SSAO | screen-space AO on the ambient term | off | `SsaoConfig::quality` |
+| SDF DDGI | indirect diffuse light from a probe grid | off | `DdgiConfig::ddgi_indirect` |
+
+The SDF marcher writes per-pixel soft-shadow visibility into `gMaterial.r` and ambient
+occlusion into `gMaterial.g` (the mask lives in `gMaterial.b`). Because the marcher already
+traces the field, this source comes from the same field the geometry does. See
 [SDF rendering](sdf.md) for the field and marcher.
+
+The resolve's own gate bits for these sources (`LightingConfig::csm_shadows`,
+`punctual_shadows`, `ddgi_indirect`, `ssao_mode`) are **derived state**: sync systems write
+them from the configs and from what the host actually armed. Set the configs, not these
+fields. Some sources also depend on the render path: under Forward and Forward+, SSAO,
+DDGI and the denoiser are capped off at boot. The full story is on
+[Shadows and ambient occlusion](shadows-and-ao.md) and
+[Global illumination](global-illumination.md).
 
 ## Clustered (froxel) light culling — L1
 
 Looping every light for every pixel is O(all lights). L1 replaces that with O(lights in the
 pixel's cluster), typically a handful. The cull is implemented in
-[`cluster_cull.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/shaders/cluster_cull.hlsl)
+[`cluster_cull.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/shaders/cluster_cull.hlsl)
 as a single compute dispatch — one invocation per froxel.
 
 The froxel grid is **16×9×24 = 3456** cells (`CLUSTER_DIM_X/Y/Z`), with **exponential-Z**
@@ -306,6 +335,19 @@ which routes the resolve down the flat L0b loop. When clusters are off, the head
 byte-identical to the L0 header — the L1 0%-gate. The grid dimensions, caps and exp-Z
 near/far come from a `ClusterConfig` resource; the defaults reproduce the constants above.
 
+`LightingConfig::cluster_select` decides who owns `clusters_enabled`:
+
+- `ClusterSelectMode::Manual` (the default) leaves it to you.
+- `ClusterSelectMode::Auto` lets the cold `select_lighting_cull` policy
+  ([`light_policy.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/light_policy.rs))
+  set it from the banded live point/spot light count. The policy runs before
+  `collect_lights`, so its decision lands in the same frame's header.
+
+> **In the windowed host, the froxel cull runs on the Visibility Buffer path only.** The
+> boot arms it for `clusters_enabled && path == VisibilityBuffer`, once. Under Deferred
+> (the default path) and Forward+, the resolve keeps the flat L0 loop even with
+> `clusters_enabled` set. See [Render paths](render-paths.md).
+
 ```rust,ignore
 use boyko_macros::Resource;
 use boyko_render::light::{LightingConfig, ClusterConfig};
@@ -333,9 +375,25 @@ host-side, in `GpuLight::from_*`:
   brighter for the same lumens). `cos(outer)` is clamped to `SPOT_COS_OUTER_MAX` (0.9999) so
   a pencil beam stays finite.
 
-A single global `exposure` scalar in `LightingConfig` (default `1.0`, identity) is the final
-multiply on accumulated linear radiance. It makes physical units usable without a full
-auto-exposure / tonemapping pipeline — those are out of scope for L0/L1.
+A single global `exposure` scalar in `LightingConfig` (default `1.0`, identity) multiplies
+the accumulated linear radiance. There is no auto-exposure: the scalar is fixed until you
+change it.
+
+The output stage then applies a **tonemapper**, `LightingConfig::tonemapper`:
+`Tonemapper::Aces` (the default), `Neutral` or `ReinhardJodie`. One more output-stage knob,
+`terminator_softening` (default `0.0`), wraps the diffuse terminator of direct lights into
+a soft ramp, so normal-map slopes under grazing light do not turn into hard dark islands.
+
+```rust,ignore
+use boyko_render::light::{LightingConfig, Tonemapper};
+
+// After `app.add_plugins(EnginePlugins::window(..))`, which inserts the default config.
+app.insert_resource(LightingConfig {
+    tonemapper: Tonemapper::Neutral,
+    exposure: 1.5,
+    ..LightingConfig::default()
+});
+```
 
 ## Performance characteristics
 
@@ -346,45 +404,44 @@ auto-exposure / tonemapping pipeline — those are out of scope for L0/L1.
 | On-change upload | One recorded staging→device copy + a `TRANSFER_WRITE → SHADER_READ` barrier; fence-free (no stall) |
 | Light toggle | O(1) bitset bit flip + a dirty mark; no archetype migration |
 | L0 resolve | O(all lights) per pixel |
-| L1 resolve | O(lights in the pixel's cluster), typically 1–8 |
+| L1 resolve | O(lights in the pixel's cluster); Visibility Buffer path only in the windowed host |
 | Cluster cull | 1 compute dispatch over 3456 froxels |
 | Table size | ≤ `MAX_LIGHTS` (1024) × 48 B ≈ 48 KiB |
 | 0%-gate | single-default-light == the previous compiled-in constant, byte-identical |
 
-Targets and design rationale are documented in
-[`LIGHTING-L0-L1-PLAN.md`](https://github.com/bluesteelll/boyko-engine/blob/ecs/docs/LIGHTING-L0-L1-PLAN.md).
+Design rationale is documented in
+[`LIGHTING-PLAN.md`](https://github.com/bluesteelll/boyko-engine/blob/master/docs/LIGHTING-PLAN.md).
+The renderer has no frame-time benchmark yet.
 
-## Status and roadmap
+## Status
 
 **Shipped:**
 
 - **L0** — directional / sky / point / spot lights as ECS components; the derived GPU light
-  table; the deferred Cook-Torrance resolve; SDF-native shadow and AO; the `LightEnabled`
-  O(1) on/off gate.
+  table; the Cook-Torrance resolve; the `LightEnabled` O(1) on/off gate.
 - **L1** — clustered froxel light culling (the 3D exp-Z grid, the compute cull pass, the
-  per-cluster resolve loop), gated by `clusters_enabled`.
+  per-cluster resolve loop), gated by `clusters_enabled`, with the `Auto` selection policy.
+- **Shadows and AO** — the SDF marcher's soft shadow and AO (on); cascaded shadow maps,
+  the punctual shadow atlas, the shadow denoiser (`hwrt`) and SSAO (off by default); and
+  ray-query mesh shadows (`hwrt` builds on capable hardware).
+- **Global illumination** — SDF DDGI, off by default.
+- **Output** — exposure, three tonemappers, terminator softening.
 
-**Planned / deferred** (designed in the lighting plan, **not** available today):
-
-- **L2** — baked irradiance probe volumes (the owner's core "bake static/dynamic 3D maps"
-  ask): a 3D probe grid bakes the frozen field + L0 lights into SH / ambient-cube coefficients
-  that the resolve trilinear-samples to light dynamic objects from static bounce.
-- **L3** — runtime DDGI updates over the same probe storage.
-- **L4** — SDF-native GI capstones (cone-traced GI, radiance cascades, Brixelizer-class
-  cascaded SDF, spatial-hash radiance caches).
-
-The roadmap and the open design questions for L2+ live in
-[`LIGHTING-PLAN.md`](https://github.com/bluesteelll/boyko-engine/blob/ecs/docs/LIGHTING-PLAN.md).
+**Not shipped:** auto-exposure, and baked (precomputed) irradiance volumes. The design
+notes for further GI work live in
+[`LIGHTING-PLAN.md`](https://github.com/bluesteelll/boyko-engine/blob/master/docs/LIGHTING-PLAN.md).
 
 ## See also
 
-- [Rendering overview](overview.md) — where lighting sits in the deferred pipeline
+- [Rendering overview](overview.md) — where lighting sits in the frame
+- [Shadows and ambient occlusion](shadows-and-ao.md) and
+  [Global illumination](global-illumination.md) — the other sources the resolve reads
 - [GPU columns](gpu-columns.md) — the CPU-orchestrate / GPU-execute upload mechanism
 - [SDF rendering](sdf.md) — the field and marcher that produce shadow/AO
 - [Enable tags](../concepts/enable-tags.md) — the bitset backend behind `LightEnabled`
 - [Hooks and observers](../concepts/hooks-and-observers.md) — the eviction hook mechanism
 - [Required components](../concepts/components.md) — the `#[require(Transform, GlobalTransform)]` pose invariant
-- Source: [`light.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/light.rs),
-  [`light_system.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/light_system.rs),
-  [`light_plugin.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/light_plugin.rs),
-  [`cluster_cull.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/shaders/cluster_cull.hlsl)
+- Source: [`light.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/light.rs),
+  [`light_system.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/light_system.rs),
+  [`light_plugin.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/light_plugin.rs),
+  [`cluster_cull.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/shaders/cluster_cull.hlsl)

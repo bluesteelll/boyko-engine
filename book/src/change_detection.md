@@ -6,7 +6,8 @@ modelled after [Bevy ECS](https://bevyengine.org/) (post-PR #6547) and ships
 with the following surface:
 
 - A monotonic `Tick(u32)` counter, advanced ~2 ticks per `Schedule::run`.
-- Per-row `added` and `changed` ticks stored alongside every component.
+- Per-row `added` and `changed` ticks stored alongside every table component,
+  and per-slot ticks for every [dense component](concepts/components.md#storage-kinds).
 - The filters `Added<T>` and `Changed<T>` (non-archetypal, composable with
   `Or`, `With`, `Without`).
 - The system parameters `Ref<T>` and `Mut<T>` for opt-in tick introspection
@@ -15,8 +16,8 @@ with the following surface:
 - Wraparound safety via `MAX_CHANGE_AGE` clamping (runs at most ~once per
   50 days of continuous play at 60 FPS).
 
-If your systems do not use any of these, **Phase 10 adds zero overhead** to
-their hot paths. The compiler's const-fold elides every per-row branch
+If your systems do not use any of these, **change detection adds zero
+overhead** to their hot paths. The compiler's const-fold elides every per-row branch
 that the change-detection filters would have inserted.
 
 ---
@@ -34,11 +35,11 @@ Each call to `Schedule::run` advances this counter with **two** atomic
 `fetch_add(1, Relaxed)` bumps:
 
 - A **frame-start bump**
-  ([`schedule.rs:286`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs#L286))
+  ([`schedule.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs))
   that publishes the new `this_run` read by every system, condition, and the
   state pass.
-- An **apply-window bump** (Bug #56,
-  [`schedule.rs:381`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs#L381))
+- An **apply-window bump**
+  ([`schedule.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs))
   that lands deferred-command stamps at `this_run + 1`, strictly between this
   run's reader window and the next's.
 
@@ -142,8 +143,8 @@ fn process_tagged_changes(
 `Changed<T>` arm will **walk every archetype** — including those that don't
 contain `T`. The non-existent `T` column makes `Changed<T>::filter_fetch`
 fall into a "null-base" branch that returns `false`. The other arms of the
-`Or` may still succeed. The cost: roughly **0.5 ns of branch overhead per
-row** on the null-base path.
+`Or` may still succeed. The cost is one extra predicted branch per row on the
+null-base path.
 
 If you only ever query specific archetypes, consider tightening the filter:
 
@@ -211,7 +212,7 @@ next legitimate write.
 
 The `Mut<T>` surface is exactly these four methods plus `Deref` / `DerefMut`
 — see the impl block at
-[`data.rs:1346`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/data.rs#L1346).
+[`data/mut_.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/data/mut_.rs).
 To forward to an API that takes `&mut T`, pass `bypass_change_detection()`
 (no bump) or `&mut *guard` (`DerefMut`, bumps once).
 
@@ -246,7 +247,41 @@ pattern feasible inside a single system.
 
 ---
 
-## 7. Wraparound and `MAX_CHANGE_AGE`
+## 7. Dense components and the direct API
+
+### Dense components
+
+A [dense component](concepts/components.md#storage-kinds)
+(`#[component(storage = "dense")]`) keeps one `added` and one `changed` tick per
+slot of its global column. The `Added<T>` and `Changed<T>` filters and the
+`Mut<T>` write guard work on it with the same semantics as on a table component:
+
+- inserting the component stamps both ticks of its slot with the current tick,
+  so it is `Added` (and `Changed`) on the next observation window;
+- a slot reused after a removal is re-stamped, so a new tenant never inherits
+  the previous tenant's history.
+
+[Enable tags](concepts/enable-tags.md) are the exception: a bitset flag has no
+per-row tick, so `Added` / `Changed` over one is a compile error.
+
+### Outside a system
+
+Code that holds the world directly (tools, a UI data-bind pass, a by-id
+writer) has three tick helpers on `EcsMaster`:
+
+| Method | What it does |
+| --- | --- |
+| `get_component_changed_tick(entity, component_id) -> Option<Tick>` | Reads a row's `changed` tick without touching any change state. `None` for a dead or stale entity, or a component the entity's archetype does not host. |
+| `any_changed_since(ids, last_run, this_run) -> bool` | `true` if any row of any archetype hosting one of `ids` has a `changed` tick in `(last_run, this_run]`. Scans only the hosting archetypes and stops at the first hit. |
+| `mark_component_changed(entity, id) -> bool` | Stamps the `changed` tick (not `added`) with the current tick — the write twin for code that wrote a component through a raw pointer, which touches no tick. |
+
+`mark_component_changed` also accepts a dense id, while
+`get_component_changed_tick` reads table rows only; a dense write is observable
+through a `Changed<T>` query.
+
+---
+
+## 8. Wraparound and `MAX_CHANGE_AGE`
 
 `Tick` is a `u32`. Comparison via `is_newer_than` uses **wrapping
 subtraction**; the result is correct only when the relative ages of stored
@@ -260,14 +295,14 @@ Constants:
 - `MAX_CHANGE_AGE = u32::MAX - (2 * CHECK_TICK_THRESHOLD - 1)` ≈ 3.26 B.
 
 At 60 FPS the world advances ~2 ticks per run (the frame-start bump plus the
-Bug #56 apply-window bump; see §1), so the threshold maps to roughly half the
+apply-window bump; see §1), so the threshold maps to roughly half the
 naive single-bump figure:
 
 | Metric | Value |
 | --- | --- |
 | Ticks per run | ~2 (more under fixed-timestep substeps) |
 | Time between scans | ~50 days of continuous play at 60 FPS |
-| Scan cost (100 k entities × 50 components) | ~3 ms cold |
+| Scan cost | one cold pass over every stored tick |
 
 Effectively, a player who runs your game non-stop for under a month and a
 half will never observe a `check_ticks` scan. The clamp is a safety net, not
@@ -275,7 +310,7 @@ a hot path. You do not need to think about it.
 
 ---
 
-## 8. Putting it together
+## 9. Putting it together
 
 A representative system that combines all three patterns:
 
@@ -300,7 +335,7 @@ fn integration_pipeline(
     }
 
     for m in &untracked {
-        // Phase 10 contributes 0 ns of overhead to this query.
+        // No change-detection term here: the query pays nothing for it.
         render_material(m);
     }
 }
@@ -312,11 +347,11 @@ fn integration_pipeline(
   capturing `this_run`.
 - Each system about to dispatch runs `set_change_ticks(last_run, this_run)`,
   where the system's previous `this_run` becomes its new `last_run`.
-- The apply-window bump (Bug #56) fires once more before deferred commands
+- The apply-window bump fires once more before deferred commands
   drain, so deferred-added components land at `this_run + 1`.
 - Workers read `&SystemMeta` (shared) inside their tasks.
 - `Mut<T>::deref_mut` writes the changed tick via `UnsafeCell<Tick>` — no
-  atomic; the Phase 9 conflict graph guarantees no concurrent reader.
+  atomic; the scheduler's conflict graph guarantees no concurrent reader.
 - `par_iter` workers write to disjoint slots in the same cache line; this
   is sound by the Rust abstract machine even though the lines see MESI
   ping-pong (false sharing). Boyko avoids regressions here via dedicated
@@ -324,25 +359,25 @@ fn integration_pipeline(
 
 ---
 
-## 9. Performance summary
+## 10. Cost model
 
-| Operation | Target | Notes |
-| --- | --- | --- |
-| `Tick::is_newer_than` | ≤ 1 ns | 2 × `wrapping_sub` + cmp |
-| `Changed<T>` filter, hot row | ≤ 1 ns/row | autovectorisable predicate |
-| `Or<(_, Changed<T>)>`, null-base | ≤ 1.5 ns/row | branch + return false |
-| `Mut<T>::deref_mut` bump | ≤ 1 ns | single u32 store |
-| Per-run tick bumps | ≤ 5 ns each | ~2 `fetch_add(Relaxed)` per run |
-| `check_ticks` scan, 100 k × 50 components | ≤ 10 ms cold | runs ~once per 50 days |
-| `Query::iter` overhead without change detection | 0 ns | const-fold elision |
-| Phase 9 dispatcher regression budget | 0 % | rides existing exclusivity |
+| Operation | Cost |
+| --- | --- |
+| `Tick::is_newer_than` | two `wrapping_sub` + one compare |
+| `Changed<T>` / `Added<T>` filter, per row | one tick compare (an autovectorisable predicate) |
+| `Or<(_, Changed<T>)>`, null-base row | one branch, returns `false` |
+| `Mut<T>::deref_mut` bump | one `u32` store, skipped after the first on the same guard |
+| Per-run tick bumps | ~2 `fetch_add(Relaxed)` per run |
+| `check_ticks` scan | a cold pass, ~once per 50 days of play |
+| `Query::iter` without change detection | nothing — the per-row branch is const-folded away |
 
-The numbers are validated by the criterion bench suite
-(`phase10_change_detection`); see `crates/boyko_ecs/benches/phase10_change_detection.rs`.
+The criterion harness is
+`crates/boyko_ecs/benches/phase10_change_detection.rs`; measured results are on
+the [Benchmarks](reference/benchmarks.md) page.
 
 ---
 
-## 10. Quick reference
+## 11. Quick reference
 
 - **Filter a query for new entities**: `Query<&T, Added<T>>`.
 - **Filter a query for modified entities**: `Query<&T, Changed<T>>`.
@@ -352,9 +387,13 @@ The numbers are validated by the criterion bench suite
   `*t = ...` (bumps) or `t.set_if_neq(...)` (bumps only on inequality).
 - **Skip the tick bump**: `t.bypass_change_detection()`.
 
-> A `SystemChangeTick` SystemParam that exposes a system's `this_run()` /
-> `last_run()` snapshot directly is planned (Wave B+) but **not yet shipped**.
-> Until then, read tick state through `Ref<T>` / `Mut<T>` accessors.
+- **Read or stamp a tick outside a system**: `get_component_changed_tick`,
+  `any_changed_since`, `mark_component_changed` (§7).
 
-For the design rationale and full invariant catalogue, see
-[`docs/PHASE-10-CHANGE-DETECTION-PLAN.md`](https://github.com/bluesteelll/boyko-engine/blob/ecs/docs/PHASE-10-CHANGE-DETECTION-PLAN.md).
+> There is no `SystemChangeTick` system parameter exposing a system's
+> `this_run()` / `last_run()` snapshot directly. Read tick state through the
+> `Ref<T>` / `Mut<T>` accessors.
+
+For contributors, the original design record with the full invariant catalogue
+is
+[`docs/archive/PHASE-10-CHANGE-DETECTION-PLAN.md`](https://github.com/bluesteelll/boyko-engine/blob/master/docs/archive/PHASE-10-CHANGE-DETECTION-PLAN.md).
