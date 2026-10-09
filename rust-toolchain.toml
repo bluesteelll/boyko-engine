@@ -66,5 +66,15 @@
 # Components are deliberately NOT listed: each CI job declares the ones it needs
 # (clippy, llvm-tools, miri, rustfmt), and listing them here would make every job
 # fetch all of them.
+#
+# PINNED TO 1.98.1 (2026-10-09). This file's own rule above said to switch to an exact version "if
+# reproducibility ever has to outrank currency", and the tree already decided that: the trybuild
+# corpus and its witness test (tests/trybuild_corpus_compiler_witness.rs) bless rustc 1.98.1 exactly.
+# Measured on the release PR (bluesteelll/boyko-engine#4): CI's floating stable resolved to 1.99.0,
+# which deprecated AtomicU64::fetch_update (a -D warnings error in every cargo job) and changed
+# trybuild error text (4 of 32 corpus targets red). The dev host builds with
+# RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc, which is 1.98.1 today and beats this file.
+# Moving to a newer compiler is one commit: this line, ci.yml's dtolnay/rust-toolchain@<version>
+# refs, the witness pin and the re-blessed trybuild .stderr files, together.
 [toolchain]
-channel = "stable"
+channel = "1.98.1"
