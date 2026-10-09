@@ -290,6 +290,9 @@ fn spawn_scene_system(mut commands: Commands) {
 /// Deliberately NOT routed through [`sv0_scene::spawn_scene`]: that test runs a real windowed
 /// device, where a `MeshBundle` naming an unregistered slot is not the inert thing it is here. Its
 /// scene is not measured by any count in this file, so it is outside review C2's seam.
+///
+/// `#[cfg(windows)]` because its one caller, the real-runner test below, is.
+#[cfg(windows)]
 fn spawn_body_only(mut commands: Commands) {
     sv0_scene::spawn_sdf_body(&mut commands);
 }
