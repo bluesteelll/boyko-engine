@@ -165,6 +165,59 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
+## mermaid
+
+The documentation site (the mdBook under `book/`) loads these two scripts to draw its diagrams. No
+crate uses them.
+
+- **Files:**
+  - `book/theme/mermaid.min.js`: mermaid 11.2.0. It is byte-identical to
+    `src/bin/assets/mermaid.min.js` in the `mdbook-mermaid` 0.14.0 crate, the version that
+    `.github/workflows/docs.yml` pins.
+  - `book/theme/mermaid-init.js`: byte-identical to `src/bin/assets/mermaid-init.js` in the same
+    crate.
+- **Upstream:** <https://github.com/mermaid-js/mermaid> (mermaid) and
+  <https://github.com/badboy/mdbook-mermaid> (mdbook-mermaid).
+- **License:**
+  - `mermaid.min.js`: MIT.
+  - `mermaid-init.js`: Mozilla Public License 2.0, the license of mdbook-mermaid (`license =
+    "MPL-2.0"` in its `Cargo.toml`). The file is unmodified and stays under MPL-2.0; it is its own
+    source form. The license text is at <https://mozilla.org/MPL/2.0/>.
+- **Copyright:**
+  - mermaid: Copyright (c) 2014 - 2022 Knut Sveidqvist
+  - mdbook-mermaid: Jan-Erik Rediger (the `authors` field of the crate manifest)
+- **Bundled:** `mermaid.min.js` inlines third-party libraries. The license comments that the
+  upstream build kept are intact at the end of the file, under "Bundled license information". They
+  name DOMPurify 3.1.6 (Apache-2.0 or MPL-2.0, (c) Cure53 and other contributors), Lodash (MIT,
+  Copyright OpenJS Foundation and other contributors), cytoscape (MIT) and js-yaml 4.1.0 (MIT).
+
+Full mermaid license text (`LICENSE` at the tag `mermaid@11.2.0`,
+<https://github.com/mermaid-js/mermaid/blob/mermaid%4011.2.0/LICENSE>):
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2014 - 2022 Knut Sveidqvist
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## Font test fixtures
 
 The two fonts are test fixtures of `boyko_fontbake`. They remain under their own font licences,
