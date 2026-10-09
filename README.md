@@ -48,16 +48,21 @@ turn it on. **Experimental** — in the tree, but partial or not wired into the 
 - **Shipped:** hybrid mesh + SDF rendering. Analytic SDF shapes are sphere-traced into the same
   G-buffer as the meshes.
 - **Shipped:** textured PBR, bindless textures and GPU-resident component columns.
-- **Shipped:** directional, point and spot lights with clustered light culling and a sky ambient.
-- **Opt-in:** cascaded sun shadows, a point/spot shadow atlas, SSAO, SDF-probe DDGI, a shadow
-  denoiser, anti-aliasing (FXAA, SMAA, SSAA, TAA with RCAS sharpening), two-phase HZB occlusion
-  culling, and GPU particles.
-- **Opt-in** (`--features hwrt` and a ray-tracing GPU): hardware ray-query shadows.
 - **Shipped:** a shader eDSL. Shader math is written once in Rust, evaluated on the CPU as the test
   oracle, and printed as HLSL. `*_spv_sync` tests recompile shaders and compare the result with the
   committed SPIR-V byte for byte.
 - **Shipped:** in-house loaders for PNG (with its own zlib/DEFLATE decoder), OBJ, binary glTF
   (`.glb`, static pose) and RON materials.
+- **Shipped:** directional, point and spot lights and a sky ambient.
+- **Opt-in:** cascaded sun shadows, a point/spot shadow atlas, SSAO, SDF-probe DDGI, anti-aliasing
+  (FXAA, SMAA, SSAA, TAA with RCAS sharpening), two-phase HZB occlusion culling, clustered (froxel)
+  light culling (`LightingConfig::clusters_enabled`, read once at boot), and GPU particles.
+- **Opt-in** (`--features hwrt` and a ray-tracing GPU): hardware ray-query shadows, and a
+  spatial/temporal denoiser for them.
+
+Some opt-in passes depend on the render path. SSAO, DDGI, anti-aliasing and the shadow denoiser need
+the Deferred or Visibility Buffer path; Forward and Forward+ switch them off. DDGI also needs the
+SDF geometry leg. HZB occlusion and clustered light culling run only on the Visibility Buffer path.
 
 ### Physics
 
@@ -68,7 +73,9 @@ turn it on. **Experimental** — in the tree, but partial or not wired into the 
 - **Shipped:** a parallel solve and narrowphase whose results are bit-identical for any worker count.
 - **Shipped:** `PhysicsPlugin`, which wires the pipeline into an `App`'s fixed schedule.
 - **Opt-in:** island sleeping, and contacts against analytic SDF shapes.
-- **Experimental:** soft bodies (an XPBD pass). Builder functions wire them; `PhysicsPlugin` does not.
+- **Experimental:** soft bodies (an XPBD pass, with optional soft-rigid coupling). They are off by
+  default. `PhysicsPlugin::soft` or `PhysicsPlugin::soft_colored` turns them on, as do the
+  `add_physics_soft*` builder functions.
 
 ### UI
 
@@ -315,8 +322,10 @@ cargo test --workspace --all-targets --no-fail-fast
 target from hiding every target after it.
 
 - **Ignored tests.** Tests that need a GPU, a window, a feature flag or a long wall clock are
-  `#[ignore]`d, and each reason starts with a class: `gpu`, `gpu-windowed`, `gpu-cap`, `feature`,
-  `solo`, `slow` and a few more. This census prints how many sites each class has:
+  `#[ignore]`d with a reason. The reason starts with a class: `gpu`, `gpu-windowed`, `gpu-cap`,
+  `feature`, `solo`, `slow` and a few more. The one exception is a test ignored only in release
+  builds: it runs in every debug run, so its reason names no class. This census prints how many
+  sites each class has:
 
   ```powershell
   cargo test -p boyko-engine --test ignore_reasons_census -- --nocapture
@@ -351,9 +360,10 @@ target from hiding every target after it.
    invariants.
 
 The build enforces part of this. [`clippy.toml`](clippy.toml) bans `HashMap`, `HashSet`, `Mutex`,
-`RwLock`, `Rc` and `RefCell`, and the workspace denies that lint. Each exception is registered in
-[`docs/HOT-PATH-EXCEPTIONS.md`](docs/HOT-PATH-EXCEPTIONS.md) and checked by
-[`scripts/check_hotpath_exceptions.py`](scripts/check_hotpath_exceptions.py). The
+`RwLock`, `Rc` and `RefCell`, and the workspace denies that lint. Each exception in shipping code is
+registered in [`docs/HOT-PATH-EXCEPTIONS.md`](docs/HOT-PATH-EXCEPTIONS.md) and checked by
+[`scripts/check_hotpath_exceptions.py`](scripts/check_hotpath_exceptions.py); test code, benches and
+examples are exempt. The
 [Design Principles](https://bluesteelll.github.io/boyko-engine/architecture/principles.html) page in
 the book explains the reasoning.
 
