@@ -227,7 +227,7 @@ workspace deps. Therefore:
 >
 > Partially offsetting: CI already de-selects the two crates this section names, on
 > every leg — `--exclude boyko_demo --exclude bench-bevy-vs-boyko`
-> (`.github/workflows/ci.yml:62, :109-111, :151, :189, :213`). And the hosts named here
+> (`.github/workflows/ci.yml:62, :123-125, :165, :203, :232`). And the hosts named here
 > are hypothetical: **`game_app` / `editor_app` do not exist.** The real hosts are
 > `boyko_app`, `boyko_demo`, and the root `boyko-engine` package. Wave 0 must pick
 > the real ship target before it can write the gate.
@@ -892,7 +892,7 @@ call site); reads sign-extend per `EnumRepr` for `Ix` reprs.
   > Miri-TB itself is confirmed available and enforceable exactly as this line assumes:
   > `MIRIFLAGS = "-Zmiri-tree-borrows"` is set workspace-wide in `.cargo/config.toml`,
   > and CI's Miri job is **required**, not `continue-on-error`
-  > (`.github/workflows/ci.yml:215`). ⚠️ But it is an **allowlist**, not a sweep — a new
+  > (`.github/workflows/ci.yml:234`). ⚠️ But it is an **allowlist**, not a sweep — a new
   > package is not covered until it is named. See **B.9**.
 - **Enum write (FIX C2):** `set_enum_variant_index` does a **release** bounds check
   (`idx < variants.len()` → else `false`, not a `debug_assert!`); only a **baked
@@ -1467,7 +1467,7 @@ hand-written Rust, so the matrix still needs it.
 ## B.6 The ship gate: the tree has already built this instrument and **measured how its naive form cannot fail**
 
 > `crates/profile_fixture/tests/profile_axis_census.rs` · CI job *"cross-profile symbol
-> census (G14/G16)"* (`.github/workflows/ci.yml:153-175`)
+> census (G14/G16)"* (`.github/workflows/ci.yml:167-189`)
 
 §2 and §7 present the ship gate — *"`cargo tree` must show `boyko_reflect` absent, and a
 symbol-absence check must pass on the exact ship artifact"* — as straightforward
@@ -1637,7 +1637,7 @@ it is worth putting to the owner explicitly because it changes what Wave 2 ships
 
 ## B.9 CI Miri is an **allowlist**, not a sweep — A.9's mandatory gate would not exist
 
-> `.github/workflows/ci.yml:215-248`
+> `.github/workflows/ci.yml:234-267`
 
 A.9 declares Miri-TB **mandatory** on four surfaces (String replace, nested-leaf write,
 enum discr, nested offset composition). The premise that this is self-enforcing is

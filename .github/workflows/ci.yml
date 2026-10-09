@@ -93,6 +93,18 @@ jobs:
   # `#[cfg(feature = "profiling-analysis")]`, and without the flag they are not compiled and not
   # run — a coverage loss that looks exactly like a green sweep. The feature-OFF side is covered by
   # the `profile-legs` matrix below, which builds four profiles that refuse it outright.
+  #
+  # `components: rust-src` is load-bearing for the trybuild suites, and it is the environment their
+  # baselines were blessed in, not a Linux accommodation. rustc renders a source snippet for a span
+  # inside the standard library only when the library's source is installed; without `rust-src` it
+  # prints `= note: the failure occurred here` in place of the snippet. Fifteen `.stderr` files under
+  # `crates/boyko_ecs/tests/` (`enable_filter_compile_fail`, `query_change_detection_compile_fail`,
+  # `option_anyof_compile_fail`) carry such a `$RUST/core/src/...` snippet. MEASURED 2026-10-09:
+  # CI run 37922685029 failed 10 of 18 `enable_filter_compile_fail` cases on exactly that one
+  # difference, and the same rustc 1.98.1 on the Windows workstation, given a sysroot WITHOUT
+  # `rust-src`, printed all 10 actual outputs byte-identical to the Linux ones (with it: 18/18 ok).
+  # trybuild's own documentation ("Troubleshooting") prescribes this component for the same reason.
+  # It is per job, not in `rust-toolchain.toml`, because that file deliberately lists no components.
   test:
     name: cargo test (${{ matrix.profile }})
     runs-on: ubuntu-latest
@@ -102,6 +114,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rust-src
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (${{ matrix.profile }})
         run: |
@@ -193,6 +207,9 @@ jobs:
   # feature selection is UNOBSERVABLE from inside a test process (measured at G2: the
   # test env is byte-identical under `--features …`), so the leg must name itself.
   # `tests/reflect_ci_coverage.rs` pins the flag and the variable together.
+  #
+  # `rust-src`: this job runs trybuild suites too, so it gets the environment their baselines are
+  # blessed in — see the note on the `test` job.
   reflect-on:
     name: cargo test reflect ON (${{ matrix.profile }})
     runs-on: ubuntu-latest
@@ -204,6 +221,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rust-src
       - uses: Swatinem/rust-cache@v2
       - name: cargo test reflect ON (${{ matrix.profile }})
         run: |
@@ -537,7 +556,11 @@ jobs:
       RUSTFLAGS: "--cfg force_alloc_panic -D warnings -C target-cpu=x86-64-v3"
     steps:
       - uses: actions/checkout@v4
+      # `rust-src`: the same `--workspace --all-targets` selection as the `test` job, trybuild
+      # suites included — see the note on that job.
       - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rust-src
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --workspace --all-targets --release --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
 
