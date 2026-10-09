@@ -72,19 +72,18 @@ Locally:
 
 ```powershell
 cargo check -p boyko_rhi_vulkan --features hwrt --all-targets    # the leg that was red for 32 days
-cargo check -p boyko-app        --features hwrt --all-targets    # Windows-only; CI cannot run it
-cargo check -p boyko-render     --features hwrt --all-targets    # the example CI's scoped leg drops
+cargo check -p boyko-app        --features hwrt --all-targets    # its cfg(windows) arm: no CI job
+cargo check -p boyko-render     --features hwrt --all-targets    # the example's cfg(windows) loop
 ```
 
 - **Known RED, refused by name in `ci.yml`:** `boyko_shaderdsl/nightly` (and `boyko_sdf_math/nightly`,
-  which forwards to it), broken on both channels.
-- **The platform cfg has the same blind spot.** `boyko-app`'s lib does not build for
-  `x86_64-unknown-linux-gnu` (2 × E0432: the `#[cfg(windows)]` module `gpu_scene` imported
-  unconditionally; 3 × E0308 in `diag.rs`), so the `check`, `test`, `profile-legs`, `clippy`,
-  `force-alloc-panic` and `bench-compile` jobs cannot pass on `ubuntu-latest` as the tree stands.
-  `boyko-render`'s lib builds there; only its `#![cfg(windows)]` example `orbit_cube_window` does not.
-  The repair belongs in those crates, not in the gate.
-- No clippy lint has run over feature-gated code. `boyko-app`'s `hwrt` / `profiling-*` features and
+  which forwards to it), broken on both channels; `boyko-app/profiling-alloc`, whose `#[global_allocator]`
+  collides with the one in `crates/boyko_app/tests/e1_engine_ui_alloc_census.rs:271`.
+- **The platform cfg has the same blind spot, narrowed.** `boyko-app` compiles on Linux; no GPU path:
+  `gpu_scene`, the host and the frame loop are `#[cfg(windows)]` (`crates/boyko_app/src/lib.rs:60-115`,
+  `runner.rs:237-238`); the non-Windows `run_windowed` reports E3004 and exits (`runner.rs:1022-1026`).
+  Every CI job runs on `ubuntu-latest`, so no job compiles a `#[cfg(windows)]` item.
+- No clippy lint has run over feature-gated code, and the `#[cfg(windows)]` arms of `boyko-app` and of
   `orbit_cube_window` get only the by-hand recipe above, which is a recipe, not coverage.
 
 (rationale and measurements: docs/WORKFLOW.md#feature-axis)
