@@ -575,7 +575,7 @@ pub fn arm_mask_bits() -> u64 {
 ///
 /// # One store, and only on change
 ///
-/// A `fetch_update` returning `None` performs **no store at all**, so a frame in which nothing was
+/// A `try_update` returning `None` performs **no store at all**, so a frame in which nothing was
 /// toggled costs one `Acquire` load and leaves the line clean for every emitter reading it. That is
 /// the corpus's *"one store only on change"*, expressed as the absence of a write rather than as a
 /// comparison a caller has to remember to make.
@@ -587,7 +587,7 @@ pub fn project_scopes(bits: u64) -> bool {
     let scopes = bits & PROJECTED_SCOPE_MASK;
     ARM_MASK
         .bits
-        .fetch_update(Ordering::Release, Ordering::Acquire, |live| {
+        .try_update(Ordering::Release, Ordering::Acquire, |live| {
             let next = (live & !PROJECTED_SCOPE_MASK) | scopes;
             if next == live { None } else { Some(next) }
         })

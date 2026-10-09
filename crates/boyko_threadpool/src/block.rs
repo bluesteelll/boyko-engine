@@ -632,6 +632,7 @@ mod tests {
     //!    which is what makes a later stage's "zero allocations in the cell size
     //!    class" a statement about a non-empty bucket.
 
+    #[cfg(not(miri))]
     use std::alloc::{GlobalAlloc, System};
     use std::io::Write;
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -689,6 +690,7 @@ mod tests {
     }
 
     /// Append one event. Allocates nothing, by construction.
+    #[cfg(not(miri))]
     fn record(acquire: bool, addr: usize, size: usize, align: usize) {
         if !REC_ON.try_with(Cell::get).unwrap_or(false) {
             return;
@@ -710,9 +712,12 @@ mod tests {
     }
 
     /// The lib test target's global allocator: `System`, plus a thread-local
-    /// tape that is off unless a [`Recording`] guard is live.
+    /// tape that is off unless a [`Recording`] guard is live. Compiled only where it is installed
+    /// (see `RECORDING_ALLOC` below): under Miri nothing would construct it.
+    #[cfg(not(miri))]
     struct RecordingAlloc;
 
+    #[cfg(not(miri))]
     // SAFETY: every method forwards its pointer and layout to `System`
     //   unchanged and returns what `System` returned, so this allocator's
     //   contract IS `System`'s. The added side effect is a store into a

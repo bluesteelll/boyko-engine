@@ -1942,12 +1942,12 @@ never runs again ⇒ re-enabling a scope writes a bit nothing will ever read. Th
 off permanently, from one ordinary toggle, with no diagnostic.
 
 So `PROJECTED_SCOPE_BASE = 8`; `arm`/`disarm` keep `ROOT_SCOPE`, `project_scopes` keeps
-`8..SCOPE_COUNT`, and the two halves are written through one `fetch_update` — atomic rather than
+`8..SCOPE_COUNT`, and the two halves are written through one `try_update` — atomic rather than
 load-then-store because `arm_scope` writes the same word, and returning `false` when the value is
 unchanged is how *"one store only on change"* is expressed as the **absence** of a write rather than
 as a comparison a caller has to remember.
 
-MEASURED RED: replace the `fetch_update` body with a plain `store(scopes)`. It fires **three
+MEASURED RED: replace the `try_update` body with a plain `store(scopes)`. It fires **three
 assertions earlier than predicted** — on *"publishing scopes cleared the channel the profiler is
 armed on"*, not on the `any_armed()` clause — because a plain store loses the channel at the FIRST
 projection, whatever it is publishing, not at the projection of zero. Predicted and measured RED
