@@ -74,8 +74,11 @@ use crate::host::WindowHost;
 #[cfg(windows)]
 use boyko_rhi_vulkan::compute::PARTICLE_DRAW_PUSH_BYTES;
 
+#[cfg(windows)]
 use crate::gpu_scene::{ParticleFrameInputs, ParticleFramePush};
+#[cfg(windows)]
 use crate::light_gate::light_upload_due;
+#[cfg(windows)]
 use crate::particle_gate::particle_effects_upload_due;
 // VG R3 piece 4 rung P4-4: the diagnostic regime, read live per frame beside `HzbConfig` and
 // recorded into both artifacts (the probe dump's `[host]` table and the bench summary's regime
@@ -89,6 +92,14 @@ use crate::window_info::{HostFrameStats, HostTeardownStats, WindowInfo};
 /// to the runner (title + requested client size; `present_mode` etc. arrive
 /// with later rungs).
 #[derive(Clone, Copy)]
+#[cfg_attr(
+    not(windows),
+    expect(
+        dead_code,
+        reason = "`EnginePlugins::window` builds the description on every platform, but the \
+                  non-Windows `run_windowed` arm exits before a window exists and reads no field"
+    )
+)]
 pub(crate) struct WindowDesc {
     /// The window caption.
     pub(crate) title: &'static str,
@@ -1043,6 +1054,14 @@ fn parse_hier_cull_env(spec: &str) -> bool {
 /// this queue into the frame's [`PhysicalInput`](boyko_input::PhysicalInput)
 /// snapshot. Pure (no FFI, no GPU), so it is unit-testable on every host.
 #[inline]
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "un-gated by design so the bridge is unit-tested on every host; its one \
+                  production caller is the Windows frame loop"
+    )
+)]
 fn ingest_captured(queue: &mut RawInputQueue, captured: CapturedMsg) {
     match captured {
         CapturedMsg::Raw { msg, wparam, lparam } => {

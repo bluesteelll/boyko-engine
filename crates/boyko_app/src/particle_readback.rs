@@ -5,7 +5,8 @@
 //!
 //! * [`ParticleCountersReadback`] — the DECODED counters, a `World` Resource the runner inserts so
 //!   an in-process gate can read them after `App::run` returns, plus the partition predicates
-//!   stated as named methods. Pure: no device, no OS, no `cfg`, unit-testable headlessly.
+//!   stated as named methods. Pure: no device, no OS, no `cfg`, unit-testable headlessly — only
+//!   its raw-block decoder (`from_raw`) is `#[cfg(windows)]`, with the device type it decodes.
 //! * `ParticleReadbackProbe` — the settle → capture driver the windowed frame loop threads through
 //!   its steady path, a sibling of `crate::host_dump::HostDump` (`#[cfg(windows)]`, like every
 //!   other driver here, because its only caller is the windowed loop).
@@ -31,6 +32,7 @@
 use boyko_rhi_vulkan::compute::{PARTICLE_SORT_BINS, PARTICLE_SORT_LOG_SPAN, particle_sort_key};
 use boyko_render::ParticleRender;
 
+#[cfg(windows)]
 use crate::gpu_scene::ParticleCountersRaw;
 
 /// The wave width the artifact line's per-lane rate is computed against — 32, this part's
@@ -110,6 +112,10 @@ pub struct ParticleCountersReadback {
 
 impl ParticleCountersReadback {
     /// Decodes one raw capture. `frames_presented` is the runner's own count at the capture.
+    ///
+    /// `#[cfg(windows)]`: the raw block is a `crate::gpu_scene` type, that module is Windows-only,
+    /// and so is the one caller (the windowed frame loop).
+    #[cfg(windows)]
     #[must_use]
     pub(crate) fn from_raw(raw: &ParticleCountersRaw, frames_presented: u32) -> Self {
         Self {

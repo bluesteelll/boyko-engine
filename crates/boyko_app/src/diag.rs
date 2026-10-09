@@ -73,6 +73,7 @@ const ERR_BYTES: usize = 192;
 
 /// How much of one pre-rendered diagnostic line reaches the record. The longest is the 12-float
 /// `GpuLight` row, at roughly 220 bytes.
+#[cfg(windows)]
 const DUMP_BYTES: usize = 256;
 
 /// Render a whole `format_args!` into a bounded stack buffer, spec and all.
@@ -92,6 +93,7 @@ const DUMP_BYTES: usize = 256;
 ///
 /// Everywhere else in this migration the values are passed as values. This is a deliberate,
 /// bounded exception with a stated reason, not the pattern.
+#[cfg(windows)]
 #[cold]
 #[inline(never)]
 pub(crate) fn line(args: core::fmt::Arguments<'_>) -> DspBuf<DUMP_BYTES> {
@@ -126,6 +128,7 @@ pub(crate) fn debug_into<E: core::fmt::Debug + ?Sized>(err: &E) -> DspBuf<ERR_BY
 /// three distinguishable failures do not arrive as one format literal. That is `E2103`'s argument
 /// applied one crate later: before L6-A's tagged payload the stage could only have been baked into
 /// three separate literals, i.e. three codes for one condition and one fix.
+#[cfg(any(windows, test))]
 #[cold]
 #[inline(never)]
 pub(crate) fn report_boot_stage_failed<E: core::fmt::Debug>(stage: &str, err: &E) {
@@ -149,6 +152,7 @@ pub(crate) fn report_boot_stage_failed<E: core::fmt::Debug>(stage: &str, err: &E
 /// which is the difference between a device lost before this frame's work was submitted and one
 /// lost after. The renderer must not be reused past either (`frame_driver`'s contract), so both
 /// end the run.
+#[cfg(any(windows, test))]
 #[cold]
 #[inline(never)]
 pub(crate) fn report_terminal_device_error<E: core::fmt::Debug>(site: &str, err: &E) {
@@ -173,15 +177,17 @@ pub(crate) fn report_terminal_device_error<E: core::fmt::Debug>(site: &str, err:
 /// same, and a silent one would read as a crash.
 ///
 /// `#[cfg(not(windows))]` because its only caller is the non-Windows `run_windowed` arm, and
-/// `-D warnings` refuses a function nothing calls. The two above need no gate: both runner arms
-/// can reach them.
+/// `-D warnings` refuses a function nothing calls. The two above are the mirror image: their
+/// only callers are the Windows boot chain and frame loop, so they are `#[cfg(any(windows,
+/// test))]` — compiled where a caller exists, and in every test build so their observers run on
+/// every host.
 #[cfg(not(windows))]
 #[cold]
 #[inline(never)]
 pub(crate) fn report_windowing_unsupported() {
     boyko_log::error!(
         boyko_log::App,
-        codes::E3004.number(),
+        codes::E3004,
         "windowing is not implemented for this platform - exiting"
     );
     if flush() == FlushResult::NoConsumer {
@@ -259,6 +265,7 @@ pub(crate) fn report_fatal_ecs_panic(stage: &str, payload: &(dyn core::any::Any 
 /// A named module-level `static`, not one inside the function: a `Once` latch is PROCESS
 /// state, and an observer that cannot reset it proves only that nothing else in the binary
 /// reached this condition first.
+#[cfg(any(windows, test))]
 pub(crate) static W3005_PROBE_SITE: codes::OnceSite = codes::OnceSite::new();
 
 // ───────────────────────── the degrade reporters (W3005..W3008, E3010) ─────────────────────────
@@ -275,8 +282,14 @@ pub(crate) static W3005_PROBE_SITE: codes::OnceSite = codes::OnceSite::new();
 // booted Vulkan device, a window surface and a device whose caps refuse something. Splitting the
 // report from the condition is what lets check 5 be satisfied by an observation rather than by a
 // row in `untested_codes.txt` saying nobody looked.
+//
+// That split is also why each one is `#[cfg(any(windows, test))]`: every production caller is a
+// Windows-only host module (the window host, the frame loop, the dump drivers), so a non-Windows
+// LIB has none and `-D warnings` refuses the dead item; the TEST half of the gate keeps the
+// observers below compiled and running on every host.
 
 /// The SSAA extent/VRAM probe refused the requested scale — `boyko-W3005`, site one of two.
+#[cfg(any(windows, test))]
 #[cold]
 #[inline(never)]
 pub(crate) fn report_ssaa_probe_refused(
@@ -306,6 +319,7 @@ pub(crate) fn report_ssaa_probe_refused(
 /// A named module-level `static`, not one inside the function: a `Once` latch is PROCESS
 /// state, and an observer that cannot reset it proves only that nothing else in the binary
 /// reached this condition first.
+#[cfg(any(windows, test))]
 pub(crate) static W3005_SCALE_SITE: codes::OnceSite = codes::OnceSite::new();
 
 /// The requested SSAA scale is not one this build admits — `boyko-W3005`, site two of two.
@@ -313,6 +327,7 @@ pub(crate) static W3005_SCALE_SITE: codes::OnceSite = codes::OnceSite::new();
 /// A SECOND latch for the same code, which is the point rather than an oversight: `Once` is per
 /// site (F11), and sharing one would let a probe refusal silence this line for the rest of the
 /// process.
+#[cfg(any(windows, test))]
 #[cold]
 #[inline(never)]
 pub(crate) fn report_ssaa_scale_unsupported(want: u32, admitted: &str) {
@@ -333,6 +348,7 @@ pub(crate) fn report_ssaa_scale_unsupported(want: u32, admitted: &str) {
 /// **No latch, and that is the decision this row exists for.** The caller walks a SET of reasons,
 /// so a latch here would report the first and silently drop the rest — `W2102`'s F11 failure mode
 /// reached through iteration instead of through separate sites.
+#[cfg(any(windows, test))]
 #[cold]
 #[inline(never)]
 pub(crate) fn report_render_path_degraded(reason: &str) {
@@ -347,9 +363,11 @@ pub(crate) fn report_render_path_degraded(reason: &str) {
 /// `W3007`'s latch. A named module-level `static`, not one inside the function: a `Once` latch is
 /// PROCESS state, and an observer that cannot reset it proves only that nothing else in the binary
 /// reached this condition first.
+#[cfg(any(windows, test))]
 pub(crate) static W3007_SITE: codes::OnceSite = codes::OnceSite::new();
 
 /// The VB geometry table could not be built — `boyko-W3007`.
+#[cfg(any(windows, test))]
 #[cold]
 #[inline(never)]
 pub(crate) fn report_geometry_table_failed(err: &str) {
@@ -365,9 +383,11 @@ pub(crate) fn report_geometry_table_failed(err: &str) {
 }
 
 /// `W3008`'s latch. Same argument as `W3007_SITE` above.
+#[cfg(any(windows, test))]
 pub(crate) static W3008_SITE: codes::OnceSite = codes::OnceSite::new();
 
 /// A profiling knob was set on a device that cannot serve it — `boyko-W3008`.
+#[cfg(any(windows, test))]
 #[cold]
 #[inline(never)]
 pub(crate) fn report_profiling_knob_unserviceable(knob: &str, why: &str) {
@@ -391,6 +411,7 @@ pub(crate) fn report_profiling_knob_unserviceable(knob: &str, why: &str) {
 ///
 /// `RatePolicy::Every` and no latch: a run that armed three dumps and could write none of them has
 /// three things to report.
+#[cfg(any(windows, test))]
 #[cold]
 #[inline(never)]
 pub(crate) fn report_dump_write_failed(kind: &str, path: &str, err: &str) {
