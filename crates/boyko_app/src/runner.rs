@@ -1055,11 +1055,21 @@ fn parse_hier_cull_env(spec: &str) -> bool {
 /// snapshot. Pure (no FFI, no GPU), so it is unit-testable on every host.
 #[inline]
 #[cfg_attr(
-    all(not(windows), not(test)),
+    not(windows),
     expect(
         dead_code,
         reason = "un-gated by design so the bridge is unit-tested on every host; its one \
                   production caller is the Windows frame loop"
+    )
+)]
+// A test build has a reader (this file's unit tests), so there the expectation above goes
+// unfulfilled by design. That case is excused under a POSITIVE `test` predicate, because
+// `tests/production_reachability_census.rs` keeps `test` out of every negation.
+#[cfg_attr(
+    all(not(windows), test),
+    allow(
+        unfulfilled_lint_expectations,
+        reason = "the unit tests in this file call the bridge on every host"
     )
 )]
 fn ingest_captured(queue: &mut RawInputQueue, captured: CapturedMsg) {
