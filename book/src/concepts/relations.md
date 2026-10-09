@@ -25,8 +25,8 @@ A relation is two components tied by their associated types so the round-trip `R
 | Source of truth (the FK) | [`Relationship`] | the source entity | **you** — insert/overwrite/remove |
 | Reverse index (the collection) | [`RelationshipTarget`] | the target entity | **the engine** — never by hand |
 
-[`Relationship`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/relationship/mod.rs#L210
-[`RelationshipTarget`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/relationship/mod.rs#L285
+[`Relationship`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/relationship/mod.rs
+[`RelationshipTarget`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/relationship/mod.rs
 
 ```rust,ignore
 use boyko_ecs::prelude::*;                       // the TRAITS + the query/observer DSL
@@ -52,7 +52,7 @@ struct LikedBy(Vec<Entity>);
 
 The component itself is declared with `#[derive(Component)]`; the relation derives add only the `impl`s on top.
 
-- **`#[relationship(target = T)]`** on the source — names the reverse-index component. Optional `allow_self_referential` permits `R(self)` (otherwise a self-link is reactively removed). [macro source](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_macros/src/lib.rs#L2251)
+- **`#[relationship(target = T)]`** on the source — names the reverse-index component. Optional `allow_self_referential` permits `R(self)` (otherwise a self-link is reactively removed). [macro source](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_macros/src/relationship.rs)
 - **`#[relationship_target(source = S [, linked_despawn] [, retain_empty])]`** on the target — names the source component, and:
   - `linked_despawn` → despawning the target recursively despawns every source (this is how `Children` cascades).
   - `retain_empty` → an emptied collection is **kept**, not removed, so a `0 → 1 → 0` link oscillation never thrashes the archetype. **v1 requires `retain_empty`.**
@@ -108,7 +108,7 @@ fn who_likes(ecs: &EcsMaster, target: Entity) {
 
 ## How the reverse index is maintained
 
-You never touch `LikedBy`. Two generic [component hooks](./hooks-and-observers.md), keyed on `R`, do all the bookkeeping ([generic hooks](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/relationship/mod.rs#L241)):
+You never touch `LikedBy`. Two generic [component hooks](./hooks-and-observers.md), keyed on `R`, do all the bookkeeping ([generic hooks](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/relationship/generic_hooks.rs)):
 
 - `R::on_insert` (`on_insert`) — enqueues a `LinkCommand` that pushes the source into the target's collection.
 - `R::on_replace` (`on_replace`) — enqueues an `UnlinkCommand` that removes the source from the *old* target's collection (this fires on overwrite and on removal alike).
@@ -163,7 +163,7 @@ Two design constraints, both enforced at compile time:
 - **Read-only only.** `D: ReadOnlyQueryData` is a hard bound. A `&mut` join is forbidden because two sources pointing at one target would alias a `&mut` into that target's row.
 - **Aliasing is the conflict graph's job.** `Related<R, D>` declares `R`'s read *then* `D`'s read against the same access set, so `Query<(&mut T, Related<R, &T>)>` trips the existing read-vs-write detector at build time — no per-row runtime check.
 
-`Related` is **sequential-only**: it is const-rejected on `par_iter` (the parallel chunk runner has no world cell to resolve a per-row target archetype) and does not implement chunked iteration (the target rows are scattered). The join is two dependent random loads per row — inherently random-access on the target side — so reach for it deliberately, not in your hottest inner loop. [related.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/relation/related.rs#L102)
+`Related` is **sequential-only**: it is const-rejected on `par_iter` (the parallel chunk runner has no world cell to resolve a per-row target archetype) and does not implement chunked iteration (the target rows are scattered). The join is two dependent random loads per row — inherently random-access on the target side — so reach for it deliberately, not in your hottest inner loop. [related.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/relation/related.rs)
 
 ### Relation filters
 
@@ -194,11 +194,11 @@ fn children_of(ecs: &mut EcsMaster, parent: Entity) {
 }
 ```
 
-> **Footgun.** `RelatedTo` needs its target seeded through `query_filtered`. Using it through the value-less `query::<_, RelatedTo<R>>()` path panics loudly (a poison sentinel) rather than silently matching nothing — `query_filtered` is the only correct entry point. [filter.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/relation/filter.rs#L254)
+> **Footgun.** `RelatedTo` needs its target seeded through `query_filtered`. Using it through the value-less `query::<_, RelatedTo<R>>()` path panics loudly (a poison sentinel) rather than silently matching nothing — `query_filtered` is the only correct entry point. [filter.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/relation/filter.rs)
 
 ### Traversal accessors
 
-Walk the relation graph directly off `EcsMaster`. Each returns an iterator of `Entity`; the transitive walks are depth-capped, and a non-acyclic relation guards revisits with a cold function-local visited set (const-folded away for an acyclic relation such as `ChildOf`). [accessors](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L2432)
+Walk the relation graph directly off `EcsMaster`. Each returns an iterator of `Entity`; the transitive walks are depth-capped, and a non-acyclic relation guards revisits with a cold function-local visited set (const-folded away for an acyclic relation such as `ChildOf`). [accessors](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/relationship_api.rs)
 
 | Accessor | Walks | Yields |
 |----------|-------|--------|
@@ -221,7 +221,7 @@ fn report(ecs: &EcsMaster, root: Entity, child: Entity) {
 
 ### Edge observers: `OnLink<R>` / `OnUnlink<R>`
 
-Two built-in [triggers](./hooks-and-observers.md), one monomorphization per relation `R`, fired on the **committed edge** at the apply window — never from the read-only hook body. Keying on the trigger's own type id gives the flecs `(R, *)` wildcard analogue for free, with no new dispatch path. [edge_observers.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/relationship/edge_observers.rs#L46)
+Two built-in [triggers](./hooks-and-observers.md), one monomorphization per relation `R`, fired on the **committed edge** at the apply window — never from the read-only hook body. Keying on the trigger's own type id gives the flecs `(R, *)` wildcard analogue for free, with no new dispatch path. [edge_observers.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/relationship/edge_observers.rs)
 
 - **`OnLink<R>`** fires after a new edge is committed (a fresh FK or the new side of a re-target). It targets the source; the payload `target` is the entity the source now points at. An edge that no-ops on a dead target never fires.
 - **`OnUnlink<R>`** fires after an edge is confirmed destroyed (remove, the old side of a re-target, a source despawn, or a non-cascading teardown). Its payload `old_target` is the entity the source used to point at. A *spurious* unlink (self-ref guard, missing link) never fires.
@@ -261,7 +261,7 @@ The fire is gated behind a cold `has_edge_observer` probe, so a world with no ed
 
 A custom trigger can fan **down** a relation: after firing on the target, it recurses over that relation's reverse collection, firing on every descendant. You declare the propagation shape and the broadcast relation on the [`Trigger`] impl:
 
-[`Trigger`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/observers/trigger.rs#L70
+[`Trigger`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/observers/trigger.rs
 
 ```rust,ignore
 use boyko_ecs::prelude::*;          // Trigger, PropagationMode, ChildOf, ...
@@ -277,7 +277,7 @@ impl Trigger for DamageWave {
 }
 ```
 
-`PropagationMode` has three arms: `None` (target-only, the historical default), `Up` (bubble one hop along `Traversal` — the existing single-chain bubble), and `Down` (the reverse-collection fan-out). The descent is cycle-safe and depth-capped, with a per-node propagate snapshot so calling `propagate(false)` prunes only that node's subtree. Fire it with `ecs.trigger::<DamageWave>(root, DamageWave)` after registering per-entity runners via `observe_entity_event`. [traversal.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/observers/traversal.rs#L18)
+`PropagationMode` has three arms: `None` (target-only, the historical default), `Up` (bubble one hop along `Traversal` — the existing single-chain bubble), and `Down` (the reverse-collection fan-out). The descent is cycle-safe and depth-capped, with a per-node propagate snapshot so calling `propagate(false)` prunes only that node's subtree. Fire it with `ecs.trigger::<DamageWave>(root, DamageWave)` after registering per-entity runners via `observe_entity_event`. [traversal.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/observers/traversal.rs)
 
 The `Up` direction is `Toward<R>`: a bridge that lets *any* single-target relation bubble, not just `ChildOf`. Setting `type Traversal = Toward<MyRelation>` makes a custom trigger walk up your relation one hop at a time, reusing the existing per-hop `get_component` lookup.
 
@@ -285,7 +285,7 @@ The `Up` direction is `Toward<R>`: a bridge that lets *any* single-target relati
 
 The cardinality is a **type choice on the target**, not a new derive. Swap the collection field from `Vec<Entity>` to [`Exclusive`] and the relation becomes one-to-one: a target held by at most one source.
 
-[`Exclusive`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/relationship/collection.rs#L146
+[`Exclusive`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/relationship/collection.rs
 
 ```rust,ignore
 use boyko_ecs::prelude::*;          // Exclusive, Relationship, RelationshipTarget
@@ -304,7 +304,7 @@ struct OccupiedBy(Exclusive);       // 1:1 instead of Vec<Entity>
 
 `Exclusive` is a `#[repr(transparent)]` newtype over `Option<Entity>` — a single slot, no heap, strictly cheaper than `Vec`'s 24 bytes plus an allocation for the at-most-one case.
 
-**Apply-time eviction.** Linking a new source `B` to a slot already held by `A` evicts `A`. The eviction is detected at apply time inside `LinkCommand::apply`: it overwrites the slot to `B`, fires `OnUnlink{A}` exactly once, and enqueues a deferred remove of `A`'s now-dangling foreign key. Exactly one `OnUnlink` and one `OnLink` fire per re-link. The `Vec` one-to-many path is untouched — it inherits the default "nothing to evict", so the eviction branch const-folds away to byte-identical code. [eviction logic](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/relationship/mod.rs#L522)
+**Apply-time eviction.** Linking a new source `B` to a slot already held by `A` evicts `A`. The eviction is detected at apply time inside `LinkCommand::apply`: it overwrites the slot to `B`, fires `OnUnlink{A}` exactly once, and enqueues a deferred remove of `A`'s now-dangling foreign key. Exactly one `OnUnlink` and one `OnLink` fire per re-link. The `Vec` one-to-many path is untouched — it inherits the default "nothing to evict", so the eviction branch const-folds away to byte-identical code. [eviction logic](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/relationship/mod.rs)
 
 ## Comparison to other engines
 
@@ -325,4 +325,4 @@ boyko deliberately follows the Bevy non-fragmenting model: re-targeting a relati
 - [Queries](./queries.md) and [Iteration](./iteration.md) — the query model `Related` / the relation filters plug into.
 - [Commands](./commands.md) — the deferred-command apply window where the reverse index settles.
 - [Glossary](../reference/glossary.md) — relation, reverse index, FK, cascade.
-- Source: [relationship/mod.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/relationship/mod.rs), [collection.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/relationship/collection.rs), [edge_observers.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/relationship/edge_observers.rs), [relation query DSL](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/relation/mod.rs).
+- Source: [relationship/mod.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/relationship/mod.rs), [collection.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/relationship/collection.rs), [edge_observers.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/relationship/edge_observers.rs), [relation query DSL](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/relation/mod.rs).

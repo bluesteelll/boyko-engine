@@ -318,7 +318,7 @@ slow path or a runtime panic:
   has no world cell to resolve them per row. Use the sequential
   [`iter` / `iter_mut`](queries.md) instead, or `dense_iter` for a pure-dense
   query. (The guard is a `const` assert in
-  [`par_iter.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs#L305),
+  [`par_iter.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs),
   so a misuse fails to compile rather than silently degrading.)
 
 Everything else — `&T`, `&mut T`, `()`, tuples up to 12, and the archetypal
@@ -349,6 +349,6 @@ because that is the faster choice.
 - [The scheduler](../scheduler.md) — the work-stealing pool the parallel paths run on.
 - [Change detection](../change_detection.md) — why ticked terms stay on `iter`.
 - Source:
-  [`chunk_iter.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/chunk_iter.rs),
-  [`par_chunk.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/par_chunk.rs),
-  [`par_iter.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs).
+  [`chunk_iter.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/chunk_iter.rs),
+  [`par_chunk.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/par_chunk.rs),
+  [`par_iter.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs).

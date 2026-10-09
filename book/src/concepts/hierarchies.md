@@ -32,7 +32,7 @@ the tree changes, and the hooks on `ChildOf` reactively patch the parent's
 `Children` to match.
 
 Both types are re-exported from the prelude
-([`prelude.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/prelude.rs#L33)):
+([`prelude.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/prelude.rs)):
 
 ```rust,ignore
 use boyko_ecs::prelude::*;       // ChildOf, Children, Commands, Query, ...
@@ -82,7 +82,7 @@ fn build_tree(mut cmds: Commands) {
 ```
 
 The relationship methods, all chainable on `EntityCommands`
-([`entity_commands.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs#L317)):
+([`entity_commands.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs)):
 
 | Method | Effect |
 |--------|--------|
@@ -126,7 +126,7 @@ command batch that mutated it.
 
 `Children` is just a component, so you read it through a [query](./queries.md)
 or with `get_component`. It exposes a slice plus the usual length helpers
-([`hierarchy/mod.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/hierarchy/mod.rs#L122)):
+([`hierarchy/mod.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/hierarchy/mod.rs)):
 `as_slice() -> &[Entity]`, `len()`, `is_empty()`, `contains(Entity)`.
 
 ```rust,ignore
@@ -159,7 +159,7 @@ Two properties worth internalising, both consequences of the storage choice:
 
 For transitive walks the engine provides relation accessors on `EcsMaster`, so
 you do not hand-roll recursion over `Children`
-([`relations_query_dsl.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/tests/relations_query_dsl.rs#L613)):
+([`relations_query_dsl.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/tests/relations_query_dsl.rs)):
 
 ```rust,ignore
 use boyko_ecs::prelude::*;
@@ -252,4 +252,4 @@ same 0%-when-unused discipline the hooks substrate guarantees everywhere.
 - [Hooks and observers](./hooks-and-observers.md) — the reactive mechanism that keeps `Children` consistent
 - [Commands](./commands.md) — the deferred-mutation API and apply window
 - [Queries](./queries.md) — how to iterate `Children` and join across relations
-- Source: [`core/hierarchy/mod.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/hierarchy/mod.rs#L63), [`hierarchy/commands.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/hierarchy/commands.rs), [`ecs_master.rs` despawn cascade](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L1362)
+- Source: [`core/hierarchy/mod.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/hierarchy/mod.rs), [`hierarchy/commands.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/hierarchy/commands.rs), [`entity_api.rs` despawn cascade](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs)

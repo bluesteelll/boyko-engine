@@ -279,6 +279,6 @@ impossible.
 - [Change detection](../change_detection.md) — tracking when a resource was written.
 - [Tags](./tags.md) — the component-side answer to "presence as data".
 - Source:
-  [`resource.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/resources/resource.rs),
-  [`res.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/system/params/res.rs#L40),
-  [`resmut.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/system/params/resmut.rs#L42).
+  [`resource.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/resources/resource.rs),
+  [`res.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/system/params/res.rs),
+  [`resmut.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/system/params/resmut.rs).

@@ -365,7 +365,7 @@ byte-identical (the campaign's 0%-gate).
 the reference `SoftStepSolver` they are silent no-ops.
 
 > **What is measured, and what is not.** Two figures from
-> [`benches/colored_solve.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/benches/colored_solve.rs)
+> [`benches/colored_solve.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/benches/colored_solve.rs)
 > back the default. The AVX2 cohort kernel runs the colored step **1.96×** faster
 > than the scalar colored arm, on that bench's production-shaped sphere pile
 > (one-point manifolds, not box–box contacts). The scalar colored solve, graph build
@@ -443,11 +443,11 @@ satisfies this.
 - [Math](math.md) — the deterministic POD `Vec3` / `Quat` / `Mat3`
 - [SDF rendering](../rendering/sdf.md) — the field physics shares for SDF contacts
 - Source:
-  [`boyko_physics/src/lib.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/lib.rs#L1),
-  [`components.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/components.rs#L1),
-  [`solver/mod.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/solver/mod.rs#L46),
-  [`solver/soft_step.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/solver/soft_step.rs#L1),
-  [`solver/colored.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/solver/colored.rs#L1),
-  [`resources.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/resources.rs#L1),
-  [`systems.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/systems.rs#L1),
-  [`plugin.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_physics/src/plugin.rs#L159)
+  [`boyko_physics/src/lib.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/lib.rs),
+  [`components.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/components.rs),
+  [`solver/mod.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/solver/mod.rs),
+  [`solver/soft_step.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/solver/soft_step.rs),
+  [`solver/colored.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/solver/colored.rs),
+  [`resources.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/resources.rs),
+  [`systems.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/systems.rs),
+  [`plugin.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_physics/src/plugin.rs)

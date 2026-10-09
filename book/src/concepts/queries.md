@@ -337,8 +337,8 @@ nothing when absent.
 - [Tags](tags.md) — why `With` / `Without` are free per row
 - [Systems](systems.md) — where `Query` lives as a SystemParam
 - [Scheduler](../scheduler.md) — the conflict graph that lets queries run in parallel
-- Source: [`query.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/query.rs#L62),
-  [`query_view.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs#L83),
-  [`data.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/data.rs),
-  [`filter.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/filter.rs),
-  [`EcsMaster::query`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L4256)
+- Source: [`query.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/query.rs),
+  [`query_view.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs),
+  [`data.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/data.rs),
+  [`filter.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/filter.rs),
+  [`EcsMaster::query`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs)

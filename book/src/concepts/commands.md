@@ -248,11 +248,11 @@ fn cull_dead(mut commands: Commands, query: Query<(&EntityRef, &Health)>) {
 > sidesteps the problem entirely.
 
 Despawning an entity with children **cascades by default**: `commands.despawn(e)`
-flushes to [`EcsMaster::delete_entity`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L1368),
+flushes to [`EcsMaster::delete_entity`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs),
 which fires the `Children` relationship's despawn hook and recursively destroys the
 whole subtree — no orphaned children, no dangling parents. If you want to free just
 the one entity and keep its children alive, the direct opt-out is
-[`EcsMaster::despawn_without_children(e)`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L1391),
+[`EcsMaster::despawn_without_children(e)`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs),
 which suppresses the cascade for exactly that one removal (the surviving children
 keep a now-dangling `ChildOf` — a documented footgun, so reparent or despawn them
 yourself).
@@ -396,7 +396,7 @@ hundreds of commands per system per frame is cheap.
   `.add_tag` / `.enable::<T>()` helpers on `EntityCommands`.
 - [Events](events.md) — `commands.send_event` and deferred dispatch.
 
-Source: [`params/commands.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/system/params/commands.rs),
-[`params/entity_commands.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs),
-[`commands/command_queue.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/commands/command_queue.rs),
-[`commands/command.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/commands/command.rs).
+Source: [`params/commands.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/system/params/commands.rs),
+[`params/entity_commands.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs),
+[`commands/command_queue.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/commands/command_queue.rs),
+[`commands/command.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/commands/command.rs).

@@ -34,11 +34,11 @@ Each call to `Schedule::run` advances this counter with **two** atomic
 `fetch_add(1, Relaxed)` bumps:
 
 - A **frame-start bump**
-  ([`schedule.rs:286`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs#L286))
+  ([`schedule.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs))
   that publishes the new `this_run` read by every system, condition, and the
   state pass.
 - An **apply-window bump** (Bug #56,
-  [`schedule.rs:381`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs#L381))
+  [`schedule.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs))
   that lands deferred-command stamps at `this_run + 1`, strictly between this
   run's reader window and the next's.
 
@@ -211,7 +211,7 @@ next legitimate write.
 
 The `Mut<T>` surface is exactly these four methods plus `Deref` / `DerefMut`
 — see the impl block at
-[`data.rs:1346`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/data.rs#L1346).
+[`data/mut_.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/data/mut_.rs).
 To forward to an API that takes `&mut T`, pass `bypass_change_detection()`
 (no bump) or `&mut *guard` (`DerefMut`, bumps once).
 
@@ -357,4 +357,4 @@ The numbers are validated by the criterion bench suite
 > Until then, read tick state through `Ref<T>` / `Mut<T>` accessors.
 
 For the design rationale and full invariant catalogue, see
-[`docs/PHASE-10-CHANGE-DETECTION-PLAN.md`](https://github.com/bluesteelll/boyko-engine/blob/ecs/docs/PHASE-10-CHANGE-DETECTION-PLAN.md).
+[`docs/archive/PHASE-10-CHANGE-DETECTION-PLAN.md`](https://github.com/bluesteelll/boyko-engine/blob/master/docs/archive/PHASE-10-CHANGE-DETECTION-PLAN.md).

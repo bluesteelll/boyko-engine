@@ -22,7 +22,7 @@ use boyko_macros::{Component};    // the DERIVE MACROS (#[derive(Component)], et
 The trait `Component` (and `Resource`, `Bundle`, `SystemSet`, …) comes from the
 prelude. The **derive macros of the same names do not** — `boyko_macros` is only
 a dev-dependency of `boyko_ecs`, so the prelude cannot re-export them (see
-[`prelude.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/prelude.rs#L6)).
+[`prelude.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/prelude.rs)).
 Import the derives you use directly from `boyko_macros`:
 
 ```rust,ignore
@@ -72,7 +72,7 @@ fn main() {
 What this does, step by step:
 
 - **`App::new()`** constructs the app with a worker pool sized to the machine's
-  available parallelism. (Use [`App::with_threads(n)`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/app/app.rs#L189)
+  available parallelism. (Use [`App::with_threads(n)`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/app/app.rs)
   for a fixed count, or `App::with_pool(pool)` to share one pool across apps.)
 - **`add_startup_system(setup)`** registers a system that runs exactly once,
   before the first frame.
@@ -163,7 +163,7 @@ archetype is a contiguous slice, so the loop above is a tight SoA pass over L1d
 ## The frame loop: schedules
 
 An `App` drives one or two **core schedules** per frame
-([`CoreSchedule`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/app/app.rs#L53)):
+([`CoreSchedule`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/app/app.rs)):
 
 ```mermaid
 flowchart LR
@@ -198,8 +198,8 @@ app.add_systems_cfg(|b| {
 });
 ```
 
-`add_system` returns a [`SystemConfig`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/system_config.rs#L41)
-handle. Call `.key()` to grab its [`SystemKey`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/ordering.rs#L33),
+`add_system` returns a [`SystemConfig`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/system_config.rs)
+handle. Call `.key()` to grab its [`SystemKey`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/ordering.rs),
 then pass that key to a sibling's `.before(key)` / `.after(key)`. boyko keys
 ordering edges by value rather than re-registering systems implicitly, so the
 edge is unambiguous and the closure never adds a system twice.
@@ -218,7 +218,7 @@ For deterministic tests and benches there is `run_n_with_delta(frames, delta)` �
 the same frame body with a fixed delta each time, so wall-clock jitter never
 enters the measured loop.
 
-`run()` watches the [`AppExit`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/app/app_exit.rs#L20)
+`run()` watches the [`AppExit`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/app/app_exit.rs)
 resource. A frame system requests shutdown by setting it:
 
 ```rust,ignore
@@ -238,7 +238,7 @@ on those paths.)
 ## Plugins: composing setup
 
 A real app does not register dozens of systems by hand in `main`. A
-[`Plugin`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/app/plugin.rs#L27)
+[`Plugin`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/app/plugin.rs)
 bundles a coherent slice of setup — its systems, resources, and states — behind
 one `build` call, and `add_plugins` composes them:
 
@@ -279,7 +279,7 @@ Two differences from Bevy worth knowing up front:
   skipping.
 
 The config-vs-run phase split — every `add_*` call mutates the staged builder,
-and [`App::finish`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/app/app.rs#L543)
+and [`App::finish`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/app/app.rs)
 freezes it into the immutable [`Schedule`](../scheduler.md) the runner drives —
 is the same boundary a `Plugin::build` writes into.
 
@@ -302,7 +302,7 @@ startup system, query it in a frame system, and drive the loop with `run` /
 
 ## Source
 
-- App builder + runners: [`app.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/app/app.rs#L113)
-- Plugin trait: [`plugin.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/app/plugin.rs#L27)
-- Variadic `add_plugins`: [`plugins.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/app/plugins.rs#L141)
-- The exact prelude surface: [`prelude.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/prelude.rs#L1)
+- App builder + runners: [`app.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/app/app.rs)
+- Plugin trait: [`plugin.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/app/plugin.rs)
+- Variadic `add_plugins`: [`plugins.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/app/plugins.rs)
+- The exact prelude surface: [`prelude.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/prelude.rs)

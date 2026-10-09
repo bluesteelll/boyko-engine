@@ -24,7 +24,7 @@ The consequences are the point:
   through as verbatim token trees with their original spans, so rustc errors,
   rust-analyzer completions and go-to-definition land on your own tokens.
 
-*(Branch: `feat/multi-paradigm-render`. Shipped rungs: **A0–A7 — the plan is
+*(Shipped rungs: **A0–A7 — the plan is
 complete**. Nothing in the language is scheduled for a later rung.)*
 
 ## Hello, Aether

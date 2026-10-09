@@ -2,8 +2,6 @@
 
 > An enable tag is a per-row bit you flip in place — no archetype migration, no fragmentation, ideal for high-churn flags.
 
-*(Branch: `ecs`, EnableTag phase.)*
-
 ## What an enable tag is
 
 A [tag](tags.md) encodes presence in the archetype **signature**: adding or
@@ -244,4 +242,4 @@ is the decision matrix.
 - [Dynamic Tags](dynamic-tags.md) — runtime-minted, name-keyed archetype tags
 - [Storage Trade-offs: Tags, Churn, and Fragmentation](../architecture/storage-tradeoffs.md) — Table vs Bitset decision matrix
 - [Change Detection](../change_detection.md) — why it does not extend to enable tags
-- Source: [`enable_tag_api.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs) (`register_enable_tag` / `enable` / `disable` / `is_enabled`), [`filter_enable.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/filter_enable.rs) (`Enabled` / `Disabled`), [`enable_terms.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/enable_terms.rs) (`with_enabled` / `without_enabled`), [`enable_store.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/enable/enable_store.rs) (paged bitset)
+- Source: [`enable_tag_api.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs) (`register_enable_tag` / `enable` / `disable` / `is_enabled`), [`filter_enable.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/filter_enable.rs) (`Enabled` / `Disabled`), [`enable_terms.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/enable_terms.rs) (`with_enabled` / `without_enabled`), [`enable_store.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/enable/enable_store.rs) (paged bitset)

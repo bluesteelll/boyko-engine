@@ -8,8 +8,6 @@ instances to `Commands::spawn`. The engine resolves the destination archetype,
 copies every field into its column, and fires the lifecycle hooks — all from one
 deferred command.
 
-*(Branch: `ecs`, sealed since Phase 8.5, arity raised to 16 in Phase 22.)*
-
 If you come from Bevy, the shape is familiar: a `#[derive(Bundle)]` struct passed
 to `commands.spawn(...)`. The difference is under the hood — Boyko's bundle path
 is built around a two-level static cache so that repeated spawns of the same
@@ -194,7 +192,7 @@ Because this is keyed on the *type*, it is shared across threads and across
 per process.
 
 **Level 2 — per-world.** The cache that actually accelerates spawning is the
-[`BundleColumnCache`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/bundle/bundle_column_cache.rs)
+[`BundleColumnCache`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/bundle/bundle_column_cache.rs)
 on each `EcsMaster`: a boxed `[OnceLock<BundleColumnRecord>; MAX_BUNDLE_TYPES]`
 indexed directly by `BundleTypeId`. A record holds the destination `ArchetypeId`
 plus the resolved per-component column IDs in canonical order. The first spawn of
@@ -255,10 +253,10 @@ copy runs. A leak on panic is the deliberate trade-off over UB.
 ## `MAX_BUNDLE_ARITY`
 
 A bundle holds at most **16 components**
-([`MAX_BUNDLE_ARITY`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/bundle/bundle.rs#L49)),
+([`MAX_BUNDLE_ARITY`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/bundle/bundle.rs)),
 raised from 8 in Phase 22 because tags make wide bundles ordinary. The derive
 rejects a 17th field at macro-expansion time
-([`boyko_macros/src/lib.rs:3334`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_macros/src/lib.rs#L3334)),
+([`boyko_macros/src/bundle.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_macros/src/bundle.rs)),
 so the limit surfaces as a clear compile error rather than a runtime surprise.
 The constant also sizes the fixed-width stack arrays the spawn path uses to
 resolve columns, which is why it is a hard ceiling: those arrays never allocate.
@@ -283,5 +281,5 @@ wider archetype on apply, and the result is identical to a single fat bundle.
 - [Entities](entities.md) — what a spawn actually produces
 - [Commands](commands.md) — `spawn`, `spawn_empty`, `spawn_batch`, `insert`
 - [Tags](tags.md) — zero-sized components, the reason arity is 16
-- Source: [`core/bundle/`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/bundle/bundle.rs),
-  [`bundle_column_cache.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/bundle/bundle_column_cache.rs)
+- Source: [`core/bundle/`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/bundle/bundle.rs),
+  [`bundle_column_cache.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/bundle/bundle_column_cache.rs)

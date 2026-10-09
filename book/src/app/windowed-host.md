@@ -28,7 +28,7 @@ fn main() {
 }
 ```
 
-That is the whole of [`examples/clear.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/examples/clear.rs).
+That is the whole of [`examples/clear.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/examples/clear.rs).
 No Vulkan SDK is required — the runner does not request the validation layer, so
 an absent layer (the common case on end-user machines) cannot fail the boot.
 
@@ -37,7 +37,7 @@ a startup system and you have a rendered room. That is the hero example below.
 
 ## The hero example: a lit, shadowed room
 
-[`examples/room.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/examples/room.rs)
+[`examples/room.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/examples/room.rs)
 is the "~30-line scene" milestone: a floor plane, four shadow-casting cubes, a
 perspective camera, and ECS-owned lighting — an angled sun with cascaded shadow
 maps, a sky ambient fill, and a warm point accent. Everything is assembled
@@ -153,9 +153,9 @@ renderer" by an imperative call.
 ## `EnginePlugins::window(title, w, h)`
 
 `EnginePlugins` is the host composition plugin. Its
-[`window`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/src/plugins.rs#L103)
+[`window`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/src/plugins.rs)
 constructor takes a caption and a requested client size, and its `build`
-([`plugins.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/src/plugins.rs#L112))
+([`plugins.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/src/plugins.rs))
 composes the default frame stack:
 
 - **Scene** — transform propagation, active-camera resolution, and the visibility
@@ -256,7 +256,7 @@ to the one before it.
 
 ### Interpolation: `bounce`
 
-[`examples/bounce.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/examples/bounce.rs)
+[`examples/bounce.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/examples/bounce.rs)
 puts the integrator in `FixedSet::Gameplay` and attaches the interpolation pair
 to the cube. The gameplay system writes `Transform` at 64 Hz; the host snapshots
 and lerps for the render frame:
@@ -301,7 +301,7 @@ the pose and snaps `prev = curr` for one frame (the `TeleportCommandsExt` sugar)
 
 ### Interactive input: `viewer`
 
-[`examples/viewer.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/examples/viewer.rs)
+[`examples/viewer.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/examples/viewer.rs)
 is the room made interactive. Add `FlyCameraPlugin` alongside `EnginePlugins` and
 spawn a `FlyCameraBundle` instead of a `CameraRig`:
 
@@ -321,7 +321,7 @@ fn main() {
 ```
 
 `FlyCameraPlugin`
-([`fly.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/src/fly.rs#L105))
+([`fly.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/src/fly.rs))
 composes the input ingest, registers the fly controller in `CameraSet::Control`
 (so the view recomposes the same frame — no input lag), and wires an ECS-native
 quit through the rebindable `FlyAction::Quit` (Escape by default). WASD flies,
@@ -330,7 +330,7 @@ quit through the rebindable `FlyAction::Quit` (Escape by default). WASD flies,
 
 ### Hybrid SDF: `sdf_room`
 
-[`examples/sdf_room.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/examples/sdf_room.rs)
+[`examples/sdf_room.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/examples/sdf_room.rs)
 adds one live SDF sphere to the room with a single spawn — no brick bake, no
 shader change:
 
@@ -378,7 +378,7 @@ are a derived view of your ECS data, never a parallel store you hand-manage.
 - [Enable Tags](../concepts/enable-tags.md) and
   [Storage Trade-offs](../architecture/storage-tradeoffs.md) — capability as
   presence, and what each storage choice costs.
-- Source: [`plugins.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/src/plugins.rs#L81),
-  [`fly.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/src/fly.rs#L105),
-  [`prelude.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_app/src/prelude.rs#L1),
-  and the examples in [`crates/boyko_app/examples/`](https://github.com/bluesteelll/boyko-engine/tree/ecs/crates/boyko_app/examples).
+- Source: [`plugins.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/src/plugins.rs),
+  [`fly.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/src/fly.rs),
+  [`prelude.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_app/src/prelude.rs),
+  and the examples in [`crates/boyko_app/examples/`](https://github.com/bluesteelll/boyko-engine/tree/master/crates/boyko_app/examples).

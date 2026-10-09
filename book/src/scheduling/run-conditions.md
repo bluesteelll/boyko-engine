@@ -160,7 +160,7 @@ machine records the matching edge — including the synthesized initial
 > See [States](./states.md) for the full lifecycle.
 
 The full set of built-ins lives in
-[`common_conditions.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/common_conditions.rs#L1).
+[`common_conditions.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/common_conditions.rs).
 Resource-existence and typed `.and`/`.or`/`.not` combinators are intentionally
 not shipped yet — AND-via-chaining (next section) covers the common case.
 
@@ -274,8 +274,8 @@ Two properties carry the design:
   unaffected.
 
 Source:
-[`schedule.rs` `evaluate_ready_conditions`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs#L779),
-[`system_config.rs` `run_if`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/system_config.rs#L183).
+[`schedule.rs` `evaluate_ready_conditions`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs),
+[`system_config.rs` `run_if`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/system_config.rs).
 
 ## Conditions must be read-only
 

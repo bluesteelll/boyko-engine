@@ -51,7 +51,7 @@ for the cases where the authoritative data still lives on the host.
 
 `boyko_ecs` is GPU-capable but **graphics-pure**: the kernel names no Vulkan or
 RHI type. A device-resident column is referenced only through an opaque
-[`DeviceColumnHandle`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/device_column.rs#L27),
+[`DeviceColumnHandle`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/device_column.rs),
 a `#[repr(transparent)]` wrapper over a bare `u64`:
 
 ```rust,ignore
@@ -64,7 +64,7 @@ Because it is a plain integer with no provenance, a `ComponentPool` carrying one
 stays trivially `Send + Sync`, and the handle is Miri-safe. The kernel never
 interprets or dereferences it; it is a token a graphics crate packs meaning into.
 
-The render side ([`boyko_render`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/gpu_column.rs))
+The render side ([`boyko_render`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/gpu_column.rs))
 packs a generational registry slot into that `u64` via the RHI's `slot_to_u64`
 bridge. The crucial property: the durable identity of a column is **not** the
 handle — it is the `(ArchetypeId, ComponentId)` pair. A grow reallocates the
@@ -100,7 +100,7 @@ arch.make_component_device_backed(component, handle);
 ### `GpuSystem` — dispatch with zero readback
 
 A device-backed column is mutated by
-[`GpuSystem`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/gpu_system.rs#L134),
+[`GpuSystem`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/gpu_system.rs),
 a **hand-written** `boyko_ecs` `System` that records and submits a compute
 dispatch over the column. It is hand-written for a reason: routing the `!Send`
 RHI context through the ordinary `NonSendResMut` system parameter would force the
@@ -147,7 +147,7 @@ zero-readback guarantee made concrete.
 > resolve machinery, the `(archetype, component)` indirection, the
 > `DispatcherToken` capability, and the dispatch path are real and tested. The
 > compute shader currently wired through this path,
-> [`gpu_integrate.comp.spv`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/gpu_system.rs#L64),
+> [`gpu_integrate.comp.spv`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/gpu_system.rs),
 > is a **demonstration kernel** (`Data[i] = Data[i] + 100`) that proves the seam
 > end to end. The mechanism is the deliverable; production compute systems plug
 > their own SPIR-V into the same `GpuSystem` shape. Deferred-wait overlap (a
@@ -185,7 +185,7 @@ gather into — the column *is* the instance array.
 
 ### `GpuInstance`: a 24-byte interpolated record
 
-[`GpuInstance`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_demo/src/render/instance.rs#L45)
+[`GpuInstance`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_demo/src/render/instance.rs)
 is both a boyko `Component` and a `#[repr(C)]` POD record matching the vertex
 shader's instance attributes. It is 24 bytes with no padding (asserted at compile
 time):
@@ -261,7 +261,7 @@ flowchart TD
 ```
 
 > **Where this runs.** The interpolated `GpuInstance` + substep-gated upload path
-> ships in the [`boyko_demo`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_demo/src/render/instance.rs)
+> ships in the [`boyko_demo`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_demo/src/render/instance.rs)
 > sandbox (which targets wgpu for portability, including a wasm build). It
 > demonstrates the *pattern* — component-as-GPU-layout, zero AoS gather, GPU-side
 > interpolation, gated uploads — on top of the engine's chunked iteration. The
@@ -285,7 +285,7 @@ flowchart TD
 - [RHI](rhi.md) — the in-house raw-FFI Vulkan layer the device columns build on
 - [Iteration](../concepts/iteration.md) — `for_each_chunk` and contiguous column slices
 - [Components](../concepts/components.md) — the column model these extend
-- Source: [`gpu_column.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/gpu_column.rs),
-  [`gpu_system.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/gpu_system.rs),
-  [`device_column.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/device_column.rs),
-  [`instance.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_demo/src/render/instance.rs)
+- Source: [`gpu_column.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/gpu_column.rs),
+  [`gpu_system.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/gpu_system.rs),
+  [`device_column.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/device_column.rs),
+  [`instance.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_demo/src/render/instance.rs)

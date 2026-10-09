@@ -4,11 +4,11 @@
 
 ## Overview
 
-There is no central memory pool. The historical shared `Arena` (a best-fit, free-block allocator) was **retired in Phase X.J** — both `arena.rs` and `free_mem_block.rs` were deleted once every storage owner gained its own reservation. The module doc in [memory/vm.rs:5-8](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/vm.rs#L5-L8) records the retirement.
+There is no central memory pool. The historical shared `Arena` (a best-fit, free-block allocator) was **retired in Phase X.J** — both `arena.rs` and `free_mem_block.rs` were deleted once every storage owner gained its own reservation. The module doc in [boyko_memory/src/vm.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_memory/src/vm.rs) records the retirement.
 
 The memory model today is **reserve-then-commit**, per owner:
 
-- Each [`ComponentPool`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs#L147) — one dense column of one component type — owns a private `VmReservation`.
+- Each [`ComponentPool`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/component_pool.rs) — one dense column of one component type — owns a private `VmReservation`.
 - The entity-metadata table (`InlandStore`) owns one too.
 - Every reservation reserves a large slice of **address space** up front (1 GiB by default on 64-bit OS arms), but commits **nothing**. Physical pages are committed lazily, one geometric slab at a time, at the row frontier.
 
@@ -47,7 +47,7 @@ classDiagram
     ComponentPool --> VmReservation : owns one (Host backing)
 ```
 
-`VmReservation` is `pub(crate)` — it is an internal primitive, not a public API surface. The `layout` field exists only on the fallback arm (Miri / wasm32 / non-syscall targets); the syscall arms carry just `base` + `os_len`. See [memory/vm.rs:85-97](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/vm.rs#L85-L97).
+`VmReservation` is `pub(crate)` — it is an internal primitive, not a public API surface. The `layout` field exists only on the fallback arm (Miri / wasm32 / non-syscall targets); the syscall arms carry just `base` + `os_len`. See [boyko_memory/src/vm.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_memory/src/vm.rs).
 
 Within a pool's reservation, the bytes are laid out as four sub-regions:
 
@@ -59,7 +59,7 @@ Within a pool's reservation, the bytes are laid out as four sub-regions:
 - `data` — the dense component rows, SIMD-aligned (`SIMD_BUFFER_ALIGN = 32`).
 - `added_ticks` / `changed_ticks` — the per-row change-detection columns ([Change Detection](../change_detection.md)).
 
-See [component_pool.rs:301-328](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs#L301-L328).
+See [`pool_byte_layout`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/constants.rs).
 
 ## Algorithms
 
@@ -69,18 +69,18 @@ Reserves `len` bytes of address space, rounded up to a 64 KiB commit granule (`C
 
 Reservation failure is unrecoverable misconfiguration: there is no fallible carve API. It panics loudly.
 
-```rust
+```rust,ignore
 // Internal primitive (pub(crate)) — shown for illustration, not callable from user code.
 let vm = VmReservation::reserve(64 * 1024 * 1024); // address space only on syscall arms
 let _base = vm.base();                              // write-once, stable for the lifetime
 ```
 
 **Complexity**: O(1) — one reservation syscall.
-**Rounding**: up to `COMMIT_GRANULE` (64 KiB), *not* a 64-byte cache line. See [vm.rs:109-180](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/vm.rs#L109-L180) and [constants.rs:7](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/constants.rs#L7).
+**Rounding**: up to `COMMIT_GRANULE` (64 KiB), *not* a 64-byte cache line. See [vm.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_memory/src/vm.rs) and [boyko_memory/src/constants.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_memory/src/constants.rs).
 
 ### `VmReservation::commit(old, new)`
 
-Makes the byte range `[old, new)` readable/writable and zero-filled (`VirtualAlloc(MEM_COMMIT)` / `mprotect(PROT_READ|PROT_WRITE)`). It is `#[cold]` — only reached on growth — and requires granule-aligned, in-bounds ranges with `new > old` (all debug-asserted); committing strictly forward of the previous frontier is a caller contract, not an assert. It never frees; the model only ever commits forward. See [vm.rs:199-260](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/vm.rs#L199-L260).
+Makes the byte range `[old, new)` readable/writable and zero-filled (`VirtualAlloc(MEM_COMMIT)` / `mprotect(PROT_READ|PROT_WRITE)`). It is `#[cold]` — only reached on growth — and requires granule-aligned, in-bounds ranges with `new > old` (all debug-asserted); committing strictly forward of the previous frontier is a caller contract, not an assert. It never frees; the model only ever commits forward. See [vm.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_memory/src/vm.rs).
 
 ### `ComponentPool::grow_rows(n)`
 
@@ -92,7 +92,7 @@ step = clamp(data_committed, 64 KiB, 64 MiB).max(needed - data_committed)
 
 The data sub-region and **both** tick sub-regions commit in lockstep. The pool's base never moves, so previously handed-out pointers stay valid.
 
-```rust
+```rust,ignore
 // What actually happens on append (illustrative; grow_rows is pub(crate)):
 // if self.len >= self.committed_rows && !self.grow_rows(self.len + 1) {
 //     return None; // reserve ceiling exhausted
@@ -102,7 +102,7 @@ The data sub-region and **both** tick sub-regions commit in lockstep. The pool's
 **Complexity**: O(1) in live rows — one (rare) commit syscall, zero bytes copied.
 **Branching**: the warm path is a single `len >= committed_rows` compare; the commit is `#[cold]`.
 
-See [component_pool.rs:494-585](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs#L494-L585), the doubling policy [`pool_commit_step`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/constants.rs#L312), and the slab bounds [constants.rs:90-97](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/constants.rs#L90-L97).
+See [component_pool.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/component_pool.rs), the doubling policy [`pool_commit_step`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/constants.rs), and the slab bounds [boyko_memory/src/constants.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_memory/src/constants.rs).
 
 ```mermaid
 sequenceDiagram
@@ -125,7 +125,7 @@ sequenceDiagram
 
 `ComponentPool` and its constructors are public, but **users do not build pools directly**. A pool requires its component to be registered in the `ComponentRegistry` first, and that wiring is done by the engine: you spawn entities through `EcsMaster` / the `App` facade, and the engine creates and grows the right pools for you.
 
-```rust
+```rust,ignore
 use boyko_ecs::prelude::*;
 
 #[derive(Component)]
@@ -138,16 +138,16 @@ let mut world = EcsMaster::new();
 
 For the curious, the internal constructors are:
 
-- `ComponentPool::new(component_id, reserve_rows)` — explicit row ceiling, exactly as given ([component_pool.rs:249](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs#L249)).
-- `ComponentPool::with_default_sizes(component_id)` — byte-targeted, row-clamped ceiling: `clamp(POOL_TARGET_DATA_BYTES / stride, POOL_MIN_ROWS, POOL_MAX_ROWS)` ([component_pool.rs:429](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs#L429)).
+- `ComponentPool::new(component_id, reserve_rows)` — explicit row ceiling, exactly as given ([component_pool.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/component_pool.rs)).
+- `ComponentPool::with_default_sizes(component_id)` — byte-targeted, row-clamped ceiling: `clamp(POOL_TARGET_DATA_BYTES / stride, POOL_MIN_ROWS, POOL_MAX_ROWS)` ([component_pool.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/component_pool.rs)).
 
-On the 64-bit syscall arms the default reservation targets **1 GiB** of data address space per pool (`POOL_TARGET_DATA_BYTES`, [constants.rs:47](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/constants.rs#L47)) — virtual address space only, with no commit charge until rows are actually used.
+On the 64-bit syscall arms the default reservation targets **1 GiB** of data address space per pool (`POOL_TARGET_DATA_BYTES`, [constants.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/constants.rs)) — virtual address space only, with no commit charge until rows are actually used.
 
 ## Concurrency
 
 `VmReservation` is `!Send` and `!Sync` via its `NonNull` base. It uses **no** `UnsafeCell`: `commit` takes `&self` only so that a chunk-stable column can grow without an exclusive borrow, but exclusivity is supplied by the *owner*. For example, `EntityMaster` carries its own `unsafe impl Send` plus a documented "no mid-flight realloc" argument (the base never moves, so a worker can read committed rows while the owner holds the exclusive growth path).
 
-The per-row tick columns inside a pool *do* use `UnsafeCell<Tick>` to permit shared-`&self` reads alongside the scheduler's per-`(archetype, component)` exclusive writes — but that is a change-detection concern, not the VM primitive. See [vm.rs:80-97](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/vm.rs#L80-L97).
+The per-row tick columns inside a pool *do* use `UnsafeCell<Tick>` to permit shared-`&self` reads alongside the scheduler's per-`(archetype, component)` exclusive writes — but that is a change-detection concern, not the VM primitive. See [vm.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_memory/src/vm.rs).
 
 ## Invariants
 
@@ -159,7 +159,7 @@ The per-row tick columns inside a pool *do* use `UnsafeCell<Tick>` to permit sha
 
 ## Drop and release
 
-Each `VmReservation` implements `Drop` and releases its **entire** reservation with the deallocator matching the acquisition arm: `VirtualFree(MEM_RELEASE)` on Windows, `munmap` on Unix, `dealloc` on the fallback arm. A `ComponentPool`'s `Host` backing owns the reservation, so the pool releases its memory when it is dropped (after running per-row `drop_fn`s on live rows). Memory *is* returned to the OS when the world tears down. See [vm.rs:263-298](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/vm.rs#L263-L298).
+Each `VmReservation` implements `Drop` and releases its **entire** reservation with the deallocator matching the acquisition arm: `VirtualFree(MEM_RELEASE)` on Windows, `munmap` on Unix, `dealloc` on the fallback arm. A `ComponentPool`'s `Host` backing owns the reservation, so the pool releases its memory when it is dropped (after running per-row `drop_fn`s on live rows). Memory *is* returned to the OS when the world tears down. See [vm.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_memory/src/vm.rs).
 
 ## Performance characteristics
 
@@ -170,7 +170,7 @@ Each `VmReservation` implements `Drop` and releases its **entire** reservation w
 | Reserve (`reserve`) | O(1) | One syscall at construction; address space only |
 | Address row `i` | O(1) | `buffer + i * stride` (no per-row cache) |
 
-Measured (vs Bevy, [PHASE-XI-RESULTS.md](https://github.com/bluesteelll/boyko-engine/blob/ecs/docs/PHASE-XI-RESULTS.md); see [FEATURE_MAP.md:619](https://github.com/bluesteelll/boyko-engine/blob/ecs/docs/FEATURE_MAP.md)):
+Measured (vs Bevy, [PHASE-XI-RESULTS.md](https://github.com/bluesteelll/boyko-engine/blob/master/docs/archive/PHASE-XI-RESULTS.md); see [FEATURE_MAP.md](https://github.com/bluesteelll/boyko-engine/blob/master/docs/FEATURE_MAP.md)):
 
 - **1M-entity single-archetype ramp: ~2.24× faster** — geometric commits beat the realloc-doubling chain.
 - **Worst per-batch growth spike: ~0.022×** — an address-stable commit replaces a realloc-memcpy of the whole column.
@@ -183,11 +183,11 @@ Measured (vs Bevy, [PHASE-XI-RESULTS.md](https://github.com/bluesteelll/boyko-en
 
 ## Source
 
-- VM primitive: [crates/boyko_ecs/src/ecs/memory/vm.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/vm.rs)
-- Component pool: [crates/boyko_ecs/src/ecs/memory/component_pool.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs)
-- Entity-metadata store: [crates/boyko_ecs/src/ecs/core/entity/inland_store.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/inland_store.rs)
-- Sizing constants: [crates/boyko_ecs/src/ecs/constants.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/constants.rs)
-- Alignment helper `align_up(capacity, cache_line_size)`: [crates/boyko_ecs/src/ecs/memory/utils.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/utils.rs#L3)
+- VM primitive: [crates/boyko_memory/src/vm.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_memory/src/vm.rs)
+- Component pool: [crates/boyko_ecs/src/ecs/memory/component_pool.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/component_pool.rs)
+- Entity-metadata store: [crates/boyko_ecs/src/ecs/core/entity/inland_store.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/inland_store.rs)
+- Sizing constants: [crates/boyko_ecs/src/ecs/constants.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/constants.rs)
+- Alignment helper `align_up(capacity, cache_line_size)`: [crates/boyko_memory/src/utils.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_memory/src/utils.rs)
 
 ## See also
 

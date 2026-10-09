@@ -68,7 +68,7 @@ Two types form the public surface:
   `ScheduleBuilder::build`. Mutable; its internal scratch state advances
   per frame.
 
-A third type — [`SystemConfig`](#systemconfig) — is the value returned
+A third type — [`SystemConfig`](#systemconfig-fluent-api) — is the value returned
 from `add_system(...)`. It carries the `.before`, `.after`, `.chain`,
 `.in_set`, `.before_set`, `.after_set`, `.run_if`, and `.gpu` fluent
 hints, plus `.key()` to capture the system's `SystemKey` for use in a
@@ -304,12 +304,12 @@ owner's direct API, or the apply window where the dispatcher holds
 `&mut EcsMaster` and SCH7 guarantees zero workers in flight), the `&mut`
 exclusivity **is** the guard. The commit syscalls are not global-allocator
 calls, so they need no separate allocation flag
-([`component_pool.rs:2023`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs#L2023)).
+([`component_pool.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/component_pool.rs)).
 
 What survives from the old discipline is a thread-local **context flag**.
 The dispatcher wraps every system body in
 `boyko_threadpool::InSystemRunGuard::enter()`
-([`schedule.rs:1239`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs#L1239)),
+([`executor_scratch.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/executor_scratch.rs)),
 and context-restricted paths `debug_assert!(boyko_threadpool::is_in_system_run())`
 (or its negation) to catch misuse:
 
@@ -334,7 +334,7 @@ The event dispatcher reserves one lane per worker plus one lane for the
 dispatcher. Worker bodies emit events to their own lane; the dispatcher
 emits during the apply window. The lane count is the `thread_count`
 passed to `EventConfig::default_for(thread_count: u32) -> EcsResult<Self>`
-([`event_config.rs:66`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/events/event_config.rs#L66)) —
+([`event_config.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/events/event_config.rs)) —
 sized to cover every worker plus the dispatcher lane.
 
 User code calls `EventDispatcher::send_event::<E>(event) -> EcsResult<()>`
@@ -442,7 +442,7 @@ Phase 9 is the execution core. Later phases extend the **same**
 
 ## Further reading
 
-- `docs/PHASE-9-PARALLEL-SCHEDULER-PLAN.md` — the architectural plan
+- `docs/archive/PHASE-9-PARALLEL-SCHEDULER-PLAN.md` — the architectural plan
   with full §2 invariants (SCH1-15, SEND1-3, EVT1-4, ALLOC1-6,
   EXC1-2, PAR1-9, CQ-SEND1-2) and the §13 test matrix.
 - `crates/boyko_threadpool/` — the underlying work-stealing pool. Not

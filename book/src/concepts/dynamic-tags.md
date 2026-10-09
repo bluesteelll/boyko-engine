@@ -2,8 +2,6 @@
 
 > A dynamic tag is a tag minted at runtime from a string name — no Rust type required.
 
-*(Branch: `ecs`, Phase 22.)*
-
 ## What they are for
 
 Static [tags](tags.md) are Rust types, fixed at compile time. Dynamic tags
@@ -191,4 +189,4 @@ walk that raises the bits on existing archetypes.
 
 - [Tags](tags.md) — the static-tag model, the 8 B/row rationale, change detection
 - [Storage Trade-offs: Tags, Churn, and Fragmentation](../architecture/storage-tradeoffs.md) — when a tag is the wrong tool
-- Source: [`component_registry.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/component_registry.rs) (`TagId`, the mint protocol, `register_hooks_by_id`), [`tag_api.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/tag_api.rs) (`register_tag` / `add_tag` / `remove_tag` / `has_tag`), [`tag_terms.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/tag_terms.rs) (query terms)
+- Source: [`component_registry/`](https://github.com/bluesteelll/boyko-engine/tree/master/crates/boyko_ecs/src/ecs/core/component/component_registry) (`TagId`, the mint protocol, `register_hooks_by_id`), [`tag_api.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/tag_api.rs) (`register_tag` / `add_tag` / `remove_tag` / `has_tag`), [`tag_terms.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/tag_terms.rs) (query terms)

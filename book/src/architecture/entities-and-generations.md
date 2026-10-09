@@ -2,8 +2,6 @@
 
 > An entity is a 12-byte `{ id, generation }` handle. Behind it sits an address-stable slab that recycles ids, defends stale handles with a generation counter, and turns `get_component` into a single pointer dereference — no sparse-map indirection.
 
-*(Branch: `ecs`.)*
-
 The [Entities](../concepts/entities.md) concept page is the "how do I use it" view. This
 page is the layer below: how the engine *allocates* and *recycles* entity ids, why the
 generation counter exists, and how the entity → component-row lookup is made into a direct
@@ -17,7 +15,7 @@ indirection from the hot read path.
 
 ## The handle
 
-An [`Entity`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity.rs#L5)
+An [`Entity`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity.rs)
 is two fields and nothing else:
 
 ```rust,ignore
@@ -29,7 +27,7 @@ fn inspect(entity: Entity) {
 }
 ```
 
-- **`id: EntityId`** — a [`#[repr(transparent)]`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/identifiers/primitives.rs#L56)
+- **`id: EntityId`** — a [`#[repr(transparent)]`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/identifiers/primitives.rs)
   newtype over `usize`. It is the *slot index* into the entity store, so a lookup is a
   direct index, never a hash.
 - **`generation: u32`** — a counter bumped every time a slot is reused. It is the half
@@ -42,7 +40,7 @@ rule is the whole use-after-despawn defence — covered under
 ## Allocation and recycling
 
 All entity lifecycle goes through
-[`EntityMaster`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs#L44),
+[`EntityMaster`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs),
 which since Phase X.D is just four fields, ordered `#[repr(C)]` so the hot scalar cluster
 sits on one cache line:
 
@@ -55,7 +53,7 @@ sits on one cache line:
 
 ### Allocate
 
-[`allocate_entity`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs#L124)
+[`allocate_entity`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
 returns a recycled id if one is waiting, otherwise mints a fresh one:
 
 ```mermaid
@@ -77,7 +75,7 @@ established later by the scheduler's apply-window barrier.
 
 ### Deallocate
 
-[`deallocate_entity`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs#L360)
+[`deallocate_entity`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
 is where the generation gets bumped:
 
 1. Reject the call if the handle is stale (generation mismatch) or its slot is already dead.
@@ -126,14 +124,14 @@ through the entity master.
 
 What replaced them is a single `usize`: `live_count`, bumped on register and decremented on
 deallocate. `entity_count()` is now an O(1) field read. The trade-off is that
-[`iter_entities`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs#L447)
+[`iter_entities`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs)
 became an O(capacity) scan of the fast store that skips dead (`is_null`) slots — accepted,
 because it is a cold inspection/test path and the hot iteration path was never here.
 
 ## The location record: EntityInland
 
 Each slot in the fast store is one
-[`EntityInland`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_inland.rs#L24):
+[`EntityInland`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_inland.rs):
 a 16-byte `#[repr(C)]` record (size/align/offsets are const-asserted) that says *exactly
 where this entity's row lives*.
 
@@ -164,7 +162,7 @@ OS-zeroed page already reads as a sea of dead slots, so growth never has to writ
 ## The fast read path
 
 Here is the payoff. A typed
-[`get_component::<T>(entity)`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L2139)
+[`get_component::<T>(entity)`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs)
 resolves to a short, branch-light pointer chase:
 
 ```mermaid
@@ -202,7 +200,7 @@ change-detection-aware [`Mut<T>`](../change_detection.md), and `has_entity` /
 ## InlandStore: address-stable growth
 
 The fast store is an
-[`InlandStore`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/inland_store.rs#L1),
+[`InlandStore`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/inland_store.rs),
 not a `Vec`. It is one contiguous **virtual-address reservation**
 ([`VmReservation`](../memory/arena.md), `DEFAULT_INLAND_RESERVE` = 1 GiB on 64-bit),
 committed lazily in geometric slabs (256 KiB → 16 MiB) as ids grow.
@@ -278,7 +276,7 @@ budget rather than an accident.
   keep addresses stable.
 - [Change detection](../change_detection.md) — the per-row ticks `get_component_mut`'s
   `Mut<T>` interacts with.
-- Source: [`entity.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity.rs#L5),
-  [`entity_master.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs#L44),
-  [`entity_inland.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/entity_inland.rs#L24),
-  [`inland_store.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/entity/inland_store.rs#L1).
+- Source: [`entity.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity.rs),
+  [`entity_master.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_master.rs),
+  [`entity_inland.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/entity_inland.rs),
+  [`inland_store.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/entity/inland_store.rs).

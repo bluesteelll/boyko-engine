@@ -54,13 +54,13 @@ flowchart TD
 ```
 
 The single source is
-[`crates/boyko_shaderdsl/src/field.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_shaderdsl/src/field.rs).
+[`crates/boyko_shaderdsl/src/field.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_shaderdsl/src/field.rs).
 The frozen GPU reference it reproduces is
-[`crates/boyko_rhi_vulkan/shaders/sdf_field.hlsli`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/shaders/sdf_field.hlsli).
+[`crates/boyko_rhi_vulkan/shaders/sdf_field.hlsli`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/shaders/sdf_field.hlsli).
 
 ## The `FieldScalar` backend
 
-[`scalar::FieldScalar`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_shaderdsl/src/scalar.rs#L36)
+[`scalar::FieldScalar`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_shaderdsl/src/scalar.rs)
 is the scalar abstraction the field body is written against. It exposes *exactly*
 the op-set the SDF edit-list field needs — no general-purpose math library, just
 the ops the frozen field folds: `add`/`sub`/`mul`/`div`/`neg`, `min`/`max`,
@@ -97,7 +97,7 @@ collapse to the hand-written code on the Eval side — the zero-cost guarantee.
 
 ### The Eval backend (`S = f32`)
 
-[`impl FieldScalar for f32`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_shaderdsl/src/scalar.rs#L214)
+[`impl FieldScalar for f32`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_shaderdsl/src/scalar.rs)
 is a literal byte-mirror of the frozen field arithmetic. `add` is `self + rhs`;
 `min` is `f32::min`; `clamp01` is `self.clamp(0.0, 1.0)`; `lerp` is
 `self + (a - self) * h` — the exact two-rounding form the frozen `smin` writes.
@@ -115,7 +115,7 @@ physics field are literally this code.
 
 ### The Emit backend (`S = Emit`)
 
-[`emit::Emit`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_shaderdsl/src/emit.rs#L372)
+[`emit::Emit`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_shaderdsl/src/emit/mod.rs)
 is a `#[repr(transparent)]` `u32` — a handle into a build-time SSA arena. Each
 `FieldScalar` op pushes one `Node` (e.g. `Node::Add(a, b)`, `Node::Lerp(s, a, h)`)
 and returns its arena index, so the arena is a topologically-ordered DAG (a node
@@ -140,14 +140,14 @@ cargo run -p boyko_shaderdsl --features emit --bin emit_field
 ```
 
 The control-flow spans are traced over a second backend,
-[`cf::Cf`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_shaderdsl/src/cf.rs),
+[`cf::Cf`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_shaderdsl/src/cf.rs),
 which records loops, breaks, continues, and early returns the same way
 `FieldScalar` records arithmetic: `EvalCf` runs them on the CPU, `EmitCf` prints
 them as HLSL `[loop]`/`[unroll]` control flow. The host-side marchers stay
 hand-written behind that seam (see [What is in scope](#what-is-in-scope--and-what-is-not-honesty)).
 
 For example, the generic `smin`
-([`field::smin`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_shaderdsl/src/field.rs#L76)) —
+([`field::smin`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_shaderdsl/src/field.rs)) —
 
 ```rust,ignore
 // hh = clamp(0.5 + 0.5 * (b - a) / k, 0, 1)
@@ -195,7 +195,7 @@ The CI-enforced generated surface spans both stages:
   `select_level`, and `m2_brick_span`.
 
 Each of those is asserted against the committed shader by its own drift test in
-[`sdf_field_edsl_sync.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/tests/sdf_field_edsl_sync.rs)
+[`sdf_field_edsl_sync.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/tests/sdf_field_edsl_sync.rs)
 (the `*_matches_edsl_emit` tests).
 
 Some deliberate exclusions remain:
@@ -237,13 +237,13 @@ flowchart LR
 ```
 
 1. **Eval byte-identity** —
-   [`tests/eval_byte_identity.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_shaderdsl/tests/eval_byte_identity.rs)
+   [`tests/eval_byte_identity.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_shaderdsl/tests/eval_byte_identity.rs)
    snapshots the pre-refactor `boyko_sdf_math` field verbatim and asserts the
    generic `field::sdf_field_body::<f32>` is byte-identical to it across empty/
    full/over-cap edit lists, every op, hard and smooth blends, and non-finite
    inputs. It fails on a one-ULP divergence.
 2. **Emit text-sync** —
-   [`crates/boyko_rhi_vulkan/tests/sdf_field_edsl_sync.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/tests/sdf_field_edsl_sync.rs)
+   [`crates/boyko_rhi_vulkan/tests/sdf_field_edsl_sync.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/tests/sdf_field_edsl_sync.rs)
    re-runs the generator and asserts the committed shaders still contain each
    generated body verbatim — one `*_matches_edsl_emit` test per leaf, covering the
    `smin`/`smax` field math, the `sdf_normal` leaf, the brick decode/cubic leaves,
@@ -262,7 +262,7 @@ generator.
 
 The crate is structured so a physics build never pulls in codegen machinery. Two
 features, both off by default
-([`Cargo.toml`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_shaderdsl/Cargo.toml)):
+([`Cargo.toml`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_shaderdsl/Cargo.toml)):
 
 - **`nightly`** — the Eval path (`scalar` + `field`) is the physics leaf and is
   `#![no_std]`-clean. The one op stable `core` lacks is `sqrt`. With `nightly`

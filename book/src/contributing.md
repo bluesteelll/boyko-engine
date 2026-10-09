@@ -62,7 +62,7 @@ This is not a typical Rust crate. The engine targets ultimate performance, so:
 
 Every `unsafe` block requires a `// SAFETY:` comment explaining the invariants:
 
-```rust
+```rust,ignore
 // SAFETY: `index` is bounds-checked above. The slot was previously written
 // by `add()` and the type `T` was constructed from a valid value.
 unsafe { Some(&*self.data.as_ptr().add(index)) }
@@ -163,7 +163,7 @@ Each duty is deliberately separated so that no single pass both proposes and rub
 
 The workspace is a single unified engine: every system (physics, render, input, lighting, UI) is a first-class part of `boyko_ecs` — components and systems on the ECS's own storage, never a subsystem glued on the side with its own data structures.
 
-```
+```text
 boyko-engine/
 ├── Cargo.toml                   # workspace (18 members) + [profile.bench] + thin binary
 ├── src/main.rs                  # entry point (library-shaped project)

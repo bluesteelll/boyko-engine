@@ -239,10 +239,10 @@ across the boundary.
 - [Entities](../concepts/entities.md) — the entity model
 - [Scheduler](../scheduler.md) — how a `Schedule` runs systems
 - [Storage trade-offs](../architecture/storage-tradeoffs.md) — per-pool virtual-memory reservations
-- Source: [`ecs_master.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L148), [`primitives.rs` (`WorldId`)](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/identifiers/primitives.rs#L106), [`schedule.rs` (run gate)](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs#L230)
+- Source: [`ecs_master.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs), [`primitives.rs` (`WorldId`)](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/identifiers/primitives.rs), [`schedule.rs` (run gate)](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/schedule/schedule.rs)
 
-[`EcsMaster`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L148
-[`WorldId`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/identifiers/primitives.rs#L106
+[`EcsMaster`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs
+[`WorldId`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/identifiers/primitives.rs
 [`App`]: ./plugins.md
-[`App::with_pool`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/app/app.rs#L195
-[`ThreadPool`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_threadpool/src/thread_pool.rs
+[`App::with_pool`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/app/app.rs
+[`ThreadPool`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_threadpool/src/thread_pool.rs

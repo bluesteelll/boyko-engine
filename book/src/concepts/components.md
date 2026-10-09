@@ -6,8 +6,6 @@ its identity, and its layout. If you have written Bevy components, these will
 feel immediately familiar; the differences are about *where the bytes live*, not
 about the API shape.
 
-*(Branch: `ecs`.)*
-
 ## What a component is
 
 An [entity](entities.md) is just an id. All of its actual state lives in
@@ -81,7 +79,7 @@ struct Frozen;
 
 There is no attribute and no special trait for this. Tag-ness is detected purely
 from `size_of::<T>() == 0` at registration — internally
-[`ComponentLayout::is_zst`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/component_registry.rs#L148)
+[`ComponentLayout::is_zst`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs)
 is just `self.size == 0`. A zero-byte component gets a *tick-only* pool (8 bytes
 per row, no data region) so that `Added<Player>` / `Changed<Player>` still work,
 but otherwise attaching it only flips the entity's archetype signature bit and
@@ -163,7 +161,7 @@ const _: () = {
 
 Storage is **Struct-of-Arrays, one column per component type**. Each component
 type owns its own
-[`ComponentPool`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs#L147)
+[`ComponentPool`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/component_pool.rs)
 inside an archetype — a single contiguous, SIMD-aligned buffer holding every
 instance of *that* component for entities in *that* archetype, back to back.
 Iterating `Position` does not drag `Velocity` or `Health` into cache; each query
@@ -248,6 +246,6 @@ on [Hooks and observers](hooks-and-observers.md).
 - [Tags](tags.md) — zero-sized marker components, in depth.
 - [Hooks and observers](hooks-and-observers.md) — react to component add/remove.
 - [Storage trade-offs](../architecture/storage-tradeoffs.md) — why SoA columns.
-- Source: [`component.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/component.rs),
-  [`component_registry.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/component_registry.rs),
-  derive in [`boyko_macros/src/lib.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_macros/src/lib.rs).
+- Source: [`component.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/component.rs),
+  [`component_registry/`](https://github.com/bluesteelll/boyko-engine/tree/master/crates/boyko_ecs/src/ecs/core/component/component_registry),
+  derive in [`boyko_macros/src/lib.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_macros/src/lib.rs).

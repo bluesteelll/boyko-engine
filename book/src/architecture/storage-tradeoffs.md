@@ -2,8 +2,6 @@
 
 > Tags are free to carry and free to query — but not free to toggle, and not free to combine without limit. This page is the cost model, and the storage-kind decision matrix.
 
-*(Branch: `ecs`, EnableTag + Dense components.)*
-
 ## Problem
 
 Every game has boolean-ish state: *frozen*, *selected*, *poisoned*, *dirty*.
@@ -28,7 +26,7 @@ the axis that decides it is toggle frequency.
 
 Tags are not the only place storage kind matters. The kernel classifies every
 component id into a `StorageKind` with **three** members
-([`component_registry.rs:397`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/component_registry.rs#L397)):
+([`component_registry/mod.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs)):
 
 | `StorageKind` | In archetype signature? | Backing store |
 |---------------|-------------------------|---------------|
@@ -38,7 +36,7 @@ component id into a `StorageKind` with **three** members
 
 Only `Table` is a *signature* kind: `is_signature_storage` returns `true` for
 `Table` and `false` for both `Bitset` and `Dense`
-([`component_registry.rs:428`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/component_registry.rs#L428)).
+([`component_registry/mod.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs)).
 That single predicate is why neither bitset tags nor dense components ever mint
 an archetype.
 
@@ -98,11 +96,11 @@ Boyko's hard ceiling is `MAX_ARCHETYPES = 1024`, and hitting it is a **loud
 failure**, never silent misbehavior. There are two surfaces, both carrying the
 count: the infallible creation path trips a release-active
 `assert!(self.count < MAX_ARCHETYPES, ...)`
-([`archetype_bundle.rs:654`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs#L654)),
+([`archetype_bundle.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs)),
 while the fallible path returns `Err(BundleFullError)`
-([`archetype_bundle.rs:433`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs#L433))
+([`archetype_bundle.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs))
 whose `Display` reads `ArchetypeBundle is full (MAX_ARCHETYPES = {…})`
-([`archetype_bundle.rs:71`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs#L71)).
+([`archetype_bundle.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs)).
 The practical guidance:
 
 - Budget tags per entity *kind*, not per idea. Ten orthogonal toggleable tags
@@ -228,4 +226,4 @@ in v1 (no worker is live during a toggle). Queries read the bit **shared**
 - [Tags](../concepts/tags.md) — the 8 B/row cost model and change detection on tags
 - [Dynamic Tags](../concepts/dynamic-tags.md) — runtime tags, budgets, query terms
 - [Design Principles](principles.md)
-- Source: [`constants.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/constants.rs) (`POOL_MAX_ROWS`, layout math), [`component_pool.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs) (tick-only pools, reserve/commit growth)
+- Source: [`constants.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/constants.rs) (`POOL_MAX_ROWS`, layout math), [`component_pool.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/component_pool.rs) (tick-only pools, reserve/commit growth)

@@ -18,8 +18,8 @@ allocation, no `dyn` dispatch, and no atomic beyond `Schedule::run` itself — a
 the plugin / tuple / `TypeId` machinery is cold, setup-only code. The frame
 driver lowers to the `Schedule::run`s plus a handful of predictable branches.
 
-Source: [`core/app/app.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/app/app.rs#L113),
-[`core/app/plugin.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/app/plugin.rs#L27).
+Source: [`core/app/app.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/app/app.rs),
+[`core/app/plugin.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/app/plugin.rs).
 
 ## The prelude
 
@@ -50,7 +50,7 @@ needs the **trait** in scope — that comes from the prelude — not just the de
 ## Two phases: config, then run
 
 An `App`'s lifetime has two phases, separated by exactly one call to
-[`finish()`](#finish):
+[`finish()`](#two-phases-config-then-run):
 
 - **Config phase** — `add_systems`, `insert_resource`, `init_state`,
   `add_plugins`, `set_fixed_hz`, `add_startup_system`, …
@@ -347,7 +347,7 @@ once-only `build` rule apply uniformly across the whole tree.
 
 ## The frame driver
 
-A frame is one call to [`update_with_delta(raw)`](#frame-functions). It runs a
+A frame is one call to [`update_with_delta(raw)`](#running-the-app). It runs a
 fixed, documented order:
 
 ```mermaid
@@ -506,5 +506,5 @@ them back into one deterministic loop.
 - [Systems](../concepts/systems.md) — what a system is and how params work.
 - [States](../scheduling/states.md) — `init_state`, `on_enter`, and ordered
   setup.
-- Source: [`core/app/app.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/app/app.rs),
-  [`core/app/plugins.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/app/plugins.rs).
+- Source: [`core/app/app.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/app/app.rs),
+  [`core/app/plugins.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/app/plugins.rs).

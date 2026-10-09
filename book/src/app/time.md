@@ -20,10 +20,10 @@ Both resources are inserted automatically by [`App::finish`](plugins.md) (and th
 that owns its own frame loop inserts them by hand — see
 [Driving the clock without an App](#driving-the-clock-without-an-app) below.
 
-> Source: [`core/time/`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/time/mod.rs) —
-> [`time.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/time/time.rs),
-> [`fixed_time.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/time/fixed_time.rs),
-> [`fixed_loop.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/time/fixed_loop.rs).
+> Source: [`core/time/`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/time/mod.rs) —
+> [`time.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/time/time.rs),
+> [`fixed_time.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/time/fixed_time.rs),
+> [`fixed_loop.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/time/fixed_loop.rs).
 
 ## The two clocks at a glance
 
@@ -212,7 +212,7 @@ flowchart TD
     G --> H
 ```
 
-Step ④ is the catch-up loop. [`fixed_advance`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/time/fixed_loop.rs#L51)
+Step ④ is the catch-up loop. [`fixed_advance`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/time/fixed_loop.rs)
 adds this frame's *virtual* delta to `FixedTime::overstep`, then repeatedly
 expends one whole timestep — running the Fixed schedule once per expense — until
 the accumulator drops below one step. So the Fixed schedule can run:

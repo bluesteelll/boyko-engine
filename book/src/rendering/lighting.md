@@ -37,7 +37,7 @@ Three forces shape the lighting layer:
 ## The four light types
 
 All four are `#[repr(C)]` PODs defined in
-[`light.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/light.rs).
+[`light.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/light.rs).
 Radiometric values are **LINEAR**.
 
 | Type | Role | Carries | Resolve rung |
@@ -101,7 +101,7 @@ If a light has a `GlobalTransform`, `light_reconcile` derives its world `positio
 pose. The write is doubly gated: by `Changed<GlobalTransform>` on the query, and by a
 bit-exact per-lane compare — a static light writes nothing and re-triggers no rebuild.
 A light without a `GlobalTransform` keeps its self-contained pose. Wiring lives in
-[`light_reconcile.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/light_reconcile.rs).
+[`light_reconcile.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/light_reconcile.rs).
 
 ## The GPU light table
 
@@ -225,11 +225,11 @@ component too, so one registration subsumes both component-remove and whole-enti
 ## The deferred resolve and the rung split
 
 Lighting is resolved in the deferred pass
-([`deferred_pbr.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/shaders/deferred_pbr.hlsl)),
+([`deferred_pbr.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/shaders/deferred_pbr.hlsl)),
 a Cook-Torrance / GGX shader (D_GGX + height-correlated Smith visibility + Schlick Fresnel +
 Lambert diffuse + a Karis analytic environment-BRDF for the sky term). It reads the light
 table through the shared decode in
-[`light_table.hlsli`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/shaders/light_table.hlsli).
+[`light_table.hlsli`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/shaders/light_table.hlsli).
 
 The split exists because **directional and sky lights need no per-pixel surface position**,
 while **point and spot lights do**:
@@ -262,7 +262,7 @@ the same field the geometry does — no second geometry representation, no shado
 
 Looping every light for every pixel is O(all lights). L1 replaces that with O(lights in the
 pixel's cluster), typically a handful. The cull is implemented in
-[`cluster_cull.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/shaders/cluster_cull.hlsl)
+[`cluster_cull.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/shaders/cluster_cull.hlsl)
 as a single compute dispatch — one invocation per froxel.
 
 The froxel grid is **16×9×24 = 3456** cells (`CLUSTER_DIM_X/Y/Z`), with **exponential-Z**
@@ -352,7 +352,7 @@ auto-exposure / tonemapping pipeline — those are out of scope for L0/L1.
 | 0%-gate | single-default-light == the previous compiled-in constant, byte-identical |
 
 Targets and design rationale are documented in
-[`LIGHTING-L0-L1-PLAN.md`](https://github.com/bluesteelll/boyko-engine/blob/ecs/docs/LIGHTING-L0-L1-PLAN.md).
+[`LIGHTING-PLAN.md`](https://github.com/bluesteelll/boyko-engine/blob/master/docs/LIGHTING-PLAN.md).
 
 ## Status and roadmap
 
@@ -374,7 +374,7 @@ Targets and design rationale are documented in
   cascaded SDF, spatial-hash radiance caches).
 
 The roadmap and the open design questions for L2+ live in
-[`LIGHTING-PLAN.md`](https://github.com/bluesteelll/boyko-engine/blob/ecs/docs/LIGHTING-PLAN.md).
+[`LIGHTING-PLAN.md`](https://github.com/bluesteelll/boyko-engine/blob/master/docs/LIGHTING-PLAN.md).
 
 ## See also
 
@@ -384,7 +384,7 @@ The roadmap and the open design questions for L2+ live in
 - [Enable tags](../concepts/enable-tags.md) — the bitset backend behind `LightEnabled`
 - [Hooks and observers](../concepts/hooks-and-observers.md) — the eviction hook mechanism
 - [Required components](../concepts/components.md) — the `#[require(Transform, GlobalTransform)]` pose invariant
-- Source: [`light.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/light.rs),
-  [`light_system.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/light_system.rs),
-  [`light_plugin.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/light_plugin.rs),
-  [`cluster_cull.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/shaders/cluster_cull.hlsl)
+- Source: [`light.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/light.rs),
+  [`light_system.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/light_system.rs),
+  [`light_plugin.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/light_plugin.rs),
+  [`cluster_cull.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/shaders/cluster_cull.hlsl)

@@ -40,7 +40,7 @@ smooth-max blend radius; `0.0` = a hard boolean). The list is folded in order: e
 seeds the accumulated distance, each later edit `combine`s into it.
 
 The list capacity is fixed at compile time:
-[`MAX_SDF_EDITS = 16`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_sdf_math/src/lib.rs#L101).
+[`MAX_SDF_EDITS = 16`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_sdf_math/src/lib.rs).
 This cap is what bounds the brute-force cost today (see below).
 
 The authority that owns the edits is [`SdfEditField`] — a `#[repr(C)]` block whose hot
@@ -88,10 +88,10 @@ field-fold hot path never reads.
 ## The marcher
 
 The production marcher is the compute shader
-[`sdf_gbuffer_composite.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/shaders/sdf_gbuffer_composite.hlsl)
+[`sdf_gbuffer_composite.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/shaders/sdf_gbuffer_composite.hlsl)
 — **one compute thread per pixel**, writing an offscreen MRT G-buffer (albedo, normal,
 material, and a view-`t` lane). It pulls the field math from the shared header
-[`sdf_field.hlsli`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/shaders/sdf_field.hlsli),
+[`sdf_field.hlsli`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/shaders/sdf_field.hlsli),
 the single field gateway for the whole engine.
 
 The per-pixel flow:
@@ -116,7 +116,7 @@ Key facts, all from the shader:
   adaptive empty-space skip. The hit threshold is `EPS = 0.001`, the miss bound
   `T_MAX = 10.0`, the step ceiling `MAX_IT = 128`.
 - **Over-relaxation (Keinert, B1).** The live step is `t += ω·d` with `ω = 1.2`
-  ([`DEFAULT_MARCHER_OMEGA`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/src/compute.rs)),
+  ([`DEFAULT_MARCHER_OMEGA`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/src/compute.rs)),
   with an exact-retreat safeguard so an overshoot falls back to a provably hole-free plain
   re-march. At `ω = 1.0` the loop is textually the frozen plain sphere-trace.
 - **Analytic shadows and AO.** `lighting_flags` gate two consumers: A1 soft shadows
@@ -152,7 +152,7 @@ flowchart LR
 
 The image-based marcher (`sdf_gbuffer_composite.hlsl`) is the production form; it is a
 verbatim derivative of the earlier packed-buffer rung
-([`sdf_depth_composite.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/shaders/sdf_depth_composite.hlsl)),
+([`sdf_depth_composite.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/shaders/sdf_depth_composite.hlsl)),
 which carried depth and pixels inside one structured buffer. The field math is identical
 between them; only the I/O (sampled depth image + storage-image G-buffer vs. packed buffer
 regions) differs.
@@ -172,7 +172,7 @@ A worst-case fully-lit pixel folds the field on the order of ~128 (primary march
 (normal) + up to 128 (A1 shadow) + 5 (A2 AO) times, each over up to `n` edits. This is
 bounded today only because `MAX_SDF_EDITS = 16`. It is a deliberate, documented trade — it
 buys exact CSG and the one shared field — not an oversight. See
-[`docs/SDF-PERF-AUDIT.md`](https://github.com/bluesteelll/boyko-engine/blob/ecs/docs/SDF-PERF-AUDIT.md).
+[`docs/SDF-PERF-AUDIT.md`](https://github.com/bluesteelll/boyko-engine/blob/master/docs/SDF-PERF-AUDIT.md).
 
 | Path | Per-step field cost | Status |
 |------|--------------------|--------|
@@ -188,7 +188,7 @@ buys exact CSG and the one shared field — not an oversight. See
 ### The coarse tile-cull (built but off on screen)
 
 A conservative 1/8-resolution coarse cone-cull pre-pass
-([`sdf_tile_cull.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/shaders/sdf_tile_cull.hlsl))
+([`sdf_tile_cull.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/shaders/sdf_tile_cull.hlsl))
 computes a per-8×8-tile `near_t` / empty flag; the fine marcher can then skip empty tiles
 and seed `t = near_t`. It is built, tested, and golden-proven conservative — but the
 windowed present hard-codes `coarse_enabled = 0`, so on-screen it is currently inactive.
@@ -263,19 +263,19 @@ smooth-max under-report inside the blend band, so the bound holds. Cone-trace co
 - [Lighting](lighting.md) — the deferred resolve that shades the SDF G-buffer.
 - [Physics](../simulation/physics.md) — the CPU narrowphase that samples the same field.
 - [RHI](rhi.md) — the in-house Vulkan layer the marcher runs on.
-- Source: [`sdf_gbuffer_composite.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/shaders/sdf_gbuffer_composite.hlsl),
-  [`sdf_field.hlsli`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/shaders/sdf_field.hlsli),
-  [`boyko_sdf_math`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_sdf_math/src/lib.rs),
-  [`brick.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_sdf_math/src/brick.rs),
-  [`SDF-PERF-AUDIT.md`](https://github.com/bluesteelll/boyko-engine/blob/ecs/docs/SDF-PERF-AUDIT.md).
+- Source: [`sdf_gbuffer_composite.hlsl`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/shaders/sdf_gbuffer_composite.hlsl),
+  [`sdf_field.hlsli`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/shaders/sdf_field.hlsli),
+  [`boyko_sdf_math`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_sdf_math/src/lib.rs),
+  [`brick.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_sdf_math/src/brick.rs),
+  [`SDF-PERF-AUDIT.md`](https://github.com/bluesteelll/boyko-engine/blob/master/docs/SDF-PERF-AUDIT.md).
 
-[`SdfEdit`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_sdf_math/src/lib.rs#L122
-[`SdfEditField`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_sdf_math/src/lib.rs#L285
-[`set_edit`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_sdf_math/src/lib.rs#L445
-[`move_edit`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_sdf_math/src/lib.rs#L462
-[`clear_dirty`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_sdf_math/src/lib.rs#L477
-[`BrickClass`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_sdf_math/src/lib.rs#L313
-[`classify_brick`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_sdf_math/src/brick.rs#L763
-[`build_pointer_grid`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_sdf_math/src/brick.rs#L913
-[`toroidal_slot`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_sdf_math/src/brick.rs#L421
-[`boyko_sdf_math::sdf_edit_list`]: https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_sdf_math/src/lib.rs#L668
+[`SdfEdit`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_sdf_math/src/lib.rs
+[`SdfEditField`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_sdf_math/src/lib.rs
+[`set_edit`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_sdf_math/src/lib.rs
+[`move_edit`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_sdf_math/src/lib.rs
+[`clear_dirty`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_sdf_math/src/lib.rs
+[`BrickClass`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_sdf_math/src/lib.rs
+[`classify_brick`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_sdf_math/src/brick.rs
+[`build_pointer_grid`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_sdf_math/src/brick.rs
+[`toroidal_slot`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_sdf_math/src/brick.rs
+[`boyko_sdf_math::sdf_edit_list`]: https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_sdf_math/src/lib.rs

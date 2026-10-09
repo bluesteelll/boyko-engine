@@ -37,12 +37,12 @@ pub struct Transform {
 pub struct GlobalTransform(pub Affine3A);
 ```
 
-- [`Transform`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/transform.rs#L46)
+- [`Transform`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/transform.rs)
   is **decomposed** (translation / rotation / scale) on purpose: it round-trips
   cleanly through an editor and is cheap to author. It is read scalar by the
   propagation pass (one affine compose per dirty node), not SIMD-loaded, so the
   natural-`f32`-aligned 40-byte layout is correct — no over-padding.
-- [`GlobalTransform`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/transform.rs#L133)
+- [`GlobalTransform`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/transform.rs)
   wraps an [`Affine3A`](math.md) (48 bytes, 16-aligned) so it uploads directly to
   a GPU lane and composes with one affine multiply.
 
@@ -85,9 +85,9 @@ fn spawn_a_pivot(mut commands: Commands) {
 `Transform` has the usual builder helpers — `Transform::IDENTITY`,
 `from_translation`, `from_rotation`, `from_scale` — and `to_affine()` folds it to
 a packed `T · R · S` affine. The crate also ships
-[`StaticProp`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/bundles.rs#L57)
+[`StaticProp`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/bundles.rs)
 (a placed mesh + material) and
-[`CameraRig`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/bundles.rs#L75)
+[`CameraRig`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/bundles.rs)
 as named bundle presets.
 
 ## Parenting
@@ -128,7 +128,7 @@ full surface and the deferred-consistency rules.
 
 ## Propagation: deriving the world pose
 
-The [`propagate_transforms`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/propagation.rs#L208)
+The [`propagate_transforms`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/propagation.rs)
 system is the **sole writer** of `GlobalTransform`. Once per frame it composes
 every entity's world pose from its `Transform` chain along the hierarchy:
 
@@ -175,7 +175,7 @@ move precisely, while a static entity stays tick-silent — see
 
 ### Registering it
 
-The [`TransformPlugin`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/plugin.rs#L45)
+The [`TransformPlugin`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/plugin.rs)
 registers propagation into the `Main` schedule (per frame, after the fixed
 physics schedule advances and before the camera / light / GPU readers). The
 scratch resource is lazily inserted on first run.
@@ -197,9 +197,9 @@ spot (a cold helper that does not consult the cache).
 ## The camera and the view
 
 A camera is an entity carrying a
-[`Camera`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/camera.rs#L97)
+[`Camera`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/camera.rs)
 plus a
-[`Projection`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/camera.rs#L134)
+[`Projection`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/camera.rs)
 and a `GlobalTransform`. `Camera` uses
 `#[require(Transform, GlobalTransform, Projection = ...)]`, so inserting a
 `Camera` alone auto-inserts a pose and a placeholder perspective projection —
@@ -212,14 +212,14 @@ an orthographic camera looking down −Z — there is no `Camera2D`.
 
 Camera selection is **explicit**, never "first wins":
 
-1. an [`ActiveCamera(Option<Entity>)`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/camera.rs#L232)
+1. an [`ActiveCamera(Option<Entity>)`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/camera.rs)
    resource override, if it names a live camera, or
 2. otherwise the **highest-`order`** `Camera` with `is_active` set.
 
 ### `ViewUniform`: the engine's single view
 
 `resolve_active_camera` lives in
-[`CameraPlugin`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/camera_plugin.rs#L26),
+[`CameraPlugin`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/camera_plugin.rs),
 **not** in `TransformPlugin`. When you need the view, add `CameraPlugin`
 *instead of* `TransformPlugin` — it supersedes it by registering propagation
 **and** `resolve_active_camera` together (with the ordering edge). Do not add
@@ -227,10 +227,10 @@ both: that double-registers `propagate_transforms`. A `ViewUniform` consumer
 running on `TransformPlugin` alone never gets a resolved view.
 
 Each frame the
-[`resolve_active_camera`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/camera.rs#L451)
+[`resolve_active_camera`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/camera.rs)
 system (which runs `.after(propagate_transforms)`, so it sees the freshly
 propagated camera pose) derives a
-[`ViewUniform`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/camera.rs#L245)
+[`ViewUniform`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/camera.rs)
 resource from the active camera's `Projection` + `GlobalTransform`. It is the
 engine-owned view the renderer is meant to consume rather than reconstructing its
 own. `ViewUniform` carries **both** forms so each backend reads what it needs:
@@ -258,7 +258,7 @@ non-uniformly-scaled camera trips a `debug_assert!` (free in release).
 
 A rig is **pure state** that derives the camera's `Transform` — keeping motion in
 the caller makes the rig system a deterministic, policy-free kernel. The shipped
-[`OrbitCamera`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/camera.rs#L551)
+[`OrbitCamera`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/camera.rs)
 orbits a `target` on a sphere of `distance`, with `yaw` / `pitch`:
 
 ```rust,ignore
@@ -290,7 +290,7 @@ fn drive_orbit(time: Res<Time>, mut rigs: Query<Mut<OrbitCamera>>) {
 ```
 
 The
-[`orbit_camera_system`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/camera.rs#L649)
+[`orbit_camera_system`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/camera.rs)
 is meant to run `.before(propagate_transforms)`. It does **not** advance
 `yaw` / `pitch` itself — that is your loop. It reads the (clamped) rig fields,
 places the eye on the orbit sphere, builds the rigid look-at world transform, and
@@ -345,6 +345,6 @@ sequenceDiagram
   `GlobalTransform` and `ViewUniform`.
 - [Change Detection](../change_detection.md) — how propagation stays
   zero-overhead on a static scene.
-- Source: [`boyko_scene/src/transform.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/transform.rs),
-  [`propagation.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/propagation.rs),
-  [`camera.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_scene/src/camera.rs).
+- Source: [`boyko_scene/src/transform.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/transform.rs),
+  [`propagation.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/propagation.rs),
+  [`camera.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_scene/src/camera.rs).

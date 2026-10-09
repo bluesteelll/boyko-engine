@@ -2,8 +2,6 @@
 
 > A tag is a zero-sized component: it carries no data, only the fact of its own presence.
 
-*(Branch: `ecs`, Phase 22.)*
-
 ## What a tag is
 
 In an archetype ECS, "which components an entity has" is itself information.
@@ -215,4 +213,4 @@ address-space profile, and when to prefer a data field — see
 - [Dynamic Tags](dynamic-tags.md) — runtime-minted, name-keyed tags without a Rust type
 - [Storage Trade-offs: Tags, Churn, and Fragmentation](../architecture/storage-tradeoffs.md)
 - [Change Detection](../change_detection.md)
-- Source: [`component_pool.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs) (tick-only ZST pools), [`spawn_at_command.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/commands/spawn_at_command.rs)
+- Source: [`component_pool.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/component_pool.rs) (tick-only ZST pools), [`spawn_at_command.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/commands/spawn_at_command.rs)

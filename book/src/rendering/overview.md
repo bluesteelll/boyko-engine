@@ -50,7 +50,7 @@ flowchart TD
 
 ### `boyko_rhi` — the interface
 
-[`boyko_rhi`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi/src/lib.rs)
+[`boyko_rhi`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi/src/lib.rs)
 is the backend-agnostic Render Hardware Interface: an umbrella `RhiApi` trait with
 associated owned-resource types, operational traits (`RhiDevice`, `RhiQueue`,
 `RhiCommandEncoder`), thin enums and descriptors, and a generational handle registry
@@ -66,7 +66,7 @@ does **not** depend on `boyko_ecs`, which keeps the dependency graph acyclic. Se
 
 ### `boyko_rhi_vulkan` — the backend
 
-[`boyko_rhi_vulkan`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/src/lib.rs)
+[`boyko_rhi_vulkan`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/src/lib.rs)
 implements the RHI traits over a **raw, hand-FFI Vulkan** backend. The INVIOLABLE rule
 here is specific: every `vk*` call is hand-declared raw FFI resolved through
 `vkGetInstanceProcAddr` / `vkGetDeviceProcAddr` — there is **no `ash`, no `vulkano`**
@@ -81,7 +81,7 @@ the `WndProc` message loop) are hand-declared `extern "system"` against `user32`
 `kernel32`, while the window-handle accessors, the Raw-Input calls, and the `RAWINPUT*`
 structs / `WM_*` constants come from the official, Microsoft-maintained
 [`windows-sys`](https://crates.io/crates/windows-sys) raw bindings — re-exported through
-[`ffi::os`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/src/ffi.rs#L37).
+[`ffi::os`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/src/ffi.rs).
 `windows-sys` is target-gated to `cfg(windows)`, so non-Windows builds pull nothing, and
 it never touches a `vk*` symbol. On top of that window, `swapchain` brings up the
 surface, a FIFO swapchain, and a Vulkan 1.3 dynamic-rendering present loop
@@ -92,7 +92,7 @@ oracle that stands in for Miri on the raw-FFI path.
 
 ### `boyko_render` — the bridge
 
-[`boyko_render`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/lib.rs)
+[`boyko_render`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/lib.rs)
 is the **only** crate allowed to name both the ECS and the RHI. It depends directly on
 `boyko_ecs`, `boyko_rhi`, `boyko_rhi_vulkan`, and `boyko_utils`, with no cycle, so the
 graphics-aware types live here and never leak into the graphics-pure ECS core. It
@@ -186,7 +186,7 @@ Step by step:
    dispatch into the same encoder and submits.
 
 3. **Execute (GPU).** On the swapchain present path
-   ([`render_gbuffer_frame`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/src/swapchain.rs#L2169)),
+   ([`render_gbuffer_frame`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/src/present/frame_driver.rs)),
    the GPU runs the deferred pipeline: an optional clustered light cull, a rasterized
    G-buffer pass that produces a depth image, an SDF compute march bounded by that
    depth (the **hybrid mesh↔SDF** occlusion — meshes and SDF share one depth so each
@@ -222,7 +222,7 @@ This stack is a deliberately staged ladder. To be precise about what runs today:
   `MAX_SDF_EDITS = 16`. The cache-and-interpolate hierarchy is pre-cut behind the
   `field_distance` shader seam but **not implemented**. See [SDF rendering](sdf.md) and
   the audit in
-  [docs/SDF-PERF-AUDIT.md](https://github.com/bluesteelll/boyko-engine/blob/ecs/docs/SDF-PERF-AUDIT.md).
+  [docs/SDF-PERF-AUDIT.md](https://github.com/bluesteelll/boyko-engine/blob/master/docs/SDF-PERF-AUDIT.md).
 - **The P4b coarse tile-cull.** Built and golden-proven, but *disabled on the windowed
   present* (`coarse_enabled = 0`) — it currently runs only in the offscreen golden test.
 - **Baked / runtime global illumination (lighting L2+).** Irradiance volumes, DDGI, and
@@ -240,6 +240,6 @@ do, the page to read is [SDF rendering](sdf.md).
 - [SDF rendering](sdf.md) — the analytic marcher, the hybrid path, and the deferred ladder.
 - [The shader eDSL](shader-edsl.md) — one source of truth for CPU and GPU field math.
 - [Lighting](lighting.md) — light entities, the GPU table, and clustered cull.
-- Source: [`boyko_render`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_render/src/lib.rs),
-  [`boyko_rhi`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi/src/lib.rs),
-  [`boyko_rhi_vulkan`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_rhi_vulkan/src/lib.rs).
+- Source: [`boyko_render`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_render/src/lib.rs),
+  [`boyko_rhi`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi/src/lib.rs),
+  [`boyko_rhi_vulkan`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_rhi_vulkan/src/lib.rs).

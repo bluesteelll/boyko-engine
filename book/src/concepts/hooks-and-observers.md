@@ -104,7 +104,7 @@ live in a single `#[component(...)]` attribute.
 Every hook receives two arguments.
 
 `HookContext` is a two-field plain-data struct
-([`hooks/mod.rs#L88`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/hooks/mod.rs#L88)):
+([`hooks/mod.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/hooks/mod.rs)):
 
 ```rust,ignore
 pub struct HookContext {
@@ -158,7 +158,7 @@ struct Pickup;
 
 When you cannot edit the component's definition (a foreign type) or you need
 `on_despawn`, register hooks at runtime through
-[`EcsMaster::register_component_hooks`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs#L2997).
+[`EcsMaster::register_component_hooks`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/ecs_master/observer_api.rs).
 It returns a chainable builder that commits when dropped (or on `.finish()`):
 
 ```rust,ignore
@@ -229,7 +229,7 @@ fn wire(ecs: &mut EcsMaster) {
 ```
 
 The runner signature mirrors a hook's, except the context is an
-[`ObserverContext`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/observers/mod.rs#L107)
+[`ObserverContext`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/observers/mod.rs)
 — the same `entity` + `component_id` plus a `kind` field, so one runner can be
 registered for several kinds and branch on `ctx.kind` internally:
 
@@ -245,7 +245,7 @@ The typed entry points are `observe_on_add`, `observe_on_insert`,
 `observe_on_replace`, and `observe_on_remove`. When you already hold a resolved
 `ComponentId` (or want the `Despawn` kind), use the type-erased
 `ecs.add_observer(kind, cid, runner)`. Every registration returns an
-[`ObserverId`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/observers/mod.rs#L59):
+[`ObserverId`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/observers/mod.rs):
 a monotonic, never-reused handle. Pass it to
 `ecs.remove_observer(id) -> bool` to unwire.
 
@@ -274,7 +274,7 @@ flowchart TD
 ## Zero overhead when unused
 
 The reason a callback-free world pays nothing is the **`ArchetypeFlags` gate**
-([`archetype_flags.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/hooks/archetype_flags.rs)).
+([`archetype_flags.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/hooks/archetype_flags.rs)).
 Each archetype carries a single `u16`. At construction it is OR-computed from the
 cold hook table and observer registry: one bit per `(kind)` saying "does *any*
 component in this archetype declare a hook **or** an observer for this kind?".
@@ -328,5 +328,5 @@ no captured state to make thread-unsafe.
 - [Commands](commands.md) — the deferred structural-change API a callback queues into
 - [Change detection](../change_detection.md) — the sibling "0% when unused" mechanism
 - Source:
-  [hooks/mod.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/hooks/mod.rs),
-  [observers/mod.rs](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/component/observers/mod.rs)
+  [hooks/mod.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/hooks/mod.rs),
+  [observers/mod.rs](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/component/observers/mod.rs)

@@ -51,7 +51,7 @@ let button = ButtonBundle {
 
 A bare tuple is **not** a `Bundle` on this engine — bundles are `#[derive(Bundle)]` structs. The preset structs are a Rust-only convenience; the canonical authorable form (used by the `ui!` macro and the `.ui` text format) is the explicit component list, and a `ui!` ≡ `.ui` ≡ hand-spawn equivalence gate verifies the three produce identical archetypes.
 
-Source: [`bundles.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ui/src/bundles.rs#L31), [`components.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ui/src/components.rs#L380).
+Source: [`bundles.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ui/src/bundles.rs), [`components.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ui/src/components.rs).
 
 ## How layout works
 
@@ -71,9 +71,9 @@ flowchart LR
 
 The change path does no per-frame allocation. The root list is cached in `LayoutScratch::roots` and refreshed (one `query_entities`) only when the root *set* could have changed (`Added<UiRoot>` or a structural `Changed<Children>`/`Changed<ChildOf>`). A plain size tweak reuses the cached list, so a stream of property-only frames re-walks roots with zero allocation. The scratch buffers are moved onto the stack at apply entry (the `mem::take` borrow protocol) so the recursion can call `get_component_mut` without holding a resource borrow.
 
-> A note on a deliberate engine deviation: the original plan specified a per-changed-node up-walk to mark only the dirty roots. That needs an entity-yielding change query, which this engine's `Query` does not provide. The shipped resolution keeps the two-system architecture and the zero-cost steady state, but relaxes relayout granularity to all-roots when anything changes — see the [layout source header](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ui/src/layout.rs#L10) for the full reasoning.
+> A note on a deliberate engine deviation: the original plan specified a per-changed-node up-walk to mark only the dirty roots. That needs an entity-yielding change query, which this engine's `Query` does not provide. The shipped resolution keeps the two-system architecture and the zero-cost steady state, but relaxes relayout granularity to all-roots when anything changes — see the [layout source header](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ui/src/layout.rs) for the full reasoning.
 
-Source: [`layout.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ui/src/layout.rs#L84).
+Source: [`layout.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ui/src/layout.rs).
 
 ## Screen-space HUD
 
@@ -152,7 +152,7 @@ Depth occlusion is a **CPU proxy**, not a GPU depth-buffer test. For each `depth
 
 A true GPU depth-buffer occlusion test and a subtree-AABB cull are documented as deferred; the CPU pick + CPU occlusion proxy is what ships.
 
-Source: [`world/pick.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ui/src/world/pick.rs#L192), [`world/project.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ui/src/world/project.rs#L85), [`world/components.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ui/src/world/components.rs#L54).
+Source: [`world/pick.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ui/src/world/pick.rs), [`world/project.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ui/src/world/project.rs), [`world/components.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ui/src/world/components.rs).
 
 ## Rendering
 
@@ -186,4 +186,4 @@ Documented deferrals (not yet shipped): GPU depth-buffer occlusion (P7b uses a C
 - [Text & MSDF](text-msdf.md) — glyph atlas, shaping, and the text-on-the-quad-path render.
 - [EnableTags](../concepts/enable-tags.md) — the O(1) bitset backend behind the world-UI visibility / cull / occlusion bits.
 - [Rendering overview](../rendering/overview.md) — how `ComputedRect` becomes a drawn quad.
-- Source: [`boyko_ui`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ui/src/lib.rs#L1).
+- Source: [`boyko_ui`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ui/src/lib.rs).

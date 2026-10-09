@@ -14,7 +14,7 @@ This means **no parallel data system**. Durable per-entity, per-element, or bulk
 
 It never lives in a side `std::Vec` or `HashMap`. A capability a subsystem needs is promoted to a **first-class kernel feature** used uniformly by every system, not a per-crate adapter.
 
-```rust
+```rust,ignore
 use boyko_ecs::prelude::*;    // the `Component` trait (and the rest of the public surface)
 use boyko_macros::Component;  // the derive macro is NOT re-exported by the prelude
 
@@ -39,7 +39,7 @@ Why this is also the fast path: the kernel storage (`ComponentPool` on a `VmRese
 
 All abstractions are compile-time. Generic code is monomorphized into direct calls — no virtual dispatch, no dynamic lookup in hot paths.
 
-```rust
+```rust,ignore
 // ❌ Avoided in hot paths:
 fn process(components: &mut [Box<dyn Component>]) { ... }
 
@@ -51,7 +51,7 @@ fn process<T: Component>(components: &mut [T]) { ... }
 
 Data structures are designed around access patterns, not conceptual models. Struct of Arrays (SoA) beats Array of Structs (AoS) wherever multiple entities are processed together. Hot and cold fields are split.
 
-```rust
+```rust,ignore
 // ❌ AoS — wastes cache lines if only `position` is read:
 struct Entity {
     position: Vec3,
@@ -149,7 +149,7 @@ By default, we trust the compiler. Rust's inliner is conservative but well-tuned
 
 `unsafe` is used liberally where it enables performance gains — but every block carries a `// SAFETY:` comment explaining the invariants the caller must uphold:
 
-```rust
+```rust,ignore
 // SAFETY: `idx < self.len` is checked above, so the row is initialized.
 // `buffer` is write-once and never relocates (growth only commits fresh
 // pages at the frontier), so this pointer is valid for the pool's lifetime.

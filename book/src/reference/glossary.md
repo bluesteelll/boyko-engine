@@ -4,9 +4,9 @@ A reference of terms used throughout Boyko Engine and ECS architecture in genera
 
 ## A
 
-**Address stability** — The guarantee that, once a row is written into a `ComponentPool`, its address never moves for the life of the pool. Each pool reserves a large virtual region up front (`VmReservation`) and only commits pages on growth, so growth never copies bytes and pointers stay valid. See [`vm.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/vm.rs) and [`component_pool.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs).
+**Address stability** — The guarantee that, once a row is written into a `ComponentPool`, its address never moves for the life of the pool. Each pool reserves a large virtual region up front (`VmReservation`) and only commits pages on growth, so growth never copies bytes and pointers stay valid. See [`vm.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_memory/src/vm.rs) and [`component_pool.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/component_pool.rs).
 
-**Archetype** — A unique combination of component types. All entities with the same set of components belong to the same archetype, and their components are stored together for cache-friendly iteration. *(Available on the `ecs` branch.)*
+**Archetype** — A unique combination of component types. All entities with the same set of components belong to the same archetype, and their components are stored together for cache-friendly iteration.
 
 **AoS** (Array of Structs) — Memory layout where each entity is a single struct containing all its data. Cache-unfriendly when only some fields are accessed. The opposite of SoA.
 
@@ -24,7 +24,7 @@ A reference of terms used throughout Boyko Engine and ECS architecture in genera
 
 **Cache, I-cache (instruction cache)** — Separate cache for executable instructions, typically L1i ~32 KB on x86_64. Bloated hot paths (e.g., from aggressive inlining) cause I-cache misses, stalling the front-end of the CPU pipeline.
 
-**Chunk** — On the `ecs` branch, a *SIMD-iteration batch*: a fixed-width slice of contiguous rows handed to a closure by `Query::for_each_chunk` / `par_for_each_chunk` so the body can vectorize over many rows at once. It is **not** a per-type storage buffer — storage is one dense byte buffer per `ComponentPool`. See [`chunked_data.rs`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/core/iters/query/chunked_data.rs). *(Available on the `ecs` branch.)*
+**Chunk** — A *SIMD-iteration batch*: a fixed-width slice of contiguous rows handed to a closure by `Query::for_each_chunk` / `par_for_each_chunk` so the body can vectorize over many rows at once. It is **not** a per-type storage buffer — storage is one dense byte buffer per `ComponentPool`. See [`chunked_data.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/core/iters/query/chunked_data.rs).
 
 **Component** — A piece of data attached to an entity. In Boyko Engine, components are POD-like structs implementing the `Component` trait via `#[derive(Component)]`.
 
@@ -40,7 +40,7 @@ A reference of terms used throughout Boyko Engine and ECS architecture in genera
 
 **ECS** (Entity Component System) — An architectural pattern that separates data (components) from behavior (systems), with entities acting as identifiers that group components.
 
-**Empty archetype** — The archetype with zero components. On the `ecs` branch entities may legally hold no components: removing the last component migrates the entity here instead of despawning it, and `spawn_empty()` creates entities here directly. See [Tags](../concepts/tags.md). *(Available on the `ecs` branch.)*
+**Empty archetype** — The archetype with zero components. Entities may legally hold no components: removing the last component migrates the entity here instead of despawning it, and `spawn_empty()` creates entities here directly. See [Tags](../concepts/tags.md).
 
 **Entity** — A lightweight identifier (an `id: EntityId` + `generation: u32` in Boyko Engine, where `EntityId` is a `#[repr(transparent)]` newtype over `usize`) that represents a "thing" in the game world. Entities themselves hold no data — their data lives in components.
 
@@ -74,13 +74,13 @@ A reference of terms used throughout Boyko Engine and ECS architecture in genera
 
 **Prefetching** — Loading data into cache *before* it's needed. Hardware prefetchers detect sequential and stride access patterns; software prefetching (`_mm_prefetch` intrinsic) is used when patterns are predictable but the hardware can't see them (e.g., pointer-chasing through indices).
 
-**Pool** — A pre-allocated, dense column of rows for components of one type. Boyko Engine's implementation is the type-erased `ComponentPool` ([`component_pool.rs:147`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/memory/component_pool.rs#L147)) — a `NonNull<u8>` byte buffer plus a cached `component_layout: Layout`, built via `ComponentPool::new(component_id, reserve_rows)` on a `VmReservation`.
+**Pool** — A pre-allocated, dense column of rows for components of one type. Boyko Engine's implementation is the type-erased `ComponentPool` ([`component_pool.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/memory/component_pool.rs)) — a `NonNull<u8>` byte buffer plus a cached `component_layout: Layout`, built via `ComponentPool::new(component_id, reserve_rows)` on a `VmReservation`.
 
 **POD** (Plain Old Data) — A type with simple memory layout (no internal pointers, no destructor) that can be safely copied with `memcpy`.
 
 ## Q
 
-**Query** — A specification of "which entities to operate on" based on which components they have. Queries iterate over all matching archetypes. *(Available on the `ecs` branch.)*
+**Query** — A specification of "which entities to operate on" based on which components they have. Queries iterate over all matching archetypes.
 
 ## R
 
@@ -100,13 +100,13 @@ A reference of terms used throughout Boyko Engine and ECS architecture in genera
 
 ## T
 
-**Tag** — A zero-sized component: it carries no data, only the fact of its presence on an entity. Stored as a tick-only pool (8 B/row), so `Added<Tag>`/`Changed<Tag>` work like on any component. See [Tags](../concepts/tags.md). *(Available on the `ecs` branch.)*
+**Tag** — A zero-sized component: it carries no data, only the fact of its presence on an entity. Stored as a tick-only pool (8 B/row), so `Added<Tag>`/`Changed<Tag>` work like on any component. See [Tags](../concepts/tags.md).
 
-**TagId** — The handle of a *dynamic* tag, minted at runtime from a string name (`world.register_tag("name")`). A transparent, one-way-bridgeable wrapper over `ComponentId`. See [Dynamic Tags](../concepts/dynamic-tags.md). *(Available on the `ecs` branch.)*
+**TagId** — The handle of a *dynamic* tag, minted at runtime from a string name (`world.register_tag("name")`). A transparent, one-way-bridgeable wrapper over `ComponentId`. See [Dynamic Tags](../concepts/dynamic-tags.md).
 
 ## U
 
-**`InlandUnitId`** — Boyko Engine's single-level row address: a `#[repr(transparent)]` newtype over `usize` naming a row index inside one `ComponentPool` ([`primitives.rs:71`](https://github.com/bluesteelll/boyko-engine/blob/ecs/crates/boyko_ecs/src/ecs/identifiers/primitives.rs#L71)). Because each pool is one dense, address-stable column, a flat row index is all the addressing storage needs.
+**`InlandUnitId`** — Boyko Engine's single-level row address: a `#[repr(transparent)]` newtype over `usize` naming a row index inside one `ComponentPool` ([`primitives.rs`](https://github.com/bluesteelll/boyko-engine/blob/master/crates/boyko_ecs/src/ecs/identifiers/primitives.rs)). Because each pool is one dense, address-stable column, a flat row index is all the addressing storage needs.
 
 **Unsafe** — Rust code that bypasses the borrow checker or memory-safety guarantees. In Boyko Engine, every `unsafe` block carries a `// SAFETY:` comment explaining the invariants.
 
