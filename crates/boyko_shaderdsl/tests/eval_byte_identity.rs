@@ -63,6 +63,37 @@ struct FrozenEdit {
 fn frozen_sqrt(x: f32) -> f32 {
     x.sqrt()
 }
+/// Every `a.max(b)` of a mirror below, with the sign of a `±0.0` tie DEFINED: GLSL.std.450
+/// `NMax` ("`b` if `a < b`, otherwise `a`; if one operand is a NaN, the other is the result"),
+/// the instruction DXC lowers HLSL `max` to. `f32::max` cannot be the mirror: on rustc 1.98.1 it
+/// may return either zero on a tie, and two call sites of it disagreed in a release build (CI
+/// run 5, `m2_brick_span_ci_run5_signed_zero_tie`), while this file compares `±0.0` exactly.
+/// Spelled here from the specification, not imported, so the oracle stays independent of the
+/// Eval backend it checks. Operand order at each call site is the snapshot's.
+fn frozen_max(a: f32, b: f32) -> f32 {
+    if a.is_nan() {
+        b
+    } else if b.is_nan() {
+        a
+    } else if a < b {
+        b
+    } else {
+        a
+    }
+}
+/// [`frozen_max`]'s counterpart for `a.min(b)`: GLSL.std.450 `NMin` ("`b` if `b < a`, otherwise
+/// `a`; if one operand is a NaN, the other is the result").
+fn frozen_min(a: f32, b: f32) -> f32 {
+    if a.is_nan() {
+        b
+    } else if b.is_nan() {
+        a
+    } else if b < a {
+        b
+    } else {
+        a
+    }
+}
 fn frozen_v_sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
@@ -73,7 +104,11 @@ fn frozen_v_abs(a: [f32; 3]) -> [f32; 3] {
     [a[0].abs(), a[1].abs(), a[2].abs()]
 }
 fn frozen_v_max0(a: [f32; 3]) -> [f32; 3] {
-    [a[0].max(0.0), a[1].max(0.0), a[2].max(0.0)]
+    [
+        frozen_max(a[0], 0.0),
+        frozen_max(a[1], 0.0),
+        frozen_max(a[2], 0.0),
+    ]
 }
 fn frozen_sd_sphere(p: [f32; 3], c: [f32; 3], r: f32) -> f32 {
     frozen_v_len(frozen_v_sub(p, c)) - r
@@ -81,7 +116,7 @@ fn frozen_sd_sphere(p: [f32; 3], c: [f32; 3], r: f32) -> f32 {
 fn frozen_sd_box(p: [f32; 3], c: [f32; 3], h: [f32; 3]) -> f32 {
     let q = frozen_v_sub(frozen_v_abs(frozen_v_sub(p, c)), h);
     let outside = frozen_v_len(frozen_v_max0(q));
-    let inside = q[0].max(q[1].max(q[2])).min(0.0);
+    let inside = frozen_min(frozen_max(q[0], frozen_max(q[1], q[2])), 0.0);
     outside + inside
 }
 // The EXPLICIT left-associated dot fold `(a.x*b.x + a.y*b.y) + a.z*b.z` — NOT the HLSL
@@ -96,7 +131,7 @@ fn frozen_v_scale(a: [f32; 3], s: f32) -> [f32; 3] {
 fn frozen_sd_capsule(p: [f32; 3], a: [f32; 3], b: [f32; 3], r: f32) -> f32 {
     let pa = frozen_v_sub(p, a);
     let ba = frozen_v_sub(b, a);
-    let denom = frozen_v_dot(ba, ba).max(FROZEN_CAPSULE_DENOM_EPS);
+    let denom = frozen_max(frozen_v_dot(ba, ba), FROZEN_CAPSULE_DENOM_EPS);
     let h = (frozen_v_dot(pa, ba) / denom).clamp(0.0, 1.0);
     frozen_v_len(frozen_v_sub(pa, frozen_v_scale(ba, h))) - r
 }
@@ -123,21 +158,21 @@ fn frozen_combine(acc: f32, d: f32, op: u32, k: f32) -> f32 {
             if k > 0.0 {
                 frozen_smax(acc, -d, k)
             } else {
-                acc.max(-d)
+                frozen_max(acc, -d)
             }
         }
         x if x == frozen_op::INTERSECT => {
             if k > 0.0 {
                 frozen_smax(acc, d, k)
             } else {
-                acc.max(d)
+                frozen_max(acc, d)
             }
         }
         _ => {
             if k > 0.0 {
                 frozen_smin(acc, d, k)
             } else {
-                acc.min(d)
+                frozen_min(acc, d)
             }
         }
     }
@@ -939,8 +974,8 @@ fn frozen_gpu_dist_to_brick_exit(
         let t3 = 1.0 / t0;
         let t4 = (t1 - p[a]) * t3;
         let t5 = (t2 - p[a]) * t3;
-        let t6 = t4.max(t5);
-        exit = exit.min(t6);
+        let t6 = frozen_max(t4, t5);
+        exit = frozen_min(exit, t6);
     }
     if exit < FROZEN_BRICK_EXIT_EPS {
         FROZEN_BRICK_EXIT_EPS
@@ -1661,11 +1696,11 @@ fn frozen_sdf_soft_shadow<Fld: Fn([f32; 3]) -> f32>(p: [f32; 3], l: [f32; 3], fi
     for _ in 0..FROZEN_MAX_IT {
         let q = [p[0] + l[0] * t, p[1] + l[1] * t, p[2] + l[2] * t];
         let d = field(q);
-        res = res.min(FROZEN_SHADOW_K * d / t);
+        res = frozen_min(res, FROZEN_SHADOW_K * d / t);
         if d < FROZEN_SHADOW_HIT_EPS {
             return 0.0;
         }
-        t += (d / FROZEN_FIELD_LIPSCHITZ_L).max(FROZEN_SHADOW_MINT_STEP);
+        t += frozen_max(d / FROZEN_FIELD_LIPSCHITZ_L, FROZEN_SHADOW_MINT_STEP);
         if t > FROZEN_T_MAX {
             break;
         }
@@ -1740,11 +1775,11 @@ fn frozen_sdf_soft_shadow_ranged<Fld: Fn([f32; 3]) -> f32>(
     for _ in 0..FROZEN_MAX_IT {
         let q = [p[0] + l[0] * t, p[1] + l[1] * t, p[2] + l[2] * t];
         let d = field(q);
-        res = res.min(FROZEN_SHADOW_K * d / t);
+        res = frozen_min(res, FROZEN_SHADOW_K * d / t);
         if d < FROZEN_SHADOW_HIT_EPS {
             return 0.0;
         }
-        t += (d / FROZEN_FIELD_LIPSCHITZ_L).max(FROZEN_SHADOW_MINT_STEP);
+        t += frozen_max(d / FROZEN_FIELD_LIPSCHITZ_L, FROZEN_SHADOW_MINT_STEP);
         if t > t_max {
             break;
         }
@@ -2436,8 +2471,8 @@ fn host_m2_brick_span(
             t1 = t2;
             t2 = tmp;
         }
-        tmin = tmin.max(t1);
-        tmax = tmax.min(t2);
+        tmin = frozen_max(tmin, t1);
+        tmax = frozen_min(tmax, t2);
     }
     // `t_enter = tmin; t_exit = tmax; return tmax > tmin;`
     (tmax > tmin, tmin, tmax)
@@ -2559,6 +2594,46 @@ fn m2_brick_span_directed_hit_miss_swap_parallel() {
         assert_bits(r.1, 1.0, "swap-branch-t_enter");
         assert_bits(r.2, 2.0, "swap-branch-t_exit");
     }
+}
+
+/// REGRESSION — release CI run 5 (jobs 114261213722 and 114261213894, windows-latest, both
+/// release legs): the random sweep's draw that came out `refactored=+0 != frozen=-0`. The
+/// literals are that message's `{:?}` spellings, which are shortest round-trip, so they parse
+/// back to the exact bits the sweep drew.
+///
+/// On axis x, `rd.x = -inf` makes `inv = 1/-inf = -0.0`, so `t1 = (f32::MAX - p.x) * -0.0 =
+/// -0.0`, and `tmin = max(tmin = +0.0, t1 = -0.0)` is a `±0` TIE (`t2 = inf * -0.0` is NaN; the
+/// y/z axes only lower `tmax`, so the tie's sign is what `t_enter` reports). Rust's `f32::max`
+/// leaves the sign of a zero result unspecified (it lowers to `llvm.maximumnum` with `nsz`), and
+/// the eDSL's unrolled copy and the mirror's rolled loop were lowered to opposite answers in a
+/// release build. Both now spell the GLSL.std.450 `NMax`/`NMin` rule the emitted HLSL
+/// `max`/`min` lower to — the FIRST operand on a tie — so `t_enter` is `tmin`'s `+0.0` on both
+/// sides, in every profile.
+#[test]
+fn m2_brick_span_ci_run5_signed_zero_tie() {
+    use std::hint::black_box;
+
+    use boyko_shaderdsl::scalar::FieldScalar;
+
+    let p = [-3.442757_f32, -0.454_272_75, -0.157_476_66];
+    let rd = [f32::NEG_INFINITY, 0.874_166_97, -1.696_899];
+    let cell_min = [f32::MAX, -1.357_211_8, 2.657_556_5];
+    let bw = f32::INFINITY;
+    let r = refactored_m2_brick_span(p, rd, cell_min, bw);
+    let h = host_m2_brick_span(p, rd, cell_min, bw);
+    assert_brick_span(r, h, "m2-brick-span-ci-run5");
+    assert!(
+        !r.0,
+        "ci-run5: the z axis drives tmax below tmin, so the span is a miss"
+    );
+    assert_bits(r.1, 0.0, "ci-run5-t_enter-is-tmin's-+0");
+    // The tie rule at the op level, through `black_box` so it is the runtime lowering that is
+    // pinned, not a constant fold: the first operand's zero wins in both orders, for both ops.
+    let (pz, nz) = (black_box(0.0_f32), black_box(-0.0_f32));
+    assert_bits(FieldScalar::max(pz, nz), 0.0, "eval-max(+0,-0)");
+    assert_bits(FieldScalar::max(nz, pz), -0.0, "eval-max(-0,+0)");
+    assert_bits(FieldScalar::min(pz, nz), 0.0, "eval-min(+0,-0)");
+    assert_bits(FieldScalar::min(nz, pz), -0.0, "eval-min(-0,+0)");
 }
 
 // ======================================================================

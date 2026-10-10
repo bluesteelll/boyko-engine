@@ -78,9 +78,13 @@ pub trait FieldScalar: Copy {
     /// `-self`.
     fn neg(self) -> Self;
 
-    /// `min(self, rhs)` (the IEEE `f32::min` / HLSL `min`).
+    /// `min(self, rhs)` — HLSL `min`, which DXC lowers to GLSL.std.450 `NMin`: `rhs` if
+    /// `rhs < self`, else `self`; a NaN operand yields the other one. On a `±0.0` tie the
+    /// result is `self` (the FIRST operand) — a defined sign, unlike `f32::min`'s.
     fn min(self, rhs: Self) -> Self;
-    /// `max(self, rhs)` (the IEEE `f32::max` / HLSL `max`).
+    /// `max(self, rhs)` — HLSL `max`, which DXC lowers to GLSL.std.450 `NMax`: `rhs` if
+    /// `self < rhs`, else `self`; a NaN operand yields the other one. On a `±0.0` tie the
+    /// result is `self` (the FIRST operand) — a defined sign, unlike `f32::max`'s.
     fn max(self, rhs: Self) -> Self;
 
     /// `clamp(self, 0.0, 1.0)` — the FIXED-bounds clamp `smin` uses for its blend
@@ -281,14 +285,28 @@ impl FieldScalar for f32 {
         -self
     }
 
+    // NOT `f32::min`/`f32::max`: on rustc 1.98.1 they are `minimum_number_nsz`/
+    // `maximum_number_nsz` ("if the inputs compare equal ... either input may be returned
+    // non-deterministically"), so the SAME expression lowered at two call sites can return
+    // opposite zeros — release CI run 5's `m2_brick_span` red (`max(+0.0, -0.0)` was `+0.0` in
+    // the eDSL's unrolled copy and `-0.0` in the mirror's rolled loop, while a debug build gave
+    // `-0.0` in both). Spelling the `NMin`/`NMax` select keeps the NaN rule `f32::min`/`max`
+    // documents and fixes the tie to the first operand, in every build.
     #[inline]
     fn min(self, rhs: Self) -> Self {
-        // `f32::min` — the same IEEE min `boyko_sdf_math` folds (lib.rs:665).
-        f32::min(self, rhs)
+        if self.is_nan() || rhs < self {
+            rhs
+        } else {
+            self
+        }
     }
     #[inline]
     fn max(self, rhs: Self) -> Self {
-        f32::max(self, rhs)
+        if self.is_nan() || self < rhs {
+            rhs
+        } else {
+            self
+        }
     }
 
     #[inline]
@@ -363,11 +381,7 @@ impl FieldScalar for f32 {
         // `sdf_edit_list_normal` (lib.rs:698-702) adds/subtracts to `p`. `GRAD_H`
         // mirrors `boyko_sdf_math::SDF_GRAD_H` (lib.rs:97).
         const GRAD_H: f32 = 0.0005;
-        [
-            [GRAD_H, 0.0, 0.0],
-            [0.0, GRAD_H, 0.0],
-            [0.0, 0.0, GRAD_H],
-        ]
+        [[GRAD_H, 0.0, 0.0], [0.0, GRAD_H, 0.0], [0.0, 0.0, GRAD_H]]
     }
 
     #[inline]
