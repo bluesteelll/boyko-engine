@@ -559,7 +559,21 @@ fn detached_spawn_panic_does_not_block_pool_shutdown() {
         run.stdout
     );
     assert!(
-        run.stdout.contains("CHILD-TASK-STARTED"),
+        !run.stdout.contains("CHILD-TASK-NEVER-STARTED"),
+        "the detached task never started within {DEADLINE:?} -- stdout:\n{}\nstderr:\n{}",
+        run.stdout,
+        run.stderr
+    );
+    // Reached = the child saw the task's flag, or the child died and the task's own panic text is
+    // on stderr. The documented abort can end the process between the task's flag store and the
+    // child thread's marker, so a child that dies may never print `CHILD-TASK-STARTED`: CI run 4
+    // (release, a 4-vCPU runner) failed this way, and so did 1 of 5 runs on the dev host under a
+    // 4-CPU affinity mask with libtest's 16 threads (MEASURED 2026-10-10). The task prints that
+    // text itself, after its flag store, so it is the same observation made by the task.
+    let reached = run.stdout.contains("CHILD-TASK-STARTED")
+        || (!success && run.stderr.contains(DETACHED_MESSAGE));
+    assert!(
+        reached,
         "the child must have reached the panicking detached task -- stdout:\n{}\nstderr:\n{}",
         run.stdout,
         run.stderr

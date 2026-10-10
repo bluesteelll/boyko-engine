@@ -48,7 +48,9 @@
 //!
 //! That single invocation runs every test in this file, the red-first gate
 //! ([`worker_spawned_wave_reaches_at_least_half_the_workers`]) included: nothing here is
-//! `#[ignore]`d, so no test in this file can pass by never having run.
+//! `#[ignore]`d, so no test in this file can pass by never having run. Without
+//! `--test-threads=1` the tests still run one at a time ([`serial`]), and the gate's floor follows
+//! the CPUs the process may use ([`occupancy_floor`]).
 
 use std::hint::black_box;
 use std::sync::Arc;
@@ -355,6 +357,73 @@ fn hardware_parallelism() -> usize {
     std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get)
 }
 
+/// The logical CPUs this process may run on: [`hardware_parallelism`], narrowed on Windows by the
+/// process affinity mask, which std does not read there. MEASURED 2026-10-10 (Rust 1.98.1, msvc,
+/// 16-CPU dev host): under `start /affinity F` the mask is `0xf` and `available_parallelism` still
+/// reads 16. On Linux std already reads the affinity mask (and the cgroup quota).
+fn usable_cpus() -> usize {
+    let available = hardware_parallelism();
+    #[cfg(windows)]
+    {
+        if let Some(mask_cpus) = affinity_cpus() {
+            return available.min(mask_cpus);
+        }
+    }
+    available
+}
+
+/// The CPU count of this process's affinity mask, or `None` if the call fails. A process spanning
+/// several processor groups reports its current group's mask only; the machines this runs on have
+/// at most 64 logical CPUs, one group.
+#[cfg(windows)]
+fn affinity_cpus() -> Option<usize> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn GetProcessAffinityMask(
+            process: *mut std::ffi::c_void,
+            process_mask: *mut usize,
+            system_mask: *mut usize,
+        ) -> i32;
+    }
+    let (mut process_mask, mut system_mask) = (0usize, 0usize);
+    // SAFETY: `GetCurrentProcess` takes no argument and returns the current process's
+    // pseudo-handle, which is always valid and needs no closing. `GetProcessAffinityMask` reads that
+    // handle and writes one `DWORD_PTR` (`usize` on every Windows target) through each of its two
+    // out-pointers, which point at live, aligned, writable `usize` locals for the whole call.
+    let ok = unsafe {
+        GetProcessAffinityMask(GetCurrentProcess(), &raw mut process_mask, &raw mut system_mask)
+    };
+    (ok != 0 && process_mask != 0).then(|| process_mask.count_ones() as usize)
+}
+
+/// The red-first gate's floor at `w` workers on `cpus` usable CPUs: half of the bodies that can be
+/// live at once, `min(w, cpus)`, and never below 2.
+///
+/// Bodies spin, so on fewer CPUs than workers at most `cpus` of them run at a time (a preempted
+/// body counts while it waits, which is noise, not capacity): CI run 4's 4-vCPU runners reached 6
+/// and 7 live bodies at W = 16, where `W/2` asked for 8. With `cpus >= w` the floor is `W/2`
+/// unchanged. The clamp at 2 keeps the gate able to tell the regression it was written against,
+/// one live body, from a healthy wave on any machine; it needs at least 2 CPUs to pass.
+fn occupancy_floor(w: usize, cpus: usize) -> usize {
+    (w.min(cpus) / 2).max(2)
+}
+
+/// Holds every test of this binary apart from the others: the guard lives for the whole test
+/// body. The gate's waves must not compete for CPUs with the number carrier's (16 spinning workers
+/// at W = 16): MEASURED 2026-10-10 under a 4-CPU affinity mask with `--test-threads=4` (the 4-vCPU
+/// runner's shape), the gate's W = 4 wave peaked at ONE live body in 6 of 29 runs, the regression's
+/// own reading, while run alone it peaked at 3 or 4 in 37 of 37. A poisoned lock still serialises,
+/// so one red test does not red the rest.
+///
+/// `clippy::disallowed_types`: a test-only gate between test bodies, taken once per test and never
+/// on a measured path; the hot-path ban is about engine code.
+#[allow(clippy::disallowed_types)]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn print_wave(route: &str, w: usize, tasks: usize, rep: usize, wave: &Wave) {
     println!(
         "[KE16] route={route:<10} W={w:<2} tasks={tasks:<3} rep={rep} body={body_us}us \
@@ -389,12 +458,14 @@ fn print_wave(route: &str, w: usize, tasks: usize, rep: usize, wave: &Wave) {
 )]
 #[test]
 fn nested_scope_occupancy_numbers_are_recorded_for_both_routes() {
+    let _serial = serial();
     // Inside the test rather than once per binary: the measurement protocol runs these FILTERED,
     // so a line printed from a harness main would not appear on the invocation whose number is
     // actually recorded.
     println!(
-        "[KE16] available_parallelism={} widths={:?} body={}us tasks_per_worker={}",
+        "[KE16] available_parallelism={} usable_cpus={} widths={:?} body={}us tasks_per_worker={}",
         hardware_parallelism(),
+        usable_cpus(),
         widths(),
         BODY.as_micros(),
         TASKS_PER_WORKER
@@ -429,6 +500,7 @@ fn nested_scope_occupancy_numbers_are_recorded_for_both_routes() {
 /// because the configuration drifted is worth less than nothing.
 #[test]
 fn worker_route_outer_task_runs_on_a_registered_worker_of_the_installed_pool() {
+    let _serial = serial();
     let w = hardware_parallelism();
     let pool = ThreadPoolBuilder::new().num_threads(w).build();
     let tasks = TASKS_PER_WORKER * w;
@@ -463,28 +535,33 @@ fn worker_route_outer_task_runs_on_a_registered_worker_of_the_installed_pool() {
 /// own registered deque, where a sibling can steal them — clears the floor with margin.
 ///
 /// Do not weaken the threshold to make it pass — `W/2` is already a floor, not the target (the
-/// dispatcher route reaches it on the same fixture).
+/// dispatcher route reaches it on the same fixture). The one derivation it takes is the machine's
+/// ([`occupancy_floor`]): on fewer usable CPUs than workers, half of the CPUs, never below 2. On
+/// the 16-CPU dev host that is `W/2` at both widths; on a 4-CPU runner it is 2, which the
+/// regression's single live body still fails.
 #[cfg_attr(
     miri,
     ignore = "miri-unsupported: a floor on simultaneously live bodies is a property of native threads; Miri interprets every thread on one host thread (MEASURED 2026-10-10 under the Miri sweep's flags: at most 3 of 16 live, speedup 0.00x). Runs natively."
 )]
 #[test]
 fn worker_spawned_wave_reaches_at_least_half_the_workers() {
+    let _serial = serial();
+    let cpus = usable_cpus();
     for w in widths() {
         let pool = ThreadPoolBuilder::new().num_threads(w).build();
         let tasks = TASKS_PER_WORKER * w;
         let wave = worker_path(&pool, tasks);
         print_wave("worker", w, tasks, 0, &wave);
         assert_eq!(wave.ran, tasks, "worker route lost tasks at W={w}");
+        let floor = occupancy_floor(w, cpus);
         assert!(
-            wave.max_in_flight >= w / 2,
+            wave.max_in_flight >= floor,
             "W={w}: a wave of {tasks} tasks spawned from inside a worker reached at most \
-             {mif} simultaneously live bodies (floor {floor}); wall={wall:.3}ms against a serial \
-             floor of {serial:.3}ms (speedup {sp:.2}x). Work spawned from inside worker {owid} is \
-             not reaching its siblings — the regression this gate was written against parked it \
-             in a queue no sibling polls.",
+             {mif} simultaneously live bodies (floor {floor} on {cpus} usable CPUs); \
+             wall={wall:.3}ms against a serial floor of {serial:.3}ms (speedup {sp:.2}x). Work \
+             spawned from inside worker {owid} is not reaching its siblings — the regression this \
+             gate was written against parked it in a queue no sibling polls.",
             mif = wave.max_in_flight,
-            floor = w / 2,
             wall = wave.wall.as_secs_f64() * 1e3,
             serial = BODY.as_secs_f64() * tasks as f64 * 1e3,
             sp = wave.speedup(tasks),
@@ -520,6 +597,7 @@ fn worker_spawned_wave_reaches_at_least_half_the_workers() {
 /// lane to reach at all.
 #[test]
 fn parked_joiner_is_claimed_by_a_foreign_wave() {
+    let _serial = serial();
     const WORKERS: usize = 2;
     let pool = ThreadPoolBuilder::new().num_threads(WORKERS).build();
 

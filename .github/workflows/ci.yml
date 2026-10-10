@@ -53,8 +53,8 @@ env:
 # WHERE EACH JOB RUNS — owner decision, 2026-10-10 (release PR #4). Every job that executes a test
 # binary runs on `windows-latest`: `test` (debug, release), `profile-census`, `reflect-on` (debug,
 # release), `reflect-census`, `reflect-dogfood`, `feature-count-tests` and `force-alloc-panic`.
-# Windows MSVC is the platform the engine is developed, measured and pinned on. Its
-# allocation-count, float-byte and timing pins were taken there. The jobs that only BUILD stay on
+# Windows MSVC is the platform the engine is developed, measured and pinned on (allocation counts,
+# float bytes); its timing gates hold at a 4-vCPU runner's width. The jobs that only BUILD stay on
 # `ubuntu-latest` and stay blocking, so the engine keeps compiling for Linux: `check`, `clippy`,
 # `profile-legs`, `feature-legs` and `bench-compile` (and `docs.yml`'s `cargo doc`). So do the two
 # Python registry jobs. `miri` and `loom` run test binaries but stay on `ubuntu-latest`, where they
@@ -192,12 +192,12 @@ jobs:
   #     (`m2_brick_span_matches_host_on_random_sweep` computes 0 where the frozen value is -0) and
   #     `boyko-render --lib` (`view::tests::perspective_bridge_reproduces_legacy_push_constants`:
   #     0.5773503 against 0.57735026). Both failed in release and in `force-alloc-panic`.
-  #   * Timing and occupancy on a 4-vCPU runner. `boyko-threadpool --test
-  #     ke16_nested_scope_occupancy` (`worker_spawned_wave_reaches_at_least_half_the_workers`),
-  #     `--test region_protocol` (`fin_a_helper_advances` in release,
-  #     `fin_t1_t2_exactly_once_and_visibility_batched_completion` in `force-alloc-panic`), and
-  #     `--test a6_panic_propagation` (`detached_spawn_panic_does_not_block_pool_shutdown` in
-  #     release).
+  #   * Timing and occupancy: runner width, not the OS (4 vCPUs here and on `windows-latest`), and
+  #     fixed. `boyko-threadpool --test ke16_nested_scope_occupancy`'s gate takes its floor from the
+  #     usable CPUs and its tests run one at a time, as `--test region_protocol`'s do (the
+  #     `fin_a_helper_advances` / batched-finisher "no helper advance" reds); `--test
+  #     a6_panic_propagation`'s detached-spawn test accepts the task's own panic text when the abort
+  #     beats its marker. Red under a 4-CPU affinity mask on the dev host before, green after.
   # FIXING THEM IS A FOLLOW-UP, and it is not done here. Each pin has to be either measured on Linux
   # as well or scoped to the platform it was taken on. Until then a red in this job is a finding
   # to read, not a reason to weaken a pin, and its targets are not the only ones it can turn up.

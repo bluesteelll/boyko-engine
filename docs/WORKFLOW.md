@@ -208,8 +208,15 @@ build-only jobs: `check`, `clippy`, `profile-legs`, `feature-legs` and `bench-co
 the engine compiling for Linux. The second is `miri` and `loom`, which pass there. What is still
 open is narrower. No clippy lint reaches a `#[cfg(windows)]` item, and no feature leg compiles one.
 CI run 4 (38026578745) ran the whole debug and release selection on `ubuntu-latest`, and its reds
-fell in three classes of pin taken on Windows: allocation counts, float bytes across C
-runtimes, and timing on a 4-vCPU runner. One more red, `boyko-physics --bench narrowphase_classes`,
+fell in two classes of pin taken on Windows, allocation counts and float bytes across C runtimes,
+and in a third that was the runner's width, not its OS: the timing and occupancy tests of
+`boyko-threadpool` assumed the dev host's 16 logical CPUs, and `windows-latest` has 4 vCPUs too.
+They were reproduced on the dev host under a 4-CPU affinity mask (`cmd /c start /affinity F`;
+std's `available_parallelism` ignores that mask on Windows, so the ke16 gate reads the mask itself)
+and fixed in the tests: the ke16 gate's floor is half of `min(W, usable CPUs)`, never below 2; its
+tests and `region_protocol`'s run one at a time, so the binary no longer starves its own helpers;
+`a6`'s detached-spawn test accepts the task's own panic text when the documented abort beats the
+child's marker. One more red, `boyko-physics --bench narrowphase_classes`,
 was no pin: it failed on the Windows MSVC dev host with the same numbers, because its
 `touching == manifolds` assert predated V2's speculative contacts, and the bench now runs the
 overlap-only rule it was written for. So the Linux test run is kept as `test-linux`, an

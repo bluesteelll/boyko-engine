@@ -20,6 +20,16 @@
 //!
 //! Miri runs a reduced matrix (participants 2 and 3, small tables): `cfg(miri)` in
 //! `region_common`. Its wall clock does not measure the protocol, so no time is asserted there.
+//!
+//! **The tests of this binary run one at a time** ([`serial`]). The finisher twins' anti-vacuity
+//! ("a helper advanced somewhere at P ≥ 2"), [`fin_a_helper_advances`] and T6's bounds need the
+//! region's helpers on a CPU while participant 0 is inside an item. libtest runs as many tests at
+//! once as the machine has CPUs, each with a pool of up to 16 spinning participants, so on a
+//! 4-CPU machine the binary starved its own helpers: CI run 4 (4-vCPU runners) had
+//! `fin_a_helper_advances` red in release and the batched finisher twin red under
+//! `force_alloc_panic`, both "no helper advance" at P4. MEASURED 2026-10-10 on the 16-CPU dev host
+//! under a 4-CPU affinity mask with `--test-threads=4` (the runner's shape): `fin_a_helper_advances`
+//! red 2 of 13 runs; run one at a time, 10 of 10 green.
 
 mod region_common;
 
@@ -38,6 +48,17 @@ use region_common::{
     Route, Stages, TestPolicy, TtasPolicy, hold_workers, participant_counts, pool,
     run_region, within,
 };
+
+/// Holds every test of this binary apart from the others (module docs): the guard lives for the
+/// whole test body. A poisoned lock still serialises, so one red test does not red the rest.
+///
+/// `clippy::disallowed_types`: a test-only gate between test bodies, taken once per test and never
+/// on a measured path; the hot-path ban is about engine code.
+#[allow(clippy::disallowed_types)]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// `P` under the finisher advance (CR-F).
 type Fin<P> = WithAdvance<P, true>;
@@ -167,36 +188,43 @@ fn exactly_once_matrix<P: RegionPolicy + 'static, const ARMED: bool>(label: &str
 
 #[test]
 fn t1_t2_exactly_once_and_visibility_v2_disarmed() {
+    let _serial = serial();
     exactly_once_matrix::<TestPolicy, false>("v2 disarmed");
 }
 
 #[test]
 fn t1_t2_exactly_once_and_visibility_v2_armed() {
+    let _serial = serial();
     exactly_once_matrix::<TestPolicy, true>("v2 armed");
 }
 
 #[test]
 fn t1_t2_exactly_once_and_visibility_batched_completion() {
+    let _serial = serial();
     exactly_once_matrix::<BatchedPolicy, false>("R-a batched");
 }
 
 #[test]
 fn t1_t2_exactly_once_and_visibility_home_lines() {
+    let _serial = serial();
     exactly_once_matrix::<HomePolicy, false>("R-b home lines");
 }
 
 #[test]
 fn t1_t2_exactly_once_and_visibility_ttas() {
+    let _serial = serial();
     exactly_once_matrix::<TtasPolicy, false>("R-c TTAS");
 }
 
 #[test]
 fn t1_t2_exactly_once_and_visibility_all_axes_armed() {
+    let _serial = serial();
     exactly_once_matrix::<AllAxesPolicy, true>("all axes armed");
 }
 
 #[test]
 fn t1_t2_exactly_once_and_visibility_pure_spin_helpers() {
+    let _serial = serial();
     exactly_once_matrix::<PureSpinHelpersPolicy, false>("R-d' pure-spin helpers");
 }
 
@@ -206,31 +234,37 @@ fn t1_t2_exactly_once_and_visibility_pure_spin_helpers() {
 
 #[test]
 fn fin_t1_t2_exactly_once_and_visibility_v2() {
+    let _serial = serial();
     exactly_once_matrix::<Fin<TestPolicy>, false>("fin v2");
 }
 
 #[test]
 fn fin_t1_t2_exactly_once_and_visibility_batched_completion() {
+    let _serial = serial();
     exactly_once_matrix::<Fin<BatchedPolicy>, false>("fin R-a batched");
 }
 
 #[test]
 fn fin_t1_t2_exactly_once_and_visibility_home_lines() {
+    let _serial = serial();
     exactly_once_matrix::<Fin<HomePolicy>, false>("fin R-b home lines");
 }
 
 #[test]
 fn fin_t1_t2_exactly_once_and_visibility_ttas() {
+    let _serial = serial();
     exactly_once_matrix::<Fin<TtasPolicy>, false>("fin R-c TTAS");
 }
 
 #[test]
 fn fin_t1_t2_exactly_once_and_visibility_pure_spin_helpers() {
+    let _serial = serial();
     exactly_once_matrix::<Fin<PureSpinHelpersPolicy>, false>("fin R-d' pure-spin helpers");
 }
 
 #[test]
 fn fin_t1_t2_exactly_once_and_visibility_all_axes() {
+    let _serial = serial();
     exactly_once_matrix::<Fin<AllAxesPolicy>, false>("fin all axes");
 }
 
@@ -239,6 +273,7 @@ fn fin_t1_t2_exactly_once_and_visibility_all_axes() {
 /// armed per-item counts hold.
 #[test]
 fn fin_armed_runs_the_orchestrator_twin() {
+    let _serial = serial();
     exactly_once_matrix::<Fin<AllAxesPolicy>, true>("fin all axes armed (orchestrator twin)");
 }
 
@@ -268,6 +303,7 @@ fn t3_body<P: RegionPolicy + 'static>(label: &str) {
 
 #[test]
 fn t3_report_formulas_on_a_fixed_table() {
+    let _serial = serial();
     t3_body::<TestPolicy>("T3");
 }
 
@@ -275,6 +311,7 @@ fn t3_report_formulas_on_a_fixed_table() {
 /// advance identity (`check_report`) is what witnesses that the schedule ran.
 #[test]
 fn fin_t3_report_formulas_on_a_fixed_table() {
+    let _serial = serial();
     t3_body::<Fin<TestPolicy>>("fin T3");
 }
 
@@ -310,6 +347,7 @@ fn t4_body<P: RegionPolicy + 'static>(label: &str) {
 
 #[test]
 fn t4_the_region_completes_alone_and_late_helpers_read_its_end() {
+    let _serial = serial();
     t4_body::<TestPolicy>("T4");
 }
 
@@ -317,6 +355,7 @@ fn t4_the_region_completes_alone_and_late_helpers_read_its_end() {
 /// its own completion adds and advances each boundary itself.
 #[test]
 fn fin_t4_the_region_completes_alone_and_late_helpers_read_its_end() {
+    let _serial = serial();
     t4_body::<Fin<TestPolicy>>("fin T4");
 }
 
@@ -361,12 +400,14 @@ fn t5_body<P: RegionPolicy + 'static>(label: &str) {
 
 #[test]
 fn t5_two_tables_over_one_frame_take_the_retry_path() {
+    let _serial = serial();
     t5_body::<TestPolicy>("T5");
 }
 
 /// T5 under the finisher: the retry path and the base sequence, whoever advances.
 #[test]
 fn fin_t5_two_tables_over_one_frame_take_the_retry_path() {
+    let _serial = serial();
     t5_body::<Fin<TestPolicy>>("fin T5");
 }
 
@@ -430,6 +471,7 @@ fn bound_payload<P: RegionPolicy + 'static>(role_helper: bool) -> Option<Result<
     ignore = "miri-unsupported: which role's wait passes the 50 ms bound first is decided by wall-clock proportions that Miri's interpreter does not keep"
 )]
 fn t6_ladder_bound_fires_in_every_phase() {
+    let _serial = serial();
     fn one<P: RegionPolicy + 'static>(name: &str) {
         let orch = bound_payload::<P>(false);
         let b = orch.unwrap_or_else(|| panic!("{name}: the orchestrator's wait did not fire its bound within 1 s"));
@@ -454,6 +496,7 @@ fn t6_ladder_bound_fires_in_every_phase() {
 /// threshold — so 50 µs could not show the census counting.
 #[test]
 fn t7_the_stall_census_is_armed_only() {
+    let _serial = serial();
     fn run<P: RegionPolicy + 'static, const ARMED: bool>() -> RegionReport {
         let pool = pool(2);
         let mut frame = Frame::new(1, 2, 8);
@@ -659,6 +702,7 @@ fn t8_body<Pb: RegionPolicy + 'static, Pu: RegionPolicy + 'static>(bounded: &str
 
 #[test]
 fn t8_a_hint_that_names_no_earlier_item_is_no_hint() {
+    let _serial = serial();
     t8_body::<TestPolicy, V2Policy>("TestPolicy", "V2Policy");
 }
 
@@ -666,6 +710,7 @@ fn t8_a_hint_that_names_no_earlier_item_is_no_hint() {
 /// `Fin<V2Policy>` on the watchdog route.
 #[test]
 fn fin_t8_a_hint_that_names_no_earlier_item_is_no_hint() {
+    let _serial = serial();
     t8_body::<Fin<TestPolicy>, Fin<V2Policy>>("Fin<TestPolicy>", "Fin<V2Policy>");
 }
 
@@ -682,6 +727,7 @@ fn fin_t8_a_hint_that_names_no_earlier_item_is_no_hint() {
 /// (ii) P = 4, one entry of 8 blocks run 64 times, 10 regions: Σ `helper_advances` > 0.
 #[test]
 fn fin_a_helper_advances() {
+    let _serial = serial();
     let regions = if cfg!(miri) { 2 } else { 20 };
     let pool2 = pool(2);
     let mut frame = Frame::new(2, 2, 8);
@@ -731,6 +777,7 @@ fn fin_a_helper_advances() {
 /// inline item itself (N-FIN-INLINE) is red in every region, not only when the timing allows.
 #[test]
 fn fin_inline_runs_stay_on_participant_0() {
+    let _serial = serial();
     let regions = if cfg!(miri) { 2 } else { 20 };
     let pool2 = pool(2);
     let mut frame = Frame::new(2, 2, 8);
@@ -837,6 +884,7 @@ fn alt_leg<P: RegionPolicy + 'static>(pool: &Arc<boyko_threadpool::ThreadPool>, 
 /// `claim_lines::<Fin<P>> == claim_lines::<P>` (u1).
 #[test]
 fn fin_alternating_advance_over_one_frame() {
+    let _serial = serial();
     let regions = if cfg!(miri) { 4 } else { 200 };
     let pool = pool(4);
     alt_leg::<TestPolicy>(&pool, "TestPolicy", regions);
@@ -852,6 +900,7 @@ fn fin_alternating_advance_over_one_frame() {
 #[cfg(miri)]
 #[test]
 fn threads_t1_t2_exactly_once_and_visibility() {
+    let _serial = serial();
     use region_common::run_threads;
     fn leg<P: RegionPolicy, const ARMED: bool>(blocks: &[u16], order: &[u16], p: u32) -> Ran {
         let mut frame = Frame::new(blocks.len(), p as usize, blocks.len() * 8 * p as usize);
