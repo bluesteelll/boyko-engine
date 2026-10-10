@@ -19,40 +19,82 @@
 //! the allocation counter around the warmed frames so the first-frame / capacity-
 //! crossing allocations (legitimately excluded from the steady-state guarantee) do not
 //! mask a regression.
+//!
+//! # The window counts the arming thread only
+//!
+//! Every frame this binary prices runs on the test's own thread: `pack_ui_instance`,
+//! `emit_ui_node_records` and `UiRenderScratch::sort_by_stack` are single-threaded and
+//! never hand work to another thread. So [`ARMED`] is a thread-local, set on the thread
+//! that opens the window, and the allocator counts only that thread's acquisitions. It
+//! was a process-global flag until 2026-10-10, which also counted whatever libtest's
+//! main thread allocated while a window was open: formatting the previous test's
+//! result line, and, when the binary has more tests than `--test-threads` (5 tests on
+//! a 4-vCPU runner), spawning the next test's thread. CI run 4's `force-alloc-panic`
+//! leg on `ubuntu-latest` read 16 allocations in
+//! `ui_render_scratch_sort_is_alloc_free_per_frame_at_large_n`, which finished right
+//! after a sibling, while its `test (release)` leg, which compiles the same code, read
+//! 0. MEASURED on the dev host at `150fc2cb` (msvc, release, `--test-threads=4`, 100
+//! runs a shape): green under a 4-CPU affinity mask and at full width, red in 12 runs
+//! under a 1-CPU mask (2 to 4 allocations, in this test and in the realloc count of
+//! `ui_render_scratch_does_not_realloc_in_steady_state`) and in 1 under a 2-CPU mask.
+//! Counting the arming thread only: 0 of 100 at all four shapes, and at 4 CPUs and
+//! full width in debug. A thread spawned by the code under test still shows: the spawn
+//! allocates on the spawning thread.
 
-// Test harness, not an engine path: the `SERIAL` `Mutex<()>` serializes the three tests because
-// the counting global allocator's counters + ARMED flag are PROCESS-GLOBAL while libtest runs
-// tests on parallel threads. Test-only scaffolding, never linked into a shipping build.
+// Test harness, not an engine path: the `SERIAL` `Mutex<()>` serializes the tests because
+// the counting global allocator's counters are PROCESS-GLOBAL while libtest runs tests on
+// parallel threads. Test-only scaffolding, never linked into a shipping build.
 #![allow(clippy::disallowed_types)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use boyko_render::ui::{
     emit_ui_node_records, pack_ui_instance, PackInput, UiImageInput, UiInstance, UiNineSliceInput,
     UiRenderScratch, FLAG_TEXTURED, UI_NINE_SLICE_REGIONS,
 };
 
-/// A pass-through allocator that counts allocations while ARMED. Disarmed by default
-/// so test-harness / setup allocations are ignored; the steady-state window arms it.
+/// A pass-through allocator that counts the acquisitions of the thread that is ARMED.
+/// Disarmed by default so test-harness / setup allocations are ignored; the
+/// steady-state window arms its own thread.
 struct CountingAlloc;
 
 static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static REALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
-static ARMED: AtomicBool = AtomicBool::new(false);
 
-/// Serializes the three tests: the counters + ARMED flag are PROCESS-GLOBAL while
-/// libtest runs the tests on parallel threads — a sibling test's setup allocations
-/// landing inside another test's armed window is a counter race (a real flake seen
-/// under full-workspace machine load). Each test holds this for its whole body.
+thread_local! {
+    /// Set on the thread whose window is open, and on no other (see "The window counts
+    /// the arming thread only" in the module doc). `const`-initialised and without a
+    /// destructor, so reading it from inside the allocator never allocates and never
+    /// fails, on any thread at any point of its life.
+    static ARMED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the calling thread's window is open.
+#[inline]
+fn armed() -> bool {
+    ARMED.try_with(Cell::get).unwrap_or(false)
+}
+
+/// Opens (`true`) or closes (`false`) the calling thread's window.
+fn arm(on: bool) {
+    ARMED.with(|a| a.set(on));
+}
+
+/// Serializes the tests: the counters are PROCESS-GLOBAL while libtest runs the tests
+/// on parallel threads, so two windows open at once would add into, and reset, each
+/// other's counts (a real flake seen under full-workspace machine load, when the
+/// ARMED flag was process-global too). Each test holds this for its whole body.
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // SAFETY: every method forwards verbatim to the system allocator (same ptr/layout
-// contract); the only added work is two relaxed atomic increments when ARMED, which
-// does not affect allocation correctness.
+// contract); the only added work is a read of a const-initialised thread-local
+// `Cell<bool>` and, when it is set, a relaxed atomic increment. Neither allocates, so
+// the allocator cannot re-enter itself, and neither affects allocation correctness.
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::Relaxed) {
+        if armed() {
             ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         }
         unsafe { System.alloc(layout) }
@@ -61,7 +103,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if ARMED.load(Ordering::Relaxed) {
+        if armed() {
             REALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         }
         unsafe { System.realloc(ptr, layout, new_size) }
@@ -168,7 +210,7 @@ fn ui_render_scratch_does_not_realloc_in_steady_state() {
     assert!(cap_pack >= N && cap_keys >= N && cap_gather >= N, "warmed to >= N capacity");
 
     // --- Steady state: arm the counter and run many frames at the SAME N. ---
-    ARMED.store(true, Ordering::Relaxed);
+    arm(true);
     ALLOC_COUNT.store(0, Ordering::Relaxed);
     REALLOC_COUNT.store(0, Ordering::Relaxed);
 
@@ -176,7 +218,7 @@ fn ui_render_scratch_does_not_realloc_in_steady_state() {
         build_frame(&mut scratch, &mut gather, N);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    arm(false);
 
     let reallocs = REALLOC_COUNT.load(Ordering::Relaxed);
 
@@ -268,7 +310,7 @@ fn ui_nine_slice_expansion_does_not_realloc_in_steady_state() {
         "warmed to >= the emitted record count"
     );
 
-    ARMED.store(true, Ordering::Relaxed);
+    arm(true);
     ALLOC_COUNT.store(0, Ordering::Relaxed);
     REALLOC_COUNT.store(0, Ordering::Relaxed);
 
@@ -276,7 +318,7 @@ fn ui_nine_slice_expansion_does_not_realloc_in_steady_state() {
         build_nine_sliced_frame(&mut scratch, &mut gather, N);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    arm(false);
 
     let reallocs = REALLOC_COUNT.load(Ordering::Relaxed);
     let allocs = ALLOC_COUNT.load(Ordering::Relaxed);
@@ -400,7 +442,7 @@ fn ui_render_scratch_steady_state_smaller_n_reuses_capacity() {
         build_frame(&mut scratch, &mut gather, WARM_N);
     }
 
-    ARMED.store(true, Ordering::Relaxed);
+    arm(true);
     ALLOC_COUNT.store(0, Ordering::Relaxed);
     REALLOC_COUNT.store(0, Ordering::Relaxed);
 
@@ -408,7 +450,7 @@ fn ui_render_scratch_steady_state_smaller_n_reuses_capacity() {
         build_frame(&mut scratch, &mut gather, STEADY_N);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    arm(false);
 
     assert_eq!(
         REALLOC_COUNT.load(Ordering::Relaxed),
@@ -441,7 +483,7 @@ fn ui_render_scratch_sort_is_alloc_free_per_frame_at_large_n() {
         build_frame(&mut scratch, &mut gather, N);
     }
 
-    ARMED.store(true, Ordering::Relaxed);
+    arm(true);
     ALLOC_COUNT.store(0, Ordering::Relaxed);
 
     const FRAMES: usize = 64;
@@ -449,7 +491,7 @@ fn ui_render_scratch_sort_is_alloc_free_per_frame_at_large_n() {
         build_frame(&mut scratch, &mut gather, N);
     }
 
-    ARMED.store(false, Ordering::Relaxed);
+    arm(false);
 
     let allocs = ALLOC_COUNT.load(Ordering::Relaxed);
     assert_eq!(
