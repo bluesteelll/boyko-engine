@@ -3090,6 +3090,10 @@ mod step6_enable_migration_tests {
 
     // ── Cross-page: source row in page 0, target append in page 1 (>4096) ─────
 
+    #[cfg_attr(
+        miri,
+        ignore = "miri-slow: needs a 4 097-row target archetype to put the append in page 1, spawned one row at a time (MEASURED 2026-10-10: past 3 min under the Miri sweep's flags); the in-page migration paths above run under Miri. Runs natively."
+    )]
     #[test]
     fn cross_page_migration_source_page0_target_page1() {
         register();

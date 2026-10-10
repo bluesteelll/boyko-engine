@@ -273,6 +273,10 @@ fn a_sample_older_than_the_window_is_late() {
 /// The samples arrive over many folds because a region holds `REGION_CAPACITY` at a time. They all
 /// carry frame 0's stamp, so they are all attributed to frame 0 — which is the point: attribution
 /// is by stamp, not by which fold happened to carry the sample.
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: the boundary is a count past `u16::MAX`, so the test needs more than 65 535 pushes and a fold per `REGION_CAPACITY` of them (MEASURED 2026-10-10: past 3 min under the Miri sweep's flags); push and fold are interpreted by every other test in this file. Runs natively."
+)]
 #[test]
 fn one_zone_taking_a_hundred_thousand_samples_keeps_count_exact() {
     const N: u32 = 100_000;
@@ -361,6 +365,10 @@ fn an_untouched_cell_is_empty_rather_than_a_measured_zero() {
 }
 
 /// A recycled row cannot report the frame it held `WINDOW` frames ago.
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: the wrap needs `WINDOW` (121) folds and one interpreted fold costs about 4 s (MEASURED 2026-10-10: 505 s for this test under the Miri sweep's flags); `fold` itself is interpreted by every other test in this file. Runs natively."
+)]
 #[test]
 fn a_row_is_zeroed_when_the_cursor_wraps_onto_it() {
     let (_g, mut p) = armed();
@@ -1691,6 +1699,10 @@ fn push_span_at(zone: u16, stamp: u64, value: u64) {
 /// So `G18` **as the corpus states it** — *"`lifetime[z].count` equals Σ per-frame `count[z]`"* —
 /// would have certified the defective implementation. The clause that actually catches it is the
 /// next test, and it exists because this one was measured not to.
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: the gate must outrun the ring, so it needs more than `WINDOW` (121) folds, and one interpreted fold costs about 4 s (MEASURED 2026-10-10: past 3 min under the Miri sweep's flags); tier B's per-sample fold is interpreted by `g18_a_span_written_a_frame_after_it_was_stamped_still_reaches_tier_b`. Runs natively."
+)]
 #[test]
 fn g18_the_lifetime_accumulator_agrees_with_every_frame_the_ring_forgot() {
     let (_g, mut p) = armed();
@@ -1812,7 +1824,9 @@ fn g16_the_histogram_edges_bracket_the_sorted_oracle_p99() {
     let slot = p.subscribe_histogram(tier_zone()).expect("a fresh subscription gets a slot");
     assert_eq!(slot, 0, "the first subscription takes the first slot");
 
-    const N: usize = 100_000;
+    // Under Miri 2 560 (ten batches of 256): the bracket holds for any N, the tail still holds
+    // ~26 samples, and the native 100 000 ran past 18 min of interpretation (MEASURED 2026-10-10).
+    const N: usize = if cfg!(miri) { 2_560 } else { 100_000 };
     let mut fed: Vec<u64> = Vec::with_capacity(N);
     // A skewed, deterministic distribution: mostly cheap, with a heavy tail — the shape a frame
     // profiler actually sees, and the one where a p99 is worth asking for. No RNG crate: an LCG

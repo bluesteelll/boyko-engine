@@ -21,6 +21,11 @@
 //!   the first panic must propagate out of `install`.
 //!
 //! Run: `cargo test --release -p boyko-threadpool --test stress`
+//!
+//! Native only, as the first paragraph says: `cfg(not(miri))`. MEASURED 2026-10-10 under the Miri
+//! sweep's flags, `stress_destructors_large_set_exactly_once` (8 workers, 8192 tasks) ran past
+//! 3 min of interpretation; the transport's soundness under Miri is `miri_scope*.rs`'s.
+#![cfg(not(miri))]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};

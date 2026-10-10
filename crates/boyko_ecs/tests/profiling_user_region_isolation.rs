@@ -59,6 +59,10 @@ fn engine_sample(stamp: u64, value: u64) -> Sample {
 
 /// **`G20`, authorship half.** A game's own static zone site overflows the game's ring, and the
 /// engine loses nothing.
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: the runaway's 4 096 zone closes take about 38 s of interpretation between two folds, past `MAX_PLAUSIBLE_FRAME_TICKS` (10 s), so the fold reads the frame as a clock jump and discards it (MEASURED 2026-10-10: `user_overflow +0`, also with isolation off; a probe of the same transport without the gap overflows as natively). The transport half runs under Miri in `profiling::tests::a_full_user_region_costs_the_engine_nothing`. Runs natively."
+)]
 #[test]
 fn a_runaway_game_zone_costs_the_engine_nothing() {
     set_lane(TEST_LANE);

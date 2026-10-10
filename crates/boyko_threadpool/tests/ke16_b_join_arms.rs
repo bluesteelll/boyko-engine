@@ -198,6 +198,10 @@ fn the_external_joiner_helps() {
 ///
 /// A registered worker of A is the nearest caller class to a lane of B that must still not be
 /// treated as one.
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: the fixture holds pool B's only worker for the 300 ms wall-clock `WORKER_HOLD`, and under Miri pool A's worker reaches B's queue only after that hold has expired, so B's worker runs the wave itself (MEASURED 2026-10-10 under the sweep's flags: `bodies_on_the_joining_thread=0`). The other two rows of this file run under Miri. Runs natively."
+)]
 #[test]
 fn a_worker_of_another_pool_obeys_the_external_arm() {
     let pool_a = ThreadPoolBuilder::new().num_threads(1).build();

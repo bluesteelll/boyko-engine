@@ -764,6 +764,14 @@ mod tests {
         }
     }
 
+    /// Rows in a parallel-path test's archetype under Miri: the smallest count that still clears
+    /// [`MIN_ARCHETYPE_FOR_PARALLEL`](crate::ecs::core::iters::query::par_iter::MIN_ARCHETYPE_FOR_PARALLEL),
+    /// so the scope.spawn fan-out is the path taken exactly as natively. The native sizes
+    /// (4 000-12 000 rows, spawned one entity at a time) cost 17-20 min per test under Miri
+    /// (MEASURED 2026-10-10).
+    const MIRI_PARALLEL_ROWS: u32 =
+        crate::ecs::core::iters::query::par_iter::MIN_ARCHETYPE_FOR_PARALLEL as u32 + 76;
+
     fn register_wave7_components() {
         component_registry::register_layout::<CompW7a>(COMP_W7A.0);
         component_registry::register_layout::<CompW7b>(COMP_W7B.0);
@@ -828,7 +836,8 @@ mod tests {
         register_wave7_components();
         let mut ecs = EcsMaster::new();
         let arch = ecs.create_archetype(&[COMP_W7A]);
-        for i in 0..10_000u32 {
+        let n: u32 = if cfg!(miri) { MIRI_PARALLEL_ROWS } else { 10_000 };
+        for i in 0..n {
             spawn_w7a(&mut ecs, arch, i);
         }
 
@@ -869,9 +878,9 @@ mod tests {
 
         assert_eq!(
             counter.load(Ordering::Relaxed),
-            10_000,
+            n as usize,
             "PAR2/CD3 full coverage: every row processed exactly once \
-             (counter == 10000, no overlap, no drop)",
+             (counter == n, no overlap, no drop)",
         );
         // At least 2 invocations (large-archetype split fan-out); upper bound
         // is the worker count × chunks-per-worker, but we only pin the
@@ -905,8 +914,11 @@ mod tests {
         let arch_a = ecs.create_archetype(&[COMP_A, COMP_W7A]);
         let arch_b = ecs.create_archetype(&[COMP_A, COMP_W7B]);
 
-        // 5000 entities into arch_a.
-        for i in 0..5000u32 {
+        // 5000 entities into arch_a and 7000 into arch_b natively; under Miri each archetype gets
+        // just past the parallel threshold, with different counts so the two stay distinguishable.
+        let (n_a, n_b): (u32, u32) =
+            if cfg!(miri) { (MIRI_PARALLEL_ROWS, MIRI_PARALLEL_ROWS + 31) } else { (5000, 7000) };
+        for i in 0..n_a {
             let ca = CompA(i);
             let cw = CompW7a(i);
             // SAFETY: both `#[repr(C)]` POD; byte slices valid for the call.
@@ -925,8 +937,7 @@ mod tests {
             ecs.create_entity(arch_a, &[(COMP_A, a_bytes), (COMP_W7A, w_bytes)])
                 .expect("multi-archetype spawn arch_a must succeed");
         }
-        // 7000 entities into arch_b.
-        for i in 0..7000u32 {
+        for i in 0..n_b {
             let ca = CompA(i + 100_000);
             let cw = CompW7b(i);
             // SAFETY: both `#[repr(C)]` POD; byte slices valid for the call.
@@ -1001,8 +1012,8 @@ mod tests {
 
         assert_eq!(
             total.load(Ordering::Relaxed),
-            12_000,
-            "multi-archetype dispatch sum: 5000 + 7000 = 12000 (every row across both archetypes processed exactly once)",
+            (n_a + n_b) as usize,
+            "multi-archetype dispatch sum: n_a + n_b (every row across both archetypes processed exactly once)",
         );
     }
 
@@ -1018,7 +1029,8 @@ mod tests {
         register_wave7_components();
         let mut ecs = EcsMaster::new();
         let arch = ecs.create_archetype(&[COMP_W7POS]);
-        for i in 0..4000u32 {
+        let n: u32 = if cfg!(miri) { MIRI_PARALLEL_ROWS } else { 4000 };
+        for i in 0..n {
             spawn_w7pos(&mut ecs, arch, i);
         }
 
@@ -1062,7 +1074,7 @@ mod tests {
         let state = QueryDataState::<&CompW7Pos, ()>::new(&mut ecs);
         // SAFETY (U_C1): cell consumed within this scope.
         let cell = unsafe { UnsafeEcsCell::new_mutable(&mut ecs) };
-        let mut collected: Vec<u32> = Vec::with_capacity(4000);
+        let mut collected: Vec<u32> = Vec::with_capacity(n as usize);
         // SAFETY (Q1, CD1-CD4): read-only re-iteration; no aliasing live.
         unsafe {
             let ids = state.archetype_state.matched_ids_pre_terms();
@@ -1080,9 +1092,9 @@ mod tests {
             );
         }
 
-        assert_eq!(collected.len(), 4000, "every row must reappear after mutation");
+        assert_eq!(collected.len(), n as usize, "every row must reappear after mutation");
         collected.sort_unstable();
-        let expected: Vec<u32> = (0..4000u32).map(|i| i.wrapping_mul(2)).collect();
+        let expected: Vec<u32> = (0..n).map(|i| i.wrapping_mul(2)).collect();
         assert_eq!(
             collected, expected,
             "every CompW7Pos(i) must now read back as CompW7Pos(i*2) — \

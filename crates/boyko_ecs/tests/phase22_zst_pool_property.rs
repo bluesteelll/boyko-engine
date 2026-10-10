@@ -93,6 +93,10 @@ struct PModelTag;
 
 proptest! {
     #![proptest_config(ProptestConfig {
+        // Under Miri, two cases of at most 48 ops (the `assets.rs` `edited_set` budget): the
+        // default 256 cases ran past 10 min of interpretation (MEASURED 2026-10-10).
+        #[cfg(miri)]
+        cases: 2,
         // No failure file under Miri: proptest finds it through the cwd, which Miri's
         // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
         #[cfg(miri)]
@@ -103,7 +107,7 @@ proptest! {
     /// ZST pool must match the reference model after every operation.
     #[test]
     fn zst_pool_len_and_grow_match_model(
-        ops in proptest::collection::vec(pool_op_strategy(), 1..96)
+        ops in proptest::collection::vec(pool_op_strategy(), 1..if cfg!(miri) { 48 } else { 96 })
     ) {
         let id = PModelTag::component_id().0;
         let sigma = pool_base_stagger(id);
@@ -239,6 +243,10 @@ impl Drop for PDropTag {
 
 proptest! {
     #![proptest_config(ProptestConfig {
+        // Under Miri, two cases of at most 48 ops (the `assets.rs` `edited_set` budget): the
+        // default 256 cases ran past 3 min of interpretation (MEASURED 2026-10-10).
+        #[cfg(miri)]
+        cases: 2,
         // No failure file under Miri: proptest finds it through the cwd, which Miri's
         // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
         #[cfg(miri)]
@@ -249,7 +257,7 @@ proptest! {
     /// Drop accounts exactly the survivors; total drops == total adds.
     #[test]
     fn zst_pool_drop_accounting_matches_model(
-        ops in proptest::collection::vec(pool_op_strategy(), 1..96)
+        ops in proptest::collection::vec(pool_op_strategy(), 1..if cfg!(miri) { 48 } else { 96 })
     ) {
         let mut pool = ComponentPool::new(PDropTag::component_id().0, RESERVE);
         let baseline = P_DROP_COUNT.load(SEQ);

@@ -3053,8 +3053,10 @@ mod tests {
         }
 
         proptest! {
+            // Under Miri, two cases of at most 48 ops: Miri is here for UB coverage of every op
+            // arm, not case volume, and every op re-checks every live row.
             #![proptest_config(ProptestConfig {
-                cases: 64,
+                cases: if cfg!(miri) { 2 } else { 64 },
                 // No failure file under Miri: proptest finds it through the cwd, which Miri's
                 // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
                 #[cfg(miri)]
@@ -3062,7 +3064,9 @@ mod tests {
                 ..ProptestConfig::default()
             })]
             #[test]
-            fn pool_matches_vec_oracle(ops in proptest::collection::vec(op_strategy(), 1..200)) {
+            fn pool_matches_vec_oracle(
+                ops in proptest::collection::vec(op_strategy(), 1..if cfg!(miri) { 48 } else { 200 })
+            ) {
                 // Force registration before pool construction.
                 let _ = U64Pair::component_id();
                 component_registry::register_layout::<U64Pair>(U64_ID.0);
@@ -3260,8 +3264,9 @@ mod tests {
         }
 
         proptest! {
+            // Under Miri, two cases of at most 48 ops, as in `pool_matches_vec_oracle`.
             #![proptest_config(ProptestConfig {
-                cases: 64,
+                cases: if cfg!(miri) { 2 } else { 64 },
                 // No failure file under Miri: proptest finds it through the cwd, which Miri's
                 // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
                 #[cfg(miri)]
@@ -3270,7 +3275,7 @@ mod tests {
             })]
             #[test]
             fn proptest_pool_vs_vec_oracle(
-                ops in proptest::collection::vec(op_strategy(), 1..200)
+                ops in proptest::collection::vec(op_strategy(), 1..if cfg!(miri) { 48 } else { 200 })
             ) {
                 let _ = U64Pair::component_id();
                 component_registry::register_layout::<U64Pair>(U64_ID.0);

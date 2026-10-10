@@ -109,8 +109,11 @@ fn check(world: &mut EcsMaster, m: &Model, step: usize, op: &Op) -> Result<(), T
 }
 
 proptest! {
+    // Under Miri, two cases of at most 48 ops (the `assets.rs` `edited_set` budget): Miri is here
+    // for UB coverage of both routes, not case volume, and the native budget ran past 3 min of
+    // interpretation (MEASURED 2026-10-10).
     #![proptest_config(ProptestConfig {
-        cases: 256,
+        cases: if cfg!(miri) { 2 } else { 256 },
         // No failure file under Miri: proptest finds it through the cwd, which Miri's
         // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
         #[cfg(miri)]
@@ -119,7 +122,9 @@ proptest! {
     })]
 
     #[test]
-    fn id_life_cycle_conserves_ids_across_both_routes(ops in prop::collection::vec(op(), 1..96)) {
+    fn id_life_cycle_conserves_ids_across_both_routes(
+        ops in prop::collection::vec(op(), 1..if cfg!(miri) { 48 } else { 96 })
+    ) {
         let a = PVal::component_id();
         let b = PTag::component_id();
         let mut world = EcsMaster::new();

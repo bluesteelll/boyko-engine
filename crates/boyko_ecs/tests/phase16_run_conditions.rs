@@ -580,6 +580,10 @@ fn member_runs_only_when_both_own_and_set_conditions_true() {
 /// temporal overlap among the parallel bank, so `in_flight` actually exceeds 1
 /// during the frame (a separate assertion confirms the bank really did overlap,
 /// otherwise the guard test would be vacuous).
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: an 8-worker pool whose parallel bank overlaps through 2 ms `thread::sleep`s (MEASURED 2026-10-10: past 3 min under the Miri sweep's flags); the multi-worker executor runs under Miri in `miri_schedule_parallel.rs`. Runs natively."
+)]
 #[test]
 fn condition_eval_never_observes_a_live_worker() {
     let pool = ThreadPoolBuilder::new().num_threads(8).build();

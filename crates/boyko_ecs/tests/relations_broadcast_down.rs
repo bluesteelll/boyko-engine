@@ -369,7 +369,10 @@ fn scaling_guard_wide_fanout_linear() {
 
 #[test]
 fn scaling_guard_balanced_tree_linear() {
-    for &n in &[10usize, 100, 1000] {
+    // Under Miri 10 and 100: the guard is an exact count per size, and the 1 000-node tree ran past
+    // 3 min of interpretation (MEASURED 2026-10-10). All three sizes natively.
+    let sizes: &[usize] = if cfg!(miri) { &[10, 100] } else { &[10, 100, 1000] };
+    for &n in sizes {
         let fires =
             measure_down_fires(build_balanced, n, c_balanced, || DownBalanced, &C_BALANCED);
         assert_eq!(

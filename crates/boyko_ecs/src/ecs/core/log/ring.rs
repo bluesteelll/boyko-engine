@@ -402,6 +402,10 @@ mod tests {
         (256 + (seq as usize % 7) * 64, (seq % 251) as u8)
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "miri-slow: four laps of the 4 096-line ring, 16 384 stores of up to 640 bytes each read back three lines byte by byte (MEASURED 2026-10-10: past 18 min under the Miri sweep's flags without finishing); the store and read paths run under Miri in this module's other tests. Runs natively."
+    )]
     #[test]
     fn a_live_line_is_never_overwritten_by_the_arena() {
         let mut ring = LogRing::new();

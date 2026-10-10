@@ -160,7 +160,10 @@ fn assert_revealed_equals_difference(old_oc: [i32; 3], new_oc: [i32; 3], ctx: &s
 #[test]
 fn revealed_set_equals_box_difference_over_random_pairs() {
     let mut rng = Rng::new(SEED_BASE ^ 0x2C);
-    for i in 0..4096usize {
+    // Under Miri 64 pairs, which still span shifts, diagonals and teleports on every axis; the
+    // native 4 096 ran past 3 min of interpretation (MEASURED 2026-10-10).
+    let pairs = if cfg!(miri) { 64usize } else { 4096usize };
+    for i in 0..pairs {
         let old_oc = rng.origin_cell();
         let d = [
             rng.offset(-(DIM + 2), DIM + 2),
@@ -216,7 +219,10 @@ fn revealed_set_teleport_reveals_whole_new_box() {
 /// streaming property is verified incrementally exactly as `scroll_update` advances `origin_cell`.
 #[test]
 fn revealed_set_equals_difference_over_random_walks() {
-    let n_walks = 256usize;
+    // Under Miri 2 walks of 32 steps, which still mix drifts and jumps: one interpreted check costs
+    // about 1.1 s, so the native 256 walks are some 2.5 hours of interpretation (MEASURED
+    // 2026-10-10 on the pair test above: 64 checks in 70 s).
+    let n_walks = if cfg!(miri) { 2usize } else { 256usize };
     let steps_per_walk = 32usize;
     for w in 0..n_walks {
         let seed = SEED_BASE.wrapping_add(w as u64 * 0x1000_0193);

@@ -143,8 +143,10 @@ proptest! {
     // Each case spins up a fresh EcsMaster and roughly half the ops go
     // through a full run_system apply window — modest case count (the
     // phase19 hierarchy property precedent).
+    // Under Miri, two cases: every op kind is drawn per op, and 256 interpreted cases ran past
+    // 3 min (MEASURED 2026-10-10).
     #![proptest_config(ProptestConfig {
-        cases: 256,
+        cases: if cfg!(miri) { 2 } else { 256 },
         // No failure file under Miri: proptest finds it through the cwd, which Miri's
         // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
         #[cfg(miri)]

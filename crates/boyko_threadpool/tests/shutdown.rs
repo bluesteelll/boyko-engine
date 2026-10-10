@@ -43,13 +43,16 @@ const WORKERS: usize = 4;
 /// workers would leak; the test completing cleanly proves the cycle is broken.
 #[test]
 fn pool_drop_joins_all_workers() {
+    // Under Miri, 32: the property is the join on drop, not the volume, and the native 512 did not
+    // finish inside 3 min of interpretation (MEASURED 2026-10-10 under the Miri sweep's flags).
+    const TASKS: usize = if cfg!(miri) { 32 } else { 512 };
     let pool = ThreadPoolBuilder::new().num_threads(WORKERS).build();
     let ran = Arc::new(AtomicUsize::new(0));
 
     // Many small independent tasks (no inter-task blocking) so the work spreads
     // across the worker threads without any deadlock hazard.
     pool.install(|scope| {
-        for _ in 0..512 {
+        for _ in 0..TASKS {
             let ran = Arc::clone(&ran);
             scope.spawn(move || {
                 ran.fetch_add(1, Ordering::Relaxed);
@@ -59,7 +62,7 @@ fn pool_drop_joins_all_workers() {
 
     assert_eq!(
         ran.load(Ordering::Acquire),
-        512,
+        TASKS,
         "every spawned task must have run exactly once"
     );
 
