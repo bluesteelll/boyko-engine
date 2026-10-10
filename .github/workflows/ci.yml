@@ -664,7 +664,21 @@ jobs:
       # hand-listed at all (F18). The fixture's census/codegen harnesses carry
       # `#[cfg(not(miri))]`: Miri cannot spawn processes either, and without the guard
       # this row reds for a reason that has nothing to do with reflection.
+      #
+      # `MIRIFLAGS` is restated with `-Zmiri-ignore-leaks`, the flag every pool-backed Miri recipe in
+      # this tree already carries (`miri_schedule_parallel.rs`, `miri_phase15.rs`, `dense_d*_miri.rs`
+      # and the rest name it in their run lines). MEASURED 2026-10-10: without it, the targets that
+      # build a `ThreadPool` or a bundle cache red on leaks after every one of their tests passed (14
+      # of the first 60 targets run) —
+      # crossbeam-epoch's per-thread `Local`s registered by the pool's workers, which outlive
+      # their thread in crossbeam-epoch's global list (an upstream shape), and the `&'static` bundle-column slices
+      # `BundleColumnCache::resolve_and_cache` leaks once per bundle type by design (SBO6). A step
+      # `env` replaces `.cargo/config.toml`'s `[env]` entry rather than appending to it (the PC-24
+      # step above relies on the same rule), so `-Zmiri-tree-borrows` is restated here. The leak
+      # check stays on in the curated steps above, which keep the config's flags.
       - name: cargo miri test (pure-compute sweep)
+        env:
+          MIRIFLAGS: "-Zmiri-tree-borrows -Zmiri-ignore-leaks"
         run: |
           cargo +nightly miri test --locked --all-targets \
             -p boyko-ecs -p boyko-memory -p boyko-utils -p boyko-threadpool -p boyko-serialize \
