@@ -351,7 +351,7 @@ are ignored, and it would run them unoptimized. The plain `slow:` site
 is the device-free leg above, in release.
 
 **Leg: Miri.** `cargo +nightly-x86_64-pc-windows-msvc miri test` skips every `miri-slow` and
-`miri-unsupported` site (`rg -n '^[^/]*ignore = "(feature\+)?miri-' -g '*.rs'`, 186 on
+`miri-unsupported` site (`rg -n '^[^/]*ignore = "(feature\+)?miri-' -g '*.rs'`, 182 on
 2026-10-10 with CI's Miri sweep gated and budgeted; 158 at `7d5a0015`); almost all are `cfg_attr(miri, …)` and run *natively* in the ordinary legs. Two tests
 exist only under Miri — `miri_fixed_loop.rs`'s plain site and `miri_phase19.rs`'s
 `miri_cascade_wide_path`, both in `#![cfg(miri)]` files — and run under Miri with `-- --ignored`.
