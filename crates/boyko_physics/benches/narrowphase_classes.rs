@@ -15,8 +15,9 @@
 //! | `rest` | the same pyramid exactly touching (gap 0, friction 0.5), the runner's `--scene rest` | after step 300 |
 //! | `rain` | 1000 boxes on a 10×10×10 lattice (pitch 2.5) with seeded random orientations, velocities (down 5 m/s ± 1) and spins (±3 rad/s) falling onto the floor | after step 40 |
 //!
-//! Each scene is stepped on the colored schedule with one worker, sleeping off and the AllPairs
-//! broadphase, and the snapshot is what the narrowphase read on the last step, copied by a probe
+//! Each scene is stepped on the colored schedule with one worker, sleeping off, the AllPairs
+//! broadphase, contact reuse off and the overlap-only contact rule (V2's speculative contacts off:
+//! `speculative_distance = 0` and `speculative_velocity_cap = 0`), and the snapshot is what the narrowphase read on the last step, copied by a probe
 //! system ordered after the narrowphase and before the constraint graph (after the step the solve
 //! has advanced the gathered bodies in place): the gathered `SolverScratch::bodies`, the
 //! `ContactPairs` and the box-axis hysteresis table (`BoxAxisCache::get`), which after the
@@ -40,8 +41,8 @@
 //!   axis also gives the separated pairs' histogram (A face / B face / edge) and the mean number
 //!   of axes an early exit evaluates (the review's OQ3: L9a (i)'s share against (ii)'s).
 //! * **The step's contact set:** the touching count equals the step's solver manifold count
-//!   (whether a box pair has a manifold is a function of the two poses alone, so the hint cannot
-//!   change it).
+//!   (under the overlap-only rule whether a box pair has a manifold is a function of the two
+//!   poses alone, so the hint cannot change it; under V2's speculative rule it is not).
 //! * **The design's J counts:** separated and touching within 5 % of 5,037 and 4,524 (P0b).
 //! * **The carried separating axis (L9 C2):** the pairs the step's narrowphase rejected by the
 //!   separating axis their previous step carried (`Manifolds::separated_axis_hits`, the SAT did
@@ -424,6 +425,14 @@ fn snapshot(spec: &SceneSpec) -> Snapshot {
         // is its record's refresh, which can exist where the full collision finds none (a kept
         // point at a knife edge) or vanish where it finds one (every kept point lifted).
         cfg.contact_reuse = false;
+        // The overlap-only rule (`speculative_distance = 0` and `speculative_velocity_cap = 0`,
+        // the engine before V2, bit for bit), although V2's speculative contacts are on by
+        // default: the classes are the public overlap-only `box_box_contact`'s, C0's snapshots
+        // and the design's J counts are that rule's trajectory, and under V2 a pair within its
+        // speculative distance of touching has a manifold the overlap SAT calls separated, so
+        // `touching == manifolds` holds only under this rule.
+        cfg.speculative_distance = 0.0;
+        cfg.speculative_velocity_cap = 0.0;
     }
     let mut physics = builder.build(&mut world);
     assert!(spec.steps > 0, "construction: a snapshot needs at least one step");

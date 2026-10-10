@@ -208,8 +208,11 @@ build-only jobs: `check`, `clippy`, `profile-legs`, `feature-legs` and `bench-co
 the engine compiling for Linux. The second is `miri` and `loom`, which pass there. What is still
 open is narrower. No clippy lint reaches a `#[cfg(windows)]` item, and no feature leg compiles one.
 CI run 4 (38026578745) ran the whole debug and release selection on `ubuntu-latest`, and its reds
-fell in three classes of pin taken on Windows: allocation and pair counts, float bytes across C
-runtimes, and timing on a 4-vCPU runner. So the Linux test run is kept as `test-linux`, an
+fell in three classes of pin taken on Windows: allocation counts, float bytes across C
+runtimes, and timing on a 4-vCPU runner. One more red, `boyko-physics --bench narrowphase_classes`,
+was no pin: it failed on the Windows MSVC dev host with the same numbers, because its
+`touching == manifolds` assert predated V2's speculative contacts, and the bench now runs the
+overlap-only rule it was written for. So the Linux test run is kept as `test-linux`, an
 informational job (`continue-on-error: true`). Its header in `ci.yml` lists each red, and making
 those pins hold on Linux is a follow-up.
 

@@ -144,9 +144,9 @@ jobs:
   #
   # `windows-latest` since 2026-10-10, by the decision in the note above `jobs:`. CI run 4
   # (38026578745, on ae9c1dc3) was the first to run all 917 targets on `ubuntu-latest`. The debug
-  # leg failed 1 target there and the release leg 7. Every one of those failures is in a class
-  # pinned on Windows, and the `test-linux` job below lists them. On the dev host, which is Windows
-  # MSVC, the same selection is green.
+  # leg failed 1 target there and the release leg 7; `test-linux` below lists them. One of them,
+  # `--bench narrowphase_classes`, was red on the Windows MSVC dev host too and is fixed. The dev
+  # host's run of the debug step had no other red; the release step has not run there in full.
   test:
     name: cargo test (${{ matrix.profile }})
     runs-on: windows-latest
@@ -176,8 +176,8 @@ jobs:
   # `windows-latest` (see the note above `jobs:`), and this job keeps a Linux test run visible.
   #
   # WHY IT CANNOT GATE. CI run 4 (38026578745, on ae9c1dc3) was the first run of all 917 targets on
-  # `ubuntu-latest`. It failed in three classes. Every failing test is pinned on Windows, and every
-  # one passes on the Windows MSVC dev host. Per leg: debug failed 1 target, release 7, and
+  # `ubuntu-latest`. It failed in three classes, plus one bench that was red on the Windows MSVC dev
+  # host as well and is fixed (below). Per leg: debug failed 1 target, release 7, and
   # `force-alloc-panic` 7. These are the targets, as run 4 measured them:
   #   * Counts pinned on Windows.
   #     - The allocation censuses `boyko-app --test e1_engine_ui_alloc_census` (release: "a forced
@@ -185,9 +185,9 @@ jobs:
   #       (`force-alloc-panic`: 0.016 OTHER-class acquisitions per frame) and
   #       `boyko-render --test ui_no_realloc` (`force-alloc-panic`: 16 allocations in the per-frame
   #       UI sort, where the pin is 0).
-  #     - The `harness = false` check of `boyko-physics --bench narrowphase_classes`. It failed in
-  #       all three legs, and it is this job's one known red: `jolt-h4` gave 75 touching pairs,
-  #       where 140 solver manifolds are expected.
+  #     - NOT a platform pin, and fixed: `boyko-physics --bench narrowphase_classes` (75 touching
+  #       pairs against 140 manifolds) was red on the Windows MSVC dev host too. Its assert predated
+  #       V2's speculative contacts; it now runs the overlap-only rule (speculative_distance = 0).
   #   * Float byte identity across C runtimes. `boyko_shaderdsl --test eval_byte_identity`
   #     (`m2_brick_span_matches_host_on_random_sweep` computes 0 where the frozen value is -0) and
   #     `boyko-render --lib` (`view::tests::perspective_bridge_reproduces_legacy_push_constants`:
