@@ -199,14 +199,18 @@ to run: `gpu_scene`, the host and its dump and probe drivers are `#[cfg(windows)
 mirror image stayed open: every CI job ran on `ubuntu-latest`, so **no job compiled a
 `#[cfg(windows)]` item**, and that whole path was compiled only on a Windows box.
 
-**Since 2026-10-10 (owner decision, release PR #4), every CI job that executes a test binary runs on
-`windows-latest`**, the platform the engine is developed, measured and pinned on. Those jobs are
+**Since 2026-10-10 (owner decision, release PR #4), every CI job that executes a test binary, except
+`miri` and `loom`, runs on `windows-latest`**, the platform the engine is developed, measured and
+pinned on. Those jobs are
 `test`, `profile-census`, `reflect-on`, `reflect-census`, `reflect-dogfood`,
 `feature-count-tests` and `force-alloc-panic`. They compile that path at default features and run
 its device-free tests. Two kinds of job stay on `ubuntu-latest`, both blocking. The first is the
 build-only jobs: `check`, `clippy`, `profile-legs`, `feature-legs` and `bench-compile`. They keep
 the engine compiling for Linux. The second is `miri` and `loom`, which pass there. What is still
-open is narrower. No clippy lint reaches a `#[cfg(windows)]` item, and no feature leg compiles one.
+open is narrower. No CI clippy lint reaches a `#[cfg(windows)]` item, because the `clippy` job runs
+on `ubuntu-latest`, and no feature leg compiles one. The dev host's own gate does lint them: MEASURED
+2026-10-10, a `len_zero` planted in a `#[cfg(windows)]` fn of a `boyko-threadpool` test reds
+`cargo clippy -- -D warnings` on msvc and passes it with `--target x86_64-unknown-linux-gnu`.
 CI run 4 (38026578745) ran the whole debug and release selection on `ubuntu-latest`, and its reds
 fell in two classes of pin taken on Windows, allocation counts and float bytes across C runtimes,
 and in a third that was the runner's width, not its OS: the timing and occupancy tests of

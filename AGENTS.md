@@ -82,13 +82,17 @@ cargo check -p boyko-render     --features hwrt --all-targets    # the example's
 - **The platform cfg has the same blind spot, narrowed.** `boyko-app` compiles on Linux; no GPU path:
   `gpu_scene`, the host and the frame loop are `#[cfg(windows)]` (`crates/boyko_app/src/lib.rs:60-115`,
   `runner.rs:237-238`); the non-Windows `run_windowed` reports E3004 and exits (`runner.rs:1022-1026`).
-  Since 2026-10-10 (owner) CI runs every test-running job on `windows-latest`, so those items compile at
-  default features. The build-only jobs (`check`, `clippy`, `profile-legs`, `feature-legs`,
-  `bench-compile`) stay on `ubuntu-latest`. A Linux test run is kept as `test-linux`, which is
-  informational (`continue-on-error`).
-- No clippy lint has run over feature-gated code or over a `#[cfg(windows)]` item. A `#[cfg(windows)]`
-  arm that also needs a feature gets only the by-hand recipe above, which is a recipe, not coverage.
-  Under `hwrt`, that means `boyko-app` and `orbit_cube_window`.
+  Since 2026-10-10 (owner) these CI jobs run on `windows-latest`, so those items compile at default
+  features: `test` (debug, release), `profile-census`, `reflect-on`, `reflect-census`,
+  `reflect-dogfood`, `feature-count-tests`, `force-alloc-panic`. On `ubuntu-latest`, all blocking:
+  the build-only `check`, `clippy`, `profile-legs`, `feature-legs`, `bench-compile` (and `docs.yml`),
+  the two Python registry jobs, and the test-running `miri` and `loom`. `test-linux` (also
+  `ubuntu-latest`) runs the debug `test` selection as information only (`continue-on-error`).
+- No CI clippy lint runs over a `#[cfg(windows)]` item (the `clippy` job is on `ubuntu-latest`), nor
+  over feature-gated code beyond `boyko-ecs/profiling-analysis`. The dev-host gate in *Build commands*
+  (`cargo clippy --workspace --all-targets -- -D warnings`, MSVC) lints the `#[cfg(windows)]` items
+  at default features. A `#[cfg(windows)]` arm that also needs a feature gets only the by-hand recipe
+  above, which is a recipe, not coverage. Under `hwrt`, that means `boyko-app` and `orbit_cube_window`.
 
 (rationale and measurements: docs/WORKFLOW.md#feature-axis)
 
