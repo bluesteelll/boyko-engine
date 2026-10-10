@@ -644,56 +644,11 @@ jobs:
           fi
           cargo +nightly miri test --locked -p boyko-ecs --lib -- pc24_ 2>&1 | tee pc24_sb.log
           grep -q 'running 7 tests' pc24_sb.log && grep -q 'test result: ok. 7 passed; 0 failed' pc24_sb.log
-      # 2026-07 audit: this step's `--all-targets` was the vacuous root-package form (it
-      # interpreted nothing). Miri CANNOT execute FFI calls, so a literal workspace sweep
-      # would fault the instant it reached `boyko_rhi_vulkan`'s raw `vk*` calls (and the
-      # crates that depend on it) — the sweep is therefore scoped EXPLICITLY to the
-      # pure-compute crates, which is what it could ever have meaningfully covered.
-      # The FFI/GPU side is covered instead by `cargo careful` + the validation-layer
-      # golden runs (docs/AUDIT-2026-07-PLAN.md's tool matrix).
-      # Reflection GATES G4 item 3 / D4: TWO reflect rows with DIFFERENT shapes, and the
-      # difference is the point. `-p boyko-reflect` is PLAIN — the crate carries no
-      # `reflect` feature (D4) and never will, so `--features reflect` on it is a hard
-      # cargo error ("none of the selected packages contains these features"); and with
-      # the feature "off" it is NOT empty — nothing in its source is cfg-gated. That row
-      # covers the arithmetic and the registry. `-p reflect-fixture` carries the
-      # `pkg/feature` spelling — the ONLY row that reaches any derive-generated unsafe,
-      # because only a consumer can hold a `#[component(reflect)]` type (B.9).
-      # `reflect-dogfood` is deliberately ABSENT: it reaches boyko_render ->
-      # boyko_rhi_vulkan, and Miri cannot execute FFI — which is why this sweep is
-      # hand-listed at all (F18). The fixture's census/codegen harnesses carry
-      # `#[cfg(not(miri))]`: Miri cannot spawn processes either, and without the guard
-      # this row reds for a reason that has nothing to do with reflection.
-      #
-      # `--tests`, not `--all-targets`: the difference is the benches, and none of them can run a
-      # body under Miri. MEASURED 2026-10-10, each of this package set's 35 benches run alone under
-      # the job's own flags: the 33 criterion ones abort inside `Criterion::default()`, which probes
-      # for gnuplot by spawning it (`criterion_plot::version`, "`GetModuleFileNameW` not available
-      # when isolation is enabled"), before any benchmark body runs; `gj1_flag_cost` aborts on the
-      # wall clock (`SystemTime::now`); `reflect_optin_cost`'s `main` is empty until G7b. `--tests`
-      # is the lib, bins and integration tests, so the sweep keeps every target with a body Miri can
-      # execute and drops only targets that could never have been green.
-      #
-      # `MIRIFLAGS` is restated with `-Zmiri-ignore-leaks`, the flag every pool-backed Miri recipe in
-      # this tree already carries (`miri_schedule_parallel.rs`, `miri_phase15.rs`, `dense_d*_miri.rs`
-      # and the rest name it in their run lines). MEASURED 2026-10-10: without it, the targets that
-      # build a `ThreadPool` or a bundle cache red on leaks after every one of their tests passed (14
-      # of the first 60 targets run) —
-      # crossbeam-epoch's per-thread `Local`s registered by the pool's workers, which outlive
-      # their thread in crossbeam-epoch's global list (an upstream shape), and the `&'static` bundle-column slices
-      # `BundleColumnCache::resolve_and_cache` leaks once per bundle type by design (SBO6). A step
-      # `env` replaces `.cargo/config.toml`'s `[env]` entry rather than appending to it (the PC-24
-      # step above relies on the same rule), so `-Zmiri-tree-borrows` is restated here. The leak
-      # check stays on in the curated steps above, which keep the config's flags.
-      - name: cargo miri test (pure-compute sweep)
-        env:
-          MIRIFLAGS: "-Zmiri-tree-borrows -Zmiri-ignore-leaks"
-        run: |
-          cargo +nightly miri test --locked --tests \
-            -p boyko-ecs -p boyko-memory -p boyko-utils -p boyko-threadpool -p boyko-serialize \
-            -p boyko-math -p boyko_sdf_math -p boyko_image \
-            -p boyko-reflect \
-            -p reflect-fixture --features reflect-fixture/reflect
+      # The pure-compute sweep (every test target of the pure-compute packages under Miri) is NOT
+      # in this job: it lives in `.github/workflows/miri-sweep.yml`, weekly and on
+      # `workflow_dispatch` only, and it is not a merge gate. MEASURED 2026-10-10 it costs ~3-3.5 h
+      # sequential, which no blocking step can carry; that file's header says why and what
+      # finishing it takes. The steps above are the curated Miri gates, and they block.
 
   # ---------------------------------------------------------------------------------------------
   # loom — the permutation checker for the pool's wake protocol

@@ -12,8 +12,9 @@
 //! has a non-empty subject three rungs before the CI legs exist. A C6 with no reference
 //! list would red G1 for a reason G4 owns; a C6 that skipped a missing list would be a
 //! gate that cannot fail. The G4 half of this file — parsing `.github/workflows/ci.yml`
-//! and asserting the reflect legs exist as specified — arrives with G4 and asserts the
-//! REVERSE direction: every `leg`-classified row below is a real CI leg.
+//! (and, for the Miri sweep, `.github/workflows/miri-sweep.yml`) and asserting the reflect
+//! legs exist as specified — arrives with G4 and asserts the REVERSE direction: every
+//! `leg`-classified row below is a real CI leg.
 //!
 //! # What a row means
 //!
@@ -51,23 +52,32 @@ mod support;
 
 use std::collections::BTreeSet;
 
-/// Reads `.github/workflows/ci.yml`, normalized to `\n` — the checkout may carry CRLF
+/// The workflow that carries every leg this gate pins except the Miri sweep.
+const CI_YML: &str = "ci.yml";
+
+/// The Miri sweep's own workflow: weekly and `workflow_dispatch` only, not a merge gate
+/// (owner decision, 2026-10-10; the file's header says why). Its two reflect rows moved
+/// there with the sweep, so G4 item 5c reads them there.
+const MIRI_SWEEP_YML: &str = "miri-sweep.yml";
+
+/// Reads `.github/workflows/<file>`, normalized to `\n` — the checkout may carry CRLF
 /// on this platform (measured: it does), and the block parser keys on newlines.
-fn ci_yml() -> String {
-    let path = support::repo_root().join(".github").join("workflows").join("ci.yml");
+fn workflow(file: &str) -> String {
+    let path = support::repo_root().join(".github").join("workflows").join(file);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e} -- the CI gate has no subject", path.display()))
         .replace("\r\n", "\n")
 }
 
-/// Extracts one job's block: from its two-space-indented `  name:` header to the next
-/// job header. Panics when the job does not exist — a missing leg is this gate's
-/// primary red, never a skip.
-fn job_block(yml: &str, job: &str) -> String {
+/// Extracts one job's block of `.github/workflows/<file>`: from its two-space-indented
+/// `  name:` header to the next job header. Panics when the job does not exist — a
+/// missing leg is this gate's primary red, never a skip.
+fn job_block(file: &str, job: &str) -> String {
+    let yml = workflow(file);
     let needle = format!("\n  {job}:\n");
-    let start = yml
-        .find(&needle)
-        .unwrap_or_else(|| panic!(".github/workflows/ci.yml has no `{job}` job -- the leg this gate pins does not exist"));
+    let start = yml.find(&needle).unwrap_or_else(|| {
+        panic!(".github/workflows/{file} has no `{job}` job -- the leg this gate pins does not exist")
+    });
     let body = &yml[start + needle.len()..];
     let mut end = body.len();
     let mut offset = 0;
@@ -97,7 +107,7 @@ fn without_comments(block: &str) -> String {
 /// marker its per-test assertion keys on.
 #[test]
 fn reflect_on_job_is_wired() {
-    let job = job_block(&ci_yml(), "reflect-on");
+    let job = job_block(CI_YML, "reflect-on");
     for needed in [
         "--features reflect-fixture/reflect",
         "-p boyko-reflect",
@@ -120,7 +130,7 @@ fn reflect_on_job_is_wired() {
 /// every gated body in `boyko_scene`/`boyko_render` — F17's exact defect.
 #[test]
 fn reflect_dogfood_job_is_wired() {
-    let job = job_block(&ci_yml(), "reflect-dogfood");
+    let job = job_block(CI_YML, "reflect-dogfood");
     for needed in ["-p reflect-dogfood", "--features reflect-dogfood/reflect", "--no-fail-fast"] {
         assert!(job.contains(needed), "the `reflect-dogfood` job lost `{needed}`");
     }
@@ -130,10 +140,11 @@ fn reflect_dogfood_job_is_wired() {
 /// (D4): `-p boyko-reflect` plain (a feature flag on it is a hard cargo error — the
 /// unrunnable sentence four sibling documents once inherited), `-p reflect-fixture` with
 /// the `pkg/feature` spelling, and no `reflect-dogfood` anywhere outside comments (Miri
-/// cannot execute FFI, F18).
+/// cannot execute FFI, F18). The sweep is `miri-sweep.yml`'s `miri-sweep` job since
+/// 2026-10-10; `ci.yml`'s `miri` job keeps only the curated steps.
 #[test]
 fn miri_sweep_names_the_right_rows_in_the_right_shapes() {
-    let job = job_block(&ci_yml(), "miri");
+    let job = job_block(MIRI_SWEEP_YML, "miri-sweep");
     let code = without_comments(&job);
     assert!(
         code.contains("-p boyko-reflect"),
@@ -168,7 +179,7 @@ fn miri_sweep_names_the_right_rows_in_the_right_shapes() {
 /// and the job must not be a machine on which the census panics for tool reasons).
 #[test]
 fn reflect_census_job_requests_llvm_tools() {
-    let job = job_block(&ci_yml(), "reflect-census");
+    let job = job_block(CI_YML, "reflect-census");
     assert!(
         job.contains("components: llvm-tools"),
         "the `reflect-census` job does not request llvm-tools -- the census panics \
