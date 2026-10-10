@@ -11260,7 +11260,7 @@ executed in a long time.** One inserted line (`on_despawn: None`) revives them a
 
 **R5 fixed the symptom; the flag fixes the class**, and the next missing field will silence the next
 eleven identically. Adding `--no-fail-fast` changes CI behaviour for all nine packages in that row,
-so it belongs to whoever owns the workflow, not to this rung. **Recorded, not acted on.**
+so it belongs to whoever owns the workflow, not to this rung. **Recorded, not acted on.** ⚠️ **Acted on, 2026-10-10 (release CI round 8):** the row is now the generic step of `.github/workflows/miri-sweep.yml`, weekly and NOT a merge gate, and it carries `--no-fail-fast`; the KE16 gates it used to reach run in steps of their own, under their own recipes, and every test step runs whenever `cargo miri setup` succeeded.
 
 ⚠️ **And a second, independent reason that row deserves a look.** The implementer measured that
 `cargo miri test -p boyko-ecs --test seam_by_id` (the whole target) **does not complete** — it stalls
