@@ -73,16 +73,16 @@
 //! so the report would land during harness teardown with `ScopeBlock` nowhere
 //! on the stack.
 //!
-//! This binary needs the guard MORE than `block.rs` does, because it is in the
-//! deciding gate's scope: `.github/workflows/ci.yml:288-291` runs
-//! `cargo +nightly miri test --all-targets … -p boyko-threadpool` as a required
-//! job. After stage 3b the scoped cell outlives the release RMW, so what
-//! carries the soundness argument's last clause is an execution gate over
-//! `run_scoped` under exactly that Miri run — and a red raised at harness
-//! teardown by a std-internal issue is indistinguishable, from the
-//! exit-condition receipts, from a red raised by `run_scoped`. Installing this
-//! allocator unconditionally is therefore not caution; it destroys the one
-//! signal the campaign is deciding on.
+//! This binary needs the guard MORE than `block.rs` does, because it is in the scope of the
+//! deciding Miri run: `.github/workflows/miri-sweep.yml`'s generic step runs `cargo +nightly
+//! miri test --no-fail-fast --tests … -p boyko-threadpool`, weekly and on `workflow_dispatch`,
+//! and since 2026-10-10 that run is NOT a merge gate; none of `ci.yml`'s blocking Miri steps
+//! builds a thread pool, so none reaches `run_scoped`. After stage 3b the scoped cell outlives
+//! the release RMW, so what carries the soundness argument's last clause is an execution gate
+//! over `run_scoped` under that weekly run (this package's targets, plus the KE16 gates in their
+//! own recipe steps), where a red is a finding, not a blocked merge, and one raised at harness
+//! teardown by a std-internal issue is indistinguishable, from the exit-condition receipts, from
+//! one raised by `run_scoped`. Installing this allocator unconditionally destroys that signal.
 //!
 //! The guard is a THREE-part device, and each part closes a hole the others
 //! leave open:

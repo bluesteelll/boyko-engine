@@ -138,9 +138,9 @@
 //! guard in this package for exactly that. And the run-time document parse is host file I/O,
 //! which Miri refuses under isolation (`CreateFileW not available when isolation is enabled`,
 //! measured at GATES G4's fifth RED and recorded at
-//! `crates/boyko_reflect/tests/c2_registry_source_census.rs:12~`). CI runs
-//! `cargo +nightly miri test --all-targets … -p boyko-reflect` (`.github/workflows/ci.yml:306`),
-//! so `--all-targets` picks this target up; the CI comment block naming the hazard names
+//! `crates/boyko_reflect/tests/c2_registry_source_census.rs:12~`). The weekly Miri sweep runs
+//! `cargo +nightly miri test --tests … -p boyko-reflect` (`.github/workflows/miri-sweep.yml`),
+//! so `--tests` picks this target up; the sweep's comment block naming the hazard names
 //! `reflect_fixture`'s harnesses, not this package's.
 #![cfg(not(miri))]
 

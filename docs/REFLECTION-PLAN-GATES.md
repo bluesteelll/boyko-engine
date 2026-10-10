@@ -30,7 +30,7 @@ is not abstract:
   reported success while every engine crate went unchecked (root `Cargo.toml`'s `default-members`
   comment records the measurement: 0 errors where `--workspace` found 4);
 * a Miri job that is a **hand-listed allowlist**, so a new package is not covered until it is named
-  (`.github/workflows/ci.yml:600-606`).
+  (then in `ci.yml`'s required `miri` job; since 2026-10-10 the generic step of `.github/workflows/miri-sweep.yml`, weekly and NOT a merge gate).
 
 Each of those four lands directly on this plan, and each has a rung.
 
@@ -1104,7 +1104,7 @@ defect this campaign keeps finding:
 2. **`components: llvm-tools`** on a `reflect-census` job running
    `cargo test -p reflect-fixture --test reflect_absence_census`, mirroring `profile-census`
    (`.github/workflows/ci.yml:188-197`).
-3. **Miri allowlist** — `.github/workflows/ci.yml:600-606` grows **two rows with different
+3. **Miri allowlist** — the Miri sweep (then a step of `ci.yml`'s required `miri` job; since 2026-10-10 `.github/workflows/miri-sweep.yml`, weekly and NOT a merge gate) grows **two rows with different
    shapes**, and the difference is the whole point (D4):
 
    ```
@@ -1149,7 +1149,7 @@ defect this campaign keeps finding:
    makes D3's whole permission meaningful — and, per D15, it is also the one invocation in CI where
    `boyko-reflect` legitimately appears in `boyko_demo`'s closure. G2's harness asserts it is not
    itself running under that selection.
-5. **`tests/reflect_ci_coverage.rs`** (root package) — parses `.github/workflows/ci.yml` and asserts:
+5. **`tests/reflect_ci_coverage.rs`** (root package) — parses `.github/workflows/ci.yml` (and, for the Miri sweep since it moved there on 2026-10-10, `.github/workflows/miri-sweep.yml`) and asserts:
    the `reflect-on` job exists and its command contains `reflect-fixture/reflect`; the
    `reflect-dogfood` job exists and its command contains `reflect-dogfood/reflect`; the Miri sweep
    line names `-p boyko-reflect` **without** a feature flag and `-p reflect-fixture` **with**
@@ -1684,7 +1684,7 @@ Verified against the tree at **2026-08-21**, branch `feat/reflection`. This file
 | `.github/workflows/ci.yml:84, :131, :133, :173, :290, :523, :541` | the `--exclude boyko_demo` legs — D2's reason |
 | `.github/workflows/ci.yml:120-121` | the existing `[debug, release]` matrix the ON leg mirrors (D7) |
 | `.github/workflows/ci.yml:188-197` | the `profile-census` job + `components: llvm-tools` (D6) |
-| `.github/workflows/ci.yml:600-606` | the hand-listed Miri sweep — B.9's allowlist, G4's row |
+| `.github/workflows/miri-sweep.yml` | the hand-listed Miri sweep — B.9's allowlist, G4's row. In `ci.yml`'s required `miri` job until 2026-10-10; since then its own workflow, weekly and NOT a merge gate |
 | `crates/boyko_ecs/Cargo.toml` | the `profiling-analysis` measurement: unification defeated `--no-default-features` (D3, G2) |
 | `crates/boyko_ecs/benches/gj1_flag_cost.rs` | the ABBA/twin/verdict idiom; the cross-build refusal at `:22-29~` (D8) |
 | `crates/boyko_log/benches/log_gate_cost.rs:42-46~` | *"a zero control whose expected value is exactly zero measures DRIFT"* (D10) |

@@ -256,8 +256,8 @@ fn miri_retag_in_place_and_fire_sites() {
             on_remove: Some(h3_on_remove),
             // `ComponentHooks` gained a FIFTH field and this exhaustive literal
             // was never updated. Because the whole file is `#![cfg(miri)]`, only
-            // a Miri build compiles it — and CI's Miri sweep
-            // (`.github/workflows/ci.yml`) carries no `--no-fail-fast`, so this
+            // a Miri build compiles it — and the Miri sweep, then in `ci.yml` (since
+            // 2026-10-10 the weekly `miri-sweep.yml`, with the flag), had no `--no-fail-fast`, so this
             // one `E0063` stopped EVERY target in that invocation from running.
             // Eleven tests in this file were dead. Prefer `..Default::default()`
             // in any new literal (as `:551` already does).

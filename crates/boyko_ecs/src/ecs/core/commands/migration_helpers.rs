@@ -3257,10 +3257,10 @@ mod step6_enable_migration_tests {
 // EG2 gate 10 — Miri (Tree Borrows) over `migrate_entity_attach_ids_with_bytes`.
 //
 // The sibling is `pub(crate)`, so an integration test cannot reach it and its
-// aliasing gate has to live in-crate. It rides CI's Miri sweep, which runs
-// `--all-targets -p boyko-ecs` (`.github/workflows/ci.yml:306`) with
-// `MIRIFLAGS = "-Zmiri-tree-borrows"` set workspace-wide in
-// `.cargo/config.toml`.
+// aliasing gate has to live in-crate. It rides the weekly Miri sweep, which is NOT
+// a merge gate (since 2026-10-10) and runs `--tests -p boyko-ecs`
+// (`.github/workflows/miri-sweep.yml`) under Tree Borrows: its step restates
+// `MIRIFLAGS = "-Zmiri-tree-borrows -Zmiri-ignore-leaks"` over `.cargo/config.toml`'s.
 //
 // A NEW `#[cfg(test)] mod` rather than an append into
 // `step6_enable_migration_tests`: that module's header scopes it to EnableTag

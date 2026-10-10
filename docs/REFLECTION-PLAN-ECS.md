@@ -781,8 +781,8 @@ implementer who reads only that either stalls at EG0 or breaches the owner gate 
 in §4 shrinks by one and EG2 gets smaller. Record it; do not re-argue it.
 
 **Miri / proptest.** ~~None (no `unsafe`, no data).~~ **CORRECTED (D19): no proptest and no
-`unsafe` — but TWO guards this rung must carry.** CI runs `cargo +nightly miri test
---all-targets … -p boyko-reflect …` (`.github/workflows/ci.yml:600`), so `--all-targets` picks
+`unsafe` — but TWO guards this rung must carry.** The Miri sweep runs `cargo +nightly miri test
+--tests … -p boyko-reflect …` (`.github/workflows/miri-sweep.yml`, weekly and NOT a merge gate since 2026-10-10; before that a step of `ci.yml`'s required `miri` job, with `--all-targets`), so it picks
 up every target this rung adds. The trybuild harness needs `#![cfg(not(miri))]` — it shells out
 to `cargo`, which Miri cannot execute, and `crates/boyko_reflect/tests/c6_compile_fail.rs`
 already carries the guard **in this package** for exactly that reason. If gate 4's assertion
@@ -1032,8 +1032,8 @@ whole rung's test surface. The homes, and each is a decision, not a preference:
   `boyko_reflect`.
 * **Gate 10 is a `#[cfg(test)] mod` inside the EXISTING `crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs`**
   (which already carries one), because its subject is `pub(crate)` and an integration test cannot
-  reach it. It is covered by CI's Miri sweep, which runs `--all-targets -p boyko-ecs`
-  (`.github/workflows/ci.yml:600`).
+  reach it. It is covered by the Miri sweep, which runs `--tests -p boyko-ecs`
+  (`.github/workflows/miri-sweep.yml`, weekly and NOT a merge gate since 2026-10-10; before that a step of `ci.yml`'s required `miri` job, with `--all-targets`).
 
   > ⚠️ **That coverage sentence was FALSE when it was written. EG2 made it true — it is not being
   > struck, it is being earned.** The sweep row carries **no `--no-fail-fast`**, and
@@ -1048,7 +1048,7 @@ whole rung's test surface. The homes, and each is a decision, not a preference:
   > `test result: ok. 11 passed; 0 failed`, 14.91 s, under Tree Borrows. **Record it as "it was
   > dead and is now alive", not as "it was always fine".** The class-level repair — adding
   > `--no-fail-fast` to that row, which changes CI for all nine packages it names — is filed in
-  > `docs/OPEN-QUESTIONS.md` and deliberately **not** taken here.
+  > `docs/OPEN-QUESTIONS.md` and deliberately **not** taken here. **Taken on 2026-10-10:** the row is now the generic step of `.github/workflows/miri-sweep.yml` (weekly, NOT a merge gate), and it carries `--no-fail-fast`.
 * **Gate 15b is a `#[cfg(test)] mod bracket_gate` inside `ecs_master/seam_by_id.rs` itself**, for
   gate 10's reason and no other: its subject is `hook_drain_depth()`, which is `pub(crate)`, so an
   integration test in `tests/` cannot read it. Added at EG2-R round 3 (FORK C).
