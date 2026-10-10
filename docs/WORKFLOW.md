@@ -211,9 +211,31 @@ open is narrower. No CI clippy lint reaches a `#[cfg(windows)]` item, because th
 on `ubuntu-latest`, and no feature leg compiles one. The dev host's own gate does lint them: MEASURED
 2026-10-10, a `len_zero` planted in a `#[cfg(windows)]` fn of a `boyko-threadpool` test reds
 `cargo clippy -- -D warnings` on msvc and passes it with `--target x86_64-unknown-linux-gnu`.
-CI run 4 (38026578745) ran the whole debug and release selection on `ubuntu-latest`, and its reds
-fell in two classes of pin taken on Windows, allocation counts and float bytes across C runtimes,
-and in a third that was the runner's width, not its OS: the timing and occupancy tests of
+CI run 4 (38026578745) ran the whole debug and release selection on `ubuntu-latest`. One class of
+its reds is pins taken on Windows: float bytes across C runtimes (`eval_byte_identity` and
+`boyko-render --lib`). The allocation censuses looked like a second such class and were not. Each
+of the three went red in ONE of the two release-profile legs and green in the other, and those
+legs compile the same code (`force-alloc-panic`'s `--cfg` has no reader), so what each counted
+depended on the schedule. MEASURED 2026-10-10 on the dev host at `150fc2cb` (16 CPUs, msvc), one
+binary at a time, release and debug, under a 4-CPU affinity mask (the runner's width, libtest at
+`--test-threads=4`) and at full width, plus two starved shapes in release (1 and 2 CPUs).
+`ui_no_realloc` armed a process-global flag, so it also counted libtest's main thread, which
+prints a finished test's line and, with more tests than test threads, spawns the next test while
+the next window is open. Green at 4 CPUs and at full width in both profiles (100 of 100 each), it
+went red in 12 of 100 runs at 1 CPU and 1 of 100 at 2, at 2 to 4 counted allocations.
+`e1_engine_ui_alloc_census` and `alloc_frame_attribution` counted threads' first-touch objects: the
+crossbeam-epoch `Local` that a worker registers on its first steal and the driving thread on its
+first helping steal, and on Windows a booting worker's 30-byte name copy. When one lands is the
+schedule's choice. A first touch fell inside a priced section-A window of `alloc_frame_attribution`
+in 7 of 20 release runs at 4 CPUs, 7 of 10 at 2 and 2 of 20 at full width (debug: 0 of 20 at both
+widths), inside the window's allowance every time; run 4 read 2 in one frame, past it. e1 never
+went red on the dev host (600 runs), but its forcing took 1 to 4 rounds at 4 CPUs and 5 to 366 at
+2, and run 4's e1 red was 4 `Local`s on a 3-worker pool, so one was the driver's. The fix is in
+each test's premise, and no pin moved: `ui_no_realloc` counts only the thread that armed it, both
+other binaries register the driver's `Local` first and assert it, and section A forces and
+verifies every worker's boot and `Local` before a window opens. After: no red in 1,290 runs at the
+same shapes, and section A's windows read OTHER 0 in all 90 `alloc_frame_attribution` runs.
+A further class was the runner's width, not its OS: the timing and occupancy tests of
 `boyko-threadpool` assumed the dev host's 16 logical CPUs, and `windows-latest` has 4 vCPUs too.
 They were reproduced on the dev host under a 4-CPU affinity mask (`cmd /c start /affinity F`;
 std's `available_parallelism` ignores that mask on Windows, so the ke16 gate reads the mask itself)
@@ -224,8 +246,9 @@ child's marker. One more red, `boyko-physics --bench narrowphase_classes`,
 was no pin: it failed on the Windows MSVC dev host with the same numbers, because its
 `touching == manifolds` assert predated V2's speculative contacts, and the bench now runs the
 overlap-only rule it was written for. So the Linux test run is kept as `test-linux`, an
-informational job (`continue-on-error: true`). Its header in `ci.yml` lists each red, and making
-those pins hold on Linux is a follow-up.
+informational job (`continue-on-error: true`). Its header in `ci.yml` lists each red. The float
+pins are the class still open, and making them hold on Linux is a follow-up; the other three are
+closed in the tests and have not been re-run on `ubuntu-latest`.
 
 **`boyko-render` was not in that position, and saying it was is the error the scope table above
 corrected.** Its lib builds on the runner, and its feature legs compile it, `cfg(not(windows))` arms

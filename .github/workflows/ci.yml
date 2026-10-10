@@ -53,8 +53,8 @@ env:
 # WHERE EACH JOB RUNS — owner decision, 2026-10-10 (release PR #4). Every job that executes a test
 # binary runs on `windows-latest`: `test` (debug, release), `profile-census`, `reflect-on` (debug,
 # release), `reflect-census`, `reflect-dogfood`, `feature-count-tests` and `force-alloc-panic`.
-# Windows MSVC is the platform the engine is developed, measured and pinned on (allocation counts,
-# float bytes); its timing gates hold at a 4-vCPU runner's width. The jobs that only BUILD stay on
+# Windows MSVC is the platform the engine is developed, measured and pinned on (the float-byte pins
+# among them); timing gates and allocation censuses hold at 4 vCPUs. The jobs that only BUILD stay on
 # `ubuntu-latest` and stay blocking, so the engine keeps compiling for Linux: `check`, `clippy`,
 # `profile-legs`, `feature-legs` and `bench-compile` (and `docs.yml`'s `cargo doc`). So do the two
 # Python registry jobs. `miri` and `loom` run test binaries but stay on `ubuntu-latest`, where they
@@ -175,33 +175,33 @@ jobs:
   # workflow. This is the debug `test` selection, on `ubuntu-latest`. The suite's gating legs run on
   # `windows-latest` (see the note above `jobs:`), and this job keeps a Linux test run visible.
   #
-  # WHY IT CANNOT GATE. CI run 4 (38026578745, on ae9c1dc3) was the first run of all 917 targets on
-  # `ubuntu-latest`. It failed in three classes, plus one bench that was red on the Windows MSVC dev
-  # host as well and is fixed (below). Per leg: debug failed 1 target, release 7, and
-  # `force-alloc-panic` 7. These are the targets, as run 4 measured them:
-  #   * Counts pinned on Windows.
-  #     - The allocation censuses `boyko-app --test e1_engine_ui_alloc_census` (release: "a forced
-  #       pool registered 1 more epoch Locals"), `boyko-physics --test alloc_frame_attribution`
-  #       (`force-alloc-panic`: 0.016 OTHER-class acquisitions per frame) and
-  #       `boyko-render --test ui_no_realloc` (`force-alloc-panic`: 16 allocations in the per-frame
-  #       UI sort, where the pin is 0).
-  #     - NOT a platform pin, and fixed: `boyko-physics --bench narrowphase_classes` (75 touching
-  #       pairs against 140 manifolds) was red on the Windows MSVC dev host too. Its assert predated
-  #       V2's speculative contacts; it now runs the overlap-only rule (speculative_distance = 0).
+  # WHY IT CANNOT GATE YET. CI run 4 (38026578745, on ae9c1dc3) was the first run of all 917 targets
+  # on `ubuntu-latest`. Per leg: debug failed 1 target, release 7, and `force-alloc-panic` 7. They
+  # fell in four classes. ONE IS OPEN, and fixing it is a follow-up that is not done here:
   #   * Float byte identity across C runtimes. `boyko_shaderdsl --test eval_byte_identity`
   #     (`m2_brick_span_matches_host_on_random_sweep` computes 0 where the frozen value is -0) and
   #     `boyko-render --lib` (`view::tests::perspective_bridge_reproduces_legacy_push_constants`:
-  #     0.5773503 against 0.57735026). Both failed in release and in `force-alloc-panic`.
-  #   * Timing and occupancy: runner width, not the OS (4 vCPUs here and on `windows-latest`), and
-  #     fixed. `boyko-threadpool --test ke16_nested_scope_occupancy`'s gate takes its floor from the
-  #     usable CPUs and its tests run one at a time, as `--test region_protocol`'s do (the
-  #     `fin_a_helper_advances` / batched-finisher "no helper advance" reds); `--test
-  #     a6_panic_propagation`'s detached-spawn test accepts the task's own panic text when the abort
-  #     beats its marker. Red under a 4-CPU affinity mask on the dev host before, green after.
-  # FIXING THEM IS A FOLLOW-UP, and it is not done here. Each pin has to be either measured on Linux
-  # as well or scoped to the platform it was taken on. Until then a red in this job is a finding
-  # to read, not a reason to weaken a pin, and its targets are not the only ones it can turn up.
-  # When the classes are closed, drop `continue-on-error` and this job becomes a gate.
+  #     0.5773503 against 0.57735026). Both failed in release and in `force-alloc-panic`. Each pin
+  #     has to be measured on Linux as well or scoped to the platform it was taken on.
+  # THREE ARE CLOSED in the tests, measured on the Windows MSVC dev host and not yet re-run here:
+  #   * Allocation censuses that counted the schedule, not a pin (closed 2026-10-10). Each went red
+  #     in ONE of the two release-profile legs, which compile the same code: `boyko-app --test
+  #     e1_engine_ui_alloc_census` ("1 more epoch Locals"), `boyko-physics --test
+  #     alloc_frame_attribution` (two OTHER in one frame) and `boyko-render --test ui_no_realloc`
+  #     (16 allocations in the UI sort). The first two counted threads' first-touch objects; they
+  #     now register the driver's epoch `Local` first and force every worker's first touch before
+  #     a window opens. The third counted libtest's main thread; it now counts only the thread that
+  #     armed it (docs/WORKFLOW.md, the CI run 4 paragraph, has the measurements).
+  #   * Timing and occupancy: runner width, not the OS (4 vCPUs here and on `windows-latest`).
+  #     `boyko-threadpool --test ke16_nested_scope_occupancy`'s floor reads the usable CPUs and its
+  #     tests run one at a time, as `--test region_protocol`'s do; `--test a6_panic_propagation`
+  #     accepts the task's own panic text when the abort beats its marker.
+  #   * `boyko-physics --bench narrowphase_classes` (75 touching pairs, 140 manifolds), red on the
+  #     dev host too: its assert predated V2's speculative contacts. It now runs the overlap-only
+  #     rule, speculative_distance = 0 AND speculative_velocity_cap = 0.
+  # Until the open class is closed a red here is a finding to read, not a reason to weaken a pin,
+  # and its targets are not the only ones it can turn up. When this job reads green, drop
+  # `continue-on-error` and it becomes a gate.
   test-linux:
     name: cargo test (linux, informational)
     runs-on: ubuntu-latest
