@@ -644,6 +644,32 @@ jobs:
           fi
           cargo +nightly miri test --locked -p boyko-ecs --lib -- pc24_ 2>&1 | tee pc24_sb.log
           grep -q 'running 7 tests' pc24_sb.log && grep -q 'test result: ok. 7 passed; 0 failed' pc24_sb.log
+      # PC-24's Tree-Borrows leg: the same matrix under the model the rest of this job runs. The
+      # module asks for BOTH legs (`unsafe_ecs_cell.rs`, the PC-24 header). Until 2026-10-10 this
+      # leg ran only inside the pure-compute sweep (`-p boyko-ecs`, Tree Borrows), so when the
+      # sweep moved to `miri-sweep.yml` it stopped blocking. It is spelled with the `pc24_` filter
+      # and MIRIFLAGS exactly as `.cargo/config.toml`'s `[env]` sets it, without the sweep's
+      # `-Zmiri-ignore-leaks`: this matrix passes with the leak check on, as the SB leg does. (The
+      # module's own TB line adds `-Zmiri-strict-provenance`; the SB leg above carries that flag.)
+      # TB reports a worker-side `&mut` retag over the world as a read that races the reservoir's
+      # atomic RMWs (T1). The guard is the SB leg's, turned around: this step RELIES on the config,
+      # so it asks cargo for the resolved entry and REDs unless `env.MIRIFLAGS` (plain, or the
+      # `.value` of a table spelling) carries `-Zmiri-tree-borrows`. It also REDs on an environment
+      # MIRIFLAGS, which replaces an unforced `[env]` entry. Either case would run Stacked Borrows
+      # under this step's name.
+      - name: cargo miri test (PC-24 world-retag matrix — Tree Borrows leg)
+        shell: bash
+        run: |
+          echo "MIRIFLAGS=${MIRIFLAGS-<unset>}"
+          if ! cfg_env=$(cargo +nightly -Zunstable-options config get env 2>&1); then
+            printf '%s\n' "$cfg_env"; echo "RED: cargo's [env] config is unset or unresolvable; this step would not run Tree Borrows"; exit 1; fi
+          printf '%s\n' "$cfg_env"
+          if ! grep -qE '^env\.MIRIFLAGS(\.value)?[[:space:]]*=[[:space:]]*"([^"]*[[:space:]])?-Zmiri-tree-borrows([[:space:]][^"]*)?"[[:space:]]*$' <<< "$cfg_env"; then
+            echo "RED: cargo's config does not set env.MIRIFLAGS to Tree Borrows; this step would run Stacked Borrows"; exit 1; fi
+          if [ -n "${MIRIFLAGS+set}" ] && ! grep -qE '^env\.MIRIFLAGS\.force[[:space:]]*=[[:space:]]*true[[:space:]]*$' <<< "$cfg_env"; then
+            echo "RED: MIRIFLAGS is set in the environment and replaces cargo's unforced [env] entry; this step would not run Tree Borrows"; exit 1; fi
+          cargo +nightly miri test --locked -p boyko-ecs --lib -- pc24_ 2>&1 | tee pc24_tb.log
+          grep -q 'running 7 tests' pc24_tb.log && grep -q 'test result: ok. 7 passed; 0 failed' pc24_tb.log
       # The pure-compute sweep (every test target of the pure-compute packages under Miri) is NOT
       # in this job: it lives in `.github/workflows/miri-sweep.yml`, weekly and on
       # `workflow_dispatch` only, and it is not a merge gate. MEASURED 2026-10-10 it costs ~3-3.5 h

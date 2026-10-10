@@ -10,8 +10,8 @@ name: Miri sweep
 # `relations_query_scaling`'s chain guard are the largest known). GitHub's hosted runner is not
 # faster than that host, so the sweep cannot hold a "twice the measured time" timeout as one
 # sequential step, and as a blocking step it would hold every push and every pull request for
-# hours. The curated Miri steps (event_attribute, drop_fn, the PC-24 Stacked-Borrows leg) stay in
-# `ci.yml`'s `miri` job and block there.
+# hours. The curated Miri steps (event_attribute, drop_fn, the PC-24 Stacked- and Tree-Borrows
+# legs) stay in `ci.yml`'s `miri` job and block there.
 #
 # NOT A MERGE GATE. It runs weekly and on `workflow_dispatch` only, never on `push` or
 # `pull_request`, and no branch protection rule may require it. A red here is a finding to triage,
