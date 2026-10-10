@@ -800,8 +800,15 @@ limit · what the commit message must disclose. **None of it is about the ECS.**
 
 ## The provenance table, re-run by a gate
 
-Every figure above was measured; this table is what keeps it measured. `tests/workflow_cost_docs.rs`
-parses the block below and, for each row, asserts a **four-link chain**:
+> **The gate is deleted.** `tests/workflow_cost_docs.rs` was removed on 2026-10-10 (owner decision,
+> release CI): its rows re-run commands against one machine's paths and one session's harness
+> directories, so every other checkout — CI's included — saw it red, and its own module header named
+> deleting the whole file as the remedy. Its last text is `git show b3793f49:tests/workflow_cost_docs.rs`.
+> Nothing re-runs the table below any more; every present-tense sentence in this set about "the gate"
+> or "the test" describes that file as it stood.
+
+Every figure above was measured; this table is what kept it measured. `tests/workflow_cost_docs.rs`
+(deleted, see the note above) parsed the block below and, for each row, asserted a **four-link chain**:
 
 1. `ctx` — a verbatim fragment of prose — occurs in `doc`, outside this block. *(A prose edit reds.)*
 2. `fig` occurs inside `ctx`. *(The sentence is bound to its number.)*
@@ -854,9 +861,10 @@ artifact adds a command, not a check.**
 * **This root is not in the repository.** `journal` resolves under the session scratchpad path, like
   `ui`, `scripts` and `scratch` — so on any other machine, or after this session's directory is
   cleaned up, these rows **red**; they do not skip. That is the same trade the module header of
-  `tests/workflow_cost_docs.rs` already states for the other three external roots, and the same
+  `tests/workflow_cost_docs.rs` stated for the other three external roots, and the same
   answer applies: if it ever matters more than the guarantee, delete the file — do not lower the
-  executed-row floor to match a green.
+  executed-row floor to match a green. *(It came to matter: the file was deleted on 2026-10-10 —
+  see the note under [the provenance table's heading](#the-provenance-table-re-run-by-a-gate).)*
 * **A journal counts workflow-launched agents and nothing else.** Agents the orchestrator started
   directly through its own Agent tool — outside any workflow — appear in no `journal.jsonl` and in no
   figure here. **These rows are not a census of the campaign's agents; they are a census of its

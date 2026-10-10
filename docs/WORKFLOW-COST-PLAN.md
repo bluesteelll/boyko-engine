@@ -17,7 +17,7 @@ CHEAP, there are no endless pointless rewrites, and everything still works corre
 | [WORKFLOW-COST-PROCEDURE.md](WORKFLOW-COST-PROCEDURE.md) | the pass structure, the stopping rule, the repair discipline, what to stop writing |
 | [WORKFLOW-COST-BRIEFS.md](WORKFLOW-COST-BRIEFS.md) | the brief templates and the orchestrator's own rules |
 | [WORKFLOW-COST-LIMITS.md](WORKFLOW-COST-LIMITS.md) | what this procedure will not catch, and the estimates in this set that are not measurements |
-| `tests/workflow_cost_docs.rs` | the gate over these five files: heading-slug collisions, citation resolution, and the [provenance table](WORKFLOW-COST-EVIDENCE.md#the-provenance-table-re-run-by-a-gate) re-run against the tree. It breaks this set's own class rule; [L8](WORKFLOW-COST-LIMITS.md#l8--the-gate-over-these-documents-breaks-their-own-class-rule-and-it-is-admitted-anyway) says why it is admitted and when to delete half of it |
+| `tests/workflow_cost_docs.rs` (**deleted 2026-10-10**, [why](WORKFLOW-COST-EVIDENCE.md#the-provenance-table-re-run-by-a-gate)) | the gate that ran over these five files: heading-slug collisions, citation resolution, and the [provenance table](WORKFLOW-COST-EVIDENCE.md#the-provenance-table-re-run-by-a-gate) re-run against the tree. It breaks this set's own class rule; [L8](WORKFLOW-COST-LIMITS.md#l8--the-gate-over-these-documents-breaks-their-own-class-rule-and-it-is-admitted-anyway) says why it is admitted and when to delete half of it |
 
 ---
 

@@ -91,7 +91,9 @@ problem; the rung's specification is.
 
 ### L8 — the gate over these documents breaks their own class rule, and it is admitted anyway
 
-`tests/workflow_cost_docs.rs` gates this set: heading-slug collisions, citation resolution, and the
+`tests/workflow_cost_docs.rs` gated this set until it was deleted on 2026-10-10 (off this machine
+it was red by construction; [the note](WORKFLOW-COST-EVIDENCE.md#the-provenance-table-re-run-by-a-gate)
+says why): heading-slug collisions, citation resolution, and the
 [provenance table](WORKFLOW-COST-EVIDENCE.md#the-provenance-table-re-run-by-a-gate). Its citation
 check **fails the [class rule](WORKFLOW-COST-PROCEDURE.md#the-ratios-and-the-rule-that-holds-them)**
 — insert a line above `migration_helpers.rs:623` and the gate reds over a change that altered no
