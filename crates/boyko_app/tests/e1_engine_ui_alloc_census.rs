@@ -28,13 +28,13 @@
 //!
 //! # First touch — forced before the window, and verified
 //!
-//! The `EPOCH` count is taken from a snapshot made BEFORE the app's pool exists, so it counts
-//! exactly the app's workers. After `finish()` and before frame 0, [`force_first_touch`] drives the
-//! app's own pool until that count reaches one `Local` per worker (bounded rounds; RED if it
-//! cannot), and the run then asserts it is EXACTLY one per worker. MEASURED on this tree: all four
-//! workers register while the app is composed (1–2 after the pool is built, 4 after composition),
-//! so the forcing takes 0 rounds today; it is there so a tree that stops touching every worker
-//! before frame 0 still takes first touch out of the window rather than into it, and
+//! The `EPOCH` count is taken after [`register_driver_epoch_local`] and BEFORE the app's pool
+//! exists, so it counts exactly the app's workers. After `finish()` and before frame 0,
+//! [`force_first_touch`] drives the app's pool until that count reaches one `Local` per worker
+//! (bounded rounds; RED if it cannot), and the run asserts it is EXACTLY one per worker. MEASURED
+//! on this tree: all four workers register while the app is composed (1–2 after the pool is built,
+//! 4 after composition), so the forcing takes 0 rounds today; it is there so a tree that stops
+//! touching every worker before frame 0 still takes first touch out of the window, and
 //! [`epoch_class_matches_a_fresh_pool`] proves on a fresh pool that it does (one `Local` per worker
 //! within two rounds, none after). A worker that has registered its `Local` has also booted (std's
 //! `SetThreadDescription` name copy happens at thread start), so no per-thread first-touch object
@@ -342,6 +342,11 @@ const PROBE_BYTES: usize = 1 << 20;
 const FIXTURE_NODES: usize = 5;
 /// Rounds [`force_first_touch`] may take before it is RED.
 const FORCE_ROUNDS: usize = 4096;
+/// Children [`register_driver_epoch_local`]'s leader pushes onto its worker's own deque.
+const DRIVER_TOUCH_CHILDREN: usize = 8;
+/// How long either side of [`register_driver_epoch_local`] waits for the other before it gives
+/// up (and the touch is RED).
+const DRIVER_TOUCH_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 struct Stat {
     min: u64,
@@ -548,6 +553,94 @@ fn worker_thread_allocations_are_counted() {
 // First touch
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Registers the DRIVER thread's epoch `Local` before any window opens, and proves it. Every EPOCH
+/// count after it counts workers only.
+///
+/// # Why the driver has to be touched first
+///
+/// The thread that drives the app (`main`) is not one of the pool's workers, and an `install` it
+/// calls joins by HELPING: once the injector is empty it probes the workers' deques with
+/// `Stealer::steal`, and its first probe registers the driver's own `Local`, the same object and
+/// so the same EPOCH class. When that first probe comes is the schedule's choice, not the
+/// program's: a join whose trivial tasks the driver drains from the injector itself, before a
+/// worker has woken, never probes. So until 2026-10-10 the driver's `Local` could land after any
+/// snapshot this file takes and be counted as a worker's. CI run 4 (`ubuntu-latest`, 4 vCPUs) read
+/// exactly that in its `test (release)` leg: [`epoch_class_matches_a_fresh_pool`] counted 3
+/// `Local`s, which the forcing took as its 3 workers', and then "1 more" over 16 further rounds.
+/// That is 4 on a 3-worker pool, so one of them was the driver's. The `force-alloc-panic` leg,
+/// which compiles the same code, was green. On the dev host at `150fc2cb` the epoch control's
+/// forcing took 1 to 4 rounds under a 4-CPU affinity mask and 5 to 366 under a 2-CPU one
+/// (2026-10-10, 100 release runs each, every one green): when a first touch lands is the
+/// schedule's choice.
+///
+/// # The construction
+///
+/// It makes the driver's first `Stealer::steal` a certainty. The pool has ONE worker, which has no
+/// sibling to steal from and so never pins: the only `Local` the touch can register is the
+/// driver's. The `install` body runs on the driver and spins until that worker has taken the
+/// leader off the injector and pushed [`DRIVER_TOUCH_CHILDREN`] children onto its own deque; the
+/// leader then spins until they have run. So the driver's join finds the injector empty and the
+/// worker's deque full, and every child it runs it took with `Stealer::steal`, which pins. Both
+/// spins are bounded by [`DRIVER_TOUCH_WAIT`], after which the leader runs what is left itself and
+/// the touch is RED.
+fn register_driver_epoch_local() {
+    use std::time::Instant;
+
+    let driver = std::thread::current().id();
+    let pushed = AtomicBool::new(false);
+    let done = AtomicUsize::new(0);
+    let on_driver = AtomicUsize::new(0);
+    let before = Snap::now();
+    let p = pool(1);
+    {
+        let (p, pushed, done, on_driver) = (&*p, &pushed, &done, &on_driver);
+        p.install(|s| {
+            s.spawn(move || {
+                p.scope(|inner| {
+                    for _ in 0..DRIVER_TOUCH_CHILDREN {
+                        inner.spawn(move || {
+                            if std::thread::current().id() == driver {
+                                on_driver.fetch_add(1, Ordering::Relaxed);
+                            }
+                            done.fetch_add(1, Ordering::Release);
+                        });
+                    }
+                    pushed.store(true, Ordering::Release);
+                    let deadline = Instant::now() + DRIVER_TOUCH_WAIT;
+                    while done.load(Ordering::Acquire) < DRIVER_TOUCH_CHILDREN
+                        && Instant::now() < deadline
+                    {
+                        std::hint::spin_loop();
+                    }
+                });
+            });
+            // Acquire: pairs with the leader's Release store above, after its pushes.
+            let deadline = Instant::now() + DRIVER_TOUCH_WAIT;
+            while !pushed.load(Ordering::Acquire) && Instant::now() < deadline {
+                std::hint::spin_loop();
+            }
+        });
+    }
+    let touched = Snap::now().since(before);
+    drop(p);
+    let stolen = on_driver.load(Ordering::Relaxed);
+    assert!(
+        stolen >= 1,
+        "E1: the driver ran none of the {DRIVER_TOUCH_CHILDREN} children on its worker's deque — \
+         it never stole, so the touch cannot vouch for the driver's epoch Local"
+    );
+    assert_eq!(
+        touched.epoch, 1,
+        "E1: the driver touch registered {} epoch Locals; the one it exists for is the driver's, \
+         and a 1-worker pool's worker has no sibling to steal from",
+        touched.epoch
+    );
+    say!(
+        "\n[driver touch] the driver thread's epoch Local registered before any window: 1 Local, \
+         {stolen} of {DRIVER_TOUCH_CHILDREN} children stolen from the worker's deque"
+    );
+}
+
 /// One round: a leader task (from the injector) opens a nested scope on its worker, pushes
 /// `8 × workers` children into that worker's local deque, and spins until other threads have run
 /// all of them — so every idle worker takes at least one by a PEER STEAL, which is the event that
@@ -705,6 +798,7 @@ fn pin() -> Pin {
 }
 
 fn e1_census() {
+    register_driver_epoch_local();
     counter_is_live();
     class_predicates_match_the_threadpool_receipt();
     worker_thread_allocations_are_counted();
