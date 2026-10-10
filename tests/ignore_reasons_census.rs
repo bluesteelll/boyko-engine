@@ -185,8 +185,11 @@ const FN_LOOKAHEAD: usize = 24;
 ///
 /// The list is CLAUDE.md's ("The ignored suite — legs by what the machine has") and it does not
 /// grow here: the B3 migration re-prefixed the five out-of-list prefixes it found (`tractability`,
-/// `instrument`, `M2`, `calibration`, `miri-arm`) rather than admitting them.
-const IGNORE_CLASSES: [(&str, &str); 11] = [
+/// `instrument`, `M2`, `calibration`, `miri-arm`) rather than admitting them. It grows only where
+/// CLAUDE.md's list grows first: `workstation` (2026-10-10, release CI round 10) names a leg no
+/// other class names, a test whose record describes the author's own machine. The CI move to
+/// `windows-latest` was the first run of such a test on a machine without that installation.
+const IGNORE_CLASSES: [(&str, &str); 12] = [
     ("gpu", "device leg, headless: a Vulkan device and no window; per binary, `-- --ignored --test-threads=1`"),
     ("gpu-windowed", "device leg on a desktop session: a device, a window and a swapchain"),
     (
@@ -215,6 +218,12 @@ const IGNORE_CLASSES: [(&str, &str); 11] = [
         "miri-unsupported",
         "runs natively; Miri cannot execute what it needs at all (a child process, a custom \
          `#[global_allocator]`, a deliberate leak)",
+    ),
+    (
+        "workstation",
+        "on demand on the dev host: the test checks a record of the author's own installation (a \
+         registry key, an installed tool) that a clean machine does not have; run it there by name, \
+         `-- --ignored --exact`",
     ),
     (
         "generator",

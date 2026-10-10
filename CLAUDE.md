@@ -103,7 +103,8 @@ Quote the census's printed lines, never a prose count:
 - **Classes** (closed list): `gpu`, `gpu-windowed` (device + window + swapchain), `gpu-cap` (RT / ray
   query / `VK_KHR_pipeline_executable_properties`), `feature` (names its `--features <name>`), `solo`
   (device-free, `--test-threads=1`), `slow` (device-free, wall-clock budget), `miri-slow`,
-  `miri-unsupported`, and the no-leg `generator`, `deferred`, `flaky`. The only composites are
+  `miri-unsupported`, `workstation` (checks a record of the author's own installation; on demand on
+  the dev host), and the no-leg `generator`, `deferred`, `flaky`. The only composites are
   `feature+<class>` and `gpu-windowed+gpu-cap`. One site is exempt: it is ignored only in release and
   names no leg (`boyko_app/src/profiling/reduce.rs`).
 - **Device-free** (any machine): `rg -n '^[^/]*#\[ignore = "(solo|slow):' -g '*.rs'`; each reason names
@@ -117,6 +118,8 @@ Quote the census's printed lines, never a prose count:
   module header (`BOYKO_DISABLE_VALIDATION`, `BOYKO_WINDOW_FRAMES`, …). A `feature+` site is not even
   compiled without its flag (`--features hwrt` / `spec_constant_smoke`); most device sites are
   `#![cfg(windows)]`.
+- **Workstation** (the dev host only, on demand): `rg -n '^[^/]*#\[ignore = "workstation:' -g '*.rs'`;
+  each reason names its command, by name with `--exact`. A clean machine reds them by construction.
 - **Physics release:** `cargo test --release -p boyko-physics --no-fail-fast`. The six
   `cfg_attr(any(miri, debug_assertions), ignore = "slow: …")` tests in
   `crates/boyko_physics/tests/sleep_settles_box_piles.rs` run only here (`running 13 tests`,

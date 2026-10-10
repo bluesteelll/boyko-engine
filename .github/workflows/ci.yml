@@ -50,17 +50,17 @@ env:
 # engine surface); `bench-compile` deliberately KEEPS `bench_bevy_vs_boyko` — compiling
 # that crate's benches is the whole point of that job.
 #
-# WHERE EACH JOB RUNS — owner decision, 2026-10-10 (release PR #4). Every job that executes a
-# test binary runs on `windows-latest`: `test` (debug, release), `profile-census`, `reflect-on`
-# (debug, release), `reflect-census`, `reflect-dogfood`, `feature-count-tests` and
-# `force-alloc-panic`. Windows MSVC is the platform the engine is developed, measured and
-# pinned on. Its allocation-count, float-byte and timing pins were taken there. The jobs that
-# only BUILD stay on `ubuntu-latest` and stay blocking, so the engine keeps compiling for
-# Linux: `check`, `clippy`, `profile-legs`, `feature-legs` and `bench-compile` (and
-# `docs.yml`'s `cargo doc`). So do the two Python registry jobs, which run no cargo. `miri`
-# and `loom` run test binaries but stay on `ubuntu-latest`, where they pass. `test-linux` runs
-# the debug `test` selection on `ubuntu-latest` as information only: its header lists what
-# CI run 4 measured red there.
+# WHERE EACH JOB RUNS — owner decision, 2026-10-10 (release PR #4). Every job that executes a test
+# binary runs on `windows-latest`: `test` (debug, release), `profile-census`, `reflect-on` (debug,
+# release), `reflect-census`, `reflect-dogfood`, `feature-count-tests` and `force-alloc-panic`.
+# Windows MSVC is the platform the engine is developed, measured and pinned on. Its
+# allocation-count, float-byte and timing pins were taken there. The jobs that only BUILD stay on
+# `ubuntu-latest` and stay blocking, so the engine keeps compiling for Linux: `check`, `clippy`,
+# `profile-legs`, `feature-legs` and `bench-compile` (and `docs.yml`'s `cargo doc`). So do the two
+# Python registry jobs. `miri` and `loom` run test binaries but stay on `ubuntu-latest`, where they
+# pass. `test-linux` runs the debug `test` selection there as information only (its header lists
+# run 4's reds). These jobs are the first to run `#[cfg(windows)]` tests on a clean image: a test
+# that checks a record of the author's own installation is `workstation`-ignored (vg_r0's probe).
 #
 # Every `windows-latest` job sets `defaults.run.shell: bash`, so its steps keep their bash
 # syntax (Git Bash on that image). Its toolchain step resolves to the msvc host there. Caches

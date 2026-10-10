@@ -244,21 +244,25 @@ measurement is a compile, not a run of any test.
 
 The four commands above run **none** of the `#[ignore]`d tests.
 [tests/ignore_reasons_census.rs](../tests/ignore_reasons_census.rs) prints what exists on every run
-(`cargo test -p boyko-engine --test ignore_reasons_census -- --nocapture`). Measured 2026-10-06 on
-`u/phys-sr` at its sync with the trunk `c335b4c6` (first parent `aa00faf6`; rung D-M0 adds one `solo` site to B3's
-`7d5a0015` reading, `u/fix-cq-sb`, L9 C4, PC-24, L10b and W8S each add one `.rs` file, L10 adds six, C1 adds five, none of those adds a site; DM1 adds nineteen `.rs` files and twelve `gpu-windowed` sites; tree C4 adds one `miri-slow` site; V2 adds four `.rs` files, five `slow` sites (the fidelity gate's four, a device-free release leg, and G6's V2 twin) and one `miri-slow` site; SR adds seven `.rs` files and two `miri-unsupported` sites, T6's ladder bound and failure B's 250 ms hold, both wall-clock), it read:
+(`cargo test -p boyko-engine --test ignore_reasons_census -- --nocapture`). Measured 2026-10-10 on
+`release/2026-10-09` after release CI round 10, which adds the `workstation` class and its one
+site (`vg_r0_reference_rig`'s live probe); at the round's parent `d92fb63a` the same run read 397
+sites (208 plain, 189 cfg_attr) and no `workstation`. It read:
 
 ```text
-[ignore census] 377 sites (208 plain, 169 cfg_attr) across 12 crates, 1869 .rs files walked, 0 waivers
+[ignore census] 398 sites (209 plain, 189 cfg_attr) across 12 crates, 1881 .rs files walked, 0 waivers
 [ignore classes] <none>=1, deferred=19, feature+gpu=1, feature+gpu-cap=3, feature+gpu-windowed+gpu-cap=4,
   feature+miri-slow=1, flaky=1, generator=7, gpu=29, gpu-cap=1, gpu-windowed=132, gpu-windowed+gpu-cap=1,
-  miri-slow=132, miri-unsupported=29, slow=14, solo=2; scopes: miri-only=160, native=216, release-only=1;
-  rule inputs: 128 sites call a device entry, 2 exist only under Miri, 9 are feature-conditioned
+  miri-slow=149, miri-unsupported=32, slow=14, solo=2, workstation=1; scopes: miri-only=180, native=217,
+  release-only=1; rule inputs: 128 sites call a device entry, 2 exist only under Miri, 9 are feature-conditioned
 ```
+
+The previous reading (2026-10-06, `u/phys-sr` at `c335b4c6`: 377 sites) and the rungs that moved
+it there are in `git log -p docs/WORKFLOW.md`.
 
 ⚠️ **Every count in this section is a snapshot, and the census's printed lines are the only
 figures to quote — read the run, not this paragraph.** `MIN_SITES` is a floor, so a prose count
-can drift arbitrarily far and stay green. How the count moved (164 → 280 → … → 355 → 356 → 368 → 369 → 375 → 377) is in
+can drift arbitrarily far and stay green. How the count moved (164 → 280 → … → 355 → 356 → 368 → 369 → 375 → 377 → … → 397 → 398) is in
 `git log -p CLAUDE.md`, not here.
 
 Every site states its requirement **and its class**, and the census fails the build if a new one
@@ -278,6 +282,10 @@ does not — a bare `#[ignore]` is the **third** way to make a check disappear, 
 - `miri-slow` — runs natively, and Miri would finish it only given hours; `miri-unsupported` —
   runs natively, and Miri cannot execute what it needs at all (a child process, a custom
   `#[global_allocator]`, a deliberate leak);
+- `workstation` — the test checks a record of the author's own installation (a registry key, an
+  installed tool) that a clean machine does not have, so it runs on the dev host only, on demand and
+  by name (`-- --ignored --exact`); added 2026-10-10, when the CI move to `windows-latest` first ran
+  such a test (`vg_r0_reference_rig`'s `the_record_matches_a_live_probe`) on a clean image;
 - `generator`, `deferred`, `flaky` — no leg (below).
 
 The only multi-class spellings are `feature+<class>` and `gpu-windowed+gpu-cap` (so
@@ -381,6 +389,13 @@ The `feature+miri-slow` site is the tb-neg Tree-Borrows arm in
 `boyko_threadpool/tests/tb_neg_m2w_block_reference.rs`: ignored natively and under a plain Miri
 run, it runs only through `scripts/tb_neg_gate.sh` (Miri, `--features tb-neg-m2w`,
 `--include-ignored`), and its success is an abort.
+
+**Leg: the dev host, on demand — `workstation`** (`rg -n '^[^/]*#\[ignore = "workstation:' -g
+'*.rs'`, 1 on 2026-10-10). The test compares a record with the author's own machine, so it runs
+there, by name: `cargo test -p boyko-app --test vg_r0_reference_rig -- --ignored --exact
+the_record_matches_a_live_probe` must print `running 1 test` and pass (measured 2026-10-10). On a
+clean image it is red by construction (the probe reads `false` / `0` against the recorded `true` /
+`1`), which is why no CI job may sweep it in.
 
 **No leg: `generator`, `deferred`, `flaky`** (`rg -n '^[^/]*ignore = "(generator|deferred|flaky):'
 -g '*.rs'`, 27 at `7d5a0015`). They must not be swept into a leg. *Generators* assert nothing

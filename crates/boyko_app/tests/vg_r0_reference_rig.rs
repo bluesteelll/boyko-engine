@@ -620,7 +620,15 @@ fn r0a_gate_holds_on_the_live_record() {
 
 /// The record DESCRIBES the search; this asserts it describes the search that actually ran, so the
 /// evidence fields cannot drift away from the machine that produced them.
+///
+/// The machine is the author's workstation, whose HKCU `Builds` key holds the stale entry the
+/// record counts, so on any other machine the probe measures a different search and this reds by
+/// construction (a clean Windows image reads `false` / `0` against the recorded `true` / `1`).
+/// Hence `workstation`: it runs on the dev host, by name. The gate itself,
+/// [`r0a_gate_holds_on_the_live_record`], re-derives its verdict from the live probe and runs
+/// everywhere.
 #[test]
+#[ignore = "workstation: compares docs/VG-R0-REFERENCE-RIG.toml's authority fields with a live probe of this machine's Unreal Engine registrations (HKCU Builds key, HKLM installs key, launcher manifest), and the record describes the author's workstation. Run on the dev host: cargo test -p boyko-app --test vg_r0_reference_rig -- --ignored --exact the_record_matches_a_live_probe"]
 fn the_record_matches_a_live_probe() {
     let fx = fixture();
     let a = &fx.authorities;
