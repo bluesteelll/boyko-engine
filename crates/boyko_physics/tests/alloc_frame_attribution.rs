@@ -205,7 +205,7 @@ use std::cell::Cell;
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use boyko_ecs::ecs::core::events::event::Event;
 use boyko_ecs::ecs::core::events::event_config::EventConfig;
@@ -378,10 +378,27 @@ fn classify(layout: Layout) -> Class {
         Class::Other => &C_OTHER,
     };
     counter.fetch_add(1, Ordering::Relaxed);
+    if class == Class::Other && size == EPOCH_LOCAL_BYTES && align == EPOCH_LOCAL_ALIGN {
+        N_EPOCH_LOCAL.fetch_add(1, Ordering::Relaxed);
+    }
     if class == Class::Other && OTHER_LOG_ON.load(Ordering::Relaxed) {
         log_other(size, align);
     }
     class
+}
+
+/// crossbeam-epoch `Local`s registered so far: the OTHER acquisitions of exactly
+/// [`EPOCH_LOCAL_BYTES`] at [`EPOCH_LOCAL_ALIGN`]. A sub-count of `OTHER`, not a
+/// fifth class: the four classes still partition every acquisition. Read only by
+/// [`register_driver_epoch_local`] and [`warmed_pool`], to prove that a first
+/// touch happened before a window opens.
+static N_EPOCH_LOCAL: AtomicU64 = AtomicU64::new(0);
+
+/// `SeqCst` on the read side, `Relaxed` on the increment side, as in `Snap::now`.
+/// The callers poll it: a registration that is not visible yet costs one more
+/// forcing round, never a wrong verdict.
+fn epoch_locals() -> u64 {
+    N_EPOCH_LOCAL.load(Ordering::SeqCst)
 }
 
 // ── The OTHER-layout log: WHAT a rare OTHER acquisition is, without a backtrace ──
@@ -421,6 +438,8 @@ fn log_other(size: usize, align: usize) {
 /// crossbeam-epoch's per-thread `Local` — the one `OTHER` object the backtrace
 /// table names (`Collector::register`, 2304 B, align 128).
 const EPOCH_LOCAL_BYTES: usize = 2304;
+/// The `Local`'s alignment: it leads with a `CachePadded` epoch.
+const EPOCH_LOCAL_ALIGN: usize = 128;
 /// std's `to_u16s` copy of a worker's name, made in `thread_start` for
 /// `SetThreadDescription`: `boyko-worker-N` is 14 characters, plus the NUL, as
 /// `u16`s (`ThreadPoolBuilder`'s default prefix; single-digit worker index).
@@ -962,14 +981,195 @@ fn chunks_for(k: usize, cell: usize) -> u64 {
     n
 }
 
-/// A pool whose threads have each been through their first steal.
+/// Rounds [`warmed_pool`] may force before it is RED.
+const FORCE_ROUNDS: usize = 4096;
+/// How long a spinning task of [`boot_barrier`] or [`register_driver_epoch_local`]
+/// waits for the other side before it gives up (and the caller is RED).
+const FIRST_TOUCH_WAIT: Duration = Duration::from_secs(30);
+/// Children [`register_driver_epoch_local`]'s leader pushes onto its worker's deque.
+const DRIVER_TOUCH_CHILDREN: usize = 8;
+
+/// Registers the DRIVER thread's epoch `Local` before section A opens a window,
+/// and proves it.
+///
+/// The thread that runs this binary is not one of any pool's workers, and an
+/// `install` it calls joins by HELPING: once the injector is empty it probes the
+/// workers' deques with `Stealer::steal`, and its first probe registers the
+/// driver's own `Local` — the same 2304-byte OTHER object a worker registers on
+/// its first steal. When that first probe comes is the schedule's choice: a
+/// join whose trivial tasks the driver drains from the injector itself, before
+/// a worker has woken, never probes. So the driver's `Local` could land inside
+/// any of section A's windows, as a first touch [`warmed_pool`] cannot see.
+///
+/// The construction makes the first probe certain. The pool has ONE worker,
+/// which has no sibling to steal from and so never pins: the only `Local` the
+/// touch can register is the driver's. The `install` body runs on the driver
+/// and spins until that worker has taken the leader off the injector and pushed
+/// [`DRIVER_TOUCH_CHILDREN`] children onto its own deque; the leader spins
+/// until they have run. So the driver's join finds the injector empty and the
+/// worker's deque full, and every child it runs it took with `Stealer::steal`,
+/// which pins. Both spins are bounded by [`FIRST_TOUCH_WAIT`].
+fn register_driver_epoch_local() {
+    let driver = std::thread::current().id();
+    let pushed = AtomicBool::new(false);
+    let done = AtomicUsize::new(0);
+    let on_driver = AtomicUsize::new(0);
+    let before = epoch_locals();
+    let p = pool(1);
+    {
+        let (p, pushed, done, on_driver) = (&*p, &pushed, &done, &on_driver);
+        p.install(|s| {
+            s.spawn(move || {
+                p.scope(|inner| {
+                    for _ in 0..DRIVER_TOUCH_CHILDREN {
+                        inner.spawn(move || {
+                            if std::thread::current().id() == driver {
+                                on_driver.fetch_add(1, Ordering::Relaxed);
+                            }
+                            done.fetch_add(1, Ordering::Release);
+                        });
+                    }
+                    pushed.store(true, Ordering::Release);
+                    let deadline = Instant::now() + FIRST_TOUCH_WAIT;
+                    while done.load(Ordering::Acquire) < DRIVER_TOUCH_CHILDREN
+                        && Instant::now() < deadline
+                    {
+                        std::hint::spin_loop();
+                    }
+                });
+            });
+            // Acquire: pairs with the leader's Release store above, after its pushes.
+            let deadline = Instant::now() + FIRST_TOUCH_WAIT;
+            while !pushed.load(Ordering::Acquire) && Instant::now() < deadline {
+                std::hint::spin_loop();
+            }
+        });
+    }
+    let registered = epoch_locals() - before;
+    drop(p);
+    let stolen = on_driver.load(Ordering::Relaxed);
+    assert!(
+        stolen >= 1,
+        "driver touch: the driver ran none of the {DRIVER_TOUCH_CHILDREN} children on its \
+         worker's deque — it never stole, so the touch cannot vouch for the driver's epoch Local"
+    );
+    assert_eq!(
+        registered, 1,
+        "driver touch: {registered} epoch Locals registered; the one the touch exists for is \
+         the driver's, and a 1-worker pool's worker has no sibling to steal from"
+    );
+    say!(
+        "[driver touch] the driver thread's epoch Local registered before section A: 1 Local, \
+         {stolen} of {DRIVER_TOUCH_CHILDREN} children stolen from the worker's deque"
+    );
+}
+
+/// Every worker of `p` holds a task at the same moment, so every worker has
+/// booted. `workers + 1` tasks each wait for all the others; a thread runs at
+/// most one of them at a time, and the driver's helping join is the only
+/// thread besides the workers, so one is held by the driver and the other
+/// `workers` by the workers, one each. RED if they do not all arrive within
+/// [`FIRST_TOUCH_WAIT`].
+fn boot_barrier(p: &ThreadPool, workers: usize) {
+    let holders = workers + 1;
+    let arrived = AtomicUsize::new(0);
+    // The fewest arrivals a holder saw when it gave up; `usize::MAX` while none
+    // has. A holder that gives up frees its thread for a task still queued, so
+    // `arrived` itself can reach `holders` after the barrier has failed.
+    let short_at = AtomicUsize::new(usize::MAX);
+    p.install(|s| {
+        for _ in 0..holders {
+            let (arrived, short_at) = (&arrived, &short_at);
+            s.spawn(move || {
+                arrived.fetch_add(1, Ordering::AcqRel);
+                let deadline = Instant::now() + FIRST_TOUCH_WAIT;
+                loop {
+                    let seen = arrived.load(Ordering::Acquire);
+                    if seen >= holders {
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        short_at.fetch_min(seen, Ordering::Relaxed);
+                        break;
+                    }
+                    std::hint::spin_loop();
+                }
+            });
+        }
+    });
+    let short_at = short_at.load(Ordering::Relaxed);
+    assert!(
+        short_at == usize::MAX,
+        "A: {short_at} of {holders} holders had reached the boot barrier of a {workers}-worker \
+         pool when the first gave up — a worker never took a task, so it may still be booting"
+    );
+}
+
+/// One forcing round (E1's `first_touch_round`, stated independently here): a
+/// leader task opens a nested scope on its worker, pushes `8 × workers` children
+/// onto that worker's own deque, and spins until other threads have run all of
+/// them, so idle workers take them by a PEER STEAL, the event that registers a
+/// worker's epoch `Local` on a host whose sweep skips empty victims.
+fn first_touch_round(p: &ThreadPool, workers: usize) {
+    let children = 8 * workers;
+    p.install(|s| {
+        s.spawn(move || {
+            let done = AtomicUsize::new(0);
+            p.scope(|inner| {
+                for _ in 0..children {
+                    let done = &done;
+                    inner.spawn(move || {
+                        // A little work, so that a single thief cannot drain the deque alone.
+                        let mut x = 0u64;
+                        for i in 0..20_000u64 {
+                            x = black_box(x.wrapping_add(i));
+                        }
+                        done.fetch_add(1, Ordering::Release);
+                    });
+                }
+                // Spin (do not join), so the children can only leave this deque by
+                // theft; bounded, so a pool that never steals cannot hang the run.
+                let mut spins = 0u64;
+                while done.load(Ordering::Acquire) < children && spins < 50_000_000 {
+                    std::hint::spin_loop();
+                    spins += 1;
+                }
+            });
+        });
+    });
+}
+
+/// A pool whose threads have each booted and been through their first steal,
+/// VERIFIED rather than assumed.
 ///
 /// A fresh pool's worker threads finish booting ASYNCHRONOUSLY: a worker's
 /// first-touch registrations (section F, and the `OTHER`-only trace table)
 /// happen whenever that thread first gets work, and the process-global counter
 /// charges them to whichever window is open at the time. Four hundred spawning
-/// frames give every lane work many times over before anything is priced.
+/// frames give every lane work many times over on a host with a CPU for every
+/// thread. They do not promise it, and with fewer CPUs than threads they do not
+/// deliver it: the driver drains trivial tasks before a worker wakes. MEASURED
+/// 2026-10-10 on the dev host (16 CPUs, `stable-x86_64-pc-windows-msvc`) at
+/// `150fc2cb`, before this check, release: a first touch landed inside one of
+/// section A's priced windows in 7 of 20 runs under a 4-CPU affinity mask (the
+/// 4-vCPU runner's width), 7 of 10 under a 2-CPU mask and 2 of 20 at full width,
+/// inside the allowance of [`first_touch_only`] every time; debug, whose slower
+/// warm-up gives the workers time, 0 of 20 at both widths. CI run 4 on
+/// `ubuntu-latest` (4 vCPUs) read 2 in ONE frame of the `k = 32` window in its
+/// `force-alloc-panic` leg, past the allowance, while its `test (release)` leg,
+/// which compiles the same code, read 0. With this check: 0 runs in 90, at every
+/// shape and in both profiles.
+///
+/// So after the warm-up, two checks the schedule cannot skip:
+/// * [`boot_barrier`]: every worker has held a task, so it has booted (on
+///   Windows std's 30-byte copy of the thread's name is behind it, section G).
+/// * The epoch count: one `Local` per worker since before the pool was built,
+///   forced with [`first_touch_round`] when the warm-up did not get there.
+///   [`register_driver_epoch_local`] has already taken the driver's out of the
+///   count. A 1-worker pool's worker has no sibling to steal from and never
+///   registers one, so its target is 0.
 fn warmed_pool(workers: usize) -> Arc<ThreadPool> {
+    let base = epoch_locals();
     let p = pool(workers);
     for _ in 0..400 {
         p.install(|s| {
@@ -980,6 +1180,26 @@ fn warmed_pool(workers: usize) -> Arc<ThreadPool> {
             }
         });
     }
+    boot_barrier(&p, workers);
+    let want = if workers >= 2 { workers as u64 } else { 0 };
+    let mut rounds = 0usize;
+    while epoch_locals() - base < want {
+        assert!(
+            rounds < FORCE_ROUNDS,
+            "A: {FORCE_ROUNDS} forcing rounds registered {} of {want} epoch Locals on a \
+             {workers}-worker pool — a worker's first steal can still land in a priced window",
+            epoch_locals() - base
+        );
+        first_touch_round(&p, workers);
+        rounds += 1;
+    }
+    assert_eq!(
+        epoch_locals() - base,
+        want,
+        "A: a {workers}-worker pool registered {} epoch Locals — one per worker that can steal \
+         is the claim the warm-up rests on",
+        epoch_locals() - base
+    );
     p
 }
 
@@ -3199,6 +3419,8 @@ fn frame_allocation_attribution() {
         d.alloc, d.realloc, d.bytes, d.other
     );
 
+    register_driver_epoch_local();
+
     let mut rows: Vec<Row> = Vec::with_capacity(64);
     let prim = a_dispatch_primitives(&mut rows);
     b_per_system_windows(&mut rows, &prim);
@@ -3281,7 +3503,10 @@ fn frame_allocation_attribution() {
              a fresh 2-worker App land past frame 64, inside the census's steady window. A \
              setup cost that lands in frames, not a frame cost — `ThreadPoolBuilder::build` \
              neither waits for its threads to start nor pre-registers them with the epoch \
-             collector, and either would move both objects into setup.",
+             collector, and either would move both objects into setup. The DRIVER thread, \
+             which joins every `install` it calls by helping, registers a `Local` of its own on \
+             its first steal; this binary registers it before section A, and section A's pools \
+             force their workers' first touch before their windows open (`warmed_pool`).",
         ),
         (
             "the recycled-entity stack (CommandQueue::apply -> DespawnCommand) — EM2′",
