@@ -227,7 +227,7 @@ workspace deps. Therefore:
 >
 > Partially offsetting: CI already de-selects the two crates this section names, on
 > every leg — `--exclude boyko_demo --exclude bench-bevy-vs-boyko`
-> (`.github/workflows/ci.yml:62, :131-133, :173, :211, :243`). And the hosts named here
+> (`.github/workflows/ci.yml:105, :169-171, :216, :255, :391, :704`). And the hosts named here
 > are hypothetical: **`game_app` / `editor_app` do not exist.** The real hosts are
 > `boyko_app`, `boyko_demo`, and the root `boyko-engine` package. Wave 0 must pick
 > the real ship target before it can write the gate.
@@ -1467,7 +1467,7 @@ hand-written Rust, so the matrix still needs it.
 ## B.6 The ship gate: the tree has already built this instrument and **measured how its naive form cannot fail**
 
 > `crates/profile_fixture/tests/profile_axis_census.rs` · CI job *"cross-profile symbol
-> census (G14/G16)"* (`.github/workflows/ci.yml:175-197`)
+> census (G14/G16)"* (`.github/workflows/ci.yml:257-286`)
 
 §2 and §7 present the ship gate — *"`cargo tree` must show `boyko_reflect` absent, and a
 symbol-absence check must pass on the exact ship artifact"* — as straightforward

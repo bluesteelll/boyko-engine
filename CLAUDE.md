@@ -82,9 +82,13 @@ cargo check -p boyko-render     --features hwrt --all-targets    # the example's
 - **The platform cfg has the same blind spot, narrowed.** `boyko-app` compiles on Linux; no GPU path:
   `gpu_scene`, the host and the frame loop are `#[cfg(windows)]` (`crates/boyko_app/src/lib.rs:60-115`,
   `runner.rs:237-238`); the non-Windows `run_windowed` reports E3004 and exits (`runner.rs:1022-1026`).
-  Every CI job runs on `ubuntu-latest`, so no job compiles a `#[cfg(windows)]` item.
-- No clippy lint has run over feature-gated code, and the `#[cfg(windows)]` arms of `boyko-app` and of
-  `orbit_cube_window` get only the by-hand recipe above, which is a recipe, not coverage.
+  Since 2026-10-10 (owner) CI runs every test-running job on `windows-latest`, so those items compile at
+  default features. The build-only jobs (`check`, `clippy`, `profile-legs`, `feature-legs`,
+  `bench-compile`) stay on `ubuntu-latest`. A Linux test run is kept as `test-linux`, which is
+  informational (`continue-on-error`).
+- No clippy lint has run over feature-gated code or over a `#[cfg(windows)]` item. A `#[cfg(windows)]`
+  arm that also needs a feature gets only the by-hand recipe above, which is a recipe, not coverage.
+  Under `hwrt`, that means `boyko-app` and `orbit_cube_window`.
 
 (rationale and measurements: docs/WORKFLOW.md#feature-axis)
 

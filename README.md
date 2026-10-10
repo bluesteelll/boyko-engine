@@ -115,7 +115,10 @@ skinning and animation; audio; an editor; virtual geometry.
   (bindless textures), and fails fast on a device that lacks one. The Visibility Buffer path needs
   two more descriptor-indexing features; without them it falls back to Deferred.
 - **Linux x86_64:** no GPU path yet — the Vulkan loader and the window are Windows-only. The
-  CPU-side crates (the ECS, physics, math, scene and the rest) compile there.
+  CPU-side crates (the ECS, physics, math, scene and the rest) compile there. CI checks that on
+  every push and pull request to `master`. CI runs the test suite on Windows, where its allocation,
+  float and timing pins were measured. A Linux test run is reported for information only, because some of those pins
+  do not hold there yet.
 - **macOS and wasm32:** not supported.
 - **Rust:** stable ([`rust-toolchain.toml`](rust-toolchain.toml) pins the `stable` channel),
   edition 2024. No minimum supported Rust version is declared.

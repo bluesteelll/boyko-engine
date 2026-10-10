@@ -107,8 +107,8 @@ compiles.
 **Reason.** §2's `game_app` / `editor_app` do not exist; the analysis says so itself. What exists:
 `crates/boyko_demo` is the only game-shaped `[[bin]]` member (`crates/boyko_demo/Cargo.toml:7`), and the
 workspace root is also a package (`boyko-engine`, `src/main.rs`). But `boyko_demo` is **excluded from
-every CI leg** — `--exclude boyko_demo` appears on `.github/workflows/ci.yml:84, :131, :133, :173, :290,
-:523, :541` — and it pulls eframe/egui/winit/wgpu. A gate whose artifact takes minutes to link is a
+every CI leg** — `--exclude boyko_demo` appears on `.github/workflows/ci.yml:105, :169, :171, :216, :255,
+:391, :675, :704` — and it pulls eframe/egui/winit/wgpu. A gate whose artifact takes minutes to link is a
 gate that gets moved to a nightly and then to nowhere.
 
 **`boyko_app` is NOT a ship target and must not be named as one.** `docs/REFLECTION-PLAN-CORE.md`'s
@@ -122,7 +122,7 @@ So the two roles split. **`boyko_demo` and `boyko-engine` are the ship targets f
 cheap manifest/resolver reads and can name every member). **A fixture package is the artifact for
 P-C/P-D** (G3/G6/G7), following the precedent verbatim: `crates/profile_fixture` builds its own two
 legs rather than consuming other jobs' artifacts, *"explicitly so it is runnable locally — a gate
-only CI can run is a gate whose RED nobody has seen"* (`.github/workflows/ci.yml:181-183`).
+only CI can run is a gate whose RED nobody has seen"* (`.github/workflows/ci.yml:264-265`).
 
 **Rejected:** (a) gating the demo binary directly — cost, plus it is excluded from CI, so the gate
 would run in no leg that exists; (b) inventing the `game_app` the analysis names — it does not exist
@@ -261,7 +261,7 @@ other, which is how a census acquires a subject that can vanish while the check 
 ### D6 — Tool absence is a **RED**, never a SKIP.
 
 Inherited verbatim: *"a gate that passes on every machine lacking its tool is a gate that passes"*
-(`.github/workflows/ci.yml:185-187`; the panicking resolver at
+(`.github/workflows/ci.yml:267-269`; the panicking resolver at
 `crates/profile_fixture/tests/profile_axis_census.rs:509`). `components: llvm-tools` on the new job,
 and the `llvm-nm` / `llvm-size` resolution copied from
 `crates/profile_fixture/tests/profile_axis_census.rs:564` — **copied, not shared**, for the reason that
@@ -279,7 +279,7 @@ under census.
   the legitimate `--release --features reflect` editor build compiles `debug_assert!` out, which is
   exactly where the kind-check's load-bearing `-> bool` return is the only remaining guard. A
   debug-only ON leg never exercises the configuration the gap is about. The existing `test` job is
-  already `matrix: profile: [debug, release]` (`.github/workflows/ci.yml:120-121`); the ON job mirrors it.
+  already `matrix: profile: [debug, release]` (`.github/workflows/ci.yml:158-159`); the ON job mirrors it.
 
 Net: **four cells** — `{off, on} × {debug, release}` — of which two already exist.
 
@@ -1103,7 +1103,7 @@ defect this campaign keeps finding:
    ambiguous across selected packages and is the form that silently selects nothing.
 2. **`components: llvm-tools`** on a `reflect-census` job running
    `cargo test -p reflect-fixture --test reflect_absence_census`, mirroring `profile-census`
-   (`.github/workflows/ci.yml:188-197`).
+   (`.github/workflows/ci.yml:274-286`).
 3. **Miri allowlist** — the Miri sweep (then a step of `ci.yml`'s required `miri` job; since 2026-10-10 `.github/workflows/miri-sweep.yml`, weekly and NOT a merge gate) grows **two rows with different
    shapes**, and the difference is the whole point (D4):
 
@@ -1485,7 +1485,7 @@ registration is real cold cost and *"must not be mistaken for a hot-path regress
 **steady-state** query/spawn inner loop is the subject. So the registration happens outside the timed
 block, and a second, explicitly-labelled reading reports the first-touch cost on its own.
 
-**It must compile with the feature OFF.** `.github/workflows/ci.yml:523` runs
+**It must compile with the feature OFF.** `.github/workflows/ci.yml:675` runs
 `cargo bench --workspace --no-run`, so a bench that only compiles with a feature reds a job that has
 nothing to do with reflection. Feature off, `main()` prints `NOT BUILT (feature off)` and returns —
 and the `reflect-on` job asserts the *printed verdict token* is present, so the vacuous form cannot
@@ -1541,7 +1541,7 @@ a set equality that is only ever tested in one direction is a subset check weari
 
 | item | deferred to | why, and what it costs to defer |
 |---|---|---|
-| Censusing the **real** `boyko_demo` artifact | a rung of its own, once a ship binary exists that CI builds | `boyko_demo` is `--exclude`d from every CI leg today (`.github/workflows/ci.yml:84` and five siblings) and pulls eframe/wgpu. Deferring costs: G3's artifact claim is about a fixture, and the fixture stands in for the demo by *argument*, not by identity. Stated in G3's "cannot claim". |
+| Censusing the **real** `boyko_demo` artifact | a rung of its own, once a ship binary exists that CI builds | `boyko_demo` is `--exclude`d from every CI leg today (`.github/workflows/ci.yml:105` and six siblings) and pulls eframe/wgpu. Deferring costs: G3's artifact claim is about a fixture, and the fixture stands in for the demo by *argument*, not by identity. Stated in G3's "cannot claim". |
 | Adding `REFLECTION-PLAN-*.md` to `GATED_DOCS` | ~~after the four plans stop moving~~ → **`docs/REFLECTION-PLAN-ECS.md`'s EG8 gate 6, which owns it** | Two plans held opposite decisions on one gate: ECS EG8 gate 6 registers all four documents in `GATED_DOCS` with a `("REFLECTION-PLAN-*.md", 0)` row in `OVER_WAIVED_MAX`, while this row deferred exactly that and called the deferral *"a choice, not an omission"*. **EG8 wins, and it wins on its own reasoning**: it is the last rung of the longest ladder, so by then all four documents exist — which answers this row's real objection, that the anchor gate's *path* check reds on a dead link to a sibling that has not landed. Verified: `tests/internal_docs_anchors.rs:349`'s `GATED_DOCS` holds four documents today and `PARTICLES-PLAN.md` is not among them, so this is a genuine addition and not a restatement. ~~**Until EG8 lands, this file's anchors are hand-checked** (Appendix GC), and **EG8's checklist includes deleting that caveat in the same commit**~~ — a document that says its anchors are hand-checked while a gate checks them is the doc-rot class this campaign has measured at 75 %. **UPDATE 2026-08-21 — landed, ahead of EG8.** All **five** reflection documents (the four plans and `REFLECTION-ANALYSIS.md`) are registered, each with a `0` row in `OVER_WAIVED_MAX`; Appendix GC's caveat is deleted. Whether EG8 still carries a gate-6 line item is bookkeeping for the campaign owner, not a claim this row can settle. |
 | The **bevy-shaped baseline** bench (`get_field` vs `HashMap<TypeId>` + `&dyn Reflect` + downcast) | `docs/REFLECTION-PLAN-CORE.md`, Wave 5 | It is a *beats-bevy* claim, not an *absence* claim. §3.3 is explicit that the feature-on/off delta *"does not prove beats-bevy"* and that both benches are required. Two claims, two owners. |
 | A **cross-build wall-clock** feature-on/off A/B | **REFUSED, not deferred** | D8. The measured cross-build drift on this box (16.16 → 12.11 ns on an unchanged leg, `crates/boyko_ecs/benches/gj1_flag_cost.rs:22-29~`) is wider than any effect the comparison could find. Recorded as refused so it is not re-proposed as "the obvious missing measurement". |
@@ -1681,9 +1681,9 @@ Verified against the tree at **2026-08-21**, branch `feat/reflection`. This file
 | `crates/profile_fixture/tests/profile_axis_census.rs` | the measured census template: the LTO finding, the present control, the RED-not-SKIP tool rule, the self-building legs |
 | `crates/profile_fixture/tests/profile_axis_census.rs:170` | `ZONE_EMIT_SYMBOL = "mint_cold"` — the plain-fn symbol class D5 mirrors |
 | `crates/profile_fixture/Cargo.toml` | *"Adding any second dependency here … destroys the gate's ARGUMENT"* — G0's fixture rule |
-| `.github/workflows/ci.yml:84, :131, :133, :173, :290, :523, :541` | the `--exclude boyko_demo` legs — D2's reason |
-| `.github/workflows/ci.yml:120-121` | the existing `[debug, release]` matrix the ON leg mirrors (D7) |
-| `.github/workflows/ci.yml:188-197` | the `profile-census` job + `components: llvm-tools` (D6) |
+| `.github/workflows/ci.yml:105, :169, :171, :216, :255, :391, :675, :704` | the `--exclude boyko_demo` legs — D2's reason |
+| `.github/workflows/ci.yml:158-159` | the existing `[debug, release]` matrix the ON leg mirrors (D7) |
+| `.github/workflows/ci.yml:274-286` | the `profile-census` job + `components: llvm-tools` (D6) |
 | `.github/workflows/miri-sweep.yml` | the hand-listed Miri sweep — B.9's allowlist, G4's row. In `ci.yml`'s required `miri` job until 2026-10-10; since then its own workflow, weekly and NOT a merge gate |
 | `crates/boyko_ecs/Cargo.toml` | the `profiling-analysis` measurement: unification defeated `--no-default-features` (D3, G2) |
 | `crates/boyko_ecs/benches/gj1_flag_cost.rs` | the ABBA/twin/verdict idiom; the cross-build refusal at `:22-29~` (D8) |

@@ -933,7 +933,7 @@ That decides the corpus's home, because C9 gate 1 as written named
   `-D warnings`.
 
 The home is `reflect-fixture`: the only package that has `boyko-macros`, the `reflect` feature, and a
-CI leg that builds it (`.github/workflows/ci.yml:224-246`). `boyko_reflect` is excluded for the same
+CI leg that builds it (`.github/workflows/ci.yml:316-341`). `boyko_reflect` is excluded for the same
 `cfg` reason **plus** GATES D4's *"NO `[features]` table, now or ever"* and its lack of a
 `boyko-macros` edge — the trap C7's gate 1 fell into, recorded at D23.
 
@@ -3585,7 +3585,7 @@ is `#[cfg(not(debug_assertions))]` and **its invocation is part of it** —
 `cargo test -p boyko-reflect --release`, output read for a non-vacuous `running [1-9]`, exactly the
 discipline `crates/boyko_reflect/src/registry.rs:141~`'s own note already states for the release
 halves beside it. **RED:** delete the assert; the gate reds. *(The CI leg exists: `reflect-on` runs a
-`profile: [debug, release]` matrix, `.github/workflows/ci.yml:224-246`.)*
+`profile: [debug, release]` matrix, `.github/workflows/ci.yml:316-341`.)*
 
 **`storage = "dense"` is NOT refused** — a dense component has real per-row bytes at a stable
 address, and it is the one non-table kind that is fully readable. Its *enumeration* problem is

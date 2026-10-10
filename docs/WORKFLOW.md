@@ -103,7 +103,9 @@ declared, 6 refused, 23 legs to run (0 of them at a narrowed target scope)`.
   `--target x86_64-unknown-linux-gnu`, the CI `RUSTFLAGS` and `--keep-going`: 21 legs green with
   0 warnings. The two `bench-alloc` legs cannot be cross-checked that way, because
   `libmimalloc-sys`'s build script needs an `x86_64-linux-gnu-gcc`, which the runner has and a
-  Windows box does not. Both were green natively on msvc (2026-09-18).
+  Windows box does not. Both were green natively on msvc (2026-09-18). The tests behind
+  `boyko-physics/{bp-query-counts, narrowphase-counts}` run in the `feature-count-tests` job on
+  `windows-latest`. That job was the last step of `feature-legs` until 2026-10-10.
 - **NOT covered — 6, each with its reason in `ci.yml`:** `bench-bevy-vs-boyko/{bench-alloc,
   nightly}` — the bevy tree, excluded from every job but `bench-compile`;
   `boyko-threadpool/tb-neg-m2w` — `compile_error!` outside Miri, by design, gated instead by
@@ -151,9 +153,10 @@ VERIFIED 2026-09-18 on `stable-x86_64-pc-windows-msvc`: all three lines are gree
 0 warnings), and so were `boyko-app`'s `profiling-alloc` and `profiling-census` at `--all-targets`;
 `profiling-alloc` has failed there since `5eab1d0b` (2026-09-23) added the e1 census test and its
 own allocator (the refusal above). CI compiles `boyko-app/{hwrt, profiling-census}` and the example on
-Linux, so what depends on this by-hand recipe is their `#[cfg(windows)]` arms — `boyko-app`'s GPU
-path and the example's window loop — and for those it is the **only** compile they get. No CI job
-runs it, so it is a recipe, not coverage.
+Linux. Since 2026-10-10 its test-running jobs run on `windows-latest`, and they compile `boyko-app`'s
+GPU path and the example's window loop at **default** features. What depends on this by-hand recipe
+is the `#[cfg(windows)]` arm of each feature, and for those arms it is the **only** compile they get.
+No CI job runs it, so it is a recipe, not coverage.
 
 ⚠️ **Three features are RED right now, and the job refuses them by name rather than hiding them:**
 `boyko-app/profiling-alloc` (the allocator collision above) and these two.
@@ -192,9 +195,23 @@ to run: `gpu_scene`, the host and its dump and probe drivers are `#[cfg(windows)
 (`runner.rs:237-238`), and its non-Windows twin reports E3004 and returns `AppExit(true)`
 (`runner.rs:1022-1026`). One layer down, `boyko_rhi_vulkan`'s non-Windows loader is `None`
 (`crates/boyko_rhi_vulkan/src/device.rs:1740-1743`) and its non-Windows `Window::open` returns
-`UnsupportedPlatform` (`crates/boyko_rhi_vulkan/src/window.rs:775-781`). What stays open is the
-mirror image: every CI job runs on `ubuntu-latest`, so **no job compiles a `#[cfg(windows)]` item**,
-and that whole path is compiled only on a Windows box.
+`UnsupportedPlatform` (`crates/boyko_rhi_vulkan/src/window.rs:775-781`). Until 2026-10-10 the
+mirror image stayed open: every CI job ran on `ubuntu-latest`, so **no job compiled a
+`#[cfg(windows)]` item**, and that whole path was compiled only on a Windows box.
+
+**Since 2026-10-10 (owner decision, release PR #4), every CI job that executes a test binary runs on
+`windows-latest`**, the platform the engine is developed, measured and pinned on. Those jobs are
+`test`, `profile-census`, `reflect-on`, `reflect-census`, `reflect-dogfood`,
+`feature-count-tests` and `force-alloc-panic`. They compile that path at default features and run
+its device-free tests. Two kinds of job stay on `ubuntu-latest`, both blocking. The first is the
+build-only jobs: `check`, `clippy`, `profile-legs`, `feature-legs` and `bench-compile`. They keep
+the engine compiling for Linux. The second is `miri` and `loom`, which pass there. What is still
+open is narrower. No clippy lint reaches a `#[cfg(windows)]` item, and no feature leg compiles one.
+CI run 4 (38026578745) ran the whole debug and release selection on `ubuntu-latest`, and its reds
+fell in three classes of pin taken on Windows: allocation and pair counts, float bytes across C
+runtimes, and timing on a 4-vCPU runner. So the Linux test run is kept as `test-linux`, an
+informational job (`continue-on-error: true`). Its header in `ci.yml` lists each red, and making
+those pins hold on Linux is a follow-up.
 
 **`boyko-render` was not in that position, and saying it was is the error the scope table above
 corrected.** Its lib builds on the runner, and its feature legs compile it, `cfg(not(windows))` arms
@@ -202,12 +219,14 @@ included. Until 2026-10-09 the one thing the runner could not build was
 `examples/orbit_cube_window.rs`, then `#![cfg(windows)]` as a whole and so without a `main` there.
 Its window loop is now `#[cfg(windows)] mod windowed` (`orbit_cube_window.rs:56-57`), and a
 non-Windows `main` prints a notice and exits (`:687-693`), so `--all-targets` builds the example on
-the runner; no CI job compiles the loop.
+the ubuntu runner. Since 2026-10-10 the `windows-latest` test jobs compile the loop at default
+features. No job compiles it with a feature on.
 
 ⚠️ **Until 2026-10-09 one consequence reached past the feature axis.** The `check`, `test`,
-`profile-legs`, `clippy`, `force-alloc-panic` and `bench-compile` jobs all run `--workspace` on
-`ubuntu-latest`, and their target sets include `boyko-app`'s lib (all six) and that example (the
-five `--all-targets` jobs). A failing unit makes cargo exit non-zero, so **none of those jobs could
+`profile-legs`, `clippy`, `force-alloc-panic` and `bench-compile` jobs all ran `--workspace` on
+`ubuntu-latest`. `test` and `force-alloc-panic` have run on `windows-latest` since 2026-10-10.
+Their target sets include `boyko-app`'s lib (all six) and that example (the five `--all-targets`
+jobs). A failing unit makes cargo exit non-zero, so **none of those jobs could
 pass on the runner.** That was inferred from the two per-crate measurements plus the command lines.
 `bench-compile`'s default target selection is the non-obvious one, and it was checked:
 `cargo +nightly bench --no-run --workspace --exclude boyko_demo --target x86_64-unknown-linux-gnu
