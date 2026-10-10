@@ -381,8 +381,10 @@ mod property {
     }
 
     proptest! {
+        // Under Miri, two cases of 16..48 ops: every op kind is drawn per op, and 200 interpreted
+        // cases ran past 16 min (MEASURED 2026-10-10).
         #![proptest_config(ProptestConfig {
-            cases: 200,
+            cases: if cfg!(miri) { 2 } else { 200 },
             // No failure file under Miri: proptest finds it through the cwd, which Miri's
             // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
             #[cfg(miri)]
@@ -391,7 +393,9 @@ mod property {
         })]
 
         #[test]
-        fn random_op_sequence_preserves_invariant(ops in proptest::collection::vec(op_strategy(), 0..80)) {
+        fn random_op_sequence_preserves_invariant(
+            ops in proptest::collection::vec(op_strategy(), if cfg!(miri) { 16..48 } else { 0..80 })
+        ) {
             register();
             let mut store = DenseStore::new(POS_ID, 256);
             // Mirror model: which entity ids are currently present.

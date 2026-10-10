@@ -61,6 +61,11 @@
 //! discharged. Its message says so in those words, because "an un-run gate" and
 //! "a broken gate" look identical from a red line and this repository has been
 //! bitten by the confusion before.
+//!
+//! Every row reads the tree from disk, which Miri isolation rejects by aborting the whole test
+//! binary (`open` not available when isolation is enabled), hence `cfg(not(miri))`. The arm's
+//! execution under Miri is `scripts/tb_neg_gate.*`'s job, not this census's.
+#![cfg(not(miri))]
 
 use std::fs;
 use std::path::{Path, PathBuf};

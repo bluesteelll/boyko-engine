@@ -61,6 +61,13 @@
 // use the `const { … }` form the lint asks for (all 63 in the workspace do).
 // See this crate's lib.rs for the full account and the delete condition.
 #![allow(clippy::missing_const_for_thread_local)]
+// Excluded from Miri for the reason `boyko_reflect/tests/c4_prim_zero_alloc.rs` measured first: a
+// `#[global_allocator]` that forwards to `System` is not transparent under Miri + Tree Borrows,
+// and libtest's own channel teardown then frees through it into a protected tag. MEASURED
+// 2026-10-10 here under the Miri sweep's flags, the same report: `deallocation through <tag>
+// (root of the allocation) ... is forbidden`, raised inside `mpmc::Sender::drop` with only
+// `Counting::dealloc` of this file on the stack. Counting allocations is not Miri's subject.
+#![cfg(not(miri))]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;

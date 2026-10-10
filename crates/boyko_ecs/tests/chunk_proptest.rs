@@ -30,14 +30,12 @@
 //!
 //! # Run scope (Miri)
 //!
-//! Run under `cargo +nightly-x86_64-pc-windows-msvc miri test --test chunk_proptest` is **NOT**
-//! recommended at the default 256-case proptest budget — each case spawns
-//! thousands of entities and Miri's per-allocation overhead is prohibitive.
-//! Per plan §11.5 / §11.3 the small-generator proptest variants live inside
-//! `chunk_iter::tests` (module-scope; future Wave 7 expansion) where the
-//! generators are bounded to ≤ 64 rows per archetype for Miri compatibility.
-//! This integration-level harness uses the default proptest cargo-test budget
-//! with up-to-2000-rows-per-archetype generators.
+//! Natively this harness uses the default proptest cargo-test budget with
+//! up-to-2000-rows-per-archetype generators. That budget is prohibitive under
+//! Miri — each case spawns thousands of entities and Miri's per-allocation
+//! overhead is interpreted — so under `cfg(miri)` every property runs two cases
+//! of at most 64 rows per archetype (the plan §11.5 / §11.3 Miri bound): Miri
+//! is here for UB coverage of both drivers, not case volume.
 
 #![allow(clippy::needless_borrow)]
 
@@ -223,17 +221,22 @@ fn total_rows_parallel(ecs: &mut EcsMaster, pool_threads: usize) -> usize {
 
 // ── Generators ──────────────────────────────────────────────────────────────
 
-/// Generator: 1..=6 archetypes, each with 0..=2000 rows. The 6-archetype
-/// upper bound matches the `MARKER_SLOTS` table; the 2000-row upper bound
-/// keeps each property case under 12k total entities for cargo-test budget.
+/// Generator: 1..=6 archetypes, each with 0..=2000 rows (0..=64 under Miri).
+/// The 6-archetype upper bound matches the `MARKER_SLOTS` table; the 2000-row
+/// upper bound keeps each property case under 12k total entities for
+/// cargo-test budget.
 fn archetype_counts_strategy() -> impl Strategy<Value = Vec<usize>> {
-    prop::collection::vec(0usize..=2000usize, 1..=6)
+    prop::collection::vec(0usize..=if cfg!(miri) { 64 } else { 2000 }, 1..=6)
 }
 
 // ── Properties ──────────────────────────────────────────────────────────────
 
 proptest! {
     #![proptest_config(ProptestConfig {
+        // Under Miri, two cases (see the module header's "Run scope (Miri)"); natively the
+        // default budget, untouched.
+        #[cfg(miri)]
+        cases: 2,
         // No failure file under Miri: proptest finds it through the cwd, which Miri's
         // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
         #[cfg(miri)]

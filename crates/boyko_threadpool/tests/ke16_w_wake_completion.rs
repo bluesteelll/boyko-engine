@@ -195,6 +195,10 @@ fn assert_each_ran_once(counters: &[AtomicU32], label: &str) {
 /// This test's deadline is far above the joiner's `park_timeout` backstop: a red
 /// here is a strand that nothing recovered, and a green here does NOT claim the
 /// window is absent — only that it is bounded.
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: a native liveness probe - waves of 64 tasks against the 30 s wall-clock `DEADLINE` and the 200 ms `QUIESCE_BUDGET`, which Miri's interpreted pool outruns (MEASURED 2026-10-10 under the sweep's flags: four of these five FAILED after 120-180 s each and the fifth ran past 3 min). Route (b) liveness is Miri-covered by `miri_scope.rs`, per the table above. Runs natively."
+)]
 #[test]
 fn w_b_a_dispatcher_wave_into_a_parked_pool_runs_every_task_exactly_once() {
     println!(
@@ -277,6 +281,10 @@ fn w_b_a_dispatcher_wave_into_a_parked_pool_runs_every_task_exactly_once() {
 /// what completes it. A red here is a strand nothing recovered; a green does
 /// NOT claim the window is absent — [`DEADLINE`] is 30 s against a window of
 /// nanoseconds.
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: a native liveness probe - waves of 64 tasks against the 30 s wall-clock `DEADLINE` and the 200 ms `QUIESCE_BUDGET`, which Miri's interpreted pool outruns (MEASURED 2026-10-10 under the sweep's flags: four of these five FAILED after 120-180 s each and the fifth ran past 3 min). Route (b) liveness is Miri-covered by `miri_scope.rs`, per the table above. Runs natively."
+)]
 #[test]
 fn w_b_a_fire_and_forget_wave_into_a_parked_pool_runs_every_task_exactly_once() {
     println!(
@@ -355,6 +363,10 @@ fn w_b_a_fire_and_forget_wave_into_a_parked_pool_runs_every_task_exactly_once() 
 /// itself a worker of the destination pool. Its assertion is the same as the
 /// dispatcher row's — the wave completes and every task runs exactly once — and
 /// having both rows in one file is what makes the pusher axis visible at all.
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: a native liveness probe - waves of 64 tasks against the 30 s wall-clock `DEADLINE` and the 200 ms `QUIESCE_BUDGET`, which Miri's interpreted pool outruns (MEASURED 2026-10-10 under the sweep's flags: four of these five FAILED after 120-180 s each and the fifth ran past 3 min). Route (b) liveness is Miri-covered by `miri_scope.rs`, per the table above. Runs natively."
+)]
 #[test]
 fn w_b_a_worker_spawned_wave_runs_every_task_exactly_once() {
     println!("[KE16 W] worker (lane) pusher, W={WORKERS} tasks={TASKS_PER_WAVE} waves={WAVES}");
@@ -451,6 +463,10 @@ fn w_b_a_worker_spawned_wave_runs_every_task_exactly_once() {
 /// delivered with `pool.spawn`, so it runs on a worker; the ONLY scope join in
 /// the test is that worker's; the test thread waits on an `AtomicBool` and
 /// never opens a scope of its own.
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: a native liveness probe - waves of 64 tasks against the 30 s wall-clock `DEADLINE` and the 200 ms `QUIESCE_BUDGET`, which Miri's interpreted pool outruns (MEASURED 2026-10-10 under the sweep's flags: four of these five FAILED after 120-180 s each and the fifth ran past 3 min). Route (b) liveness is Miri-covered by `miri_scope.rs`, per the table above. Runs natively."
+)]
 #[test]
 fn w_d_prime_a_worker_route_join_terminates_and_runs_every_task_exactly_once() {
     println!("[KE16 W] route (b), worker joiner, W={WORKERS} tasks={TASKS_PER_WAVE} joins={WAVES}");
@@ -536,6 +552,10 @@ fn w_d_prime_a_worker_route_join_terminates_and_runs_every_task_exactly_once() {
 /// rather than a behavioural check because the behaviour it guards is precisely
 /// the one no native test can see — a wake that was lost and then recovered
 /// looks exactly like a wake that arrived.
+///
+/// Reads `src/scope.rs` from disk, which Miri isolation rejects by aborting the whole test
+/// binary, hence `cfg(not(miri))`.
+#[cfg(not(miri))]
 #[test]
 fn the_join_backstop_source_constant_is_still_50_us() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/scope.rs");
@@ -576,6 +596,10 @@ const BOUNDARY_REPEATS: usize = 64;
 ///
 /// The route is the dispatcher's: the test's own driver thread opens each
 /// scope, so the pushes land in the pool's non-lane destination.
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: a native liveness probe - waves of 64 tasks against the 30 s wall-clock `DEADLINE` and the 200 ms `QUIESCE_BUDGET`, which Miri's interpreted pool outruns (MEASURED 2026-10-10 under the sweep's flags: four of these five FAILED after 120-180 s each and the fifth ran past 3 min). Route (b) liveness is Miri-covered by `miri_scope.rs`, per the table above. Runs natively."
+)]
 #[test]
 fn w_b_the_boundary_wave_sizes_one_two_and_three_drain_a_parked_pool() {
     println!(

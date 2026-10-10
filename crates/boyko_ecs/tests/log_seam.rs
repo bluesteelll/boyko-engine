@@ -18,6 +18,10 @@ use boyko_log::level::Level;
 use boyko_log::lifecycle::{LogConfig, boot, drain_once, enable, shutdown};
 use boyko_log::target::{LogTarget, TargetControl, set_target_control};
 
+#[cfg_attr(
+    miri,
+    ignore = "miri-unsupported: `boyko_log::lifecycle::enable` mints the session id from `SystemTime::now`, which Miri isolation refuses by aborting the whole test binary (MEASURED 2026-10-10: `GetSystemTimePreciseAsFileTime` not available when isolation is enabled). Runs natively."
+)]
 #[test]
 fn the_seam_carries_a_record_and_costs_nothing_until_it_does() {
     // ── 1. `build` reserves nothing ──────────────────────────────────────────────────────────

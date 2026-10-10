@@ -130,6 +130,16 @@ fn assert_ship_invocation_purity(args: &[String]) {
 }
 
 /// The plan's exact command line for one package, plus `extra` args.
+///
+/// `--color never --charset utf8` pin the output's PRESENTATION, which the spawned cargo would
+/// otherwise take from the inherited environment: [`parse_line`] strips exactly the utf8
+/// tree-drawing set and expects no escape sequences. MEASURED 2026-10-09: CI's workflow-wide
+/// `CARGO_TERM_COLOR: always` wraps every drawing prefix in ANSI escapes, the first token of each
+/// row is then the escape-wrapped prefix rather than the package name, and the positive control
+/// reds at "NOT RESOLVED" while the ship clause is green for the wrong reason (CI run
+/// 37955724283, reproduced on Windows with the same variable); `CARGO_TERM_UNICODE=false` swaps
+/// the prefixes for `|--` / `` `-- `` with the same effect. A flag beats both variables. Neither
+/// flag selects a feature, so [`assert_ship_invocation_purity`] has nothing to refuse.
 fn tree_args(package: &str, extra: &[&str]) -> Vec<String> {
     let mut args: Vec<String> = [
         "tree",
@@ -141,6 +151,10 @@ fn tree_args(package: &str, extra: &[&str]) -> Vec<String> {
         "normal,build",
         "--format",
         "{p} {f}",
+        "--color",
+        "never",
+        "--charset",
+        "utf8",
     ]
     .iter()
     .map(|s| (*s).to_owned())

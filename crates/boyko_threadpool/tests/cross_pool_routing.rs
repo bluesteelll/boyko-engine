@@ -51,7 +51,10 @@ fn cross_pool_spawn_from_worker_completes_promptly() {
     let pool_a = ThreadPoolBuilder::new().num_threads(4).build();
     let pool_b = ThreadPoolBuilder::new().num_threads(4).build();
 
-    const N: usize = 256;
+    // Under Miri, 16: the routing decision is made per push, so 16 cross-pool pushes from A's
+    // workers reach the same arm as 256, and the native 256 did not finish inside 3 min of
+    // interpretation (MEASURED 2026-10-10 under the Miri sweep's flags).
+    const N: usize = if cfg!(miri) { 16 } else { 256 };
     let done = Arc::new(AtomicUsize::new(0));
 
     // Run a scope on A. Its spawned tasks execute on A's WORKER threads (not the

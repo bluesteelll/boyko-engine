@@ -301,6 +301,10 @@ fn ecs_master_spawn_batch_uses_reserve_batch_no_direct_atomic() {
 //
 // This test pins the new contract: spawning past the legacy 72_192-slot
 // cap **succeeds** and the entity count matches the cumulative request.
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: the property is growth past the legacy 72 192-slot cap, so it spawns 75 000 entities (MEASURED 2026-10-10: past 3 min under the Miri sweep's flags); the lazy-growth path itself is the same for any batch past the current capacity. Runs natively."
+)]
 #[test]
 fn direct_path_grows_past_legacy_capacity() {
     register_components();

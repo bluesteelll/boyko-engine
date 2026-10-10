@@ -327,9 +327,16 @@ mod tests {
     /// the merge boundary at all" to chance).
     const PREAMBLE_KEYS: usize = 5 * MERGE_THRESHOLD;
 
+    /// Randomized ops per case. Under Miri 64..96: still more than [`MERGE_THRESHOLD`] fresh-key
+    /// inserts on average, so a live merge fires mid-sequence as natively, where the native
+    /// 300..700 cost 110 s per interpreted case (MEASURED 2026-10-10).
+    const OPS_LEN: std::ops::Range<usize> = if cfg!(miri) { 64..96 } else { 300..700 };
+
     proptest! {
+        // Under Miri, two cases: Miri is here for UB coverage of the merge and lookup paths, not
+        // case volume, and every case already crosses several merges by construction.
         #![proptest_config(ProptestConfig {
-            cases: 256,
+            cases: if cfg!(miri) { 2 } else { 256 },
             // No failure file under Miri: proptest finds it through the cwd, which Miri's
             // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
             #[cfg(miri)]
@@ -353,7 +360,7 @@ mod tests {
         /// `Lookup`s that hit both old (merged) and brand-new (tail) entries.
         #[test]
         fn lookup_matches_btreemap_oracle_across_merges(
-            ops in prop::collection::vec(op_strategy(TOTAL_KEYS), 300..700)
+            ops in prop::collection::vec(op_strategy(TOTAL_KEYS), OPS_LEN)
         ) {
             let mut index = PathIndex::new();
             let mut model: BTreeMap<u64, (u32, u32)> = BTreeMap::new();

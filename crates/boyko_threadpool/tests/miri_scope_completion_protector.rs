@@ -115,7 +115,7 @@
 //! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-permissive-provenance \
 //!   -Zmiri-ignore-leaks -Zmiri-preemption-rate=0" \
 //!   cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-threadpool \
-//!   --test miri_scope_completion_protector -- --nocapture
+//!   --test miri_scope_completion_protector -- --include-ignored --nocapture
 //! ```
 //!
 //! The seed sweep, which is how a change to `MIRI_RELEASE_PROBE_YIELDS` is
@@ -132,7 +132,7 @@
 //!     -Zmiri-permissive-provenance -Zmiri-ignore-leaks \
 //!     -Zmiri-preemption-rate=0 -Zmiri-seed=$S" \
 //!     cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-threadpool \
-//!     --test miri_scope_completion_protector -- --nocapture
+//!     --test miri_scope_completion_protector -- --include-ignored --nocapture
 //! done
 //! ```
 //!
@@ -544,6 +544,10 @@ fn assert_probe_armed(
 /// `error: Undefined Behavior: deallocation through <TAG> ... is forbidden`,
 /// the freeing thread inside `Scope::drop` and the protector inside
 /// `ScopeShared::complete_task`. With the by-value receiver it passes.
+#[cfg_attr(
+    miri,
+    ignore = "miri-unsupported: armed only under this file's own flag set (`# Run`: `-Zmiri-preemption-rate=0` and the rest), which a shared sweep cannot carry; under the sweep's default preemption its arming is seed-dependent (the header measures a reduced flag set armed on 4 of 6 seeds) and its sibling W-d-prime row reds there (MEASURED 2026-10-10). Run it with the recipe in `# Run`, which passes `--include-ignored`."
+)]
 #[test]
 fn completer_holds_no_protector_when_the_joiner_frees() {
     let probes_before = probe_firings();
@@ -798,6 +802,10 @@ mod w_state {
 /// for, and does NOT decide the placement. The placement is kept after the
 /// unpark because it dominates — it makes the probe independent of the joiner's
 /// park state — and `scope.rs` now says so at that strength.
+#[cfg_attr(
+    miri,
+    ignore = "miri-unsupported: armed only under this file's own flag set (`# Run`: `-Zmiri-preemption-rate=0` and the rest), which a shared sweep cannot carry; under the sweep's default preemption `assert_probe_armed` reds by design (MEASURED 2026-10-10: `the probe fired 2 times but NOT ONE of 2 frees landed inside a release window`). Run it with the recipe in `# Run`, which passes `--include-ignored`."
+)]
 #[test]
 fn worker_joiner_completer_holds_no_protector_when_the_joiner_frees() {
     use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
@@ -994,6 +1002,10 @@ fn worker_joiner_completer_holds_no_protector_when_the_joiner_frees() {
 /// GREEN after the change, because the activation that receives the body — and
 /// every `&T` nested inside it — has RETURNED before the activation that
 /// performs the release is entered.
+#[cfg_attr(
+    miri,
+    ignore = "miri-unsupported: armed only under this file's own flag set (`# Run`: `-Zmiri-preemption-rate=0` and the rest), which a shared sweep cannot carry; without that flag `assert_probe_armed` fires by design (this test's own doc). Run it with the recipe in `# Run`, which passes `--include-ignored`."
+)]
 #[test]
 fn body_environment_protector_expires_before_the_borrowed_frame_pops() {
     let probes_before = probe_firings();

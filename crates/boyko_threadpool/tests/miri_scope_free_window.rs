@@ -112,7 +112,7 @@
 //! MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-disable-isolation -Zmiri-permissive-provenance
 //!   -Zmiri-ignore-leaks -Zmiri-many-seeds=0..12 -Zmiri-preemption-rate=0.5"
 //!   cargo +nightly-x86_64-pc-windows-msvc miri test -p boyko-threadpool
-//!   --test miri_scope_free_window -- --nocapture
+//!   --test miri_scope_free_window -- --include-ignored --nocapture
 //! ```
 //!
 //! A run whose `MIRIFLAGS` lack `-Zmiri-tree-borrows` proves nothing here: the
@@ -133,8 +133,13 @@
 //! sweep that prints its volume cannot quietly claim one it did not run - but
 //! the knob that made the mistake possible is gone, and the census line stays.
 //!
-//! This test is deliberately NOT `cfg_attr(miri, ignore)`d and carries no
-//! build gate of its own. The shipped build under Miri is the whole point.
+//! This test carries no build gate of its own: the shipped build under Miri is
+//! the whole point. It IS `cfg_attr(miri, ignore)`d since 2026-10-10, for one
+//! reason only: CI's pure-compute Miri sweep runs every test of this package
+//! under one shared flag set, and this probe is priced in hours under any flag
+//! set (MEASURED 2026-10-10: past 3 min under the sweep's flags without
+//! finishing). The recipe above passes `--include-ignored`, so a
+//! run that follows it is unchanged.
 
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
@@ -174,6 +179,10 @@ fn ran_on_worker(id: u32) -> bool {
 /// `error: Undefined Behavior: deallocation through <TAG> ... is forbidden`,
 /// with the freeing thread inside `Scope::drop` and the protector inside
 /// `ScopeShared::complete_task`.
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: the evidence probe, priced in hours (`POOLS` x `SCOPES_PER_POOL` scopes of `TASKS_PER_SCOPE` tasks, see the header), run by its own recipe with `--include-ignored`; the cheap deterministic gate for the same window is `miri_scope_completion_protector.rs`."
+)]
 #[test]
 fn external_joiner_free_races_completion_protector() {
     // Total bodies executed across every scope - the primary anti-vacuity

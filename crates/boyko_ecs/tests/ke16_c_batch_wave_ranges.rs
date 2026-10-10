@@ -82,7 +82,11 @@ const WORKERS: usize = 4;
 /// Rows below `MIN_ARCHETYPE_FOR_PARALLEL` (1024) take the inline path and
 /// spawn no wave at all, so 1024 is the smallest count that exercises the
 /// conversion.
-const COUNTS: [usize; 6] = [1024, 1025, 4096, 4099, 5001, 8191];
+///
+/// Under Miri only 1025: the first count past the parallel threshold whose last chunk is short,
+/// which is the property both drivers are named for; the full list (23 000 rows) ran past 3 min of
+/// interpretation (MEASURED 2026-10-10). The closed form is exercised for every count natively.
+const COUNTS: &[usize] = if cfg!(miri) { &[1025] } else { &[1024, 1025, 4096, 4099, 5001, 8191] };
 
 /// The wave size the drivers must emit for `n` rows at [`WORKERS`] workers:
 /// the closed form `KE16-DESIGN-W.md` §4.2 replaces the `while` walk with.
@@ -130,7 +134,7 @@ fn assert_each_row_visited_once(ledger: &[AtomicU32], n: usize, driver: &str) {
 /// once at counts whose last chunk is short.
 #[test]
 fn par_iter_visits_every_row_exactly_once_at_counts_whose_last_chunk_is_short() {
-    for n in COUNTS {
+    for &n in COUNTS {
         let mut world = world_with_rows(n);
         let ledger: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
         let pool = ThreadPoolBuilder::new().num_threads(WORKERS).build();
@@ -166,7 +170,7 @@ fn par_iter_visits_every_row_exactly_once_at_counts_whose_last_chunk_is_short() 
 /// passing both as one inline chunk.
 #[test]
 fn par_for_each_chunk_visits_every_row_exactly_once_at_counts_whose_last_chunk_is_short() {
-    for n in COUNTS {
+    for &n in COUNTS {
         let mut world = world_with_rows(n);
         let ledger: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
         let chunks_seen = AtomicU32::new(0);

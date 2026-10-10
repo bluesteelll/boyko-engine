@@ -131,8 +131,10 @@ proptest! {
     // Keep the case count modest: every case spins up a fresh EcsMaster + an
     // apply window per op (each op is a full schedule drain), so this is heavier
     // than a pure-CPU property.
+    // Under Miri, two cases: every op kind is drawn per op, and 256 interpreted cases (each op a
+    // full schedule drain) ran past 3 min (MEASURED 2026-10-10).
     #![proptest_config(ProptestConfig {
-        cases: 256,
+        cases: if cfg!(miri) { 2 } else { 256 },
         // No failure file under Miri: proptest finds it through the cwd, which Miri's
         // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
         #[cfg(miri)]

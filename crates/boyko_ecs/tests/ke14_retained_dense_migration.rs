@@ -671,6 +671,10 @@ fn step_strategy() -> impl Strategy<Value = Step> {
 
 proptest! {
     #![proptest_config(ProptestConfig {
+        // Under Miri, two cases: every step kind is drawn per step, and the default 256 cases ran
+        // past 3 min of interpretation (MEASURED 2026-10-10); natively the default budget.
+        #[cfg(miri)]
+        cases: 2,
         // No failure file under Miri: proptest finds it through the cwd, which Miri's
         // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
         #[cfg(miri)]

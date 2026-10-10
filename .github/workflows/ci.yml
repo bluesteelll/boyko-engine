@@ -113,10 +113,18 @@ jobs:
   # component — panicked at `reflect_absence_census.rs:484` with exactly that message, while the
   # `reflect-census` job, the same test on the same runner image WITH it, is not among that run's
   # four failed jobs. Here the trybuild failure above had stopped the run before either census.
+  #
+  # `--no-fail-fast` and `fail-fast: false` for the reason `CLAUDE.md` gives the flag: without it
+  # `cargo test` stops at the first failing target, so "green" means "green up to the first thing
+  # already known to be red". MEASURED 2026-10-09, CI run 37955724283: the debug leg stopped at
+  # `tests/reflect_ship_closure.rs`, target 407 of the 917 this selection builds, so the 510 behind
+  # it (every package after `boyko-engine`) have never run on Linux; and the matrix's default
+  # `fail-fast` then cancelled the release leg sixteen seconds later, before it reported anything.
   test:
     name: cargo test (${{ matrix.profile }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         profile: [debug, release]
     steps:
@@ -128,9 +136,9 @@ jobs:
       - name: cargo test (${{ matrix.profile }})
         run: |
           if [ "${{ matrix.profile }}" = "release" ]; then
-            cargo test --locked --workspace --all-targets --release --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
+            cargo test --locked --workspace --all-targets --no-fail-fast --release --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
           else
-            cargo test --locked --workspace --all-targets --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
+            cargo test --locked --workspace --all-targets --no-fail-fast --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
           fi
 
   # ---------------------------------------------------------------------------------------------
@@ -568,12 +576,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # `rust-src` and `llvm-tools`: the same `--workspace --all-targets` selection as the `test`
-      # job, trybuild suites and the two symbol censuses included — see the note on that job.
+      # job, trybuild suites and the two symbol censuses included — see the note on that job, which
+      # also says why `--no-fail-fast` (this job stopped at the same target 407 of 917 in run
+      # 37955724283).
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rust-src, llvm-tools
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked --workspace --all-targets --release --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
+      - run: cargo test --locked --workspace --all-targets --no-fail-fast --release --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
 
   miri:
     name: Miri
@@ -654,9 +664,32 @@ jobs:
       # hand-listed at all (F18). The fixture's census/codegen harnesses carry
       # `#[cfg(not(miri))]`: Miri cannot spawn processes either, and without the guard
       # this row reds for a reason that has nothing to do with reflection.
+      #
+      # `--tests`, not `--all-targets`: the difference is the benches, and none of them can run a
+      # body under Miri. MEASURED 2026-10-10, each of this package set's 35 benches run alone under
+      # the job's own flags: the 33 criterion ones abort inside `Criterion::default()`, which probes
+      # for gnuplot by spawning it (`criterion_plot::version`, "`GetModuleFileNameW` not available
+      # when isolation is enabled"), before any benchmark body runs; `gj1_flag_cost` aborts on the
+      # wall clock (`SystemTime::now`); `reflect_optin_cost`'s `main` is empty until G7b. `--tests`
+      # is the lib, bins and integration tests, so the sweep keeps every target with a body Miri can
+      # execute and drops only targets that could never have been green.
+      #
+      # `MIRIFLAGS` is restated with `-Zmiri-ignore-leaks`, the flag every pool-backed Miri recipe in
+      # this tree already carries (`miri_schedule_parallel.rs`, `miri_phase15.rs`, `dense_d*_miri.rs`
+      # and the rest name it in their run lines). MEASURED 2026-10-10: without it, the targets that
+      # build a `ThreadPool` or a bundle cache red on leaks after every one of their tests passed (14
+      # of the first 60 targets run) —
+      # crossbeam-epoch's per-thread `Local`s registered by the pool's workers, which outlive
+      # their thread in crossbeam-epoch's global list (an upstream shape), and the `&'static` bundle-column slices
+      # `BundleColumnCache::resolve_and_cache` leaks once per bundle type by design (SBO6). A step
+      # `env` replaces `.cargo/config.toml`'s `[env]` entry rather than appending to it (the PC-24
+      # step above relies on the same rule), so `-Zmiri-tree-borrows` is restated here. The leak
+      # check stays on in the curated steps above, which keep the config's flags.
       - name: cargo miri test (pure-compute sweep)
+        env:
+          MIRIFLAGS: "-Zmiri-tree-borrows -Zmiri-ignore-leaks"
         run: |
-          cargo +nightly miri test --locked --all-targets \
+          cargo +nightly miri test --locked --tests \
             -p boyko-ecs -p boyko-memory -p boyko-utils -p boyko-threadpool -p boyko-serialize \
             -p boyko-math -p boyko_sdf_math -p boyko_image \
             -p boyko-reflect \

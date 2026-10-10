@@ -346,7 +346,10 @@ fn measure_down_fires<E: Trigger>(
 
 #[test]
 fn scaling_guard_deep_chain_linear() {
-    for &n in &[10usize, 100, 1000] {
+    // Under Miri 10 and 100, as in `scaling_guard_balanced_tree_linear`: the 1 000-node chain ran
+    // past 4 min of interpretation (MEASURED 2026-10-10). All three sizes natively.
+    let sizes: &[usize] = if cfg!(miri) { &[10, 100] } else { &[10, 100, 1000] };
+    for &n in sizes {
         let fires = measure_down_fires(build_deep_chain, n, c_deep, || DownDeep, &C_DEEP);
         assert_eq!(
             fires, n,
@@ -357,7 +360,10 @@ fn scaling_guard_deep_chain_linear() {
 
 #[test]
 fn scaling_guard_wide_fanout_linear() {
-    for &n in &[10usize, 100, 1000] {
+    // Under Miri 10 and 100, as in `scaling_guard_balanced_tree_linear`: its two siblings' 1 000-node
+    // sizes each ran past 3 min of interpretation (MEASURED 2026-10-10). All three sizes natively.
+    let sizes: &[usize] = if cfg!(miri) { &[10, 100] } else { &[10, 100, 1000] };
+    for &n in sizes {
         let fires = measure_down_fires(build_wide, n, c_wide, || DownWide, &C_WIDE);
         assert_eq!(
             fires, n,
@@ -369,7 +375,10 @@ fn scaling_guard_wide_fanout_linear() {
 
 #[test]
 fn scaling_guard_balanced_tree_linear() {
-    for &n in &[10usize, 100, 1000] {
+    // Under Miri 10 and 100: the guard is an exact count per size, and the 1 000-node tree ran past
+    // 3 min of interpretation (MEASURED 2026-10-10). All three sizes natively.
+    let sizes: &[usize] = if cfg!(miri) { &[10, 100] } else { &[10, 100, 1000] };
+    for &n in sizes {
         let fires =
             measure_down_fires(build_balanced, n, c_balanced, || DownBalanced, &C_BALANCED);
         assert_eq!(

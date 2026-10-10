@@ -494,7 +494,10 @@ fn run_chain_termination(ecs: &mut EcsMaster, n: usize) {
 // so terminating with N-1 / N fires proves the drain stayed bounded.
 #[test]
 fn exclusive_chain_termination_bounded_for_n_10_100_1000() {
-    for &n in &[10usize, 100, 1000] {
+    // Under Miri 10 and 100: the bound is checked per size, and the 1 000-link chain ran past 3 min
+    // of interpretation (MEASURED 2026-10-10). All three sizes natively.
+    let sizes: &[usize] = if cfg!(miri) { &[10, 100] } else { &[10, 100, 1000] };
+    for &n in sizes {
         let mut ecs = EcsMaster::new();
         // Per-world observer registration (the registry is a per-`EcsMaster` field);
         // the dedicated private `ChainRel` relation + the sequential single-test loop

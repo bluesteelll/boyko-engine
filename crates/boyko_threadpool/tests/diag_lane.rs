@@ -81,7 +81,10 @@ fn unattached_thread_has_no_lane() {
 #[test]
 fn worker_lane_agrees_with_worker_id() {
     const WORKERS: usize = 4;
-    const TASKS: usize = 4096;
+    // Under Miri, 256: every task checks its own lane, so the property is per task, and the native
+    // 4096 did not finish inside 3 min of interpretation (MEASURED 2026-10-10 under the Miri
+    // sweep's flags). 256 pushes still unpark idle workers, which the non-vacuity check needs.
+    const TASKS: usize = if cfg!(miri) { 256 } else { 4096 };
 
     let pool = ThreadPoolBuilder::new().num_threads(WORKERS).build();
 

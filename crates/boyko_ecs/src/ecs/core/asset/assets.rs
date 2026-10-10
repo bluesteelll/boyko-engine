@@ -1831,8 +1831,11 @@ mod tests {
         }
 
         proptest! {
+            // Under Miri, two cases of at most 48 ops (the `edited_set` budget below): Miri is
+            // here for UB coverage of every op arm, not case volume, and the native 256 x 1..300
+            // projects to about ten interpreted hours.
             #![proptest_config(ProptestConfig {
-                cases: 256,
+                cases: if cfg!(miri) { 2 } else { 256 },
                 // No failure file under Miri: proptest finds it through the cwd, which Miri's
                 // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
                 #[cfg(miri)]
@@ -1840,7 +1843,9 @@ mod tests {
                 ..ProptestConfig::default()
             })]
             #[test]
-            fn assets_matches_hashmap_oracle(ops in proptest::collection::vec(op_strategy(), 1..300)) {
+            fn assets_matches_hashmap_oracle(
+                ops in proptest::collection::vec(op_strategy(), 1..if cfg!(miri) { 48 } else { 300 })
+            ) {
                 let mut assets = Assets::<u64>::with_reserved(16);
                 let mut oracle: HashMap<Handle<u64>, u64> = HashMap::new();
                 let mut reserved_pending: HashSet<Handle<u64>> = HashSet::new();
@@ -1959,8 +1964,9 @@ mod tests {
         }
 
         proptest! {
+            // Under Miri, two cases of at most 48 ops, as in `assets_matches_hashmap_oracle`.
             #![proptest_config(ProptestConfig {
-                cases: 256,
+                cases: if cfg!(miri) { 2 } else { 256 },
                 // No failure file under Miri: proptest finds it through the cwd, which Miri's
                 // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
                 #[cfg(miri)]
@@ -1968,7 +1974,9 @@ mod tests {
                 ..ProptestConfig::default()
             })]
             #[test]
-            fn assets_refcount_matches_model_oracle(ops in proptest::collection::vec(ref_op_strategy(), 1..300)) {
+            fn assets_refcount_matches_model_oracle(
+                ops in proptest::collection::vec(ref_op_strategy(), 1..if cfg!(miri) { 48 } else { 300 })
+            ) {
                 let mut assets = Assets::<u64>::with_reserved(16);
                 let mut oracle: HashMap<Handle<u64>, u64> = HashMap::new();
                 let mut reserved_pending: HashSet<Handle<u64>> = HashSet::new();
@@ -2723,8 +2731,10 @@ mod tests {
         use super::*;
 
         proptest! {
+            // Under Miri, two cases, as in `edited_set` below: the body is one `dec_ref` whatever
+            // the offset, and 256 interpreted cases cost 85 s of the sweep (MEASURED 2026-10-10).
             #![proptest_config(ProptestConfig {
-                cases: 256,
+                cases: if cfg!(miri) { 2 } else { 256 },
                 // No failure file under Miri: proptest finds it through the cwd, which Miri's
                 // isolation refuses (`getcwd` / `GetCurrentDirectoryW`), aborting the test binary.
                 #[cfg(miri)]

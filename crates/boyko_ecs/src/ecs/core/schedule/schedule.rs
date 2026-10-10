@@ -2807,8 +2807,10 @@ mod tests {
         use proptest::prelude::*;
         use proptest::test_runner::{Config, TestRunner};
 
+        // Under Miri, two cases: every case builds a pool, a world and a schedule, and Miri is
+        // here for UB coverage of the clamp path, not case volume.
         let mut runner = TestRunner::new(Config {
-            cases: 256,
+            cases: if cfg!(miri) { 2 } else { 256 },
             ..Config::default()
         });
 

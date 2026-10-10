@@ -383,6 +383,10 @@ fn print_wave(route: &str, w: usize, tasks: usize, rep: usize, wave: &Wave) {
 /// This test must stay green whatever the pool does — it is the number carrier, not the gate. It
 /// also carries the healthy-path max-in-flight, which is the direct reading of defect B (the
 /// census reported "only 4-5 of 16 tasks simultaneously live" even on the dispatcher route).
+#[cfg_attr(
+    miri,
+    ignore = "miri-slow: the number carrier records every width up to 16 workers, three repeats and both routes of 200 us-body waves (MEASURED 2026-10-10: past 3 min under the Miri sweep's flags), and a wall time taken under the interpreter is not the pool's number; both routes' task accounting runs under Miri in this file's other rows. Runs natively."
+)]
 #[test]
 fn nested_scope_occupancy_numbers_are_recorded_for_both_routes() {
     // Inside the test rather than once per binary: the measurement protocol runs these FILTERED,
@@ -460,6 +464,10 @@ fn worker_route_outer_task_runs_on_a_registered_worker_of_the_installed_pool() {
 ///
 /// Do not weaken the threshold to make it pass — `W/2` is already a floor, not the target (the
 /// dispatcher route reaches it on the same fixture).
+#[cfg_attr(
+    miri,
+    ignore = "miri-unsupported: a floor on simultaneously live bodies is a property of native threads; Miri interprets every thread on one host thread (MEASURED 2026-10-10 under the Miri sweep's flags: at most 3 of 16 live, speedup 0.00x). Runs natively."
+)]
 #[test]
 fn worker_spawned_wave_reaches_at_least_half_the_workers() {
     for w in widths() {
