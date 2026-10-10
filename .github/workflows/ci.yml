@@ -30,7 +30,11 @@ env:
   #
   # ⚠ Assumes the runner supports AVX2. GitHub-hosted `ubuntu-latest` runners are Intel
   # Xeon (Skylake or newer) or AMD EPYC, all of which do; a runner without it would fail
-  # with an illegal instruction on the first vectorised kernel, not a build error.
+  # with an illegal instruction on the first vectorised kernel, not a build error. The jobs
+  # on `windows-latest` (since 2026-10-10, see the note above `jobs:`) make the same
+  # assumption of that image's hosts. It is NOT yet measured there: CI run 4 executed the
+  # vectorised kernels on `ubuntu-latest` only, so an illegal instruction in the first
+  # Windows run is this assumption failing, not a test.
   RUSTFLAGS: "-D warnings -C target-cpu=x86-64-v3"
 
 # 2026-07 audit, P0 build-gate finding: EVERY job below used to run a bare
@@ -45,6 +49,23 @@ env:
 # proven-on-this-runner set (eframe/wgpu and bevy are heavy third-party trees, not
 # engine surface); `bench-compile` deliberately KEEPS `bench_bevy_vs_boyko` — compiling
 # that crate's benches is the whole point of that job.
+#
+# WHERE EACH JOB RUNS — owner decision, 2026-10-10 (release PR #4). Every job that executes a
+# test binary runs on `windows-latest`: `test` (debug, release), `profile-census`, `reflect-on`
+# (debug, release), `reflect-census`, `reflect-dogfood`, `feature-count-tests` and
+# `force-alloc-panic`. Windows MSVC is the platform the engine is developed, measured and
+# pinned on. Its allocation-count, float-byte and timing pins were taken there. The jobs that
+# only BUILD stay on `ubuntu-latest` and stay blocking, so the engine keeps compiling for
+# Linux: `check`, `clippy`, `profile-legs`, `feature-legs` and `bench-compile` (and
+# `docs.yml`'s `cargo doc`). So do the two Python registry jobs, which run no cargo. `miri`
+# and `loom` run test binaries but stay on `ubuntu-latest`, where they pass. `test-linux` runs
+# the debug `test` selection on `ubuntu-latest` as information only: its header lists what
+# CI run 4 measured red there.
+#
+# Every `windows-latest` job sets `defaults.run.shell: bash`, so its steps keep their bash
+# syntax (Git Bash on that image). Its toolchain step resolves to the msvc host there. Caches
+# are keyed per OS without a `key:` input: `Swatinem/rust-cache` puts the runner's OS and
+# architecture in every key it builds (run 4's log: `v0-rust-test-Linux-x64-089de5a9-…`).
 jobs:
   # The suppression half of the hot-path type ban. `clippy.toml` + the denied
   # `[workspace.lints.clippy] disallowed_types` stop a NEW `HashMap`/`Mutex`/`RefCell` from
@@ -120,9 +141,18 @@ jobs:
   # `tests/reflect_ship_closure.rs`, target 407 of the 917 this selection builds, so the 510 behind
   # it (every package after `boyko-engine`) have never run on Linux; and the matrix's default
   # `fail-fast` then cancelled the release leg sixteen seconds later, before it reported anything.
+  #
+  # `windows-latest` since 2026-10-10, by the decision in the note above `jobs:`. CI run 4
+  # (38026578745, on ae9c1dc3) was the first to run all 917 targets on `ubuntu-latest`. The debug
+  # leg failed 1 target there and the release leg 7. Every one of those failures is in a class
+  # pinned on Windows, and the `test-linux` job below lists them. On the dev host, which is Windows
+  # MSVC, the same selection is green.
   test:
     name: cargo test (${{ matrix.profile }})
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -140,6 +170,50 @@ jobs:
           else
             cargo test --locked --workspace --all-targets --no-fail-fast --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
           fi
+
+  # INFORMATIONAL, NOT A GATE: `continue-on-error: true` on the job, so a red here never fails the
+  # workflow. This is the debug `test` selection, on `ubuntu-latest`. The suite's gating legs run on
+  # `windows-latest` (see the note above `jobs:`), and this job keeps a Linux test run visible.
+  #
+  # WHY IT CANNOT GATE. CI run 4 (38026578745, on ae9c1dc3) was the first run of all 917 targets on
+  # `ubuntu-latest`. It failed in three classes. Every failing test is pinned on Windows, and every
+  # one passes on the Windows MSVC dev host. Per leg: debug failed 1 target, release 7, and
+  # `force-alloc-panic` 7. These are the targets, as run 4 measured them:
+  #   * Counts pinned on Windows.
+  #     - The allocation censuses `boyko-app --test e1_engine_ui_alloc_census` (release: "a forced
+  #       pool registered 1 more epoch Locals"), `boyko-physics --test alloc_frame_attribution`
+  #       (`force-alloc-panic`: 0.016 OTHER-class acquisitions per frame) and
+  #       `boyko-render --test ui_no_realloc` (`force-alloc-panic`: 16 allocations in the per-frame
+  #       UI sort, where the pin is 0).
+  #     - The `harness = false` check of `boyko-physics --bench narrowphase_classes`. It failed in
+  #       all three legs, and it is this job's one known red: `jolt-h4` gave 75 touching pairs,
+  #       where 140 solver manifolds are expected.
+  #   * Float byte identity across C runtimes. `boyko_shaderdsl --test eval_byte_identity`
+  #     (`m2_brick_span_matches_host_on_random_sweep` computes 0 where the frozen value is -0) and
+  #     `boyko-render --lib` (`view::tests::perspective_bridge_reproduces_legacy_push_constants`:
+  #     0.5773503 against 0.57735026). Both failed in release and in `force-alloc-panic`.
+  #   * Timing and occupancy on a 4-vCPU runner. `boyko-threadpool --test
+  #     ke16_nested_scope_occupancy` (`worker_spawned_wave_reaches_at_least_half_the_workers`),
+  #     `--test region_protocol` (`fin_a_helper_advances` in release,
+  #     `fin_t1_t2_exactly_once_and_visibility_batched_completion` in `force-alloc-panic`), and
+  #     `--test a6_panic_propagation` (`detached_spawn_panic_does_not_block_pool_shutdown` in
+  #     release).
+  # FIXING THEM IS A FOLLOW-UP, and it is not done here. Each pin has to be either measured on Linux
+  # as well or scoped to the platform it was taken on. Until then a red in this job is a finding
+  # to read, not a reason to weaken a pin, and its targets are not the only ones it can turn up.
+  # When the classes are closed, drop `continue-on-error` and this job becomes a gate.
+  test-linux:
+    name: cargo test (linux, informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rust-src, llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (linux, informational)
+        run: cargo test --locked --workspace --all-targets --no-fail-fast --features boyko-ecs/profiling-analysis --exclude boyko_demo --exclude bench-bevy-vs-boyko
 
   # ---------------------------------------------------------------------------------------------
   # The BOYKO_PROFILE axis — profiling rung 14 / logging L17, the joint rung J1
@@ -193,9 +267,16 @@ jobs:
   # `components: llvm-tools` is load-bearing and its absence is a RED, not a skip: without `llvm-nm`
   # the census cannot tell a folded site from a present one, and a gate that passes on every machine
   # lacking its tool is a gate that passes.
+  #
+  # `windows-latest`, as every test-running job is (the note above `jobs:`). On both hosts the
+  # census reads the post-LTO object, the linker's input, because an MSVC image carries no symbol
+  # table at all. `profile_axis_census.rs`'s header has the measurement.
   profile-census:
     name: cross-profile symbol census (G14/G16)
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
@@ -229,9 +310,15 @@ jobs:
   # `reflect-fixture` includes `reflect_absence_census`, which panics without `llvm-nm` (D6) — the
   # failure of this job's debug leg in CI run 37922685029; the `reflect-census` job below is the
   # census's dedicated leg, this is the same test reached through the package selection.
+  #
+  # This job, `reflect-census` and `reflect-dogfood` run on `windows-latest`, as every
+  # test-running job does (the note above `jobs:`).
   reflect-on:
     name: cargo test reflect ON (${{ matrix.profile }})
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     strategy:
       matrix:
         profile: [debug, release]
@@ -259,7 +346,10 @@ jobs:
   # measure.
   reflect-census:
     name: reflect absence census (G3)
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
@@ -276,7 +366,10 @@ jobs:
   # harness takes its ship readings from its own feature-clean `cargo tree` spawns.
   reflect-dogfood:
     name: cargo test reflect dogfood
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.98.1
@@ -344,10 +437,14 @@ jobs:
   # exclusion. An exclusion is only for a crate whose lib itself cannot be compiled here.
   #
   # ⚠ WHAT IT DOES NOT COVER, stated plainly for the same reason:
-  #   * THE PLATFORM AXIS — the same blind spot on a different cfg, narrowed but not closed. Every
-  #     job in this file runs on `ubuntu-latest`, so no job here compiles a `#[cfg(windows)]` item:
-  #     in `boyko-app` that is the `gpu_scene` module, the windowed runner's frame loop and the
-  #     host modules, which only a Windows build ever sees. Until 2026-10-09 the hole was wider:
+  #   * THE PLATFORM AXIS — the same blind spot on a different cfg, narrowed but not closed. These
+  #     legs run on `ubuntu-latest`, so no leg compiles a `#[cfg(windows)]` item. In `boyko-app`
+  #     those items are the `gpu_scene` module, the windowed runner's frame loop and the host
+  #     modules. Since 2026-10-10 the test-running jobs run on `windows-latest` (the note above
+  #     `jobs:`), and they compile those items at DEFAULT features. Two gaps remain. No job
+  #     compiles a `#[cfg(windows)]` item that also needs a feature. And `clippy` stays on
+  #     `ubuntu-latest`, so no clippy lint runs over any `#[cfg(windows)]` item. Until 2026-10-09
+  #     the hole was wider:
   #     `boyko-app`'s LIB did not compile for a non-Windows target at all (2 × E0432, an unresolved
   #     `crate::gpu_scene` import in `runner.rs` and `particle_readback.rs`, plus 3 × E0308 from
   #     `codes::E3004.number()` in the `#[cfg(not(windows))]` reporter in `diag.rs`, which landed
@@ -368,8 +465,10 @@ jobs:
   #   * The window loop of `crates/boyko_render/examples/orbit_cube_window.rs`. Since 2026-10-09
   #     (3f2c88e6) the example has a `main` on every target; off Windows it prints a notice and
   #     exits, so `--all-targets` builds it here and no `boyko-render` leg needs a narrowed scope
-  #     any more. The loop itself is `#[cfg(windows)] mod windowed`, which NO job in this file
-  #     compiles — only the by-hand Windows recipe in `CLAUDE.md` does.
+  #     any more. The loop itself is `#[cfg(windows)] mod windowed`. Since 2026-10-10 the
+  #     `windows-latest` test jobs compile it at default features, because `--all-targets` builds
+  #     examples (none of them runs). With a feature on, it is compiled only by the by-hand
+  #     Windows recipe in `CLAUDE.md`.
   #   * The six refused features, each carrying its reason at the site.
   feature-legs:
     name: cargo check (per-feature legs)
@@ -530,17 +629,31 @@ jobs:
           if [ "$failed" -ne 0 ]; then
             exit 1
           fi
-      # The two physics count features gate test-only code: the step above compiles it, only `cargo
-      # test` runs it, and until this step nothing did (L9 C4's `bp_query_counts` red went unseen until
-      # a lane ran it by hand). Each target must report its own count: `running 0 tests` from a feature
-      # that did not take effect is the vacuous green this file guards against. Both legs run even when
-      # the first fails, so the status is accumulated rather than left to `-e`; and the step runs even
-      # when a derived leg above failed (`!cancelled()`), so one red compile does not shadow it. A red
-      # that shows only on this runner is a host-divergence finding for its own lane, never a reason
-      # to weaken the step (W8S cut, Q9).
-      - name: cargo test the physics count features (bp-query-counts, narrowphase-counts)
-        if: ${{ !cancelled() }}
+
+  # The two physics count features gate test-only code. `feature-legs` above compiles it, but only
+  # `cargo test` runs it, and until this step existed nothing did: L9 C4's `bp_query_counts` red
+  # went unseen until a lane ran it by hand. Each target must report its own count, because
+  # `running 0 tests` from a feature that did not take effect is the vacuous green this file guards
+  # against. Both legs run even when the first fails, so the status is accumulated rather than left
+  # to `-e`. A red that shows only on this runner is a host-divergence finding for its own lane,
+  # never a reason to weaken the step (W8S cut, Q9).
+  #
+  # Until 2026-10-10 this was the last step of `feature-legs`, behind `if: ${{ !cancelled() }}` so
+  # that a red derived-leg compile could not skip it. It runs test binaries, so it moved with the
+  # other test-running jobs to `windows-latest` (the note above `jobs:`). Its counts were pinned on
+  # msvc. The `run:` text is unchanged. The `if:` is gone, because in a job of its own no
+  # `feature-legs` step can shadow it, and `shell: bash` now comes from the job's `defaults`.
+  feature-count-tests:
+    name: cargo test (physics count features)
+    runs-on: windows-latest
+    defaults:
+      run:
         shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test the physics count features (bp-query-counts, narrowphase-counts)
         run: |
           set +e
           rc=0
@@ -561,9 +674,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo bench --locked --workspace --no-run --exclude boyko_demo
 
+  # `windows-latest` since 2026-10-10, as every test-running job is (the note above `jobs:`). On
+  # `ubuntu-latest` CI run 4 failed 7 of this job's targets, and the `test-linux` job lists them.
   force-alloc-panic:
     name: cargo test --release (force_alloc_panic)
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
     env:
       # Phase 9 Wave 7 Step 24 (Round 3 O-NEW-1): escalate ALLOC1 to a
       # release-mode panic. Catches any regression that accidentally
