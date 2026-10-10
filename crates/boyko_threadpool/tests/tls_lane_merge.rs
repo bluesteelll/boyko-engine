@@ -35,6 +35,10 @@
 //!   goes red if `tls.rs` moves, is renamed, or stops containing the function
 //!   this file claims to inspect — the failure mode where a source-shape test
 //!   reads nothing and reports success.
+//!
+//! Reads `src/` from disk, which Miri isolation rejects by aborting the whole test binary
+//! (`open` not available when isolation is enabled), hence `cfg(not(miri))`.
+#![cfg(not(miri))]
 
 use std::path::PathBuf;
 

@@ -199,18 +199,31 @@ impl Resource for AssetServer {
 
 #[cfg(test)]
 mod tests {
+    // Every test that calls `AssetServer::load` is `cfg(not(miri))`: `load` reads the file
+    // system, which Miri isolation rejects by aborting the whole test binary
+    // (`GetFullPathNameW` / `open` not available when isolation is enabled). The `decode_bytes`
+    // dispatch, `Assets` and `AssetStaging` keep their Miri coverage through their own tests.
+    // The items only those tests use carry the same `cfg` as their users, so the Miri build
+    // compiles exactly what it runs.
     use super::*;
+    #[cfg(not(miri))]
     use crate::ecs::core::asset::asset::AssetLoadState;
+    #[cfg(not(miri))]
     use crate::ecs::core::asset::assets::Assets;
     use crate::ecs::core::asset::loader::{AssetLoader, LoaderEntry};
+    #[cfg(not(miri))]
     use crate::ecs::core::asset::staging::AssetStaging;
 
+    #[cfg(not(miri))]
     struct Dummy;
+    #[cfg(not(miri))]
     impl Asset for Dummy {
         type Cpu = ();
     }
 
+    #[cfg(not(miri))]
     struct Other;
+    #[cfg(not(miri))]
     impl Asset for Other {
         type Cpu = ();
     }
@@ -233,14 +246,18 @@ mod tests {
     // Asset-streaming plan F1: `Assets<A>` (and therefore `AssetServer::load`)
     // requires `A: AssetBacking` in addition to `A: Asset` — a POD backing
     // with no device teardown is the correct fit for every test type here.
-    crate::impl_asset_pod_backing!(Dummy, Other, TestAsset);
+    crate::impl_asset_pod_backing!(TestAsset);
+    #[cfg(not(miri))]
+    crate::impl_asset_pod_backing!(Dummy, Other);
 
     // Asset-streaming plan F3: `AssetServer::load` requires `A: HasLoaders`.
     // `Dummy`/`Other` never decode in these tests (only their I/O-failure /
     // dedup paths run), so an empty table is enough for them to type-check.
+    #[cfg(not(miri))]
     impl HasLoaders for Dummy {
         const LOADERS: &'static [LoaderEntry<Self>] = &[];
     }
+    #[cfg(not(miri))]
     impl HasLoaders for Other {
         const LOADERS: &'static [LoaderEntry<Self>] = &[];
     }
@@ -301,6 +318,8 @@ mod tests {
     /// A read/decode failure still returns a resolvable `Handle` in the
     /// `Failed` state — `load` never panics on a missing file (plan §A3a
     /// unit: load's I/O failure path reserves+fails rather than panicking).
+    // Calls `load`, which reads the file system (see the note at the top of `tests`).
+    #[cfg(not(miri))]
     #[test]
     fn load_missing_file_reserves_and_fails_without_panicking() {
         let server = AssetServer::new();
@@ -327,6 +346,8 @@ mod tests {
     /// the synchronous channel and is counted there instead. Asserting only `delivered` would
     /// therefore be green or red depending on which harness thread ran it — the shape of vacuity
     /// this campaign has hit twice, from the other side.
+    // Calls `load`, which reads the file system (see the note at the top of `tests`).
+    #[cfg(not(miri))]
     #[test]
     fn e0801_reaches_the_log_and_not_only_the_handle() {
         use boyko_log::level::Level;
@@ -365,6 +386,8 @@ mod tests {
     /// rung A3b, is what fills it) and queues exactly one staged entry whose
     /// handle matches the reserved row (plan §A3a unit: load's success path
     /// stages a Staged entry bound to the reserved handle).
+    // Calls `load`, which reads the file system (see the note at the top of `tests`).
+    #[cfg(not(miri))]
     #[test]
     fn load_success_stages_entry_bound_to_reserved_handle() {
         let server = AssetServer::new();
@@ -401,6 +424,8 @@ mod tests {
     /// path to the same handle) — still holds at A3a even though neither
     /// path exists on disk (the first call reserves+fails the row, but the
     /// SAME handle is cached and returned on every repeat).
+    // Calls `load`, which reads the file system (see the note at the top of `tests`).
+    #[cfg(not(miri))]
     #[test]
     fn load_dedupes_repeated_path_to_same_handle() {
         let server = AssetServer::new();
@@ -413,6 +438,8 @@ mod tests {
     }
 
     /// Distinct paths mint distinct handles.
+    // Calls `load`, which reads the file system (see the note at the top of `tests`).
+    #[cfg(not(miri))]
     #[test]
     fn load_distinct_paths_mint_distinct_handles() {
         let server = AssetServer::new();
@@ -431,6 +458,8 @@ mod tests {
     /// is no shared keyed registry left to collapse onto in the first place.
     /// Each type also dedupes independently within its own table/staging on
     /// a repeat call.
+    // Calls `load`, which reads the file system (see the note at the top of `tests`).
+    #[cfg(not(miri))]
     #[test]
     fn load_same_path_different_types_do_not_alias() {
         let server = AssetServer::new();

@@ -17,6 +17,10 @@
 //!
 //! Hand-rolled parse rather than a TOML dependency: the crate has none, and the property is one
 //! line of one table.
+//!
+//! Reads `Cargo.toml` from disk, which Miri isolation rejects by aborting the whole test binary
+//! (`open` not available when isolation is enabled), hence `cfg(not(miri))`.
+#![cfg(not(miri))]
 
 use std::fs;
 use std::path::{Path, PathBuf};

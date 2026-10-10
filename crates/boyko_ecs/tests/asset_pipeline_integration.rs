@@ -9,6 +9,11 @@
 //! `Assets::len()`, and its row index must recycle correctly for a later
 //! reservation — exercised here end-to-end through the real `AssetServer`
 //! path (a missing file on disk), not just the unit-level `Assets` API.
+//!
+//! Every test writes or opens a file on disk, which Miri isolation rejects by aborting the
+//! whole test binary (`open` not available when isolation is enabled), hence `cfg(not(miri))`.
+//! `Assets<T>` and `AssetStaging` are interpreted under Miri by their own unit tests.
+#![cfg(not(miri))]
 
 use boyko_ecs::ecs::core::asset::{
     Asset, AssetError, AssetLoadState, AssetLoader, AssetPaths, AssetServer, AssetStaging, Assets, HasLoaders,

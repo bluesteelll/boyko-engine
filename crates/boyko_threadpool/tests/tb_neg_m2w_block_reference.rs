@@ -145,7 +145,8 @@ const UNDER_MIRI: bool = cfg!(miri);
 // the two assertions below still fire, unchanged, for anyone who runs this
 // binary with `--include-ignored` in a configuration that cannot decide; and the
 // NATIVE gate over this property is not this test at all but
-// `tb_neg_m2w_arm_present.rs`, which is unignored, runs everywhere, and asserts
+// `tb_neg_m2w_arm_present.rs`, which is unignored, runs in every native build
+// (it reads the tree from disk, so it is `cfg(not(miri))`), and asserts
 // that the arm exists in the source, that both driver scripts stay in step, and
 // that four committed receipts are red for the declared diagnostic.
 //

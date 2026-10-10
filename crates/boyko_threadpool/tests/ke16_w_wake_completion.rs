@@ -536,6 +536,10 @@ fn w_d_prime_a_worker_route_join_terminates_and_runs_every_task_exactly_once() {
 /// rather than a behavioural check because the behaviour it guards is precisely
 /// the one no native test can see — a wake that was lost and then recovered
 /// looks exactly like a wake that arrived.
+///
+/// Reads `src/scope.rs` from disk, which Miri isolation rejects by aborting the whole test
+/// binary, hence `cfg(not(miri))`.
+#[cfg(not(miri))]
 #[test]
 fn the_join_backstop_source_constant_is_still_50_us() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/scope.rs");
